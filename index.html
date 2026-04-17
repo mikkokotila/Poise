@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Poise</title>
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="preconnect" href="https://rsms.me/" />
+    <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Main view -->
+      <section id="view-main" class="view">
+        <header class="view-header">
+          <div class="view-title">Main <span class="view-sub">Vaquum · everything you're part of</span></div>
+        </header>
+        <nav id="filters">
+          <button data-filter="both" class="active">All</button>
+          <button data-filter="issue">Issues</button>
+          <button data-filter="pr">PRs</button>
+          <span class="separator"></span>
+          <button data-status="all" class="active" id="status-all">Any</button>
+          <button data-status="open" id="status-open">Open</button>
+          <span class="count" id="count"></span>
+        </nav>
+        <main>
+          <table id="table">
+            <thead>
+              <tr>
+                <th class="col-type"></th>
+                <th class="col-title">Title</th>
+                <th class="col-last">Last</th>
+                <th class="col-repo">Repo</th>
+                <th class="col-state">State</th>
+                <th class="col-updated">Updated</th>
+                <th class="col-action"></th>
+              </tr>
+            </thead>
+            <tbody id="tbody"></tbody>
+          </table>
+          <div id="loader" class="loader"><span></span><span></span><span></span></div>
+          <p id="empty" hidden>No results.</p>
+        </main>
+      </section>
+
+      <!-- Flow view (lazy-rendered into this container) -->
+      <section id="view-flow" class="view" hidden></section>
+
+      <!-- Trust view (lazy-rendered into this container) -->
+      <section id="view-trust" class="view" hidden></section>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
