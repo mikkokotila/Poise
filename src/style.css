@@ -333,24 +333,18 @@ td a:hover {
   display: inline-block;
   vertical-align: middle;
   background: var(--hairline);
-  transition: filter 0.15s ease, opacity 0.15s ease;
+  object-fit: cover;
+  transition: opacity 0.15s ease;
 }
 
-/* Self — faded so it fades into the background; you still recognize your face */
-.last-avatar.is-me {
-  opacity: 0.4;
-  filter: grayscale(100%);
-}
-
-/* Bot — slightly desaturated and marked with a tiny ring */
+/* Bot — subtle ring to distinguish from humans, without dimming */
 .last-avatar.is-bot {
-  opacity: 0.75;
   box-shadow: inset 0 0 0 1px var(--border);
 }
 
-tr:hover .last-avatar {
-  opacity: 1;
-  filter: none;
+/* If the image failed to load, hide it completely instead of showing a broken-image icon */
+.last-avatar.broken {
+  visibility: hidden;
 }
 
 .last-dash {

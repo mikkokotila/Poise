@@ -28,6 +28,7 @@ interface PrRow {
   merged_at: string | null
   comments_count: number
   last_commenter: string | null
+  last_commenter_avatar: string | null
   last_comment_body: string | null
 }
 
@@ -91,20 +92,25 @@ function stateLabel(item: PrRow): { text: string; cls: string } {
   return item.state === 'open' ? { text: 'Open', cls: 'open' } : { text: 'Closed', cls: 'closed' }
 }
 
-function avatarUrl(username: string): string {
-  // GitHub serves avatars for any username/bot at this endpoint with redirects to CDN
+function humanAvatarFallback(username: string): string {
+  // Only works for real user accounts (not GitHub Apps). Used if we don't have the
+  // API-reported avatar_url stored yet.
   return `https://github.com/${encodeURIComponent(username)}.png?size=48`
 }
 
 function lastCell(item: PrRow): string {
   const c = item.last_commenter
   if (!c) return '<span class="last-dash">\u2014</span>'
-  const isMe = c.toLowerCase() === ME
   const isBot = /\[bot\]$/i.test(c)
+  const stored = item.last_commenter_avatar
+  // Prefer the stored avatar_url from the GitHub API — it works for bots
+  // (https://avatars.githubusercontent.com/in/{app_id}) which the /{name}.png
+  // convention does not. Fall back to the name-based URL for rows synced before
+  // we started storing avatars.
+  const src = stored && stored.length > 0 ? stored : humanAvatarFallback(c)
   const classes = ['last-avatar']
-  if (isMe) classes.push('is-me')
   if (isBot) classes.push('is-bot')
-  return `<img class="${classes.join(' ')}" src="${avatarUrl(c)}" alt="${escapeHtml(c)}" title="${escapeHtml(c)}" loading="lazy" decoding="async" />`
+  return `<img class="${classes.join(' ')}" src="${src}" alt="${escapeHtml(c)}" title="${escapeHtml(c)}" loading="lazy" decoding="async" onerror="this.classList.add('broken')" />`
 }
 
 function buildRow(item: PrRow, animate: boolean, idx: number): HTMLTableRowElement {

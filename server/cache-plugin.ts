@@ -1,5 +1,5 @@
 import type { Plugin, Connect } from 'vite'
-import { syncDelta, backfillFiles } from './sync'
+import { syncDelta, backfillFiles, backfillAvatars } from './sync'
 import { listPrs, countPrs, getFlow, getTrust } from './queries'
 import { getMeta } from './db'
 import { getToken, setToken, hasToken } from './auth'
@@ -150,6 +150,20 @@ export function cachePlugin(): Plugin {
           const limit = Math.min(Math.max(Number(p.get('limit')) || 200, 1), 600)
           try {
             const result = await backfillFiles(token, limit)
+            return json(res, 200, result)
+          } catch (err: any) {
+            return json(res, 500, { error: err.message || String(err) })
+          }
+        }
+
+        // POST /api/cache/backfill-avatars?limit=200
+        if (url.startsWith('/api/cache/backfill-avatars') && req.method === 'POST') {
+          const token = getToken()
+          if (!token) return json(res, 401, { error: 'No GitHub token configured', code: 'NO_TOKEN' })
+          const p = new URL(url, 'http://x').searchParams
+          const limit = Math.min(Math.max(Number(p.get('limit')) || 200, 1), 1200)
+          try {
+            const result = await backfillAvatars(token, limit)
             return json(res, 200, result)
           } catch (err: any) {
             return json(res, 500, { error: err.message || String(err) })

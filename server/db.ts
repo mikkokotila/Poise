@@ -79,11 +79,11 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_pr_files_filename ON pr_files(filename);
 `)
 
-// Migration: add files_changed column if missing
+// Migrations — add columns if missing
 const prCols = db.prepare('PRAGMA table_info(prs)').all() as { name: string }[]
-if (!prCols.some((c) => c.name === 'files_changed')) {
-  db.exec('ALTER TABLE prs ADD COLUMN files_changed INTEGER')
-}
+const hasCol = (name: string) => prCols.some((c) => c.name === name)
+if (!hasCol('files_changed'))          db.exec('ALTER TABLE prs ADD COLUMN files_changed INTEGER')
+if (!hasCol('last_commenter_avatar'))  db.exec('ALTER TABLE prs ADD COLUMN last_commenter_avatar TEXT')
 
 export function getMeta(key: string): string | null {
   const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined

@@ -106,12 +106,17 @@ export function isJunkFile(path: string): boolean {
   return false
 }
 
-async function fetchLastComment(owner: string, repo: string, number: number, count: number, token: string): Promise<{ login: string; body: string; createdAt: string } | null> {
+async function fetchLastComment(owner: string, repo: string, number: number, count: number, token: string): Promise<{ login: string; avatar: string; body: string; createdAt: string } | null> {
   if (count === 0) return null
   try {
     const comments = await ghFetch(`/repos/${owner}/${repo}/issues/${number}/comments?per_page=1&page=${count}`, token)
     if (comments.length > 0) {
-      return { login: comments[0].user.login, body: comments[0].body || '', createdAt: comments[0].created_at }
+      return {
+        login: comments[0].user.login,
+        avatar: comments[0].user.avatar_url || '',
+        body: comments[0].body || '',
+        createdAt: comments[0].created_at,
+      }
     }
   } catch { /* ignore */ }
   return null
@@ -122,11 +127,11 @@ const upsertPr = db.prepare(`
   INSERT INTO prs(id, org, repo, number, title, html_url, author, is_pr, state,
     created_at, updated_at, closed_at, merged_at, comments_count,
     additions, deletions, files_changed, tag, first_review_at, iteration_count,
-    last_commenter, last_comment_body, last_comment_at, raw_json)
+    last_commenter, last_commenter_avatar, last_comment_body, last_comment_at, raw_json)
   VALUES (@id, @org, @repo, @number, @title, @html_url, @author, @is_pr, @state,
     @created_at, @updated_at, @closed_at, @merged_at, @comments_count,
     @additions, @deletions, @files_changed, @tag, @first_review_at, @iteration_count,
-    @last_commenter, @last_comment_body, @last_comment_at, @raw_json)
+    @last_commenter, @last_commenter_avatar, @last_comment_body, @last_comment_at, @raw_json)
   ON CONFLICT(id) DO UPDATE SET
     state=excluded.state,
     updated_at=excluded.updated_at,
@@ -140,9 +145,15 @@ const upsertPr = db.prepare(`
     first_review_at=excluded.first_review_at,
     iteration_count=excluded.iteration_count,
     last_commenter=excluded.last_commenter,
+    last_commenter_avatar=excluded.last_commenter_avatar,
     last_comment_body=excluded.last_comment_body,
     last_comment_at=excluded.last_comment_at,
     raw_json=excluded.raw_json
+`)
+
+const updateLastCommentOnly = db.prepare(`
+  UPDATE prs SET last_commenter = ?, last_commenter_avatar = ?, last_comment_body = ?, last_comment_at = ?
+  WHERE id = ?
 `)
 
 const deleteReviewsForPr = db.prepare('DELETE FROM reviews WHERE pr_id = ?')
@@ -212,6 +223,45 @@ export async function backfillFiles(token: string, limit: number = 200): Promise
   applyAll(results)
 
   const remaining = (db.prepare(`SELECT COUNT(*) AS n FROM prs WHERE is_pr = 1 AND files_changed IS NULL`).get() as { n: number }).n
+  return { filled, skipped, remaining, completed_at: new Date().toISOString() }
+}
+
+// Re-fetch the last comment for PRs whose last_commenter is set but avatar is missing.
+// This catches rows synced before we started storing avatar_url.
+export async function backfillAvatars(token: string, limit: number = 200): Promise<BackfillResult> {
+  const rows = db.prepare(`
+    SELECT id, repo, number, comments_count FROM prs
+    WHERE last_commenter IS NOT NULL AND last_commenter != ''
+      AND (last_commenter_avatar IS NULL OR last_commenter_avatar = '')
+    ORDER BY updated_at DESC
+    LIMIT ?
+  `).all(limit) as { id: number; repo: string; number: number; comments_count: number }[]
+
+  let filled = 0
+  let skipped = 0
+
+  const results = await mapLimit(rows, 6, async (r) => {
+    const c = await fetchLastComment(ORG, r.repo, r.number, r.comments_count, token)
+    return { id: r.id, c }
+  })
+
+  const applyAll = db.transaction((items: typeof results) => {
+    for (const { id, c } of items) {
+      if (!c || !c.avatar) {
+        skipped++
+        continue
+      }
+      updateLastCommentOnly.run(c.login, c.avatar, c.body, c.createdAt, id)
+      filled++
+    }
+  })
+  applyAll(results)
+
+  const remaining = (db.prepare(`
+    SELECT COUNT(*) AS n FROM prs
+    WHERE last_commenter IS NOT NULL AND last_commenter != ''
+      AND (last_commenter_avatar IS NULL OR last_commenter_avatar = '')
+  `).get() as { n: number }).n
   return { filled, skipped, remaining, completed_at: new Date().toISOString() }
 }
 
@@ -304,6 +354,7 @@ export async function syncDelta(token: string, force: boolean = false): Promise<
         first_review_at: firstReviewAt,
         iteration_count: iterationCount,
         last_commenter: lastComment?.login ?? null,
+        last_commenter_avatar: lastComment?.avatar ?? null,
         last_comment_body: lastComment?.body ?? null,
         last_comment_at: lastComment?.createdAt ?? null,
         raw_json: JSON.stringify(item),

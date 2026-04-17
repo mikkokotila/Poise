@@ -16,6 +16,7 @@ export interface PrRow {
   merged_at: string | null
   comments_count: number
   last_commenter: string | null
+  last_commenter_avatar: string | null
   last_comment_body: string | null
 }
 
@@ -36,7 +37,7 @@ export function listPrs(args: PrListArgs): PrRow[] {
   const sql = `
     SELECT id, repo, number, title, html_url, author, is_pr, state,
            created_at, updated_at, closed_at, merged_at, comments_count,
-           last_commenter, last_comment_body
+           last_commenter, last_commenter_avatar, last_comment_body
     FROM prs
     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
     ORDER BY updated_at DESC
