@@ -55,6 +55,9 @@ html {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overflow-x: hidden;
+  /* Reserve the vertical scrollbar gutter so filter changes don't nudge
+     the page sideways when the content shrinks enough to hide the scrollbar. */
+  scrollbar-gutter: stable;
 }
 
 body {

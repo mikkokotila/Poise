@@ -124,11 +124,11 @@ async function fetchLastComment(owner: string, repo: string, number: number, cou
 
 // Insert or replace a PR row with all derived fields
 const upsertPr = db.prepare(`
-  INSERT INTO prs(id, org, repo, number, title, html_url, author, is_pr, state,
+  INSERT INTO prs(id, org, repo, number, title, html_url, author, author_avatar, is_pr, state,
     created_at, updated_at, closed_at, merged_at, comments_count,
     additions, deletions, files_changed, tag, first_review_at, iteration_count,
     last_commenter, last_commenter_avatar, last_comment_body, last_comment_at, raw_json)
-  VALUES (@id, @org, @repo, @number, @title, @html_url, @author, @is_pr, @state,
+  VALUES (@id, @org, @repo, @number, @title, @html_url, @author, @author_avatar, @is_pr, @state,
     @created_at, @updated_at, @closed_at, @merged_at, @comments_count,
     @additions, @deletions, @files_changed, @tag, @first_review_at, @iteration_count,
     @last_commenter, @last_commenter_avatar, @last_comment_body, @last_comment_at, @raw_json)
@@ -148,6 +148,7 @@ const upsertPr = db.prepare(`
     last_commenter_avatar=excluded.last_commenter_avatar,
     last_comment_body=excluded.last_comment_body,
     last_comment_at=excluded.last_comment_at,
+    author_avatar=excluded.author_avatar,
     raw_json=excluded.raw_json
 `)
 
@@ -340,6 +341,7 @@ export async function syncDelta(token: string, force: boolean = false): Promise<
         title: item.title,
         html_url: item.html_url,
         author: item.user.login,
+        author_avatar: item.user.avatar_url || null,
         is_pr: isPR ? 1 : 0,
         state: item.state,
         created_at: item.created_at,

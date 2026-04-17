@@ -84,6 +84,15 @@ const prCols = db.prepare('PRAGMA table_info(prs)').all() as { name: string }[]
 const hasCol = (name: string) => prCols.some((c) => c.name === name)
 if (!hasCol('files_changed'))          db.exec('ALTER TABLE prs ADD COLUMN files_changed INTEGER')
 if (!hasCol('last_commenter_avatar'))  db.exec('ALTER TABLE prs ADD COLUMN last_commenter_avatar TEXT')
+if (!hasCol('author_avatar')) {
+  db.exec('ALTER TABLE prs ADD COLUMN author_avatar TEXT')
+  // Backfill from the stored raw_json so existing rows don't need a resync
+  db.exec(`
+    UPDATE prs
+    SET author_avatar = json_extract(raw_json, '$.user.avatar_url')
+    WHERE raw_json IS NOT NULL
+  `)
+}
 
 export function getMeta(key: string): string | null {
   const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined

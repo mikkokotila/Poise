@@ -8,6 +8,7 @@ export interface PrRow {
   title: string
   html_url: string
   author: string
+  author_avatar: string | null
   is_pr: number
   state: string
   created_at: string
@@ -35,7 +36,7 @@ export function listPrs(args: PrListArgs): PrRow[] {
   if (args.status === 'open') where.push("state = 'open'")
 
   const sql = `
-    SELECT id, repo, number, title, html_url, author, is_pr, state,
+    SELECT id, repo, number, title, html_url, author, author_avatar, is_pr, state,
            created_at, updated_at, closed_at, merged_at, comments_count,
            last_commenter, last_commenter_avatar, last_comment_body
     FROM prs

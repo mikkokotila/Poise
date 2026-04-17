@@ -20,6 +20,7 @@ interface PrRow {
   title: string
   html_url: string
   author: string
+  author_avatar: string | null
   is_pr: number
   state: string
   created_at: string
@@ -99,18 +100,21 @@ function humanAvatarFallback(username: string): string {
 }
 
 function lastCell(item: PrRow): string {
-  const c = item.last_commenter
-  if (!c) return '<span class="last-dash">\u2014</span>'
-  const isBot = /\[bot\]$/i.test(c)
-  const stored = item.last_commenter_avatar
-  // Prefer the stored avatar_url from the GitHub API — it works for bots
-  // (https://avatars.githubusercontent.com/in/{app_id}) which the /{name}.png
-  // convention does not. Fall back to the name-based URL for rows synced before
-  // we started storing avatars.
-  const src = stored && stored.length > 0 ? stored : humanAvatarFallback(c)
+  // The "last" person on this thread. If nobody has commented yet, the original
+  // author is the most recent voice — fall through to them so we never show a dash.
+  let name = item.last_commenter
+  let avatar = item.last_commenter_avatar
+  if (!name) {
+    name = item.author
+    avatar = item.author_avatar
+  }
+  if (!name) return '<span class="last-dash">\u2014</span>'
+
+  const isBot = /\[bot\]$/i.test(name)
+  const src = avatar && avatar.length > 0 ? avatar : humanAvatarFallback(name)
   const classes = ['last-avatar']
   if (isBot) classes.push('is-bot')
-  return `<img class="${classes.join(' ')}" src="${src}" alt="${escapeHtml(c)}" title="${escapeHtml(c)}" loading="lazy" decoding="async" onerror="this.classList.add('broken')" />`
+  return `<img class="${classes.join(' ')}" src="${src}" alt="${escapeHtml(name)}" title="${escapeHtml(name)}" loading="lazy" decoding="async" onerror="this.classList.add('broken')" />`
 }
 
 function buildRow(item: PrRow, animate: boolean, idx: number): HTMLTableRowElement {
