@@ -1,5 +1,6 @@
 import './style.css'
 import { initTypography, toggleTypographyPanel } from './typo'
+import { initSettings, toggleSettingsPanel, openSettingsPanel, isTokenConfigured } from './settings'
 import { initMenu } from './menu'
 import { initMainView, refreshMainView } from './views/main-view'
 import { initFlowView } from './views/flow-view'
@@ -21,40 +22,46 @@ function showView(v: 'main' | 'flow' | 'trust') {
   for (const el of all) {
     if (el === target) {
       el.hidden = false
-      // Restart the entering animation
       el.classList.remove('view-entering')
-      // Force reflow so the animation restarts
       void (el as HTMLElement).offsetWidth
       el.classList.add('view-entering')
-      // Clean up class after animation so future changes can retrigger
       window.setTimeout(() => el.classList.remove('view-entering'), 300)
     } else {
       el.hidden = true
     }
   }
-  // Scroll to top for a predictable landing
   window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior })
 }
 
-// Init order: typography first (it applies CSS vars), then menu, then initial view
+// Init order: typography → settings → menu → initial view
 initTypography()
+initSettings()
 
 const menu = initMenu({
   onSelectView: (v) => showView(v),
   onOpenTypography: () => toggleTypographyPanel(),
+  onOpenSettings: () => toggleSettingsPanel(),
 })
 
 // Initial view
 showView(menu.currentView())
 
-// Background sync on load — delta refresh from GitHub
+// On load: check token status. If missing, open settings panel with prompt. Otherwise sync.
 ;(async () => {
+  const hasToken = await isTokenConfigured()
+  if (!hasToken) {
+    openSettingsPanel()
+    return
+  }
+
   try {
     const res = await fetch('/api/cache/sync', { method: 'POST' })
-    if (!res.ok) return
+    if (!res.ok) {
+      if (res.status === 401) openSettingsPanel()
+      return
+    }
     const result = await res.json()
     console.log('[poise] sync:', result)
-    // Refresh main view if any items changed
     if ((result.added > 0 || result.updated > 0) && menu.currentView() === 'main') {
       refreshMainView()
     }
@@ -62,6 +69,12 @@ showView(menu.currentView())
     console.warn('[poise] sync failed:', err)
   }
 })()
+
+// When settings saves a token + triggers sync, refresh any open view
+window.addEventListener('poise:synced', () => {
+  if (menu.currentView() === 'main') refreshMainView()
+  else showView(menu.currentView()) // re-init flow/trust to pull fresh data
+})
 
 // Auto-refresh after 5 minutes idle
 const IDLE_MS = 5 * 60 * 1000

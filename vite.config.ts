@@ -1,14 +1,5 @@
 import { defineConfig, loadEnv } from 'vite'
-import { execSync } from 'child_process'
 import { cachePlugin } from './server/cache-plugin'
-
-function getGitHubToken(): string {
-  try {
-    return execSync('gh auth token', { encoding: 'utf-8' }).trim()
-  } catch {
-    return ''
-  }
-}
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
@@ -22,20 +13,8 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       proxy: {
-        '/api/github': {
-          target: 'https://api.github.com',
-          changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/api\/github/, ''),
-          configure: (proxy) => {
-            const token = getGitHubToken()
-            if (token) {
-              proxy.on('proxyReq', (proxyReq) => {
-                proxyReq.setHeader('Authorization', `Bearer ${token}`)
-                proxyReq.setHeader('User-Agent', 'poise')
-              })
-            }
-          },
-        },
+        // Note: /api/github/* is NOT proxied here — it's handled by cachePlugin
+        // middleware so the token can come from the SQLite meta table.
         '/api/confab': {
           target: confabUrl,
           changeOrigin: true,
