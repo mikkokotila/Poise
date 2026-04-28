@@ -24,17 +24,25 @@ export interface PrRow {
 export interface PrListArgs {
   type: 'both' | 'issue' | 'pr'
   status: 'all' | 'open'
+  since?: string
+  until?: string
   limit: number
   offset: number
 }
 
-export function listPrs(args: PrListArgs): PrRow[] {
+function buildPrWhere(args: Pick<PrListArgs, 'type' | 'status' | 'since' | 'until'>): { where: string[]; params: any[] } {
   const where: string[] = []
   const params: any[] = []
   if (args.type === 'issue') where.push('is_pr = 0')
   else if (args.type === 'pr') where.push('is_pr = 1')
   if (args.status === 'open') where.push("state = 'open'")
+  if (args.since) { where.push('updated_at >= ?'); params.push(args.since) }
+  if (args.until) { where.push('updated_at < ?'); params.push(args.until) }
+  return { where, params }
+}
 
+export function listPrs(args: PrListArgs): PrRow[] {
+  const { where, params } = buildPrWhere(args)
   const sql = `
     SELECT id, repo, number, title, html_url, author, author_avatar, is_pr, state,
            created_at, updated_at, closed_at, merged_at, comments_count,
@@ -44,17 +52,13 @@ export function listPrs(args: PrListArgs): PrRow[] {
     ORDER BY updated_at DESC
     LIMIT ? OFFSET ?
   `
-  params.push(args.limit, args.offset)
-  return db.prepare(sql).all(...params) as PrRow[]
+  return db.prepare(sql).all(...params, args.limit, args.offset) as PrRow[]
 }
 
 export function countPrs(args: Omit<PrListArgs, 'limit' | 'offset'>): number {
-  const where: string[] = []
-  if (args.type === 'issue') where.push('is_pr = 0')
-  else if (args.type === 'pr') where.push('is_pr = 1')
-  if (args.status === 'open') where.push("state = 'open'")
+  const { where, params } = buildPrWhere(args)
   const sql = `SELECT COUNT(*) as n FROM prs ${where.length ? `WHERE ${where.join(' AND ')}` : ''}`
-  return (db.prepare(sql).get() as { n: number }).n
+  return (db.prepare(sql).get(...params) as { n: number }).n
 }
 
 // Dashboard data — takes a date range (days back from now)

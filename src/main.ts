@@ -44,12 +44,12 @@ const menu = initMenu({
   onOpenSettings: () => toggleSettingsPanel(),
 })
 
-// Initial view
-showView(menu.currentView())
-
-// On load: ensure full config (token + org + me). Open Settings if anything is missing.
+// On load: pull settings first so views can render with the correct org/me/timezone,
+// then show the initial view, then sync.
 ;(async () => {
   await loadSettings()
+  showView(menu.currentView())
+
   const ready = await isFullyConfigured()
   if (!ready) {
     openSettingsPanel()

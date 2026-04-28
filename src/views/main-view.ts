@@ -1,6 +1,6 @@
 // Main table view — reads from SQLite cache (/api/cache/prs)
 
-import { getSettings } from '../config'
+import { getSettings, midnightInZone, startOfWeekInZone } from '../config'
 
 const STORAGE_KEY = 'poise-filters'
 const REVIEWED_KEY = 'poise-reviewed'
@@ -36,9 +36,11 @@ interface PrRow {
 
 type TypeFilter = 'both' | 'issue' | 'pr'
 type StatusFilter = 'all' | 'open'
+type TimeFilter = 'all' | 'today' | 'yesterday' | 'week'
 
 let typeFilter: TypeFilter = 'both'
 let statusFilter: StatusFilter = 'all'
+let timeFilter: TimeFilter = 'all'
 let items: PrRow[] = []
 let offset = 0
 let total = 0
@@ -56,7 +58,7 @@ let filtersEl: HTMLElement
 let countEl: HTMLSpanElement
 let sentinel: HTMLDivElement
 
-function loadFilters(): { type: TypeFilter; status: StatusFilter } {
+function loadFilters(): { type: TypeFilter; status: StatusFilter; time: TimeFilter } {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
@@ -64,14 +66,28 @@ function loadFilters(): { type: TypeFilter; status: StatusFilter } {
       return {
         type: ['both', 'issue', 'pr'].includes(parsed.type) ? parsed.type : 'both',
         status: ['all', 'open'].includes(parsed.status) ? parsed.status : 'all',
+        time: ['all', 'today', 'yesterday', 'week'].includes(parsed.time) ? parsed.time : 'all',
       }
     }
   } catch { /* ignore */ }
-  return { type: 'both', status: 'all' }
+  return { type: 'both', status: 'all', time: 'all' }
 }
 
 function saveFilters() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ type: typeFilter, status: statusFilter }))
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ type: typeFilter, status: statusFilter, time: timeFilter }))
+}
+
+function timeWindow(): { since?: string; until?: string } {
+  if (timeFilter === 'today') {
+    return { since: midnightInZone(0).toISOString() }
+  }
+  if (timeFilter === 'yesterday') {
+    return { since: midnightInZone(-1).toISOString(), until: midnightInZone(0).toISOString() }
+  }
+  if (timeFilter === 'week') {
+    return { since: startOfWeekInZone().toISOString() }
+  }
+  return {}
 }
 
 function relativeDate(iso: string): string {
@@ -195,7 +211,16 @@ async function fetchPage(): Promise<void> {
   fetching = true
   loader.hidden = false
   try {
-    const url = `/api/cache/prs?type=${typeFilter}&status=${statusFilter}&limit=${PAGE_SIZE}&offset=${offset}`
+    const win = timeWindow()
+    const params = new URLSearchParams({
+      type: typeFilter,
+      status: statusFilter,
+      limit: String(PAGE_SIZE),
+      offset: String(offset),
+    })
+    if (win.since) params.set('since', win.since)
+    if (win.until) params.set('until', win.until)
+    const url = `/api/cache/prs?${params.toString()}`
     const res = await fetch(url)
     if (!res.ok) throw new Error(`Cache ${res.status}`)
     const data = await res.json()
@@ -244,6 +269,9 @@ function initFilterButtons() {
   filtersEl.querySelectorAll<HTMLButtonElement>('[data-status]').forEach((b) => {
     b.classList.toggle('active', b.dataset.status === statusFilter)
   })
+  filtersEl.querySelectorAll<HTMLButtonElement>('[data-time]').forEach((b) => {
+    b.classList.toggle('active', b.dataset.time === timeFilter)
+  })
 }
 
 function attachHandlers() {
@@ -265,6 +293,15 @@ function attachHandlers() {
       if (next === statusFilter) return
       statusFilter = next
       filtersEl.querySelectorAll<HTMLButtonElement>('[data-status]').forEach((b) => b.classList.remove('active'))
+      btn.classList.add('active')
+      saveFilters()
+      resetAndFetch()
+    }
+    if (btn.dataset.time) {
+      const next = btn.dataset.time as TimeFilter
+      if (next === timeFilter) return
+      timeFilter = next
+      filtersEl.querySelectorAll<HTMLButtonElement>('[data-time]').forEach((b) => b.classList.remove('active'))
       btn.classList.add('active')
       saveFilters()
       resetAndFetch()
@@ -363,6 +400,7 @@ export function initMainView() {
   const saved = loadFilters()
   typeFilter = saved.type
   statusFilter = saved.status
+  timeFilter = saved.time
 
   updateSubtitle()
   initFilterButtons()

@@ -41,3 +41,40 @@ export function effectiveTimezone(): string {
   if (current.timezone) return current.timezone
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone } catch { return 'UTC' }
 }
+
+// Minutes between an IANA zone's wall clock and UTC at a given UTC instant.
+// Positive for zones east of UTC. Anchoring at the desired instant handles DST.
+function tzOffsetMin(tz: string, atUtc: Date): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(atUtc)
+  const p = (t: string) => Number(parts.find((x) => x.type === t)!.value)
+  const wallAsUtc = Date.UTC(p('year'), p('month') - 1, p('day'), p('hour'), p('minute'), p('second'))
+  return Math.round((wallAsUtc - atUtc.getTime()) / 60000)
+}
+
+// Midnight (00:00) of "today + dayOffset" in the configured zone, returned as a Date.
+// Day rolls at midnight, weeks start on Monday — this function only handles the day part.
+export function midnightInZone(dayOffset: number = 0): Date {
+  const tz = effectiveTimezone()
+  const ymd = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date())
+  const [y, m, d] = ymd.split('-').map(Number)
+  // Probe the offset at noon of the target day so DST transitions near midnight
+  // can't accidentally pick the wrong side of the jump.
+  const noonProbe = new Date(Date.UTC(y, m - 1, d + dayOffset, 12, 0, 0))
+  const offsetMin = tzOffsetMin(tz, noonProbe)
+  const wallMidUtc = Date.UTC(y, m - 1, d + dayOffset, 0, 0, 0)
+  return new Date(wallMidUtc - offsetMin * 60000)
+}
+
+// Most recent Monday 00:00 in the configured zone (today if today is Monday).
+export function startOfWeekInZone(): Date {
+  const tz = effectiveTimezone()
+  const dow = new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'short' }).format(new Date())
+  const map: Record<string, number> = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 }
+  return midnightInZone(-(map[dow] ?? 0))
+}

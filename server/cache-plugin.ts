@@ -121,16 +121,18 @@ export function cachePlugin(): Plugin {
           }
         }
 
-        // GET /api/cache/prs?type=&status=&limit=&offset=
+        // GET /api/cache/prs?type=&status=&since=&until=&limit=&offset=
         if (url.startsWith('/api/cache/prs') && req.method === 'GET') {
           const p = new URL(url, 'http://x').searchParams
           const type = (p.get('type') || 'both') as 'both' | 'issue' | 'pr'
           const status = (p.get('status') || 'all') as 'all' | 'open'
+          const since = p.get('since') || undefined
+          const until = p.get('until') || undefined
           const limit = Math.min(Number(p.get('limit')) || 20, 200)
           const offset = Number(p.get('offset')) || 0
           try {
-            const items = listPrs({ type, status, limit, offset })
-            const total = countPrs({ type, status })
+            const items = listPrs({ type, status, since, until, limit, offset })
+            const total = countPrs({ type, status, since, until })
             const last_sync_at = getMeta('last_sync_at')
             return json(res, 200, { items, total, last_sync_at })
           } catch (err: any) {
