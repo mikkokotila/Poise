@@ -55,6 +55,7 @@ let loader: HTMLDivElement
 let empty: HTMLParagraphElement
 let table: HTMLTableElement
 let filtersEl: HTMLElement
+let timePickerEl: HTMLElement
 let countEl: HTMLSpanElement
 let sentinel: HTMLDivElement
 
@@ -269,7 +270,7 @@ function initFilterButtons() {
   filtersEl.querySelectorAll<HTMLButtonElement>('[data-status]').forEach((b) => {
     b.classList.toggle('active', b.dataset.status === statusFilter)
   })
-  filtersEl.querySelectorAll<HTMLButtonElement>('[data-time]').forEach((b) => {
+  timePickerEl.querySelectorAll<HTMLButtonElement>('[data-time]').forEach((b) => {
     b.classList.toggle('active', b.dataset.time === timeFilter)
   })
 }
@@ -297,15 +298,19 @@ function attachHandlers() {
       saveFilters()
       resetAndFetch()
     }
-    if (btn.dataset.time) {
-      const next = btn.dataset.time as TimeFilter
-      if (next === timeFilter) return
-      timeFilter = next
-      filtersEl.querySelectorAll<HTMLButtonElement>('[data-time]').forEach((b) => b.classList.remove('active'))
-      btn.classList.add('active')
-      saveFilters()
-      resetAndFetch()
-    }
+  })
+
+  // Time picker — separate handler since it lives in the header, not in #filters
+  timePickerEl.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest('button')
+    if (!btn || !btn.dataset.time) return
+    const next = btn.dataset.time as TimeFilter
+    if (next === timeFilter) return
+    timeFilter = next
+    timePickerEl.querySelectorAll<HTMLButtonElement>('[data-time]').forEach((b) => b.classList.remove('active'))
+    btn.classList.add('active')
+    saveFilters()
+    resetAndFetch()
   })
 
   // Expand/collapse last comment (already cached — no fetch!)
@@ -395,6 +400,7 @@ export function initMainView() {
   empty = document.getElementById('empty') as HTMLParagraphElement
   table = document.getElementById('table') as HTMLTableElement
   filtersEl = document.getElementById('filters') as HTMLElement
+  timePickerEl = document.getElementById('time-picker') as HTMLElement
   countEl = document.getElementById('count') as HTMLSpanElement
 
   const saved = loadFilters()
