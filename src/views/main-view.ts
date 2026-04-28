@@ -1,6 +1,7 @@
 // Main table view — reads from SQLite cache (/api/cache/prs)
 
-const ME = 'mikkokotila'
+import { getSettings } from '../config'
+
 const STORAGE_KEY = 'poise-filters'
 const REVIEWED_KEY = 'poise-reviewed'
 const PAGE_SIZE = 20
@@ -144,6 +145,13 @@ function updateCount() {
   countEl.textContent = total > 0 ? `${Math.min(items.length, total)} / ${total}` : ''
 }
 
+function updateSubtitle() {
+  const sub = document.getElementById('main-sub')
+  if (!sub) return
+  const org = getSettings().org
+  sub.textContent = org ? `${org} · everything you're part of` : `everything you're part of`
+}
+
 function renderAll() {
   tbody.innerHTML = ''
   if (items.length === 0 && !fetching) {
@@ -284,7 +292,8 @@ function attachHandlers() {
     wrapper.className = 'inline-comment'
 
     const commenter = item.last_commenter || ''
-    const isMe = commenter.toLowerCase() === ME
+    const me = (getSettings().me || '').toLowerCase()
+    const isMe = !!me && commenter.toLowerCase() === me
     const nameHtml = commenter
       ? `<span class="comment-author ${isMe ? 'is-me' : ''}">${escapeHtml(commenter)}</span> `
       : ''
@@ -317,7 +326,9 @@ function attachHandlers() {
       if (!reviewRes.ok) throw new Error(`Review API ${reviewRes.status}`)
       const reviewData = await reviewRes.json()
       const synthesis: string = reviewData.synthesis
-      const commentRes = await fetch(`/api/github/repos/Vaquum/${item.repo}/issues/${item.number}/comments`, {
+      const org = getSettings().org
+      if (!org) throw new Error('Org not configured')
+      const commentRes = await fetch(`/api/github/repos/${org}/${item.repo}/issues/${item.number}/comments`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ body: synthesis }),
       })
@@ -353,6 +364,7 @@ export function initMainView() {
   typeFilter = saved.type
   statusFilter = saved.status
 
+  updateSubtitle()
   initFilterButtons()
   attachHandlers()
 
@@ -371,5 +383,6 @@ export function initMainView() {
 // Called by idle refresh
 export function refreshMainView() {
   if (!initialized) return
+  updateSubtitle()
   resetAndFetch()
 }

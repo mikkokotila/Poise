@@ -1,7 +1,5 @@
 import { db, getMeta, setMeta } from './db'
 
-const ORG = 'Vaquum'
-const ME = 'mikkokotila'
 const GITHUB_API = 'https://api.github.com'
 
 // Conventional commit tag parser: "feat: ...", "fix(scope): ..."
@@ -46,9 +44,9 @@ async function ghFetch(path: string, token: string): Promise<any> {
   return res.json()
 }
 
-async function searchIssues(token: string, since?: string): Promise<GitHubSearchItem[]> {
+async function searchIssues(org: string, me: string, token: string, since?: string): Promise<GitHubSearchItem[]> {
   const all: GitHubSearchItem[] = []
-  let q = `org:${ORG} involves:${ME}`
+  let q = `org:${org} involves:${me}`
   if (since) q += ` updated:>${since}`
 
   for (let page = 1; page <= 10; page++) {
@@ -191,7 +189,7 @@ export interface BackfillResult {
   completed_at: string
 }
 
-export async function backfillFiles(token: string, limit: number = 200): Promise<BackfillResult> {
+export async function backfillFiles(org: string, token: string, limit: number = 200): Promise<BackfillResult> {
   const rows = db.prepare(`
     SELECT id, repo, number FROM prs
     WHERE is_pr = 1 AND files_changed IS NULL
@@ -203,7 +201,7 @@ export async function backfillFiles(token: string, limit: number = 200): Promise
   let skipped = 0
 
   const results = await mapLimit(rows, 6, async (r) => {
-    const files = await fetchFiles(ORG, r.repo, r.number, token)
+    const files = await fetchFiles(org, r.repo, r.number, token)
     return { id: r.id, files }
   })
 
@@ -229,7 +227,7 @@ export async function backfillFiles(token: string, limit: number = 200): Promise
 
 // Re-fetch the last comment for PRs whose last_commenter is set but avatar is missing.
 // This catches rows synced before we started storing avatar_url.
-export async function backfillAvatars(token: string, limit: number = 200): Promise<BackfillResult> {
+export async function backfillAvatars(org: string, token: string, limit: number = 200): Promise<BackfillResult> {
   const rows = db.prepare(`
     SELECT id, repo, number, comments_count FROM prs
     WHERE last_commenter IS NOT NULL AND last_commenter != ''
@@ -242,7 +240,7 @@ export async function backfillAvatars(token: string, limit: number = 200): Promi
   let skipped = 0
 
   const results = await mapLimit(rows, 6, async (r) => {
-    const c = await fetchLastComment(ORG, r.repo, r.number, r.comments_count, token)
+    const c = await fetchLastComment(org, r.repo, r.number, r.comments_count, token)
     return { id: r.id, c }
   })
 
@@ -274,13 +272,14 @@ export interface SyncResult {
   completed_at: string
 }
 
-export async function syncDelta(token: string, force: boolean = false): Promise<SyncResult> {
+export async function syncDelta(org: string, me: string, token: string, force: boolean = false): Promise<SyncResult> {
+  if (!org || !me) throw new Error('org and me must be configured in Settings before syncing')
   const startedAt = new Date().toISOString()
   const lastSync = force ? null : getMeta('last_sync_at')
 
   // Fetch only items updated since last sync (or all on first run)
   const sinceIso = lastSync ? lastSync.split('.')[0].replace('Z', '') : undefined
-  const items = await searchIssues(token, sinceIso)
+  const items = await searchIssues(org, me, token, sinceIso)
 
   let added = 0
   let updated = 0
@@ -302,9 +301,9 @@ export async function syncDelta(token: string, force: boolean = false): Promise<
 
     if (isPR) {
       const [detail, reviews, files] = await Promise.all([
-        fetchPrDetail(ORG, repo, item.number, token),
-        fetchReviews(ORG, repo, item.number, token),
-        fetchFiles(ORG, repo, item.number, token),
+        fetchPrDetail(org, repo, item.number, token),
+        fetchReviews(org, repo, item.number, token),
+        fetchFiles(org, repo, item.number, token),
       ])
       if (detail) {
         additions = detail.additions
@@ -330,12 +329,12 @@ export async function syncDelta(token: string, force: boolean = false): Promise<
       }))
     }
 
-    const lastComment = await fetchLastComment(ORG, repo, item.number, item.comments, token)
+    const lastComment = await fetchLastComment(org, repo, item.number, item.comments, token)
 
     return {
       row: {
         id: item.id,
-        org: ORG,
+        org,
         repo,
         number: item.number,
         title: item.title,

@@ -1383,6 +1383,24 @@ tr:hover .review-btn { opacity: 1; }
   color: var(--text-tertiary);
 }
 
+.st-select {
+  width: 100%;
+  padding: 8px 10px;
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-size: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  color: var(--text);
+  outline: none;
+  margin-top: 4px;
+  transition: border-color 0.15s ease;
+}
+
+.st-select:focus {
+  border-color: var(--text);
+}
+
 .st-help {
   font-size: 0.6875rem;
   margin-top: 6px;

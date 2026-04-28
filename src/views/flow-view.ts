@@ -1,6 +1,13 @@
 // Flow dashboard view — reads from /api/cache/flow
 
+import { getSettings } from '../config'
+
 const RANGE_KEY = 'poise-flow-range'
+
+function subtitle(): string {
+  const org = getSettings().org
+  return org ? `${org} · last ${rangeDays} days` : `last ${rangeDays} days`
+}
 
 interface Kpis {
   cycle_time_days_median: number | null
@@ -174,7 +181,7 @@ function renderWaste(data: FlowPayload['waste_monthly']): string {
 function renderShell(): string {
   return `
     <header class="view-header" id="flow-header">
-      <div class="view-title">Flow <span class="view-sub">Vaquum · last ${rangeDays} days</span></div>
+      <div class="view-title">Flow <span class="view-sub">${subtitle()}</span></div>
       <div class="range-picker">
         ${[7, 30, 90, 365].map((d) => `<button data-range="${d}" class="${d === rangeDays ? 'active' : ''}">${d === 365 ? '1y' : d + 'd'}</button>`).join('')}
       </div>
@@ -240,7 +247,7 @@ export function initFlowView() {
         b.classList.toggle('active', Number(b.dataset.range) === rangeDays)
       })
       const sub = view.querySelector('.view-sub')
-      if (sub) sub.textContent = `Vaquum · last ${rangeDays} days`
+      if (sub) sub.textContent = subtitle()
       loadAndRender()
     })
   }

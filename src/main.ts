@@ -1,10 +1,11 @@
 import './style.css'
 import { initTypography, toggleTypographyPanel } from './typo'
-import { initSettings, toggleSettingsPanel, openSettingsPanel, isTokenConfigured } from './settings'
+import { initSettings, toggleSettingsPanel, openSettingsPanel, isFullyConfigured } from './settings'
 import { initMenu } from './menu'
 import { initMainView, refreshMainView } from './views/main-view'
 import { initFlowView } from './views/flow-view'
 import { initTrustView } from './views/trust-view'
+import { loadSettings } from './config'
 
 const viewMainEl = document.getElementById('view-main')!
 const viewFlowEl = document.getElementById('view-flow')!
@@ -46,10 +47,11 @@ const menu = initMenu({
 // Initial view
 showView(menu.currentView())
 
-// On load: check token status. If missing, open settings panel with prompt. Otherwise sync.
+// On load: ensure full config (token + org + me). Open Settings if anything is missing.
 ;(async () => {
-  const hasToken = await isTokenConfigured()
-  if (!hasToken) {
+  await loadSettings()
+  const ready = await isFullyConfigured()
+  if (!ready) {
     openSettingsPanel()
     return
   }
@@ -57,7 +59,7 @@ showView(menu.currentView())
   try {
     const res = await fetch('/api/cache/sync', { method: 'POST' })
     if (!res.ok) {
-      if (res.status === 401) openSettingsPanel()
+      if (res.status === 401 || res.status === 400) openSettingsPanel()
       return
     }
     const result = await res.json()

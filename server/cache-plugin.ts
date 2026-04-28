@@ -3,6 +3,7 @@ import { syncDelta, backfillFiles, backfillAvatars } from './sync'
 import { listPrs, countPrs, getFlow, getTrust } from './queries'
 import { getMeta } from './db'
 import { getToken, setToken, hasToken } from './auth'
+import { getSettings, setSettings } from './settings'
 
 function json(res: any, status: number, body: unknown) {
   res.statusCode = status
@@ -89,14 +90,31 @@ export function cachePlugin(): Plugin {
           }
         }
 
+        // ── Settings ──
+        if (url.startsWith('/api/settings') && req.method === 'GET') {
+          return json(res, 200, getSettings())
+        }
+        if (url.startsWith('/api/settings') && req.method === 'POST') {
+          try {
+            const body = await readBody(req)
+            const parsed = body ? JSON.parse(body) : {}
+            const next = setSettings(parsed)
+            return json(res, 200, next)
+          } catch (err: any) {
+            return json(res, 500, { error: err.message || String(err) })
+          }
+        }
+
         // ── Cache ──
         // POST /api/cache/sync
         if (url.startsWith('/api/cache/sync') && req.method === 'POST') {
           const token = getToken()
           if (!token) return json(res, 401, { error: 'No GitHub token configured', code: 'NO_TOKEN' })
+          const { org, me } = getSettings()
+          if (!org || !me) return json(res, 400, { error: 'Org and username must be set in Settings', code: 'NO_SETTINGS' })
           const force = new URL(url, 'http://x').searchParams.get('force') === '1'
           try {
-            const result = await syncDelta(token, force)
+            const result = await syncDelta(org, me, token, force)
             return json(res, 200, result)
           } catch (err: any) {
             return json(res, 500, { error: err.message || String(err) })
@@ -146,10 +164,12 @@ export function cachePlugin(): Plugin {
         if (url.startsWith('/api/cache/backfill-files') && req.method === 'POST') {
           const token = getToken()
           if (!token) return json(res, 401, { error: 'No GitHub token configured', code: 'NO_TOKEN' })
+          const { org } = getSettings()
+          if (!org) return json(res, 400, { error: 'Org must be set in Settings', code: 'NO_SETTINGS' })
           const p = new URL(url, 'http://x').searchParams
           const limit = Math.min(Math.max(Number(p.get('limit')) || 200, 1), 600)
           try {
-            const result = await backfillFiles(token, limit)
+            const result = await backfillFiles(org, token, limit)
             return json(res, 200, result)
           } catch (err: any) {
             return json(res, 500, { error: err.message || String(err) })
@@ -160,10 +180,12 @@ export function cachePlugin(): Plugin {
         if (url.startsWith('/api/cache/backfill-avatars') && req.method === 'POST') {
           const token = getToken()
           if (!token) return json(res, 401, { error: 'No GitHub token configured', code: 'NO_TOKEN' })
+          const { org } = getSettings()
+          if (!org) return json(res, 400, { error: 'Org must be set in Settings', code: 'NO_SETTINGS' })
           const p = new URL(url, 'http://x').searchParams
           const limit = Math.min(Math.max(Number(p.get('limit')) || 200, 1), 1200)
           try {
-            const result = await backfillAvatars(token, limit)
+            const result = await backfillAvatars(org, token, limit)
             return json(res, 200, result)
           } catch (err: any) {
             return json(res, 500, { error: err.message || String(err) })
