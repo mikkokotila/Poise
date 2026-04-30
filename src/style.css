@@ -1,51 +1,6 @@
 :root {
-  /* Surface */
-  --bg: #fafafa;
-  --surface: #ffffff;
-  --hover: #f5f5f5;
-
-  /* Text */
-  --text: #1a1a1a;
-  --text-secondary: #737373;
-  --text-tertiary: #a3a3a3;
-
-  /* Lines */
-  --border: #e5e5e5;
-  --hairline: #f0f0f0;
-
-  /* Accents */
-  --accent: #18181b;
-  --green: #16a34a;
-  --green-soft: #6bc77a;
-  --purple: #7c3aed;
-  --red: #dc2626;
-  --red-soft: #f7c0c0;
-  --blue: #2563eb;
-  --amber: #d97706;
-
-  /* Spacing scale */
-  --sp-1: 4px;
-  --sp-2: 8px;
-  --sp-3: 12px;
-  --sp-4: 16px;
-  --sp-5: 24px;
-  --sp-6: 32px;
-  --sp-7: 48px;
-  --sp-8: 64px;
-
-  /* Radii */
-  --r-sm: 4px;
-  --r-md: 6px;
-  --r-lg: 8px;
-  --r-pill: 100px;
-
-  /* Shadows */
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.04);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.06);
-
   /* ────────────────────────────────────────────────────────────────────
-     Design System v1 — applied per-view; older views still use the
-     legacy tokens above until they're migrated.
+     Design System v1 — see docs/Local-Design-System.md
      ──────────────────────────────────────────────────────────────────── */
 
   /* Neutrals */
@@ -78,6 +33,57 @@
   --e-1: 0 1px 2px rgba(22, 26, 32, .06), 0 2px 4px rgba(22, 26, 32, .04);
   --e-2: 0 4px 8px rgba(22, 26, 32, .08), 0 2px 4px rgba(22, 26, 32, .05);
   --e-3: 0 12px 24px rgba(22, 26, 32, .14), 0 4px 8px rgba(22, 26, 32, .06);
+
+  /* ────────────────────────────────────────────────────────────────────
+     Legacy aliases — bound to DS values so every existing var() call
+     across Main / Flow / Trust / Swarm / Settings inherits the DS look
+     without per-rule edits. New code should use the DS tokens directly.
+     ──────────────────────────────────────────────────────────────────── */
+
+  /* Surfaces */
+  --bg:       var(--n0);
+  --surface:  var(--n0);
+  --hover:    var(--n1);
+
+  /* Text */
+  --text:           var(--n6);
+  --text-secondary: var(--n5);
+  --text-tertiary:  var(--n4);
+
+  /* Lines */
+  --border:   var(--n3);
+  --hairline: var(--n2);
+
+  /* Action / accents — kept as DS approximations of the old hues so
+     status pills (Trust feat/fix, Swarm pills) still read the same. */
+  --accent:     var(--n7);
+  --green:      var(--a3);
+  --green-soft: #8FBE9C;       /* lighter A3 — approval pill borders */
+  --purple:     var(--a7);
+  --red:        var(--a5);
+  --red-soft:   #DDA8A4;       /* lighter A5 — blocked pill borders */
+  --blue:       var(--a1);
+  --amber:      var(--a4);
+
+  /* Spacing scale */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 48px;
+  --sp-8: 64px;
+
+  /* Radii */
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 8px;
+  --r-pill: 100px;
+
+  /* Shadows (legacy; new code should use --e-1/2/3 instead) */
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.06);
 }
 
 *,
@@ -148,7 +154,7 @@ body {
 #filters button {
   font-family: inherit;
   font-size: 0.8125rem;
-  font-weight: 500;
+  font-weight: 600;
   padding: 6px 16px;
   border: 1px solid var(--border);
   border-radius: 100px;
@@ -194,7 +200,7 @@ table {
 thead th {
   text-align: left;
   font-size: var(--typo-header-size, 0.6875rem);
-  font-weight: 500;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-tertiary);
@@ -306,7 +312,7 @@ td:first-child:has(.type-toggle) {
 td a {
   color: var(--text);
   text-decoration: none;
-  font-weight: var(--typo-title-weight, 500);
+  font-weight: var(--typo-title-weight, 600);
 }
 
 td a:hover {
@@ -339,12 +345,12 @@ td a:hover {
 
 .comment-author.is-me {
   color: var(--text-tertiary);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .comment-none {
   color: var(--text-tertiary);
-  font-style: italic;
+  /* No italics per DS — color difference carries the emphasis */
 }
 
 .comment-loading {
@@ -642,7 +648,7 @@ tr:hover .review-btn { opacity: 1; }
 
 .tp-label {
   font-size: 0.75rem;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text-secondary);
   display: block;
   margin-bottom: 4px;
@@ -741,7 +747,7 @@ tr:hover .review-btn { opacity: 1; }
   padding: 8px;
   font-family: inherit;
   font-size: 0.75rem;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text-tertiary);
   background: none;
   border: 1px solid var(--border);
@@ -833,7 +839,7 @@ tr:hover .review-btn { opacity: 1; }
   color: var(--text-secondary);
   font-family: inherit;
   font-size: 0.8125rem;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
   border-radius: 5px;
   text-align: left;
@@ -880,7 +886,7 @@ tr:hover .review-btn { opacity: 1; }
 .range-picker button {
   font-family: inherit;
   font-size: 0.75rem;
-  font-weight: 500;
+  font-weight: 600;
   padding: var(--sp-1) var(--sp-3);
   border: 1px solid var(--border);
   background: var(--surface);
@@ -915,7 +921,7 @@ tr:hover .review-btn { opacity: 1; }
 
 .kpi-label {
   font-size: 0.625rem;
-  font-weight: 500;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.1em;
   color: var(--text-tertiary);
@@ -934,7 +940,7 @@ tr:hover .review-btn { opacity: 1; }
 .kpi-delta {
   margin-top: 6px;
   font-size: 0.75rem;
-  font-weight: 500;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
@@ -949,7 +955,7 @@ tr:hover .review-btn { opacity: 1; }
 
 .section-label {
   font-size: 0.625rem;
-  font-weight: 500;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.1em;
   color: var(--text-tertiary);
@@ -1090,7 +1096,7 @@ tr:hover .review-btn { opacity: 1; }
 .ppl-table th {
   text-align: left;
   font-size: 0.625rem;
-  font-weight: 500;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-tertiary);
@@ -1105,7 +1111,7 @@ tr:hover .review-btn { opacity: 1; }
 }
 
 .ppl-name {
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text);
 }
 
@@ -1140,7 +1146,7 @@ tr:hover .review-btn { opacity: 1; }
   font-size: 0.6875rem;
   color: var(--text-secondary);
   margin-bottom: 12px;
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .waste-bars {
@@ -1272,7 +1278,7 @@ tr:hover .review-btn { opacity: 1; }
 
 .bucket-label {
   color: var(--text-secondary);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .bucket-bar {
@@ -1297,7 +1303,7 @@ tr:hover .review-btn { opacity: 1; }
 .bucket-count {
   text-align: right;
   color: var(--text);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .bucket-pct {
@@ -1321,7 +1327,7 @@ tr:hover .review-btn { opacity: 1; }
 .hs-table th {
   text-align: left;
   font-size: 0.625rem;
-  font-weight: 500;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-tertiary);
@@ -1482,7 +1488,7 @@ tr:hover .review-btn { opacity: 1; }
 .st-clear {
   font-family: inherit;
   font-size: 0.75rem;
-  font-weight: 500;
+  font-weight: 600;
   padding: 6px 14px;
   border: 1px solid var(--border);
   border-radius: var(--r-md);
@@ -1901,7 +1907,7 @@ tr:hover .review-btn { opacity: 1; }
 .flight-table thead th {
   text-align: left;
   font-size: 0.6875rem;
-  font-weight: 500;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-tertiary);
@@ -1933,7 +1939,7 @@ tr:hover .review-btn { opacity: 1; }
 .flight-table .col-actor   { width: 130px; color: var(--text-secondary); }
 .flight-table .col-time    { width: 80px; text-align: right; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
 
-.flight-table td a { color: var(--text); text-decoration: none; font-weight: 500; }
+.flight-table td a { color: var(--text); text-decoration: none; font-weight: 600; }
 .flight-table td a:hover { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
 
 .target-row { transition: background 0.1s ease; }
@@ -2004,7 +2010,7 @@ tr:hover .review-btn { opacity: 1; }
   color: var(--text-tertiary);
   padding: 6px 12px 6px 0;
   border-bottom: 1px solid var(--hairline);
-  font-weight: 500;
+  font-weight: 600;
 }
 .child-table td {
   padding: 6px 12px 6px 0;
@@ -2037,7 +2043,7 @@ tr:hover .review-btn { opacity: 1; }
 .pill {
   display: inline-block;
   font-size: 0.6875rem;
-  font-weight: 500;
+  font-weight: 600;
   letter-spacing: 0.04em;
   padding: 2px 10px;
   border-radius: var(--r-pill);

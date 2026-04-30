@@ -1,4 +1,8 @@
 const TYPO_KEY = 'poise-typo'
+/* Bump this when DEFAULTS shifts in a way old saved prefs should be wiped.
+   ds-v1 = bound the defaults to Design System v1 neutrals/accents. */
+const TYPO_VERSION_KEY = 'poise-typo-version'
+const TYPO_VERSION = 'ds-v1'
 
 interface TypoConfig {
   archetype: string
@@ -41,19 +45,21 @@ const DEFAULTS: TypoConfig = {
   lineHeight: 1.5,
   rowFontSize: 0.8125,
   rowPadding: 11,
-  titleWeight: 500,
+  titleWeight: 600,         // sans-semibold per DS (400 and 600 only)
   headerSize: 0.6875,
   contentWidth: 960,
   commentLines: 4,
   commentFontSize: 0.75,
   commentFontWeight: 400,
-  textColor: '#1a1a1a',
-  textSecondary: '#737373',
-  textTertiary: '#a3a3a3',
-  bgColor: '#fafafa',
-  borderColor: '#e5e5e5',
-  hoverColor: '#f5f5f5',
-  accentColor: '#18181b',
+  /* DS v1 colors — match :root --n0..--n7 / --a*. Users can still
+     customize from the panel; "Reset to defaults" returns to these. */
+  textColor: '#2F353D',         // N6
+  textSecondary: '#5C636D',     // N5
+  textTertiary: '#8E959E',      // N4
+  bgColor: '#F7F8F9',           // N0
+  borderColor: '#C5CBD1',       // N3
+  hoverColor: '#EEF0F2',        // N1
+  accentColor: '#161A20',       // N7
 }
 
 interface SliderDef {
@@ -80,7 +86,8 @@ const SLIDERS: SliderDef[] = [
   { key: 'lineHeight',    label: 'Line height',     min: 1.2,    max: 2.0,   step: 0.05,   fmt: f2 },
   { key: 'rowFontSize',   label: 'Row text size',   min: 0.6875, max: 1.0,   step: 0.0625, fmt: fRem },
   { key: 'rowPadding',    label: 'Row density',     min: 6,      max: 18,    step: 1,      fmt: fPx },
-  { key: 'titleWeight',   label: 'Title weight',    min: 400,    max: 700,   step: 100,    fmt: f0 },
+  /* DS sans allows 400 and 600 only — step 200 keeps the slider snapped to those */
+  { key: 'titleWeight',   label: 'Title weight',    min: 400,    max: 600,   step: 200,    fmt: f0 },
   { key: 'headerSize',    label: 'Header size',     min: 0.5625, max: 0.875, step: 0.0625, fmt: fRem },
   { key: 'contentWidth',  label: 'Content width',   min: 600,    max: 1400,  step: 20,     fmt: fPx },
   { key: 'commentLines',     label: 'Comment lines',     min: 1,      max: 10,    step: 1,      fmt: f0 },
@@ -109,6 +116,15 @@ const fontsLoaded = new Set<string>()
 
 function load(): TypoConfig {
   try {
+    const stored = localStorage.getItem(TYPO_VERSION_KEY)
+    if (stored !== TYPO_VERSION) {
+      // Stale prefs from a previous default palette — wipe so the user
+      // picks up the DS defaults. Their explicit customizations will be
+      // lost; this only happens once per major DS revision.
+      localStorage.removeItem(TYPO_KEY)
+      localStorage.setItem(TYPO_VERSION_KEY, TYPO_VERSION)
+      return { ...DEFAULTS }
+    }
     const raw = localStorage.getItem(TYPO_KEY)
     if (raw) return { ...DEFAULTS, ...JSON.parse(raw) }
   } catch { /* ignore */ }
