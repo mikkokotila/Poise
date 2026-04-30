@@ -27,6 +27,8 @@ let initialized = false
 let viewEl: HTMLElement
 let bodyEl: HTMLElement
 let refreshTimer: ReturnType<typeof setInterval> | null = null
+let fetchInFlight = false
+let everRendered = false
 
 function escapeHtml(s: string): string {
   const d = document.createElement('div'); d.textContent = s; return d.innerHTML
@@ -299,23 +301,56 @@ function restoreOpenRows(prev: Set<string>) {
 }
 
 async function loadAndRender() {
+  // The upstream service is single-threaded and a parse of both swarm logs
+  // can take several seconds. Don't pile up overlapping refreshes — the
+  // queued ones would only block the upstream further.
+  if (fetchInFlight) return
+  fetchInFlight = true
+
   const previouslyOpen = bodyEl.querySelector('.target-row') ? snapshotOpenRows() : new Set<string>()
   try {
     const url = '/api/swarm/events?show_held=true&show_info=true&dedupe=false&limit=10000&order=asc'
     const res = await fetch(url)
     if (!res.ok) {
-      bodyEl.innerHTML = renderError(`Swarm service unreachable (HTTP ${res.status}). Is the local swarm-events service running on 127.0.0.1:7878?`)
+      // Only show the error state if we have nothing rendered yet. Otherwise
+      // keep the last good dashboard visible and the user can wait for the
+      // next refresh tick.
+      if (!everRendered) {
+        bodyEl.innerHTML = renderError(`Swarm service unreachable (HTTP ${res.status}). Is the local swarm-events service running on 127.0.0.1:7878?`)
+      }
       return
     }
     const json = await res.json()
     const events: SwarmEvent[] = json.events || []
     const data = buildDashboard(events)
     bodyEl.innerHTML = renderDashboard(data)
+    everRendered = true
     restoreOpenRows(previouslyOpen)
     updateSubtitle()
   } catch (err) {
-    bodyEl.innerHTML = renderError(`Swarm service unreachable: ${(err as Error).message}`)
+    if (!everRendered) {
+      bodyEl.innerHTML = renderError(`Swarm service unreachable: ${(err as Error).message}`)
+    }
+  } finally {
+    fetchInFlight = false
   }
+}
+
+function renderLoading(): string {
+  return `
+    <header class="view-header">
+      <div class="view-title">Swarm <span class="view-sub" id="swarm-sub">live</span></div>
+      <div class="refresh-note">refreshes every 15s</div>
+    </header>
+    <div class="kpi-row swarm-kpis">
+      <div class="kpi"><div class="kpi-label">In flight</div><div class="kpi-value swarm-skeleton">—</div><div class="kpi-sub">live targets</div></div>
+      <div class="kpi"><div class="kpi-label">Blocked</div><div class="kpi-value swarm-skeleton">—</div><div class="kpi-sub">need attention</div></div>
+      <div class="kpi"><div class="kpi-label">PRs opened today</div><div class="kpi-value swarm-skeleton">—</div><div class="kpi-sub">by worker</div></div>
+      <div class="kpi"><div class="kpi-label">Milestones today</div><div class="kpi-value swarm-skeleton">—</div><div class="kpi-sub">approved · pushed · merged · edited</div></div>
+    </div>
+    <div class="section-label">In flight <span class="section-note">loading…</span></div>
+    <div class="section-empty swarm-loading">Reading swarm logs…</div>
+  `
 }
 
 function renderError(msg: string): string {
@@ -351,7 +386,13 @@ export async function initSwarmView() {
   } else {
     bodyEl = viewEl.querySelector<HTMLElement>('#swarm-body')!
   }
-  await loadAndRender()
+  // Show a skeleton immediately if we have nothing rendered yet — the
+  // upstream service can take several seconds to respond, and a blank
+  // viewport during that wait reads as broken.
+  if (!everRendered) {
+    bodyEl.innerHTML = renderLoading()
+  }
+  loadAndRender()  // intentionally not awaited — let the user see the skeleton
   stopSwarmRefresh()
   refreshTimer = setInterval(loadAndRender, REFRESH_MS)
 }

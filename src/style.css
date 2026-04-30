@@ -1956,3 +1956,22 @@ tr:hover .review-btn { opacity: 1; }
 .pill.s-COMPLETED { color: var(--green); border-color: var(--green); background: #f0fdf4; }
 .pill.s-INFO,
 .pill.s-HELD      { color: var(--text-tertiary); }
+
+/* Swarm loading skeleton — kicks in while the (slow, single-threaded)
+   upstream service parses its log files. */
+.swarm-skeleton { color: var(--text-tertiary); opacity: 0.4; }
+.swarm-loading {
+  position: relative;
+  overflow: hidden;
+}
+.swarm-loading::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, var(--hover), transparent);
+  animation: swarm-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes swarm-shimmer {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
