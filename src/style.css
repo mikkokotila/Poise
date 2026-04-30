@@ -42,6 +42,42 @@
   /* Shadows */
   --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.04);
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.06);
+
+  /* ────────────────────────────────────────────────────────────────────
+     Design System v1 — applied per-view; older views still use the
+     legacy tokens above until they're migrated.
+     ──────────────────────────────────────────────────────────────────── */
+
+  /* Neutrals */
+  --n0: #F7F8F9;
+  --n1: #EEF0F2;
+  --n2: #DEE2E6;
+  --n3: #C5CBD1;
+  --n4: #8E959E;
+  --n5: #5C636D;
+  --n6: #2F353D;
+  --n7: #161A20;
+
+  /* Accents */
+  --a1: #3A72B0;   /* Blue   — info, primary data, focus */
+  --a2: #3D8E84;   /* Teal   — stable, active, secondary data */
+  --a3: #4A8E5E;   /* Green  — success */
+  --a4: #A8792B;   /* Amber  — warning, pending */
+  --a5: #B85048;   /* Red    — error, destructive */
+  --a6: #B0537B;   /* Rose   — risk, exception, categorical */
+  --a7: #7560A8;   /* Violet — categorical, special state */
+  --a8: #6E7886;   /* Slate  — neutral category, "other" */
+
+  /* Borders */
+  --b-hair: 0.5px solid var(--n2);
+  --b-base: 1px solid var(--n3);
+  --b-focus: 2px solid var(--a1);
+
+  /* Elevation ladder — borders carry resting depth, shadows on interaction */
+  --e-0: none;
+  --e-1: 0 1px 2px rgba(22, 26, 32, .06), 0 2px 4px rgba(22, 26, 32, .04);
+  --e-2: 0 4px 8px rgba(22, 26, 32, .08), 0 2px 4px rgba(22, 26, 32, .05);
+  --e-3: 0 12px 24px rgba(22, 26, 32, .14), 0 4px 8px rgba(22, 26, 32, .06);
 }
 
 *,
@@ -1496,11 +1532,20 @@ tr:hover .review-btn { opacity: 1; }
 
 #view-pipe { padding-bottom: 64px; }
 
-/* Kanban needs more horizontal real estate than the typography content width
-   permits, so break out and use the full viewport (minus page padding). */
+/* Pipe is the first view migrated to Design System v1. All values here
+   resolve through DS tokens (--n*, --a*, --b-*, --e-*) — never the legacy
+   --bg / --text / --border vars used elsewhere. Density is "calm":
+   row 36, card padding 12, card gap 10, column padding 12. */
+
+#view-pipe { color: var(--n6); }
+#view-pipe .view-title { color: var(--n6); font-weight: 600; }
+#view-pipe .view-sub   { color: var(--n4); font-weight: 400; }
+
+/* Kanban needs more horizontal real estate than the typography content
+   width permits, so break out and use the full viewport. */
 .kanban {
   display: flex;
-  gap: 14px;
+  gap: 16px;
   align-items: flex-start;
   overflow-x: auto;
   padding: 0 24px 12px;
@@ -1509,100 +1554,98 @@ tr:hover .review-btn { opacity: 1; }
   width: 100vw;
   left: 50%;
   transform: translateX(-50%);
-  /* Subtle scrollbar */
   scrollbar-width: thin;
-  scrollbar-color: var(--border) transparent;
+  scrollbar-color: var(--n3) transparent;
 }
 
 .kanban::-webkit-scrollbar { height: 8px; }
 .kanban::-webkit-scrollbar-track { background: transparent; }
-.kanban::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 4px;
-}
+.kanban::-webkit-scrollbar-thumb { background: var(--n3); border-radius: 4px; }
 
+/* Lane = panel: r-md outer radius, b-base resting border, no shadow */
 .lane {
-  /* Share the full kanban width equally; min keeps lanes readable when the
-     viewport is narrower than 5 × min, falling back to horizontal scroll. */
   flex: 1 1 0;
   min-width: 220px;
-  background: var(--hover);
-  border: 1px solid var(--hairline);
-  border-radius: 12px;
+  background: var(--n1);
+  border: var(--b-base);
+  border-radius: 8px;
   padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 10px;
   min-height: 180px;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  box-shadow: var(--e-0);
 }
 
 .lane-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 2px 4px 6px;
+  padding: 0 4px 4px;
 }
 
 .lane-title {
   font-size: 0.6875rem;
-  font-weight: 600;
+  font-weight: 600;             /* sans-semibold */
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--text-secondary);
+  color: var(--n5);
 }
 
+/* Numeric count → mono per DS rule (aligned numerics) */
 .lane-count {
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
   font-size: 0.6875rem;
-  font-weight: 500;
+  font-weight: 400;             /* mono-regular */
   font-variant-numeric: tabular-nums;
-  color: var(--text-tertiary);
-  background: var(--bg);
-  padding: 1px 7px;
-  border-radius: 999px;
-  border: 1px solid var(--hairline);
+  color: var(--n4);
+  background: var(--n0);
+  padding: 1px 8px;
+  border-radius: 999px;         /* r-full */
+  border: var(--b-base);
 }
 
 .lane-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   min-height: 24px;
 }
 
-/* Cards */
+/* ── Cards ────────────────────────────────────────────────────────────
+   Budget per spec: e-0 at rest → e-1 on drag, nothing more.
+   - Border (b-base) carries resting depth.
+   - Hover signals through cursor + the × revealing; no shadow change. */
 
 .card {
   position: relative;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 28px 10px 12px;
+  background: var(--n0);
+  border: var(--b-base);
+  border-radius: 4px;            /* r-sm */
+  padding: 12px 32px 12px 12px;  /* right inset reserves room for × */
   font-size: 0.8125rem;
   line-height: 1.5;
-  color: var(--text);
+  font-weight: 400;              /* sans-regular */
+  color: var(--n6);
   cursor: grab;
   user-select: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.08s ease;
-}
-
-.card:hover {
-  border-color: var(--text-tertiary);
-  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02), 0 4px 12px -6px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--e-0);
+  transition: box-shadow 0.15s ease, transform 0.08s ease, opacity 0.15s ease;
 }
 
 .card:active { cursor: grabbing; }
 
+/* Drag = e-1 only — opacity + tiny scale make it clear the card is moving */
 .card.dragging {
   opacity: 0.4;
   transform: scale(0.99);
+  box-shadow: var(--e-1);
   cursor: grabbing;
 }
 
+/* Editing state inherits b-base; the textarea inside owns the focus ring */
 .card.editing {
   cursor: default;
-  border-color: var(--text);
-  box-shadow: 0 0 0 3px rgba(24, 24, 27, 0.06);
 }
 
 .card-text {
@@ -1612,54 +1655,62 @@ tr:hover .review-btn { opacity: 1; }
 
 .card-delete {
   position: absolute;
-  top: 6px;
-  right: 6px;
+  top: 8px;
+  right: 8px;
   width: 18px;
   height: 18px;
   border: none;
   background: transparent;
-  color: var(--text-tertiary);
+  color: var(--n4);
   cursor: pointer;
   font-size: 16px;
   line-height: 1;
-  border-radius: 4px;
+  border-radius: 4px;            /* r-sm */
   opacity: 0;
   transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
   padding: 0;
 }
 
 .card:hover .card-delete { opacity: 1; }
-.card-delete:hover { color: var(--red); background: var(--hover); }
+.card-delete:hover { color: var(--a5); background: var(--n1); }
 .card.editing .card-delete { display: none; }
 
-/* Drop indicator — thin accent line shown between cards while dragging */
+/* Drop indicator = A1 (Blue), the same hue used for focus */
 .drop-indicator {
   height: 2px;
-  background: var(--accent);
+  background: var(--a1);
   border-radius: 2px;
   margin: 1px 4px;
   pointer-events: none;
 }
 
-/* Composer (add new) and inline editor share the same layout */
+/* ── Composer (add new) ──────────────────────────────────────────────
+   Inline popover treatment: b-base + e-1. Inside, the textarea gets the
+   focus ring (b-focus, 2px offset). No box-shadow halo — the spec
+   reserves shadows for interaction states only and the focus ring
+   carries that signal cleanly. */
 
-.composer,
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--n0);
+  border: var(--b-base);
+  border-radius: 4px;            /* r-sm — composer reads as a card */
+  padding: 8px;
+  box-shadow: var(--e-1);
+}
+
+/* Inline edit replaces the card body — no extra chrome. */
 .card-edit {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  background: var(--bg);
-  border: 1px solid var(--text);
-  border-radius: 8px;
-  padding: 8px;
-  box-shadow: 0 0 0 3px rgba(24, 24, 27, 0.06);
-}
-
-.card-edit {
+  gap: 8px;
   margin-top: 8px;
-  box-shadow: none;
+  background: transparent;
   border: none;
   padding: 0;
+  box-shadow: none;
 }
 
 .composer textarea,
@@ -1667,83 +1718,118 @@ tr:hover .review-btn { opacity: 1; }
   width: 100%;
   resize: vertical;
   min-height: 64px;
-  font-family: inherit;
+  font-family: inherit;          /* sans body */
   font-size: 0.8125rem;
   line-height: 1.5;
-  color: var(--text);
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  font-weight: 400;
+  color: var(--n6);
+  background: var(--n0);
+  border: var(--b-base);
+  border-radius: 4px;            /* r-sm */
   padding: 8px 10px;
   outline: none;
-  transition: border-color 0.15s ease;
+  transition: outline-color 0.12s ease;
 }
 
-.card-edit textarea {
-  border: 1px solid var(--text);
+/* Focus ring per DS: 2px solid A1, offset 2px, inherits radius.
+   Longhand props because var() inside the `outline` shorthand expands
+   inconsistently across browsers. */
+.composer textarea:focus,
+.card-edit textarea:focus {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
 }
-
-.composer textarea:focus { border-color: var(--text); }
 
 .composer-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 
+/* Primary action: dark surface (N7), N0 text, sans-semibold */
 .composer-add {
   appearance: none;
-  background: var(--accent);
-  color: var(--bg);
+  background: var(--n7);
+  color: var(--n0);
   border: none;
+  font-family: inherit;
   font-size: 0.75rem;
-  font-weight: 500;
+  font-weight: 600;              /* sans-semibold */
   padding: 6px 12px;
-  border-radius: 6px;
+  border-radius: 4px;            /* r-sm */
   cursor: pointer;
-  transition: opacity 0.15s ease;
+  transition: opacity 0.15s ease, background 0.15s ease;
 }
 
-.composer-add:hover  { opacity: 0.88; }
+.composer-add:hover    { background: var(--n6); }
 .composer-add:disabled { opacity: 0.5; cursor: default; }
+.composer-add:focus-visible {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
+}
 
+/* Secondary action: ghost button, secondary text */
 .composer-cancel {
   appearance: none;
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--n5);
   border: none;
+  font-family: inherit;
   font-size: 0.75rem;
+  font-weight: 400;
   padding: 6px 8px;
-  border-radius: 6px;
+  border-radius: 4px;
   cursor: pointer;
 }
 
-.composer-cancel:hover { color: var(--text); background: var(--hover); }
-
-.composer-hint {
-  margin-left: auto;
-  font-size: 0.625rem;
-  color: var(--text-tertiary);
-  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+.composer-cancel:hover { color: var(--n6); background: var(--n1); }
+.composer-cancel:focus-visible {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
 }
 
+/* Composer keyboard hint: keystroke is technical content → mono per DS */
+.composer-hint {
+  margin-left: auto;
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-size: 0.625rem;
+  font-weight: 400;
+  color: var(--n4);
+}
+
+/* "+ Add a card" — quiet at rest, dashed b-base on hover */
 .lane-add {
   appearance: none;
   background: transparent;
   border: 1px dashed transparent;
-  color: var(--text-tertiary);
+  color: var(--n4);
+  font-family: inherit;
   font-size: 0.75rem;
+  font-weight: 400;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: 4px;            /* r-sm */
   cursor: pointer;
   text-align: left;
   transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
 }
 
 .lane-add:hover {
-  color: var(--text);
-  background: var(--bg);
-  border-color: var(--border);
+  color: var(--n6);
+  background: var(--n0);
+  border-color: var(--n3);
+}
+
+.lane-add:focus-visible {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
