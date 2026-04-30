@@ -42,8 +42,8 @@
 
   /* Surfaces */
   --bg:       var(--n0);
-  --surface:  var(--n0);
-  --hover:    var(--n1);
+  --surface:  var(--n1);   /* DS: panels & raised surfaces sit one tone above app bg */
+  --hover:    var(--n2);
 
   /* Text */
   --text:           var(--n6);
