@@ -290,26 +290,39 @@ function attachDragHandlers() {
     cardEl?.classList.remove('dragging')
     dragId = null
     clearIndicator()
+    // Make sure no lane is left highlighted if dragend fires before drop
+    viewEl.querySelectorAll('.lane.lane-drag-over').forEach((l) => l.classList.remove('lane-drag-over'))
   })
 
-  // Lane-list-level events (where the drop happens)
+  // Lane-level events. The whole lane is the drop target — that means the
+  // padding, header, lane-add button, and empty space all accept the drop —
+  // not just the inner card stack. The insertion index is still computed
+  // against the cards in the lane-list.
   for (const l of LANES) {
+    const lane = laneEl(l.key)
     const list = laneListEl(l.key)
-    list.addEventListener('dragover', (e) => {
+
+    lane.addEventListener('dragover', (e) => {
       if (dragId === null) return
       e.preventDefault()
       if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
       const idx = insertionIndex(list, e.clientY)
       placeIndicator(list, idx)
+      lane.classList.add('lane-drag-over')
     })
-    list.addEventListener('dragleave', (e) => {
-      // Only clear when actually leaving the list (not when entering a child)
+
+    lane.addEventListener('dragleave', (e) => {
+      // Only clear when actually leaving the lane — not when moving between
+      // children of the same lane.
       const related = e.relatedTarget as Node | null
-      if (related && list.contains(related)) return
+      if (related && lane.contains(related)) return
       clearIndicator()
+      lane.classList.remove('lane-drag-over')
     })
-    list.addEventListener('drop', async (e) => {
+
+    lane.addEventListener('drop', async (e) => {
       e.preventDefault()
+      lane.classList.remove('lane-drag-over')
       if (dragId === null) return
       const movingId = dragId
       const targetLane = l.key

@@ -1562,7 +1562,9 @@ tr:hover .review-btn { opacity: 1; }
 .kanban::-webkit-scrollbar-track { background: transparent; }
 .kanban::-webkit-scrollbar-thumb { background: var(--n3); border-radius: 4px; }
 
-/* Lane = panel: r-md outer radius, b-base resting border, no shadow */
+/* Lane = panel: r-md outer radius, b-base resting border, no shadow.
+   The whole lane (not just the inner list) is the drop target — that's
+   why the border + bg shift to A1 while a card hovers over it. */
 .lane {
   flex: 1 1 0;
   min-width: 220px;
@@ -1573,8 +1575,14 @@ tr:hover .review-btn { opacity: 1; }
   display: flex;
   flex-direction: column;
   gap: 10px;
-  min-height: 180px;
+  min-height: 220px;
   box-shadow: var(--e-0);
+  transition: border-color 0.12s ease, background-color 0.12s ease;
+}
+
+.lane.lane-drag-over {
+  border-color: var(--a1);
+  background: rgba(58, 114, 176, 0.05);
 }
 
 .lane-header {
@@ -1605,11 +1613,14 @@ tr:hover .review-btn { opacity: 1; }
   border: var(--b-base);
 }
 
+/* Lane-list grows to fill the lane, so an empty lane has a generous drop
+   zone instead of a thin sliver above the "+ Add a card" button. */
 .lane-list {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  min-height: 24px;
+  flex: 1 1 auto;
+  min-height: 60px;
 }
 
 /* ── Cards ────────────────────────────────────────────────────────────
@@ -1635,9 +1646,10 @@ tr:hover .review-btn { opacity: 1; }
 
 .card:active { cursor: grabbing; }
 
-/* Drag = e-1 only — opacity + tiny scale make it clear the card is moving */
+/* Drag = e-1 only. Opacity stays high enough that the source card reads
+   as "I'm being moved, not gone" — 0.4 made cards look deleted. */
 .card.dragging {
-  opacity: 0.4;
+  opacity: 0.55;
   transform: scale(0.99);
   box-shadow: var(--e-1);
   cursor: grabbing;
@@ -1675,13 +1687,15 @@ tr:hover .review-btn { opacity: 1; }
 .card-delete:hover { color: var(--a5); background: var(--n1); }
 .card.editing .card-delete { display: none; }
 
-/* Drop indicator = A1 (Blue), the same hue used for focus */
+/* Drop indicator = A1 (Blue), same hue as focus. Pill-shaped with a
+   subtle glow so it's hard to miss between cards. */
 .drop-indicator {
-  height: 2px;
+  height: 3px;
   background: var(--a1);
-  border-radius: 2px;
-  margin: 1px 4px;
+  border-radius: 999px;
+  margin: 2px 2px;
   pointer-events: none;
+  box-shadow: 0 0 0 2px rgba(58, 114, 176, 0.15);
 }
 
 /* ── Composer (add new) ──────────────────────────────────────────────
