@@ -77,6 +77,16 @@ db.exec(`
     FOREIGN KEY (pr_id) REFERENCES prs(id) ON DELETE CASCADE
   );
   CREATE INDEX IF NOT EXISTS idx_pr_files_filename ON pr_files(filename);
+
+  CREATE TABLE IF NOT EXISTS pipe_cards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    text TEXT NOT NULL,
+    lane TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_pipe_cards_lane ON pipe_cards(lane, position);
 `)
 
 // Migrations — add columns if missing

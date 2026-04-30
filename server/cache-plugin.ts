@@ -4,6 +4,7 @@ import { listPrs, countPrs, getFlow, getTrust } from './queries'
 import { getMeta } from './db'
 import { getToken, setToken, hasToken } from './auth'
 import { getSettings, setSettings } from './settings'
+import { listCards, createCard, setCardText, moveCard, removeCard, type Lane } from './pipe'
 
 function json(res: any, status: number, body: unknown) {
   res.statusCode = status
@@ -197,6 +198,56 @@ export function cachePlugin(): Plugin {
         // GET /api/cache/meta
         if (url.startsWith('/api/cache/meta') && req.method === 'GET') {
           return json(res, 200, { last_sync_at: getMeta('last_sync_at') })
+        }
+
+        // ── Pipe (kanban) ──
+        // GET /api/pipe — list all cards
+        if (url === '/api/pipe' && req.method === 'GET') {
+          return json(res, 200, { cards: listCards() })
+        }
+
+        // POST /api/pipe — { text, lane }
+        if (url === '/api/pipe' && req.method === 'POST') {
+          try {
+            const body = await readBody(req)
+            const parsed = body ? JSON.parse(body) : {}
+            const card = createCard(String(parsed.text ?? ''), parsed.lane as Lane)
+            return json(res, 200, card)
+          } catch (err: any) {
+            return json(res, 400, { error: err.message || String(err) })
+          }
+        }
+
+        // PATCH /api/pipe/:id — { text? } or { lane?, position? } (move)
+        // DELETE /api/pipe/:id
+        const pipeMatch = url.match(/^\/api\/pipe\/(\d+)(?:\?|$)/)
+        if (pipeMatch) {
+          const id = Number(pipeMatch[1])
+          if (req.method === 'PATCH') {
+            try {
+              const body = await readBody(req)
+              const parsed = body ? JSON.parse(body) : {}
+              if (typeof parsed.text === 'string') {
+                const card = setCardText(id, parsed.text)
+                return json(res, 200, card)
+              }
+              if (typeof parsed.lane === 'string' && typeof parsed.position === 'number') {
+                const card = moveCard(id, parsed.lane as Lane, parsed.position)
+                return json(res, 200, card)
+              }
+              return json(res, 400, { error: 'Provide either { text } or { lane, position }' })
+            } catch (err: any) {
+              return json(res, 400, { error: err.message || String(err) })
+            }
+          }
+          if (req.method === 'DELETE') {
+            try {
+              removeCard(id)
+              return json(res, 200, { ok: true })
+            } catch (err: any) {
+              return json(res, 400, { error: err.message || String(err) })
+            }
+          }
         }
 
         next()

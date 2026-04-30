@@ -5,20 +5,26 @@ import { initMenu } from './menu'
 import { initMainView, refreshMainView } from './views/main-view'
 import { initFlowView } from './views/flow-view'
 import { initTrustView } from './views/trust-view'
+import { initPipeView } from './views/pipe-view'
 import { loadSettings } from './config'
 
 const viewMainEl = document.getElementById('view-main')!
 const viewFlowEl = document.getElementById('view-flow')!
 const viewTrustEl = document.getElementById('view-trust')!
+const viewPipeEl = document.getElementById('view-pipe')!
 
-function showView(v: 'main' | 'flow' | 'trust') {
-  const all = [viewMainEl, viewFlowEl, viewTrustEl]
-  const target = v === 'main' ? viewMainEl : v === 'flow' ? viewFlowEl : viewTrustEl
+function showView(v: 'main' | 'flow' | 'trust' | 'pipe') {
+  const all = [viewMainEl, viewFlowEl, viewTrustEl, viewPipeEl]
+  const target = v === 'main' ? viewMainEl
+    : v === 'flow' ? viewFlowEl
+    : v === 'trust' ? viewTrustEl
+    : viewPipeEl
 
   // Initialize the target first so content exists before the animation starts
   if (v === 'main') initMainView()
   else if (v === 'flow') initFlowView()
-  else initTrustView()
+  else if (v === 'trust') initTrustView()
+  else initPipeView()
 
   for (const el of all) {
     if (el === target) {
