@@ -30,8 +30,10 @@ interface GitHubSearchItem {
 function computeStatus(labels: Array<{ name: string }> | undefined): 'ALLOCATED' | 'BUILDING' | 'IN REVIEW' {
   if (!labels || labels.length === 0) return 'IN REVIEW'
   const names = new Set(labels.map((l) => l.name))
-  if (names.has('ALLOCATION')) return 'ALLOCATED'
+  // IN_PROGRESS is the later workflow stage — when both are set (allocated and
+  // now actively being built) the build state takes precedence.
   if (names.has('IN_PROGRESS')) return 'BUILDING'
+  if (names.has('ALLOCATION')) return 'ALLOCATED'
   return 'IN REVIEW'
 }
 

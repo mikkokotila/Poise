@@ -97,15 +97,31 @@ if (!hasCol('status')) {
   db.exec('ALTER TABLE prs ADD COLUMN status TEXT')
   // Workflow status derived from labels. Cheap to backfill via LIKE since
   // GitHub label names are unique enough that "name":"ALLOCATION" only appears
-  // for that label.
+  // for that label. IN_PROGRESS wins over ALLOCATION when both are present
+  // (later workflow stage takes precedence).
   db.exec(`
     UPDATE prs
     SET status = CASE
-      WHEN raw_json LIKE '%"name":"ALLOCATION"%' THEN 'ALLOCATED'
       WHEN raw_json LIKE '%"name":"IN_PROGRESS"%' THEN 'BUILDING'
+      WHEN raw_json LIKE '%"name":"ALLOCATION"%' THEN 'ALLOCATED'
       ELSE 'IN REVIEW'
     END
   `)
+}
+// Re-derive status for users whose DB was backfilled with the old priority
+// (where ALLOCATION won over IN_PROGRESS). Idempotent and meta-gated.
+const statusV2 = db.prepare('SELECT value FROM meta WHERE key = ?').get('mig_status_v2') as { value: string } | undefined
+if (!statusV2) {
+  db.exec(`
+    UPDATE prs
+    SET status = CASE
+      WHEN raw_json LIKE '%"name":"IN_PROGRESS"%' THEN 'BUILDING'
+      WHEN raw_json LIKE '%"name":"ALLOCATION"%' THEN 'ALLOCATED'
+      ELSE 'IN REVIEW'
+    END
+    WHERE raw_json IS NOT NULL
+  `)
+  db.prepare('INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)').run('mig_status_v2', '1')
 }
 if (!hasCol('owner_login')) {
   db.exec('ALTER TABLE prs ADD COLUMN owner_login TEXT')

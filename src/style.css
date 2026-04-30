@@ -173,12 +173,15 @@ thead th:last-child {
 }
 
 /* Column widths */
+/* Type / action are icon columns; Title flexes; the rest are equal-width data columns */
 .col-type    { width: 40px; }
 .col-title   { /* remaining */ }
-.col-last    { width: 88px; }
-.col-repo    { width: 84px; }
-.col-state   { width: 64px; }
-.col-updated { width: 60px; text-align: right; }
+.col-last    { width: 80px; }
+.col-repo    { width: 80px; }
+.col-status  { width: 80px; }
+.col-owner   { width: 80px; }
+.col-state   { width: 80px; }
+.col-updated { width: 80px; text-align: right; }
 .col-action  { width: 32px; text-align: center; }
 
 /* ── Rows ── */
