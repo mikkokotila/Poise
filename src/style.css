@@ -1748,10 +1748,12 @@ tr:hover .review-btn { opacity: 1; }
   gap: 8px;
 }
 
-/* Primary action: dark surface (N7), N0 text, sans-semibold */
+/* Primary action: mid-grey surface (N5), N0 text, sans-semibold.
+   N7 was too contrasty against an N1 panel; N5 keeps the button
+   readable as the darkest element on the panel without burning the eye. */
 .composer-add {
   appearance: none;
-  background: var(--n7);
+  background: var(--n5);
   color: var(--n0);
   border: none;
   font-family: inherit;
