@@ -107,6 +107,18 @@ if (!hasCol('status')) {
     END
   `)
 }
+if (!hasCol('owner_login')) {
+  db.exec('ALTER TABLE prs ADD COLUMN owner_login TEXT')
+  db.exec('ALTER TABLE prs ADD COLUMN owner_avatar TEXT')
+  // Backfill the first assignee from raw_json so existing rows show an owner
+  // without a resync.
+  db.exec(`
+    UPDATE prs SET
+      owner_login  = json_extract(raw_json, '$.assignees[0].login'),
+      owner_avatar = json_extract(raw_json, '$.assignees[0].avatar_url')
+    WHERE raw_json IS NOT NULL
+  `)
+}
 
 export function getMeta(key: string): string | null {
   const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined

@@ -12,6 +12,8 @@ export interface PrRow {
   is_pr: number
   state: string
   status: string | null
+  owner_login: string | null
+  owner_avatar: string | null
   created_at: string
   updated_at: string
   closed_at: string | null
@@ -46,6 +48,7 @@ export function listPrs(args: PrListArgs): PrRow[] {
   const { where, params } = buildPrWhere(args)
   const sql = `
     SELECT id, repo, number, title, html_url, author, author_avatar, is_pr, state, status,
+           owner_login, owner_avatar,
            created_at, updated_at, closed_at, merged_at, comments_count,
            last_commenter, last_commenter_avatar, last_comment_body
     FROM prs

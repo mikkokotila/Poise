@@ -25,6 +25,8 @@ interface PrRow {
   is_pr: number
   state: string
   status: string | null
+  owner_login: string | null
+  owner_avatar: string | null
   created_at: string
   updated_at: string
   closed_at: string | null
@@ -125,6 +127,16 @@ function humanAvatarFallback(username: string): string {
   return `https://github.com/${encodeURIComponent(username)}.png?size=48`
 }
 
+function ownerCell(item: PrRow): string {
+  const name = item.owner_login
+  if (!name) return '<span class="last-dash">—</span>'
+  const isBot = /\[bot\]$/i.test(name)
+  const src = item.owner_avatar && item.owner_avatar.length > 0 ? item.owner_avatar : humanAvatarFallback(name)
+  const classes = ['last-avatar']
+  if (isBot) classes.push('is-bot')
+  return `<img class="${classes.join(' ')}" src="${src}" alt="${escapeHtml(name)}" title="${escapeHtml(name)}" loading="lazy" decoding="async" onerror="this.classList.add('broken')" />`
+}
+
 function lastCell(item: PrRow): string {
   // The "last" person on this thread. If nobody has commented yet, the original
   // author is the most recent voice — fall through to them so we never show a dash.
@@ -161,6 +173,7 @@ function buildRow(item: PrRow, animate: boolean, idx: number): HTMLTableRowEleme
     <td class="last-cell">${lastCell(item)}</td>
     <td><span class="repo-name">${escapeHtml(item.repo)}</span></td>
     <td><span class="status ${status.cls}">${status.text}</span></td>
+    <td class="last-cell">${ownerCell(item)}</td>
     <td><span class="state ${st.cls}">${st.text}</span></td>
     <td><span class="date">${relativeDate(item.updated_at)}</span></td>
     <td class="action-cell">${actionHtml}</td>
