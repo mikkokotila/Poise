@@ -6,25 +6,32 @@ import { initMainView, refreshMainView } from './views/main-view'
 import { initFlowView } from './views/flow-view'
 import { initTrustView } from './views/trust-view'
 import { initPipeView } from './views/pipe-view'
+import { initSwarmView, stopSwarmRefresh } from './views/swarm-view'
 import { loadSettings } from './config'
 
 const viewMainEl = document.getElementById('view-main')!
 const viewFlowEl = document.getElementById('view-flow')!
 const viewTrustEl = document.getElementById('view-trust')!
 const viewPipeEl = document.getElementById('view-pipe')!
+const viewSwarmEl = document.getElementById('view-swarm')!
 
-function showView(v: 'main' | 'flow' | 'trust' | 'pipe') {
-  const all = [viewMainEl, viewFlowEl, viewTrustEl, viewPipeEl]
+function showView(v: 'main' | 'flow' | 'trust' | 'pipe' | 'swarm') {
+  const all = [viewMainEl, viewFlowEl, viewTrustEl, viewPipeEl, viewSwarmEl]
   const target = v === 'main' ? viewMainEl
     : v === 'flow' ? viewFlowEl
     : v === 'trust' ? viewTrustEl
-    : viewPipeEl
+    : v === 'pipe' ? viewPipeEl
+    : viewSwarmEl
+
+  // Stop the swarm auto-refresh when leaving its view
+  if (v !== 'swarm') stopSwarmRefresh()
 
   // Initialize the target first so content exists before the animation starts
   if (v === 'main') initMainView()
   else if (v === 'flow') initFlowView()
   else if (v === 'trust') initTrustView()
-  else initPipeView()
+  else if (v === 'pipe') initPipeView()
+  else initSwarmView()
 
   for (const el of all) {
     if (el === target) {

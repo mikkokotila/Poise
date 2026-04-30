@@ -200,6 +200,24 @@ export function cachePlugin(): Plugin {
           return json(res, 200, { last_sync_at: getMeta('last_sync_at') })
         }
 
+        // ── Swarm proxy ──
+        // Proxies to the local hermes swarm-events service. Swallowing the
+        // host here so the browser never has to know the upstream URL.
+        if (url.startsWith('/api/swarm/events')) {
+          const qs = url.slice('/api/swarm/events'.length)
+          const upstream = 'http://127.0.0.1:7878/events' + qs
+          try {
+            const upRes = await fetch(upstream)
+            const text = await upRes.text()
+            res.statusCode = upRes.status
+            res.setHeader('Content-Type', upRes.headers.get('content-type') || 'application/json')
+            res.end(text)
+          } catch (err: any) {
+            return json(res, 502, { error: 'swarm-events service unreachable: ' + (err.message || String(err)) })
+          }
+          return
+        }
+
         // ── Pipe (kanban) ──
         // GET /api/pipe — list all cards
         if (url === '/api/pipe' && req.method === 'GET') {
