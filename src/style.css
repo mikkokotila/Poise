@@ -20,6 +20,8 @@
   --purple: #7c3aed;
   --red: #dc2626;
   --red-soft: #f7c0c0;
+  --blue: #2563eb;
+  --amber: #d97706;
 
   /* Spacing scale */
   --sp-1: 4px;
@@ -372,6 +374,18 @@ td a:hover {
 .state.open   { color: var(--green); }
 .state.closed { color: var(--red); }
 .state.merged { color: var(--purple); }
+
+/* ── Status (workflow) ── */
+.status {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.status.allocated { color: var(--blue); }
+.status.building  { color: var(--amber); }
+.status.review    { color: var(--text-tertiary); }
 
 /* ── Date ── */
 .date {

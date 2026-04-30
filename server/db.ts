@@ -93,6 +93,20 @@ if (!hasCol('author_avatar')) {
     WHERE raw_json IS NOT NULL
   `)
 }
+if (!hasCol('status')) {
+  db.exec('ALTER TABLE prs ADD COLUMN status TEXT')
+  // Workflow status derived from labels. Cheap to backfill via LIKE since
+  // GitHub label names are unique enough that "name":"ALLOCATION" only appears
+  // for that label.
+  db.exec(`
+    UPDATE prs
+    SET status = CASE
+      WHEN raw_json LIKE '%"name":"ALLOCATION"%' THEN 'ALLOCATED'
+      WHEN raw_json LIKE '%"name":"IN_PROGRESS"%' THEN 'BUILDING'
+      ELSE 'IN REVIEW'
+    END
+  `)
+}
 
 export function getMeta(key: string): string | null {
   const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined

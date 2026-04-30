@@ -24,6 +24,7 @@ interface PrRow {
   author_avatar: string | null
   is_pr: number
   state: string
+  status: string | null
   created_at: string
   updated_at: string
   closed_at: string | null
@@ -111,6 +112,13 @@ function stateLabel(item: PrRow): { text: string; cls: string } {
   return item.state === 'open' ? { text: 'Open', cls: 'open' } : { text: 'Closed', cls: 'closed' }
 }
 
+function statusLabel(item: PrRow): { text: string; cls: string } {
+  const s = item.status || 'IN REVIEW'
+  if (s === 'ALLOCATED') return { text: 'Allocated', cls: 'allocated' }
+  if (s === 'BUILDING')  return { text: 'Building',  cls: 'building' }
+  return { text: 'In review', cls: 'review' }
+}
+
 function humanAvatarFallback(username: string): string {
   // Only works for real user accounts (not GitHub Apps). Used if we don't have the
   // API-reported avatar_url stored yet.
@@ -141,6 +149,7 @@ function buildRow(item: PrRow, animate: boolean, idx: number): HTMLTableRowEleme
   tr.dataset.idx = String(idx)
   const pr = item.is_pr === 1
   const st = stateLabel(item)
+  const status = statusLabel(item)
   const isDone = reviewed.has(item.html_url)
   const actionHtml = pr
     ? `<button class="review-btn${isDone ? ' done' : ''}" data-idx="${idx}" title="Run consensus review">${PLAY_SVG}</button>`
@@ -151,6 +160,7 @@ function buildRow(item: PrRow, animate: boolean, idx: number): HTMLTableRowEleme
     <td class="title-cell"><a href="${item.html_url}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a></td>
     <td class="last-cell">${lastCell(item)}</td>
     <td><span class="repo-name">${escapeHtml(item.repo)}</span></td>
+    <td><span class="status ${status.cls}">${status.text}</span></td>
     <td><span class="state ${st.cls}">${st.text}</span></td>
     <td><span class="date">${relativeDate(item.updated_at)}</span></td>
     <td class="action-cell">${actionHtml}</td>

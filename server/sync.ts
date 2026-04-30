@@ -15,7 +15,7 @@ interface GitHubSearchItem {
   number: number
   title: string
   html_url: string
-  user: { login: string }
+  user: { login: string; avatar_url?: string }
   state: string
   created_at: string
   updated_at: string
@@ -23,6 +23,15 @@ interface GitHubSearchItem {
   pull_request?: { merged_at: string | null }
   repository_url: string
   comments: number
+  labels?: Array<{ name: string }>
+}
+
+function computeStatus(labels: Array<{ name: string }> | undefined): 'ALLOCATED' | 'BUILDING' | 'IN REVIEW' {
+  if (!labels || labels.length === 0) return 'IN REVIEW'
+  const names = new Set(labels.map((l) => l.name))
+  if (names.has('ALLOCATION')) return 'ALLOCATED'
+  if (names.has('IN_PROGRESS')) return 'BUILDING'
+  return 'IN REVIEW'
 }
 
 function repoFromUrl(url: string): string {
@@ -122,16 +131,17 @@ async function fetchLastComment(owner: string, repo: string, number: number, cou
 
 // Insert or replace a PR row with all derived fields
 const upsertPr = db.prepare(`
-  INSERT INTO prs(id, org, repo, number, title, html_url, author, author_avatar, is_pr, state,
+  INSERT INTO prs(id, org, repo, number, title, html_url, author, author_avatar, is_pr, state, status,
     created_at, updated_at, closed_at, merged_at, comments_count,
     additions, deletions, files_changed, tag, first_review_at, iteration_count,
     last_commenter, last_commenter_avatar, last_comment_body, last_comment_at, raw_json)
-  VALUES (@id, @org, @repo, @number, @title, @html_url, @author, @author_avatar, @is_pr, @state,
+  VALUES (@id, @org, @repo, @number, @title, @html_url, @author, @author_avatar, @is_pr, @state, @status,
     @created_at, @updated_at, @closed_at, @merged_at, @comments_count,
     @additions, @deletions, @files_changed, @tag, @first_review_at, @iteration_count,
     @last_commenter, @last_commenter_avatar, @last_comment_body, @last_comment_at, @raw_json)
   ON CONFLICT(id) DO UPDATE SET
     state=excluded.state,
+    status=excluded.status,
     updated_at=excluded.updated_at,
     closed_at=excluded.closed_at,
     merged_at=excluded.merged_at,
@@ -343,6 +353,7 @@ export async function syncDelta(org: string, me: string, token: string, force: b
         author_avatar: item.user.avatar_url || null,
         is_pr: isPR ? 1 : 0,
         state: item.state,
+        status: computeStatus(item.labels),
         created_at: item.created_at,
         updated_at: item.updated_at,
         closed_at: item.closed_at,
