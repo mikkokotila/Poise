@@ -1522,7 +1522,10 @@ tr:hover .review-btn { opacity: 1; }
 }
 
 .lane {
-  flex: 0 0 240px;
+  /* Share the full kanban width equally; min keeps lanes readable when the
+     viewport is narrower than 5 × min, falling back to horizontal scroll. */
+  flex: 1 1 0;
+  min-width: 220px;
   background: var(--hover);
   border: 1px solid var(--hairline);
   border-radius: 12px;
