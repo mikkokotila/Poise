@@ -1,4 +1,4 @@
-// Stream — five-lane kanban that mixes free-form thinking with live GitHub
+// Current — five-lane kanban that mixes free-form thinking with live GitHub
 // activity. The first three lanes (Idea / Concept / Plan) are manual cards
 // you drag around; the last two (Issue / PR) are read-only feeds pulled
 // from the local cache of issues + PRs you're involved in. Time + status
@@ -61,7 +61,7 @@ const FRESH_WINDOW_MS = 6 * 60 * 60 * 1000   // PRs created in the last 6h read 
 type TimeFilter = 'all' | 'today' | 'yesterday' | 'week'
 type StatusFilter = 'all' | 'open'
 
-const FILTER_KEY = 'poise-stream-filters'
+const FILTER_KEY = 'poise-current-filters'
 const LIVE_LIMIT = 200            // upper bound; time / status filters narrow further
 
 let initialized = false
@@ -199,18 +199,18 @@ function renderShell(): string {
 
   return `
     <header class="view-header">
-      <div class="filter-cluster" id="stream-filters">
-        <div class="range-picker" id="stream-status-filter">
+      <div class="filter-cluster" id="current-filters">
+        <div class="range-picker" id="current-status-filter">
           <button data-status="all" class="${statusFilter === 'all' ? 'active' : ''}">Any</button>
           <button data-status="open" class="${statusFilter === 'open' ? 'active' : ''}">Open</button>
         </div>
-        <div class="range-picker" id="stream-time-picker">
+        <div class="range-picker" id="current-time-picker">
           <button data-time="all" class="${timeFilter === 'all' ? 'active' : ''}">Any time</button>
           <button data-time="today" class="${timeFilter === 'today' ? 'active' : ''}">Today</button>
           <button data-time="yesterday" class="${timeFilter === 'yesterday' ? 'active' : ''}">Yesterday</button>
           <button data-time="week" class="${timeFilter === 'week' ? 'active' : ''}">This week</button>
         </div>
-        <input class="search-input" id="stream-search" type="search" placeholder="Filter…" autocomplete="off" spellcheck="false" />
+        <input class="search-input" id="current-search" type="search" placeholder="Filter…" autocomplete="off" spellcheck="false" />
       </div>
     </header>
     <div class="kanban">${lanes}</div>
@@ -393,8 +393,8 @@ async function api<T>(method: string, path: string, body?: unknown): Promise<T> 
 }
 
 async function fetchManual() {
-  const res = await fetch('/api/stream')
-  if (!res.ok) throw new Error(`/api/stream ${res.status}`)
+  const res = await fetch('/api/current')
+  if (!res.ok) throw new Error(`/api/current ${res.status}`)
   const data = await res.json()
   manualCards = data.cards.filter((c: ManualCard) => c.lane === 'idea' || c.lane === 'concept' || c.lane === 'plan')
 }
@@ -442,7 +442,7 @@ function applyPrStatusClasses() {
   }
 }
 
-export function stopStreamPolling() {
+export function stopCurrentPolling() {
   if (liveTimer) { clearInterval(liveTimer); liveTimer = null }
 }
 
@@ -545,7 +545,7 @@ function openManualComposer(lane: 'idea' | 'concept' | 'plan') {
     if (!text) { close(); return }
     addB.disabled = true
     try {
-      const card = await api<ManualCard>('POST', '/api/stream', { text, lane })
+      const card = await api<ManualCard>('POST', '/api/current', { text, lane })
       manualCards.push(card)
       renderAll()
       close()
@@ -699,7 +699,7 @@ function startEdit(cardEl: HTMLElement) {
     const text = ta.value.trim()
     if (!text || text === original) { close(); return }
     try {
-      const updated = await api<ManualCard>('PATCH', `/api/stream/${id}`, { text })
+      const updated = await api<ManualCard>('PATCH', `/api/current/${id}`, { text })
       const idx = manualCards.findIndex((c) => c.id === id)
       if (idx >= 0) manualCards[idx] = updated
       renderAll()
@@ -718,7 +718,7 @@ function startEdit(cardEl: HTMLElement) {
 }
 
 async function deleteManualCard(id: number) {
-  await api('DELETE', `/api/stream/${id}`)
+  await api('DELETE', `/api/current/${id}`)
   manualCards = manualCards.filter((c) => c.id !== id)
   renderAll()
 }
@@ -832,7 +832,7 @@ function attachDragHandlers() {
       renderAll()
 
       try {
-        await api('PATCH', `/api/stream/${movingId}`, { lane: targetLane, position: idx })
+        await api('PATCH', `/api/current/${movingId}`, { lane: targetLane, position: idx })
       } catch (err) {
         console.error('move failed:', err)
         try { await fetchManual(); renderAll() } catch { /* ignore */ }
@@ -867,7 +867,7 @@ function attachCardClickHandlers() {
 // ── Filters ─────────────────────────────────────────────────────────────────
 
 function attachFilterHandlers() {
-  const timePicker = viewEl.querySelector<HTMLElement>('#stream-time-picker')!
+  const timePicker = viewEl.querySelector<HTMLElement>('#current-time-picker')!
   timePicker.addEventListener('click', async (e) => {
     const btn = (e.target as HTMLElement).closest('button')
     if (!btn || !btn.dataset.time) return
@@ -880,7 +880,7 @@ function attachFilterHandlers() {
     try { await fetchLive(); renderLiveOnly() } catch (err) { console.error(err) }
   })
 
-  const statusBar = viewEl.querySelector<HTMLElement>('#stream-status-filter')!
+  const statusBar = viewEl.querySelector<HTMLElement>('#current-status-filter')!
   statusBar.addEventListener('click', async (e) => {
     const btn = (e.target as HTMLElement).closest('button')
     if (!btn || !btn.dataset.status) return
@@ -896,7 +896,7 @@ function attachFilterHandlers() {
   // Search — pure client-side filter over what's already loaded. Debounced
   // so typing doesn't thrash the renderer. Re-renders BOTH manual and live
   // lanes since search applies across the whole board.
-  const searchEl = viewEl.querySelector<HTMLInputElement>('#stream-search')!
+  const searchEl = viewEl.querySelector<HTMLInputElement>('#current-search')!
   searchEl.addEventListener('input', () => {
     if (searchDebounce) clearTimeout(searchDebounce)
     searchDebounce = setTimeout(() => {
@@ -910,8 +910,8 @@ function attachFilterHandlers() {
 
 // ── Init ────────────────────────────────────────────────────────────────────
 
-export async function initStreamView() {
-  viewEl = document.getElementById('view-stream')!
+export async function initCurrentView() {
+  viewEl = document.getElementById('view-current')!
   if (!initialized) {
     initialized = true
     loadFilters()
@@ -937,7 +937,7 @@ export async function initStreamView() {
 }
 
 function startLiveTimer() {
-  stopStreamPolling()
+  stopCurrentPolling()
   liveTimer = setInterval(pollLiveTick, getRefreshRateMs())
 }
 

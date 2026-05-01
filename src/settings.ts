@@ -115,7 +115,7 @@ function buildPanel(): HTMLElement {
           <button type="button" data-rate="1m" class="${getRefreshRate() === '1m' ? 'active' : ''}">1m</button>
           <button type="button" data-rate="5m" class="${getRefreshRate() === '5m' ? 'active' : ''}">5m</button>
         </div>
-        <div class="st-help st-help-info">How often Main, Stream, and Swarm pull fresh data.</div>
+        <div class="st-help st-help-info">How often Current, Swarm, and Archive pull fresh data.</div>
       </div>
 
       <div class="st-row">

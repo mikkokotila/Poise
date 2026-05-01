@@ -43,7 +43,7 @@ export function effectiveTimezone(): string {
 }
 
 // ── Refresh rate ──────────────────────────────────────────────────────
-// How often the live views (Main, Stream, Swarm) re-fetch their data.
+// How often the live views (Current, Swarm, Archive) re-fetch their data.
 // Two presets only — "1m" or "5m" — picked from the Settings panel.
 // Stored client-side; views listen for `poise:refresh-rate-changed` and
 // restart their timers.

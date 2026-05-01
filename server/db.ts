@@ -5,7 +5,7 @@ import { join, dirname } from 'path'
 
 // Poise's local SQLite holds two things only:
 //   meta          — small key-value store for org / me / timezone settings
-//   stream_cards  — the manual Idea / Concept / Plan kanban cards
+//   current_cards  — the manual Idea / Concept / Plan kanban cards
 //
 // Everything else (issues, PRs, reviews, files) lives in the user's external
 // /github service. Older Poise versions kept a full mirror of GitHub data
@@ -31,7 +31,7 @@ db.exec(`
     value TEXT NOT NULL
   );
 
-  CREATE TABLE IF NOT EXISTS stream_cards (
+  CREATE TABLE IF NOT EXISTS current_cards (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     text TEXT NOT NULL,
     lane TEXT NOT NULL,
@@ -39,22 +39,28 @@ db.exec(`
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
-  CREATE INDEX IF NOT EXISTS idx_stream_cards_lane ON stream_cards(lane, position);
+  CREATE INDEX IF NOT EXISTS idx_current_cards_lane ON current_cards(lane, position);
 `)
 
-// One-time migration: stream_cards inherited rows from the older pipe_cards
-// table when Pipe was renamed to Stream. If the legacy table is still
-// hanging around, copy any rows in then drop it.
-const hasPipeCards = db.prepare(
-  "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'pipe_cards'"
-).get() as { name: string } | undefined
-if (hasPipeCards) {
+// One-time migrations: the kanban table has been renamed twice.
+//   pipe_cards   (when the view was called Pipe)
+//   stream_cards (when it was Stream)
+//   current_cards (now)
+// Each block is idempotent — guarded by sqlite_master so it only runs
+// while the legacy table still exists, and re-runs are no-ops.
+function migrateKanbanTable(legacy: string) {
+  const exists = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
+  ).get(legacy) as { name: string } | undefined
+  if (!exists) return
   db.exec(`
-    INSERT OR IGNORE INTO stream_cards (id, text, lane, position, created_at, updated_at)
-    SELECT id, text, lane, position, created_at, updated_at FROM pipe_cards;
-    DROP TABLE pipe_cards;
+    INSERT OR IGNORE INTO current_cards (id, text, lane, position, created_at, updated_at)
+    SELECT id, text, lane, position, created_at, updated_at FROM ${legacy};
+    DROP TABLE ${legacy};
   `)
 }
+migrateKanbanTable('pipe_cards')
+migrateKanbanTable('stream_cards')
 
 // One-time cleanup: drop the legacy GitHub-mirror tables if they exist.
 // Idempotent — runs once and the DROP is a no-op afterwards.

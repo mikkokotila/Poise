@@ -187,16 +187,18 @@ body {
   flex-wrap: wrap;
 }
 
-/* Search input — pill-shaped, sized to match a range-picker button so
-   the cluster reads as one unified row. Live filter, no submit button. */
+/* Search input — pill-shaped and sized identically to a range-picker
+   button so the cluster reads as one unified row. Padding + font +
+   border are intentionally the same tokens; height resolves
+   intrinsically so we never drift. Live filter, no submit button. */
 .search-input {
   font-family: inherit;
   font-size: 0.75rem;
   font-weight: 400;
-  padding: 5px 14px;
-  height: 26px;                 /* matches range-picker button height */
+  letter-spacing: 0.01em;
+  padding: var(--sp-1) var(--sp-3);
   width: 200px;
-  border: var(--b-base);
+  border: 1px solid var(--border);
   border-radius: var(--r-pill);
   background: var(--surface);
   color: var(--text);
@@ -1652,16 +1654,16 @@ tr:hover .review-btn { opacity: 1; }
    Stream (kanban)
    ───────────────────────────────────────────────────────────────────────── */
 
-#view-stream { padding-bottom: 64px; }
+#view-current { padding-bottom: 64px; }
 
 /* Stream is the first view migrated to Design System v1. All values here
    resolve through DS tokens (--n*, --a*, --b-*, --e-*) — never the legacy
    --bg / --text / --border vars used elsewhere. Density is "calm":
    row 36, card padding 12, card gap 10, column padding 12. */
 
-#view-stream { color: var(--n6); }
-#view-stream .view-title { color: var(--n6); font-weight: 600; }
-#view-stream .view-sub   { color: var(--n4); font-weight: 400; }
+#view-current { color: var(--n6); }
+#view-current .view-title { color: var(--n6); font-weight: 600; }
+#view-current .view-sub   { color: var(--n4); font-weight: 400; }
 
 /* Kanban needs more horizontal real estate than the typography content
    width permits, so break out and use the full viewport. */
@@ -1921,10 +1923,10 @@ tr:hover .review-btn { opacity: 1; }
    existing cards via inline transforms; this animation is only for
    cards arriving fresh in the lane. */
 .card.card-live.card-entering {
-  animation: streamCardIn 520ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  animation: currentCardIn 520ms cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
-@keyframes streamCardIn {
+@keyframes currentCardIn {
   from {
     opacity: 0;
     transform: translateY(-6px);

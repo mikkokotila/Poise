@@ -3,28 +3,28 @@ import { initTypography, toggleTypographyPanel } from './typo'
 import { initSettings, toggleSettingsPanel, openSettingsPanel, isFullyConfigured } from './settings'
 import { initMenu } from './menu'
 import { initMainView, refreshMainView, stopMainRefresh } from './views/main-view'
-import { initStreamView, stopStreamPolling } from './views/stream-view'
+import { initCurrentView, stopCurrentPolling } from './views/current-view'
 import { initSwarmView, stopSwarmRefresh } from './views/swarm-view'
 import { loadSettings } from './config'
 
 const viewMainEl = document.getElementById('view-main')!
-const viewStreamEl = document.getElementById('view-stream')!
+const viewCurrentEl = document.getElementById('view-current')!
 const viewSwarmEl = document.getElementById('view-swarm')!
 
-function showView(v: 'main' | 'stream' | 'swarm') {
-  const all = [viewMainEl, viewStreamEl, viewSwarmEl]
+function showView(v: 'main' | 'current' | 'swarm') {
+  const all = [viewMainEl, viewCurrentEl, viewSwarmEl]
   const target = v === 'main' ? viewMainEl
-    : v === 'stream' ? viewStreamEl
+    : v === 'current' ? viewCurrentEl
     : viewSwarmEl
 
   // Stop background polling when leaving the views that own them
   if (v !== 'swarm') stopSwarmRefresh()
-  if (v !== 'stream') stopStreamPolling()
+  if (v !== 'current') stopCurrentPolling()
   if (v !== 'main') stopMainRefresh()
 
   // Initialize the target first so content exists before the animation starts
   if (v === 'main') initMainView()
-  else if (v === 'stream') initStreamView()
+  else if (v === 'current') initCurrentView()
   else initSwarmView()
 
   for (const el of all) {

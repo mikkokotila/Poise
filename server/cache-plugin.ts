@@ -1,6 +1,6 @@
 import type { Plugin, Connect } from 'vite'
 import { getSettings, setSettings } from './settings'
-import { listCards, createCard, setCardText, moveCard, removeCard, type Lane } from './stream'
+import { listCards, createCard, setCardText, moveCard, removeCard, type Lane } from './current'
 
 function json(res: any, status: number, body: unknown) {
   res.statusCode = status
@@ -83,12 +83,12 @@ export function cachePlugin(): Plugin {
           return
         }
 
-        // ── Stream (kanban) — manual cards (idea / concept / plan) ──
+        // ── Current (kanban) — manual cards (idea / concept / plan) ──
         // Stays Poise-local. The Issue + PR lanes pull from /api/gh.
-        if (url === '/api/stream' && req.method === 'GET') {
+        if (url === '/api/current' && req.method === 'GET') {
           return json(res, 200, { cards: listCards() })
         }
-        if (url === '/api/stream' && req.method === 'POST') {
+        if (url === '/api/current' && req.method === 'POST') {
           try {
             const body = await readBody(req)
             const parsed = body ? JSON.parse(body) : {}
@@ -98,9 +98,9 @@ export function cachePlugin(): Plugin {
             return json(res, 400, { error: err.message || String(err) })
           }
         }
-        const streamMatch = url.match(/^\/api\/stream\/(\d+)(?:\?|$)/)
-        if (streamMatch) {
-          const id = Number(streamMatch[1])
+        const currentMatch = url.match(/^\/api\/current\/(\d+)(?:\?|$)/)
+        if (currentMatch) {
+          const id = Number(currentMatch[1])
           if (req.method === 'PATCH') {
             try {
               const body = await readBody(req)

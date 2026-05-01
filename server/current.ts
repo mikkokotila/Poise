@@ -4,7 +4,7 @@ export type Lane = 'idea' | 'concept' | 'plan' | 'issue' | 'pr'
 
 export const LANES: Lane[] = ['idea', 'concept', 'plan', 'issue', 'pr']
 
-export interface StreamCard {
+export interface CurrentCard {
   id: number
   text: string
   lane: Lane
@@ -19,51 +19,51 @@ function isValidLane(s: unknown): s is Lane {
 
 const selectAll = db.prepare(`
   SELECT id, text, lane, position, created_at, updated_at
-  FROM stream_cards
+  FROM current_cards
   ORDER BY lane, position
 `)
 
 const selectOne = db.prepare(`
   SELECT id, text, lane, position, created_at, updated_at
-  FROM stream_cards WHERE id = ?
+  FROM current_cards WHERE id = ?
 `)
 
 const maxPositionInLane = db.prepare(
-  `SELECT COALESCE(MAX(position), -1) AS max FROM stream_cards WHERE lane = ?`
+  `SELECT COALESCE(MAX(position), -1) AS max FROM current_cards WHERE lane = ?`
 )
 
 const insertCard = db.prepare(
-  `INSERT INTO stream_cards(text, lane, position, created_at, updated_at)
+  `INSERT INTO current_cards(text, lane, position, created_at, updated_at)
    VALUES (?, ?, ?, ?, ?)`
 )
 
 const updateText = db.prepare(
-  `UPDATE stream_cards SET text = ?, updated_at = ? WHERE id = ?`
+  `UPDATE current_cards SET text = ?, updated_at = ? WHERE id = ?`
 )
 
-const deleteCard = db.prepare(`DELETE FROM stream_cards WHERE id = ?`)
+const deleteCard = db.prepare(`DELETE FROM current_cards WHERE id = ?`)
 
 const cardsInLane = db.prepare(
-  `SELECT id FROM stream_cards WHERE lane = ? ORDER BY position`
+  `SELECT id FROM current_cards WHERE lane = ? ORDER BY position`
 )
 
 const setLaneAndPosition = db.prepare(
-  `UPDATE stream_cards SET lane = ?, position = ?, updated_at = ? WHERE id = ?`
+  `UPDATE current_cards SET lane = ?, position = ?, updated_at = ? WHERE id = ?`
 )
 
 const setPosition = db.prepare(
-  `UPDATE stream_cards SET position = ?, updated_at = ? WHERE id = ?`
+  `UPDATE current_cards SET position = ?, updated_at = ? WHERE id = ?`
 )
 
-export function listCards(): StreamCard[] {
-  return selectAll.all() as StreamCard[]
+export function listCards(): CurrentCard[] {
+  return selectAll.all() as CurrentCard[]
 }
 
-export function getCard(id: number): StreamCard | null {
-  return (selectOne.get(id) as StreamCard | undefined) ?? null
+export function getCard(id: number): CurrentCard | null {
+  return (selectOne.get(id) as CurrentCard | undefined) ?? null
 }
 
-export function createCard(text: string, lane: Lane): StreamCard {
+export function createCard(text: string, lane: Lane): CurrentCard {
   const trimmed = text.trim()
   if (!trimmed) throw new Error('Card text is required')
   if (!isValidLane(lane)) throw new Error(`Invalid lane: ${lane}`)
@@ -73,7 +73,7 @@ export function createCard(text: string, lane: Lane): StreamCard {
   return getCard(Number(result.lastInsertRowid))!
 }
 
-export function setCardText(id: number, text: string): StreamCard {
+export function setCardText(id: number, text: string): CurrentCard {
   const card = getCard(id)
   if (!card) throw new Error('Card not found')
   const trimmed = text.trim()
@@ -85,7 +85,7 @@ export function setCardText(id: number, text: string): StreamCard {
 // Move a card to (lane, index). The index is the desired final 0-based position
 // among cards in `lane` after the move. Re-numbers positions in the affected
 // lane(s) so they stay contiguous integers.
-export function moveCard(id: number, lane: Lane, index: number): StreamCard {
+export function moveCard(id: number, lane: Lane, index: number): CurrentCard {
   if (!isValidLane(lane)) throw new Error(`Invalid lane: ${lane}`)
   const card = getCard(id)
   if (!card) throw new Error('Card not found')
