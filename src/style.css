@@ -75,15 +75,17 @@
   --sp-7: 48px;
   --sp-8: 64px;
 
-  /* Radii */
-  --r-sm: 4px;
-  --r-md: 6px;
-  --r-lg: 8px;
-  --r-pill: 100px;
+  /* Radii — aligned to DS (r-0=0, r-sm=4, r-md=8, r-full=999) */
+  --r-sm:   4px;
+  --r-md:   8px;
+  --r-lg:   8px;       /* alias of r-md, kept for legacy callers */
+  --r-pill: 999px;
 
-  /* Shadows (legacy; new code should use --e-1/2/3 instead) */
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.04);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.06);
+  /* Soft accent tints — used for status pills where background colour
+     adds emphasis. Derived from A3/A5/A1 at low alpha. */
+  --tint-a1: rgba(58, 114, 176, 0.06);
+  --tint-a3: rgba(74, 142, 94, 0.07);
+  --tint-a5: rgba(184, 80, 72, 0.06);
 }
 
 *,
@@ -92,6 +94,20 @@
   margin: 0;
   padding: 0;
   box-sizing: border-box;
+}
+
+/* Global DS focus ring — 2px A1, 2px offset, inherits the element's
+   radius. Longhand props because var() in `outline` shorthand expands
+   inconsistently. Click focus is suppressed (focus-visible only) so
+   the ring is a keyboard affordance, not visual noise on every click. */
+:focus-visible {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
+}
+:focus:not(:focus-visible) {
+  outline: none;
 }
 
 html {
@@ -157,11 +173,11 @@ body {
   font-weight: 600;
   padding: 6px 16px;
   border: 1px solid var(--border);
-  border-radius: 100px;
+  border-radius: var(--r-pill);
   background: var(--surface);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
   letter-spacing: 0.01em;
 }
 
@@ -173,7 +189,7 @@ body {
 #filters button.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--n0);
 }
 
 .separator {
@@ -248,7 +264,7 @@ td {
   padding: var(--typo-row-pad, 11px) 12px var(--typo-row-pad, 11px) 0;
   font-size: var(--typo-row-size, 0.8125rem);
   vertical-align: middle;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--hairline);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -379,7 +395,7 @@ td a:hover {
 .last-avatar {
   width: 22px;
   height: 22px;
-  border-radius: 50%;
+  border-radius: var(--r-pill);
   display: inline-block;
   vertical-align: middle;
   background: var(--hairline);
@@ -450,7 +466,7 @@ td a:hover {
 .loader span {
   width: 5px;
   height: 5px;
-  border-radius: 50%;
+  border-radius: var(--r-pill);
   background: var(--text-tertiary);
   animation: pulse 1s ease-in-out infinite;
 }
@@ -538,15 +554,15 @@ tr:hover .review-btn { opacity: 1; }
   right: 16px;
   width: 32px;
   height: 32px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: var(--b-base);
+  border-radius: var(--r-sm);
   background: var(--surface);
   color: var(--text-tertiary);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.15s ease;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
   z-index: 100;
 }
 
@@ -565,7 +581,7 @@ tr:hover .review-btn { opacity: 1; }
   height: 100vh;
   background: var(--surface);
   border-left: 1px solid var(--border);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--e-3);
   z-index: 110;
   transform: translateX(100%);
   transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
@@ -605,8 +621,8 @@ tr:hover .review-btn { opacity: 1; }
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 4px;
-  transition: all 0.1s ease;
+  border-radius: var(--r-sm);
+  transition: color 0.1s ease, background 0.1s ease;
 }
 
 .tp-close:hover {
@@ -670,8 +686,8 @@ tr:hover .review-btn { opacity: 1; }
   padding: 6px 10px;
   font-family: inherit;
   font-size: 0.8125rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: var(--b-base);
+  border-radius: var(--r-sm);
   background: var(--bg);
   color: var(--text);
   cursor: pointer;
@@ -680,15 +696,18 @@ tr:hover .review-btn { opacity: 1; }
 }
 
 .tp-select:focus {
-  border-color: var(--text-tertiary);
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
 }
 
 .tp-range {
   width: 100%;
   height: 4px;
   appearance: none;
-  background: var(--border);
-  border-radius: 2px;
+  background: var(--n2);
+  border-radius: var(--r-sm);
   outline: none;
   cursor: pointer;
 }
@@ -697,11 +716,11 @@ tr:hover .review-btn { opacity: 1; }
   appearance: none;
   width: 14px;
   height: 14px;
-  border-radius: 50%;
+  border-radius: var(--r-pill);
   background: var(--surface);
-  border: 2px solid var(--text-tertiary);
+  border: 2px solid var(--n4);
   cursor: pointer;
-  transition: border-color 0.1s ease;
+  transition: border-color 0.12s ease;
 }
 
 .tp-range::-webkit-slider-thumb:hover {
@@ -709,7 +728,12 @@ tr:hover .review-btn { opacity: 1; }
 }
 
 .tp-range:active::-webkit-slider-thumb {
-  border-color: var(--accent);
+  border-color: var(--a1);
+}
+
+.tp-range:focus-visible::-webkit-slider-thumb {
+  border-color: var(--a1);
+  box-shadow: 0 0 0 2px var(--tint-a1);
 }
 
 .tp-color-section {
@@ -725,8 +749,8 @@ tr:hover .review-btn { opacity: 1; }
 .tp-color {
   width: 28px;
   height: 28px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  border: var(--b-base);
+  border-radius: var(--r-sm);
   padding: 2px;
   cursor: pointer;
   background: none;
@@ -738,7 +762,7 @@ tr:hover .review-btn { opacity: 1; }
 
 .tp-color::-webkit-color-swatch {
   border: none;
-  border-radius: 2px;
+  border-radius: 0;
 }
 
 .tp-reset {
@@ -750,10 +774,10 @@ tr:hover .review-btn { opacity: 1; }
   font-weight: 600;
   color: var(--text-tertiary);
   background: none;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: var(--b-base);
+  border-radius: var(--r-sm);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
 }
 
 .tp-reset:hover {
@@ -813,9 +837,9 @@ tr:hover .review-btn { opacity: 1; }
   right: 16px;
   min-width: 180px;
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+  border: var(--b-base);
+  border-radius: var(--r-md);
+  box-shadow: var(--e-2);
   padding: 4px;
   z-index: 101;
   opacity: 0;
@@ -841,7 +865,7 @@ tr:hover .review-btn { opacity: 1; }
   font-size: 0.8125rem;
   font-weight: 600;
   cursor: pointer;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   text-align: left;
   transition: background 0.1s ease, color 0.1s ease;
 }
@@ -905,7 +929,7 @@ tr:hover .review-btn { opacity: 1; }
 .range-picker button.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--n0);
 }
 .range-picker button.active:hover { background: var(--accent); }
 
@@ -1025,7 +1049,7 @@ tr:hover .review-btn { opacity: 1; }
   display: flex;
   width: 100%;
   height: 8px;
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   overflow: hidden;
   background: var(--hover);
 }
@@ -1048,7 +1072,7 @@ tr:hover .review-btn { opacity: 1; }
 .mix-segment.tag-build    { background: var(--text-tertiary); opacity: 0.6; }
 .mix-segment.tag-ci       { background: var(--text-tertiary); opacity: 0.4; }
 .mix-segment.tag-revert   { background: var(--red); opacity: 0.5; }
-.mix-segment.tag-other    { background: #d4d4d4; }
+.mix-segment.tag-other    { background: var(--a8); opacity: 0.5; }
 
 .mix-legend {
   display: flex;
@@ -1069,7 +1093,7 @@ tr:hover .review-btn { opacity: 1; }
   display: inline-block;
   width: 8px;
   height: 8px;
-  border-radius: 2px;
+  border-radius: 0;
   vertical-align: middle;
   margin-right: 6px;
 }
@@ -1085,7 +1109,7 @@ tr:hover .review-btn { opacity: 1; }
 .mix-label.tag-build    .sw { background: var(--text-tertiary); opacity: 0.6; }
 .mix-label.tag-ci       .sw { background: var(--text-tertiary); opacity: 0.4; }
 .mix-label.tag-revert   .sw { background: var(--red); opacity: 0.5; }
-.mix-label.tag-other    .sw { background: #d4d4d4; }
+.mix-label.tag-other    .sw { background: var(--a8); opacity: 0.5; }
 
 /* People table */
 .ppl-table {
@@ -1107,7 +1131,7 @@ tr:hover .review-btn { opacity: 1; }
 .ppl-table td {
   padding: 10px 12px 10px 0;
   font-size: 0.8125rem;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--hairline);
 }
 
 .ppl-name {
@@ -1161,7 +1185,7 @@ tr:hover .review-btn { opacity: 1; }
   background: var(--text-tertiary);
   opacity: 0.3;
   min-height: 2px;
-  border-radius: 1px 1px 0 0;
+  border-radius: 0;
   transition: opacity 0.1s ease;
 }
 
@@ -1246,7 +1270,7 @@ tr:hover .review-btn { opacity: 1; }
   display: inline-block;
   width: 8px;
   height: 8px;
-  border-radius: 2px;
+  border-radius: 0;
   vertical-align: middle;
   margin-right: 6px;
 }
@@ -1284,7 +1308,7 @@ tr:hover .review-btn { opacity: 1; }
 .bucket-bar {
   height: 5px;
   background: var(--hairline);
-  border-radius: 3px;
+  border-radius: 0;
   overflow: hidden;
 }
 
@@ -1340,7 +1364,7 @@ tr:hover .review-btn { opacity: 1; }
 .hs-table td {
   padding: 10px 12px 10px 0;
   font-size: 0.8125rem;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--hairline);
   vertical-align: middle;
 }
 
@@ -1364,7 +1388,7 @@ tr:hover .review-btn { opacity: 1; }
   height: 4px;
   background: var(--accent);
   opacity: 0.35;
-  border-radius: 2px;
+  border-radius: 0;
   transition: width 0.25s ease;
 }
 
@@ -1412,11 +1436,11 @@ tr:hover .review-btn { opacity: 1; }
 .st-dot {
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  border-radius: var(--r-pill);
   display: inline-block;
 }
 
-.st-dot.ok { background: var(--green-soft); box-shadow: 0 0 0 3px rgba(107, 199, 122, 0.15); }
+.st-dot.ok { background: var(--a3); box-shadow: 0 0 0 3px var(--tint-a3); }
 .st-dot.missing { background: var(--text-tertiary); }
 
 .st-input {
@@ -1471,7 +1495,7 @@ tr:hover .review-btn { opacity: 1; }
   font-size: 0.625rem;
   background: var(--hover);
   padding: 1px 4px;
-  border-radius: 3px;
+  border-radius: 0;
 }
 
 .st-help-info  { color: var(--text-tertiary); }
@@ -1495,12 +1519,12 @@ tr:hover .review-btn { opacity: 1; }
   background: var(--surface);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
 }
 
 .st-save {
   background: var(--accent);
-  color: #fff;
+  color: var(--n0);
   border-color: var(--accent);
 }
 
@@ -1566,7 +1590,7 @@ tr:hover .review-btn { opacity: 1; }
 
 .kanban::-webkit-scrollbar { height: 8px; }
 .kanban::-webkit-scrollbar-track { background: transparent; }
-.kanban::-webkit-scrollbar-thumb { background: var(--n3); border-radius: 4px; }
+.kanban::-webkit-scrollbar-thumb { background: var(--n3); border-radius: var(--r-sm); }
 
 /* Lane = panel: r-md outer radius, b-base resting border, no shadow.
    The whole lane (not just the inner list) is the drop target — that's
@@ -1576,7 +1600,7 @@ tr:hover .review-btn { opacity: 1; }
   min-width: 220px;
   background: var(--n1);
   border: var(--b-base);
-  border-radius: 8px;
+  border-radius: var(--r-md);
   padding: 12px;
   display: flex;
   flex-direction: column;
@@ -1615,7 +1639,7 @@ tr:hover .review-btn { opacity: 1; }
   color: var(--n4);
   background: var(--n0);
   padding: 1px 8px;
-  border-radius: 999px;         /* r-full */
+  border-radius: var(--r-pill);         /* r-full */
   border: var(--b-base);
 }
 
@@ -1638,7 +1662,7 @@ tr:hover .review-btn { opacity: 1; }
   position: relative;
   background: var(--n0);
   border: var(--b-base);
-  border-radius: 4px;            /* r-sm */
+  border-radius: var(--r-sm);            /* r-sm */
   padding: 12px 32px 12px 12px;  /* right inset reserves room for × */
   font-size: 0.8125rem;
   line-height: 1.5;
@@ -1683,7 +1707,7 @@ tr:hover .review-btn { opacity: 1; }
   cursor: pointer;
   font-size: 16px;
   line-height: 1;
-  border-radius: 4px;            /* r-sm */
+  border-radius: var(--r-sm);            /* r-sm */
   opacity: 0;
   transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
   padding: 0;
@@ -1698,7 +1722,7 @@ tr:hover .review-btn { opacity: 1; }
 .drop-indicator {
   height: 3px;
   background: var(--a1);
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   margin: 2px 2px;
   pointer-events: none;
   box-shadow: 0 0 0 2px rgba(58, 114, 176, 0.15);
@@ -1716,7 +1740,7 @@ tr:hover .review-btn { opacity: 1; }
   gap: 8px;
   background: var(--n0);
   border: var(--b-base);
-  border-radius: 4px;            /* r-sm — composer reads as a card */
+  border-radius: var(--r-sm);            /* r-sm — composer reads as a card */
   padding: 8px;
   box-shadow: var(--e-1);
 }
@@ -1745,7 +1769,7 @@ tr:hover .review-btn { opacity: 1; }
   color: var(--n6);
   background: var(--n0);
   border: var(--b-base);
-  border-radius: 4px;            /* r-sm */
+  border-radius: var(--r-sm);            /* r-sm */
   padding: 8px 10px;
   outline: none;
   transition: outline-color 0.12s ease;
@@ -1780,7 +1804,7 @@ tr:hover .review-btn { opacity: 1; }
   font-size: 0.75rem;
   font-weight: 600;              /* sans-semibold */
   padding: 6px 12px;
-  border-radius: 4px;            /* r-sm */
+  border-radius: var(--r-sm);            /* r-sm */
   cursor: pointer;
   transition: opacity 0.15s ease, background 0.15s ease;
 }
@@ -1804,7 +1828,7 @@ tr:hover .review-btn { opacity: 1; }
   font-size: 0.75rem;
   font-weight: 400;
   padding: 6px 8px;
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   cursor: pointer;
 }
 
@@ -1835,7 +1859,7 @@ tr:hover .review-btn { opacity: 1; }
   font-size: 0.75rem;
   font-weight: 400;
   padding: 8px 10px;
-  border-radius: 4px;            /* r-sm */
+  border-radius: var(--r-sm);            /* r-sm */
   cursor: pointer;
   text-align: left;
   transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
@@ -1879,7 +1903,7 @@ tr:hover .review-btn { opacity: 1; }
   padding: 14px 18px;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-md);
 }
 
 #view-swarm .swarm-kpis .kpi-value {
@@ -1963,7 +1987,7 @@ tr:hover .review-btn { opacity: 1; }
   line-height: 1;
   color: var(--text-tertiary);
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   transition: background 0.1s ease, color 0.1s ease;
 }
 .toggle-btn:hover { background: var(--border); color: var(--text); }
@@ -2060,8 +2084,8 @@ tr:hover .review-btn { opacity: 1; }
 .pill.s-PR-OPENED { color: var(--purple); border-color: var(--purple); }
 .pill.s-COMMENTED { color: var(--amber); border-color: var(--amber); }
 .pill.s-EDITED    { color: var(--text-secondary); }
-.pill.s-BLOCKED   { color: var(--red); border-color: var(--red-soft); background: #fef2f2; }
-.pill.s-COMPLETED { color: var(--green); border-color: var(--green); background: #f0fdf4; }
+.pill.s-BLOCKED   { color: var(--red); border-color: var(--red-soft); background: var(--tint-a5); }
+.pill.s-COMPLETED { color: var(--green); border-color: var(--green); background: var(--tint-a3); }
 .pill.s-INFO,
 .pill.s-HELD      { color: var(--text-tertiary); }
 
