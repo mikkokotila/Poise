@@ -1915,6 +1915,26 @@ tr:hover .review-btn { opacity: 1; }
   box-shadow: inset 3px 0 0 0 var(--a1);
 }
 
+/* New live cards drop in from a few pixels above their final position
+   while fading in. Keeps the once-a-minute refresh from feeling like
+   a sudden insertion. The FLIP animator handles the *movement* of
+   existing cards via inline transforms; this animation is only for
+   cards arriving fresh in the lane. */
+.card.card-live.card-entering {
+  animation: streamCardIn 520ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+@keyframes streamCardIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 /* Drop indicator = A1 (Blue), same hue as focus. Pill-shaped with a
    subtle glow so it's hard to miss between cards. */
 .drop-indicator {

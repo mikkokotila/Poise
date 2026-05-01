@@ -45,7 +45,7 @@ interface LiveItem {
 
 type PrStatus = 'mergeable'        // currently the only meaningful upstream signal
 const FRESH_WINDOW_MS = 6 * 60 * 60 * 1000   // PRs created in the last 6h read as "just opened"
-const PR_STATUS_POLL_MS = 60_000             // upstream caches at 1m, no point hammering faster
+const LIVE_POLL_MS = 60_000                  // re-fetch live data + status once a minute
 
 type TimeFilter = 'all' | 'today' | 'yesterday' | 'week'
 type StatusFilter = 'all' | 'open'
@@ -63,7 +63,7 @@ let statusFilter: StatusFilter = 'all'
 let searchQuery = ''
 let searchDebounce: ReturnType<typeof setTimeout> | null = null
 let prStatus: Map<string, PrStatus> = new Map()
-let prStatusTimer: ReturnType<typeof setInterval> | null = null
+let liveTimer: ReturnType<typeof setInterval> | null = null
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -129,9 +129,13 @@ function relativeTime(iso: string): string {
   return `${Math.floor(months / 12)}y`
 }
 
-function liveStateLabel(item: LiveItem): { text: string; cls: string } {
+// Open is implicit (the card existing tells you it's open). We only badge
+// the deviations — merged and closed — so the eye lands on the cards that
+// have actually moved past the "active work" state.
+function liveStateLabel(item: LiveItem): { text: string; cls: string } | null {
   if (item.is_pr === 1 && item.merged_at) return { text: 'merged', cls: 'merged' }
-  return item.state === 'open' ? { text: 'open', cls: 'open' } : { text: 'closed', cls: 'closed' }
+  if (item.state === 'closed')            return { text: 'closed', cls: 'closed' }
+  return null
 }
 
 function prKey(item: LiveItem): string {
@@ -218,13 +222,14 @@ function renderLiveItem(item: LiveItem): HTMLElement {
   el.className = classes.join(' ')
   el.dataset.id = String(item.id)
   const st = liveStateLabel(item)
+  const stateBadge = st ? `<span class="state ${st.cls}">${st.text}</span>` : ''
   el.innerHTML = `
     <a class="card-link" href="${item.html_url}" target="_blank" rel="noopener">
       <div class="card-text">${escapeHtml(item.title)}</div>
       <div class="card-meta">
         <span class="card-repo">${escapeHtml(item.repo)}</span>
         <span class="card-num">#${item.number}</span>
-        <span class="state ${st.cls}">${st.text}</span>
+        ${stateBadge}
         <span class="card-time">${relativeTime(item.updated_at)}</span>
       </div>
     </a>
@@ -250,16 +255,113 @@ function renderAll() {
   }
 }
 
-// Re-render only live lanes — used after filter changes / live refetches
-function renderLiveOnly() {
+// Re-render only the live lanes. Two modes:
+//   - snap (animate=false): clear + rebuild — used for filter / search
+//     changes, where the user initiated the change and expects a hard
+//     update.
+//   - animated (animate=true): used by the once-a-minute background
+//     refresh. Re-orders existing card nodes via a FLIP transition so
+//     they glide to their new positions; new cards drop-and-fade in;
+//     leaving cards just disappear (rare, and the FLIP handles the gap).
+function renderLiveOnly(opts: { animate?: boolean } = {}) {
   for (const l of LANES) {
     if (l.type !== 'live') continue
-    const list = laneListEl(l.key)
-    list.innerHTML = ''
-    const items = liveInLane(l.key as 'issue' | 'pr')
-    for (const i of items) list.appendChild(renderLiveItem(i))
-    laneCountEl(l.key).textContent = String(items.length)
+    if (opts.animate) renderLiveLaneAnimated(l.key as 'issue' | 'pr')
+    else              renderLiveLaneSnap(l.key as 'issue' | 'pr')
   }
+}
+
+function renderLiveLaneSnap(laneKey: 'issue' | 'pr') {
+  const list = laneListEl(laneKey)
+  list.innerHTML = ''
+  const items = liveInLane(laneKey)
+  for (const i of items) list.appendChild(renderLiveItem(i))
+  laneCountEl(laneKey).textContent = String(items.length)
+}
+
+// FLIP — First, Last, Invert, Play. The single piece of motion in the
+// app that earns its time on screen. ~700ms with the standard ease so
+// it reads as a deliberate settling, not a glitch. No stagger — the
+// whole column shifts together so the eye locks onto the new ordering
+// rather than chasing individual cards.
+const FLIP_MS = 700
+
+function renderLiveLaneAnimated(laneKey: 'issue' | 'pr') {
+  const list = laneListEl(laneKey)
+  const newItems = liveInLane(laneKey)
+
+  // 1. First — capture current bounding rects of every visible card
+  const firstRects = new Map<string, DOMRect>()
+  const existingEls = new Map<string, HTMLElement>()
+  for (const el of [...list.children] as HTMLElement[]) {
+    if (!el.classList.contains('card')) continue
+    const id = el.dataset.id
+    if (!id) continue
+    firstRects.set(id, el.getBoundingClientRect())
+    existingEls.set(id, el)
+  }
+
+  // 2. Last — reorder existing nodes + insert any new ones. Cards no
+  //    longer in newItems are dropped from the DOM (no leave animation
+  //    in v1; in practice the polling rarely sees a card disappear).
+  const newIds = new Set(newItems.map((i) => String(i.id)))
+  for (const [id, el] of existingEls) {
+    if (!newIds.has(id)) el.remove()
+  }
+  const fragment = document.createDocumentFragment()
+  for (const item of newItems) {
+    const idStr = String(item.id)
+    const existing = existingEls.get(idStr)
+    if (existing) {
+      fragment.appendChild(existing)        // moved to its new index
+    } else {
+      const fresh = renderLiveItem(item)
+      fresh.classList.add('card-entering')   // CSS animation handles the fade-and-drop
+      fragment.appendChild(fresh)
+    }
+  }
+  list.appendChild(fragment)
+
+  // 3. Invert — for every card that existed before AND after, compute
+  //    the delta from old → new layout and apply the inverse transform
+  //    so the card LOOKS like it's still in its old position.
+  const movers: HTMLElement[] = []
+  for (const item of newItems) {
+    const cardEl = existingEls.get(String(item.id))
+    if (!cardEl) continue
+    const firstRect = firstRects.get(String(item.id))
+    if (!firstRect) continue
+    const lastRect = cardEl.getBoundingClientRect()
+    const dx = firstRect.left - lastRect.left
+    const dy = firstRect.top  - lastRect.top
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) continue   // didn't move
+    cardEl.style.transition = 'none'
+    cardEl.style.transform = `translate(${dx}px, ${dy}px)`
+    movers.push(cardEl)
+  }
+
+  // 4. Play — flush layout, then animate transform back to identity.
+  //    requestAnimationFrame guarantees the inverted position is painted
+  //    before the transition kicks in.
+  if (movers.length > 0) {
+    void list.offsetHeight   // force reflow so the transform is committed
+    requestAnimationFrame(() => {
+      for (const cardEl of movers) {
+        cardEl.style.transition = `transform ${FLIP_MS}ms cubic-bezier(0.4, 0, 0.2, 1)`
+        cardEl.style.transform = ''
+      }
+      // Clean up inline styles after the animation finishes so they
+      // don't interfere with future renders.
+      window.setTimeout(() => {
+        for (const cardEl of movers) {
+          cardEl.style.transition = ''
+          cardEl.style.transform = ''
+        }
+      }, FLIP_MS + 50)
+    })
+  }
+
+  laneCountEl(laneKey).textContent = String(newItems.length)
 }
 
 // ── Data fetches ─────────────────────────────────────────────────────────────
@@ -284,7 +386,7 @@ async function fetchManual() {
 async function fetchPrStatus() {
   const prKeys = liveItems.filter((i) => i.is_pr === 1).map(prKey)
   if (prKeys.length === 0) {
-    if (prStatus.size > 0) { prStatus.clear(); renderLiveOnly() }
+    if (prStatus.size > 0) { prStatus.clear(); applyPrStatusClasses() }
     return
   }
   try {
@@ -299,18 +401,46 @@ async function fetchPrStatus() {
     for (const [key, val] of Object.entries(data.statuses || {})) {
       if (val === 'mergeable') next.set(key, 'mergeable')
     }
-    // Cheap diff — only re-render if something actually changed
     const changed = next.size !== prStatus.size
       || [...next.entries()].some(([k, v]) => prStatus.get(k) !== v)
     if (changed) {
       prStatus = next
-      renderLiveOnly()
+      applyPrStatusClasses()
     }
   } catch { /* upstream offline — silent, cards stay neutral */ }
 }
 
+// Touch the mergeable / fresh classes on PR cards in place. Avoids a full
+// re-render so the FLIP-induced inline transforms aren't disturbed and
+// the user sees no flicker when only the PR-status map changed.
+function applyPrStatusClasses() {
+  for (const cardEl of viewEl.querySelectorAll<HTMLElement>('.card.card-live')) {
+    const id = Number(cardEl.dataset.id)
+    const item = liveItems.find((i) => i.id === id)
+    if (!item || item.is_pr !== 1) continue
+    const merge = isMergeable(item)
+    const fresh = !merge && isFresh(item)
+    cardEl.classList.toggle('card-mergeable', merge)
+    cardEl.classList.toggle('card-fresh', fresh)
+  }
+}
+
 export function stopStreamPolling() {
-  if (prStatusTimer) { clearInterval(prStatusTimer); prStatusTimer = null }
+  if (liveTimer) { clearInterval(liveTimer); liveTimer = null }
+}
+
+// One-minute background tick: re-fetch live items, then re-fetch the
+// PR-status map. The live re-render uses the FLIP path so cards glide
+// to their new positions; the PR-status pass only twiddles classes so
+// it doesn't disturb the FLIP that just played.
+async function pollLiveTick() {
+  try {
+    await fetchLive()
+    renderLiveOnly({ animate: true })
+  } catch { /* network blip — try again next tick */ }
+  try {
+    await fetchPrStatus()
+  } catch { /* same */ }
 }
 
 async function fetchLive() {
@@ -760,8 +890,9 @@ export async function initStreamView() {
   } catch (err) {
     console.error('[stream] failed to load:', err)
   }
-  // Poll the PR-status endpoint at the upstream's cadence. Cancelled when
-  // the user navigates away (see main.ts → showView).
+  // Once-a-minute combined refresh — re-fetch live items + PR-status,
+  // re-render the live lanes through the FLIP animator so cards glide
+  // to their new updated_at order. Cancelled on view leave.
   stopStreamPolling()
-  prStatusTimer = setInterval(fetchPrStatus, PR_STATUS_POLL_MS)
+  liveTimer = setInterval(pollLiveTick, LIVE_POLL_MS)
 }
