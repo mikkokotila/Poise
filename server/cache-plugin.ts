@@ -1,6 +1,6 @@
 import type { Plugin, Connect } from 'vite'
 import { syncDelta, backfillFiles, backfillAvatars } from './sync'
-import { listPrs, countPrs, getFlow, getTrust } from './queries'
+import { listPrs, countPrs } from './queries'
 import { getMeta } from './db'
 import { getToken, setToken, hasToken } from './auth'
 import { getSettings, setSettings } from './settings'
@@ -142,28 +142,6 @@ export function cachePlugin(): Plugin {
           }
         }
 
-        // GET /api/cache/flow?range=90
-        if (url.startsWith('/api/cache/flow') && req.method === 'GET') {
-          const p = new URL(url, 'http://x').searchParams
-          const range = Math.min(Math.max(Number(p.get('range')) || 90, 7), 365)
-          try {
-            return json(res, 200, getFlow(range))
-          } catch (err: any) {
-            return json(res, 500, { error: err.message || String(err) })
-          }
-        }
-
-        // GET /api/cache/trust?range=90
-        if (url.startsWith('/api/cache/trust') && req.method === 'GET') {
-          const p = new URL(url, 'http://x').searchParams
-          const range = Math.min(Math.max(Number(p.get('range')) || 90, 7), 365)
-          try {
-            return json(res, 200, getTrust(range))
-          } catch (err: any) {
-            return json(res, 500, { error: err.message || String(err) })
-          }
-        }
-
         // POST /api/cache/backfill-files?limit=200
         if (url.startsWith('/api/cache/backfill-files') && req.method === 'POST') {
           const token = getToken()
@@ -201,44 +179,29 @@ export function cachePlugin(): Plugin {
           return json(res, 200, { last_sync_at: getMeta('last_sync_at') })
         }
 
-        // ── PR status proxy ──
-        // POST /api/pr-status → forward to whatever local endpoint resolves
-        // a list of PR identifiers to mergeable / neutral status. The
-        // upstream URL is read from PR_STATUS_URL on each request so a
-        // change to the env doesn't require a server restart. When unset
-        // a deterministic dummy fires so the UI styling shows up while
-        // the real endpoint is being wired.
-        if (url === '/api/pr-status' && req.method === 'POST') {
+        // ── /github bridge ──
+        // POST /api/gh forwards to the user's local /github API (default
+        // http://127.0.0.1:8788/github, override via GITHUB_API_URL). Every
+        // GitHub-related call from Poise — reads (list / green_pr / new) and
+        // any future writes — flows through here, so the host + auth live in
+        // one place and the views stay agnostic.
+        if (url === '/api/gh' && req.method === 'POST') {
           const body = await readBody(req)
-          const upstream = process.env.PR_STATUS_URL || ''
-          if (upstream) {
-            try {
-              const upRes = await fetch(upstream, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body,
-              })
-              const text = await upRes.text()
-              res.statusCode = upRes.status
-              res.setHeader('Content-Type', upRes.headers.get('content-type') || 'application/json')
-              res.end(text)
-              return
-            } catch (err: any) {
-              return json(res, 502, { error: 'pr-status upstream unreachable: ' + (err.message || String(err)) })
-            }
-          }
-          // Dummy fallback — every 7th PR by number is mergeable
+          const upstream = process.env.GITHUB_API_URL || 'http://127.0.0.1:8788/github'
           try {
-            const parsed = body ? JSON.parse(body) : {}
-            const statuses: Record<string, string> = {}
-            for (const key of parsed.prs || []) {
-              const m = String(key).match(/#(\d+)$/)
-              if (m && Number(m[1]) % 7 === 0) statuses[key] = 'mergeable'
-            }
-            return json(res, 200, { statuses, dummy: true })
+            const upRes = await fetch(upstream, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body,
+            })
+            const text = await upRes.text()
+            res.statusCode = upRes.status
+            res.setHeader('Content-Type', upRes.headers.get('content-type') || 'application/json')
+            res.end(text)
           } catch (err: any) {
-            return json(res, 400, { error: err.message || String(err) })
+            return json(res, 502, { error: 'github bridge unreachable: ' + (err.message || String(err)) })
           }
+          return
         }
 
         // ── Swarm proxy ──

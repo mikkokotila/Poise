@@ -1,7 +1,7 @@
 // Settings panel — GitHub PAT, org, username, timezone.
 // Slides in from the right, same pattern as the typography panel.
 
-import { getSettings as getCachedSettings, setLocalSettings, loadSettings } from './config'
+import { getSettings as getCachedSettings, setLocalSettings, loadSettings, getRefreshRate, setRefreshRate } from './config'
 
 let panelEl: HTMLElement | null = null
 let statusDot: HTMLElement | null = null
@@ -191,6 +191,15 @@ function buildPanel(): HTMLElement {
         <div class="st-help st-help-info">Used to cut "today / yesterday / this week" in Main.</div>
       </div>
 
+      <div class="tp-section">
+        <label class="tp-label">Refresh rate</label>
+        <div class="range-picker st-refresh-picker">
+          <button type="button" data-rate="1m" class="${getRefreshRate() === '1m' ? 'active' : ''}">1m</button>
+          <button type="button" data-rate="5m" class="${getRefreshRate() === '5m' ? 'active' : ''}">5m</button>
+        </div>
+        <div class="st-help st-help-info">How often Main, Stream, and Swarm pull fresh data.</div>
+      </div>
+
       <div class="st-row">
         <button class="st-save">Save</button>
         <button class="st-clear" hidden>Clear token</button>
@@ -223,6 +232,18 @@ function buildPanel(): HTMLElement {
   for (const inp of [tokenInput, orgInput, meInput]) {
     inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveAll() })
   }
+
+  // Refresh-rate toggle — applies live (no Save needed); each view's
+  // running timer restarts via the `poise:refresh-rate-changed` event.
+  const refreshPicker = panel.querySelector<HTMLElement>('.st-refresh-picker')!
+  refreshPicker.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest('button')
+    if (!btn || !btn.dataset.rate) return
+    const rate = btn.dataset.rate as '1m' | '5m'
+    refreshPicker.querySelectorAll<HTMLButtonElement>('[data-rate]').forEach((b) => b.classList.remove('active'))
+    btn.classList.add('active')
+    setRefreshRate(rate)
+  })
 
   return panel
 }

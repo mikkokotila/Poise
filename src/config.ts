@@ -42,6 +42,34 @@ export function effectiveTimezone(): string {
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone } catch { return 'UTC' }
 }
 
+// ── Refresh rate ──────────────────────────────────────────────────────
+// How often the live views (Main, Stream, Swarm) re-fetch their data.
+// Two presets only — "1m" or "5m" — picked from the Settings panel.
+// Stored client-side; views listen for `poise:refresh-rate-changed` and
+// restart their timers.
+
+const REFRESH_KEY = 'poise-refresh-rate'
+export type RefreshRate = '1m' | '5m'
+
+export function getRefreshRate(): RefreshRate {
+  try {
+    const v = localStorage.getItem(REFRESH_KEY)
+    if (v === '1m' || v === '5m') return v
+  } catch { /* ignore */ }
+  return '1m'
+}
+
+export function getRefreshRateMs(): number {
+  return getRefreshRate() === '5m' ? 5 * 60_000 : 60_000
+}
+
+export function setRefreshRate(rate: RefreshRate) {
+  if (rate !== '1m' && rate !== '5m') return
+  if (getRefreshRate() === rate) return
+  try { localStorage.setItem(REFRESH_KEY, rate) } catch { /* ignore */ }
+  window.dispatchEvent(new CustomEvent('poise:refresh-rate-changed', { detail: { rate } }))
+}
+
 // Minutes between an IANA zone's wall clock and UTC at a given UTC instant.
 // Positive for zones east of UTC. Anchoring at the desired instant handles DST.
 function tzOffsetMin(tz: string, atUtc: Date): number {

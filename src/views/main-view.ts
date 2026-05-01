@@ -1,6 +1,6 @@
 // Main table view — reads from SQLite cache (/api/cache/prs)
 
-import { getSettings, midnightInZone, startOfWeekInZone } from '../config'
+import { getSettings, midnightInZone, startOfWeekInZone, getRefreshRateMs } from '../config'
 
 const STORAGE_KEY = 'poise-filters'
 const REVIEWED_KEY = 'poise-reviewed'
@@ -53,6 +53,7 @@ let fetching = false
 let initialized = false
 let observer: IntersectionObserver | null = null
 let searchDebounce: ReturnType<typeof setTimeout> | null = null
+let refreshTimer: ReturnType<typeof setInterval> | null = null
 
 // DOM
 let tbody: HTMLTableSectionElement
@@ -450,6 +451,7 @@ export function initMainView() {
   observer.observe(sentinel)
 
   fetchPage()
+  startMainTimer()
 }
 
 // Called by idle refresh
@@ -457,3 +459,20 @@ export function refreshMainView() {
   if (!initialized) return
   resetAndFetch()
 }
+
+// Background refresh at the user-chosen cadence (1m or 5m). Pulls page 1
+// only — the visible top of the table — so scroll position is preserved
+// for users who are reading something further down. The total count
+// updates so the "20 / 1083" pill stays honest.
+export function stopMainRefresh() {
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null }
+}
+
+function startMainTimer() {
+  stopMainRefresh()
+  refreshTimer = setInterval(refreshMainView, getRefreshRateMs())
+}
+
+window.addEventListener('poise:refresh-rate-changed', () => {
+  if (refreshTimer) startMainTimer()
+})

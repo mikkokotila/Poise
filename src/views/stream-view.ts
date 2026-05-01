@@ -6,7 +6,7 @@
 // unaffected. The Issue lane has a richer composer (title / body / repo)
 // that opens a real GitHub issue via the proxy.
 
-import { getSettings, midnightInZone, startOfWeekInZone } from '../config'
+import { getSettings, midnightInZone, startOfWeekInZone, getRefreshRateMs } from '../config'
 
 type Lane = 'idea' | 'concept' | 'plan' | 'issue' | 'pr'
 type LaneType = 'manual' | 'live'
@@ -45,7 +45,6 @@ interface LiveItem {
 
 type PrStatus = 'mergeable'        // currently the only meaningful upstream signal
 const FRESH_WINDOW_MS = 6 * 60 * 60 * 1000   // PRs created in the last 6h read as "just opened"
-const LIVE_POLL_MS = 60_000                  // re-fetch live data + status once a minute
 
 type TimeFilter = 'all' | 'today' | 'yesterday' | 'week'
 type StatusFilter = 'all' | 'open'
@@ -384,22 +383,23 @@ async function fetchManual() {
 }
 
 async function fetchPrStatus() {
-  const prKeys = liveItems.filter((i) => i.is_pr === 1).map(prKey)
-  if (prKeys.length === 0) {
+  if (liveItems.filter((i) => i.is_pr === 1).length === 0) {
     if (prStatus.size > 0) { prStatus.clear(); applyPrStatusClasses() }
     return
   }
   try {
-    const res = await fetch('/api/pr-status', {
+    const res = await fetch('/api/gh', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prs: prKeys }),
+      body: JSON.stringify({ operation: 'green_pr' }),
     })
     if (!res.ok) return
     const data = await res.json()
+    // The /github endpoint already returns full records — repo here is
+    // the full "Vaquum/repo" name, matching the format prKey() builds.
     const next = new Map<string, PrStatus>()
-    for (const [key, val] of Object.entries(data.statuses || {})) {
-      if (val === 'mergeable') next.set(key, 'mergeable')
+    for (const r of data.records || []) {
+      next.set(`${r.repo}#${r.number}`, 'mergeable')
     }
     const changed = next.size !== prStatus.size
       || [...next.entries()].some(([k, v]) => prStatus.get(k) !== v)
@@ -890,9 +890,19 @@ export async function initStreamView() {
   } catch (err) {
     console.error('[stream] failed to load:', err)
   }
-  // Once-a-minute combined refresh — re-fetch live items + PR-status,
-  // re-render the live lanes through the FLIP animator so cards glide
-  // to their new updated_at order. Cancelled on view leave.
-  stopStreamPolling()
-  liveTimer = setInterval(pollLiveTick, LIVE_POLL_MS)
+  // Combined refresh at the user-chosen cadence (1m or 5m, from
+  // Settings). Re-fetch live items + PR-status, re-render the live
+  // lanes through the FLIP animator so cards glide to their new
+  // updated_at order. Cancelled on view leave; restarted whenever the
+  // rate changes.
+  startLiveTimer()
 }
+
+function startLiveTimer() {
+  stopStreamPolling()
+  liveTimer = setInterval(pollLiveTick, getRefreshRateMs())
+}
+
+window.addEventListener('poise:refresh-rate-changed', () => {
+  if (liveTimer) startLiveTimer()
+})

@@ -16,7 +16,7 @@ interface SwarmEvent {
   cycle_done: boolean
 }
 
-const REFRESH_MS = 15_000
+import { getRefreshRateMs } from '../config'
 
 const LIVE_STATUSES = new Set(['QUEUED', 'WORKING'])
 const MILESTONE_STATUSES = new Set([
@@ -420,6 +420,14 @@ export async function initSwarmView() {
     bodyEl.innerHTML = renderLoading()
   }
   loadAndRender()  // intentionally not awaited — let the user see the skeleton
-  stopSwarmRefresh()
-  refreshTimer = setInterval(loadAndRender, REFRESH_MS)
+  startSwarmTimer()
 }
+
+function startSwarmTimer() {
+  stopSwarmRefresh()
+  refreshTimer = setInterval(loadAndRender, getRefreshRateMs())
+}
+
+window.addEventListener('poise:refresh-rate-changed', () => {
+  if (refreshTimer) startSwarmTimer()
+})
