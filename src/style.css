@@ -86,6 +86,14 @@
   --tint-a1: rgba(58, 114, 176, 0.06);
   --tint-a3: rgba(74, 142, 94, 0.07);
   --tint-a5: rgba(184, 80, 72, 0.06);
+
+  /* Motion — three canonical durations, all eased the same way. Quick is
+     for hover/press, base is for state toggles, slow is for surfaces
+     entering/leaving. Anything outside this triplet is a smell. */
+  --t-quick: 120ms;
+  --t-base:  180ms;
+  --t-slow:  250ms;
+  --ease:    cubic-bezier(0.2, 0, 0, 1);
 }
 
 *,
@@ -108,6 +116,26 @@
 }
 :focus:not(:focus-visible) {
   outline: none;
+}
+
+/* Text selection — soft A1 tint instead of the browser-default hard blue.
+   Sits in the same hue family as focus + drop-indicator for coherence. */
+::selection {
+  background: var(--tint-a1);
+  color: var(--text);
+}
+
+/* Honour reduced-motion: collapse every transition / animation to a
+   near-instant fade so the app stays feeling crisp without movement. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 html {
@@ -177,7 +205,7 @@ body {
   background: var(--surface);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  transition: color var(--t-base) ease, background var(--t-base) ease, border-color var(--t-base) ease;
   letter-spacing: 0.01em;
 }
 
@@ -246,7 +274,7 @@ thead th:last-child {
 
 /* ── Rows ── */
 tbody tr {
-  transition: background 0.1s ease;
+  transition: background var(--t-quick) ease;
 }
 
 tbody tr:hover {
@@ -259,7 +287,7 @@ tbody tr:hover {
 }
 
 tbody tr.new {
-  animation: rowIn 0.18s ease-out both;
+  animation: rowIn var(--t-base) ease-out both;
 }
 
 td {
@@ -307,7 +335,7 @@ td:last-child {
   letter-spacing: 0.02em;
   cursor: pointer;
   user-select: none;
-  transition: opacity 0.15s ease;
+  transition: opacity var(--t-base) ease;
 }
 
 .type-toggle:hover {
@@ -345,7 +373,7 @@ td a:hover {
 /* ── Inline comment (inside title cell) ── */
 .inline-comment {
   margin-top: 6px;
-  padding: 8px 24px 8px 0;
+  padding: var(--sp-2) var(--sp-5) var(--sp-2) 0;
   font-size: var(--typo-comment-size, 0.75rem);
   font-weight: var(--typo-comment-weight, 400);
   line-height: 1.6;
@@ -356,7 +384,7 @@ td a:hover {
   -webkit-line-clamp: var(--typo-comment-lines, 4);
   -webkit-box-orient: vertical;
   overflow: hidden;
-  animation: commentIn 0.2s ease both;
+  animation: commentIn var(--t-base) ease both;
 }
 
 .comment-author {
@@ -379,17 +407,17 @@ td a:hover {
 }
 
 @keyframes commentIn {
-  from { opacity: 0; margin-top: 0; padding: 0 24px 0 0; max-height: 0; }
-  to   { opacity: 1; margin-top: 6px; padding: 8px 24px 8px 0; max-height: 120px; }
+  from { opacity: 0; margin-top: 0; padding: 0 var(--sp-5) 0 0; max-height: 0; }
+  to   { opacity: 1; margin-top: 6px; padding: var(--sp-2) var(--sp-5) var(--sp-2) 0; max-height: 120px; }
 }
 
 .inline-comment.closing {
-  animation: commentOut 0.15s ease both;
+  animation: commentOut var(--t-base) ease both;
 }
 
 @keyframes commentOut {
-  from { opacity: 1; margin-top: 6px; padding: 8px 24px 8px 0; max-height: 120px; }
-  to   { opacity: 0; margin-top: 0; padding: 0 24px 0 0; max-height: 0; }
+  from { opacity: 1; margin-top: 6px; padding: var(--sp-2) var(--sp-5) var(--sp-2) 0; max-height: 120px; }
+  to   { opacity: 0; margin-top: 0; padding: 0 var(--sp-5) 0 0; max-height: 0; }
 }
 
 /* ── Last commenter (avatar) ── */
@@ -405,7 +433,7 @@ td a:hover {
   vertical-align: middle;
   background: var(--hairline);
   object-fit: cover;
-  transition: opacity 0.15s ease;
+  transition: opacity var(--t-base) ease;
 }
 
 /* Bot — subtle ring to distinguish from humans, without dimming */
@@ -515,7 +543,7 @@ td a:hover {
   align-items: center;
   justify-content: center;
   border-radius: var(--r-sm);
-  transition: color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+  transition: color var(--t-base) ease, background var(--t-base) ease, transform var(--t-quick) ease;
   padding: 0;
   opacity: 0.55;
 }
@@ -571,7 +599,7 @@ tr:hover .review-btn { opacity: 1; }
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  transition: color var(--t-base) ease, background var(--t-base) ease, border-color var(--t-base) ease;
   z-index: 100;
 }
 
@@ -593,7 +621,7 @@ tr:hover .review-btn { opacity: 1; }
   box-shadow: var(--e-3);
   z-index: 110;
   transform: translateX(100%);
-  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform var(--t-slow) var(--ease);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -631,7 +659,7 @@ tr:hover .review-btn { opacity: 1; }
   align-items: center;
   justify-content: center;
   border-radius: var(--r-sm);
-  transition: color 0.1s ease, background 0.1s ease;
+  transition: color var(--t-quick) ease, background var(--t-quick) ease;
 }
 
 .tp-close:hover {
@@ -649,7 +677,7 @@ tr:hover .review-btn { opacity: 1; }
   font-size: 0.625rem;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.08em;
   color: var(--text-tertiary);
   margin: 20px 0 12px;
   padding-bottom: 6px;
@@ -729,7 +757,7 @@ tr:hover .review-btn { opacity: 1; }
   background: var(--surface);
   border: 2px solid var(--n4);
   cursor: pointer;
-  transition: border-color 0.12s ease;
+  transition: border-color var(--t-quick) ease;
 }
 
 .tp-range::-webkit-slider-thumb:hover {
@@ -786,7 +814,7 @@ tr:hover .review-btn { opacity: 1; }
   border: var(--b-base);
   border-radius: var(--r-sm);
   cursor: pointer;
-  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  transition: color var(--t-base) ease, border-color var(--t-base) ease, background var(--t-base) ease;
 }
 
 .tp-reset:hover {
@@ -824,7 +852,7 @@ tr:hover .review-btn { opacity: 1; }
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  transition: color var(--t-base) ease, border-color var(--t-base) ease, background var(--t-base) ease;
   z-index: 120;
   padding: 0;
 }
@@ -853,7 +881,7 @@ tr:hover .review-btn { opacity: 1; }
   z-index: 101;
   opacity: 0;
   transform: translateY(-4px);
-  transition: opacity 0.15s ease, transform 0.15s ease;
+  transition: opacity var(--t-base) ease, transform var(--t-base) ease;
 }
 
 #menu-popover.open {
@@ -876,7 +904,7 @@ tr:hover .review-btn { opacity: 1; }
   cursor: pointer;
   border-radius: var(--r-sm);
   text-align: left;
-  transition: background 0.1s ease, color 0.1s ease;
+  transition: background var(--t-quick) ease, color var(--t-quick) ease;
 }
 
 .menu-item:hover {
@@ -925,7 +953,7 @@ tr:hover .review-btn { opacity: 1; }
   background: var(--surface);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  transition: color var(--t-base) ease, background var(--t-base) ease, border-color var(--t-base) ease;
   letter-spacing: 0.01em;
   font-variant-numeric: tabular-nums;
 }
@@ -946,17 +974,17 @@ tr:hover .review-btn { opacity: 1; }
 .kpi-row {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 24px;
+  gap: var(--sp-5);
   margin-bottom: 56px;
   padding-bottom: 40px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: var(--b-hair);  /* calmer than 1px N3 — half-pixel between sections */
 }
 
 .kpi-label {
   font-size: 0.625rem;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.08em;
   color: var(--text-tertiary);
   margin-bottom: 8px;
 }
@@ -990,7 +1018,7 @@ tr:hover .review-btn { opacity: 1; }
   font-size: 0.625rem;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.08em;
   color: var(--text-tertiary);
   margin-bottom: 16px;
 }
@@ -1065,7 +1093,7 @@ tr:hover .review-btn { opacity: 1; }
 
 .mix-segment {
   height: 100%;
-  transition: opacity 0.15s ease;
+  transition: opacity var(--t-base) ease;
 }
 
 .mix-segment:hover { opacity: 0.8; }
@@ -1198,7 +1226,7 @@ tr:hover .review-btn { opacity: 1; }
   opacity: 0.3;
   min-height: 2px;
   border-radius: 0;
-  transition: opacity 0.1s ease;
+  transition: opacity var(--t-quick) ease;
 }
 
 .waste-bar:hover { opacity: 0.6; }
@@ -1333,7 +1361,7 @@ tr:hover .review-btn { opacity: 1; }
   height: 100%;
   background: var(--n5);
   opacity: 0.85;
-  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: width var(--t-slow) var(--ease);
 }
 
 .bucket-fill.bar-warn {
@@ -1345,11 +1373,13 @@ tr:hover .review-btn { opacity: 1; }
   text-align: right;
   color: var(--text);
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .bucket-pct {
   text-align: right;
   color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
 }
 
 /* Hotspots */
@@ -1406,7 +1436,7 @@ tr:hover .review-btn { opacity: 1; }
   background: var(--n5);          /* mid neutral — data, not alarm */
   opacity: 0.7;
   border-radius: 0;
-  transition: width 0.25s ease;
+  transition: width var(--t-slow) ease;
 }
 
 .hs-num {
@@ -1472,7 +1502,7 @@ tr:hover .review-btn { opacity: 1; }
   outline: none;
   letter-spacing: 0;
   margin-top: 4px;
-  transition: border-color 0.15s ease;
+  transition: border-color var(--t-base) ease;
 }
 
 .st-input:focus {
@@ -1494,7 +1524,7 @@ tr:hover .review-btn { opacity: 1; }
   color: var(--text);
   outline: none;
   margin-top: 4px;
-  transition: border-color 0.15s ease;
+  transition: border-color var(--t-base) ease;
 }
 
 .st-select:focus {
@@ -1536,7 +1566,7 @@ tr:hover .review-btn { opacity: 1; }
   background: var(--surface);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  transition: color var(--t-base) ease, background var(--t-base) ease, border-color var(--t-base) ease;
 }
 
 /* Primary action: N5 mid-grey (matches Pipe). Lighter than N7 so it
@@ -1545,7 +1575,7 @@ tr:hover .review-btn { opacity: 1; }
   background: var(--n5);
   color: var(--n0);
   border-color: var(--n5);
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition: background var(--t-base) ease, border-color var(--t-base) ease;
 }
 
 .st-save:hover    { background: var(--n6); border-color: var(--n6); }
@@ -1627,7 +1657,7 @@ tr:hover .review-btn { opacity: 1; }
   gap: 10px;
   min-height: 220px;
   box-shadow: var(--e-0);
-  transition: border-color 0.12s ease, background-color 0.12s ease;
+  transition: border-color var(--t-quick) ease, background-color var(--t-quick) ease;
 }
 
 .lane.lane-drag-over {
@@ -1691,7 +1721,7 @@ tr:hover .review-btn { opacity: 1; }
   cursor: grab;
   user-select: none;
   box-shadow: var(--e-0);
-  transition: box-shadow 0.15s ease, transform 0.08s ease, opacity 0.15s ease;
+  transition: box-shadow var(--t-base) ease, transform var(--t-quick) ease, opacity var(--t-base) ease;
 }
 
 .card:active { cursor: grabbing; }
@@ -1729,7 +1759,7 @@ tr:hover .review-btn { opacity: 1; }
   line-height: 1;
   border-radius: var(--r-sm);            /* r-sm */
   opacity: 0;
-  transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
+  transition: opacity var(--t-quick) ease, color var(--t-quick) ease, background var(--t-quick) ease;
   padding: 0;
 }
 
@@ -1792,7 +1822,7 @@ tr:hover .review-btn { opacity: 1; }
   border-radius: var(--r-sm);            /* r-sm */
   padding: 8px 10px;
   outline: none;
-  transition: outline-color 0.12s ease;
+  transition: outline-color var(--t-quick) ease;
 }
 
 /* Focus ring per DS: 2px solid A1, offset 2px, inherits radius.
@@ -1826,7 +1856,7 @@ tr:hover .review-btn { opacity: 1; }
   padding: 6px 12px;
   border-radius: var(--r-sm);            /* r-sm */
   cursor: pointer;
-  transition: opacity 0.15s ease, background 0.15s ease;
+  transition: opacity var(--t-base) ease, background var(--t-base) ease;
 }
 
 .composer-add:hover    { background: var(--n6); }
@@ -1882,7 +1912,7 @@ tr:hover .review-btn { opacity: 1; }
   border-radius: var(--r-sm);            /* r-sm */
   cursor: pointer;
   text-align: left;
-  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  transition: color var(--t-base) ease, background var(--t-base) ease, border-color var(--t-base) ease;
 }
 
 .lane-add:hover {
@@ -1986,7 +2016,7 @@ tr:hover .review-btn { opacity: 1; }
 .flight-table td a { color: var(--text); text-decoration: none; font-weight: 600; }
 .flight-table td a:hover { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
 
-.target-row { transition: background 0.1s ease; }
+.target-row { transition: background var(--t-quick) ease; }
 .target-row:hover { background: var(--hover); }
 .target-row.idle .col-target a { color: var(--text-secondary); }
 .target-row.idle .col-cycle,
@@ -2008,7 +2038,7 @@ tr:hover .review-btn { opacity: 1; }
   color: var(--text-tertiary);
   cursor: pointer;
   border-radius: var(--r-sm);
-  transition: background 0.1s ease, color 0.1s ease;
+  transition: background var(--t-quick) ease, color var(--t-quick) ease;
 }
 .toggle-btn:hover { background: var(--border); color: var(--text); }
 .toggle-btn .toggle-minus { display: none; }
