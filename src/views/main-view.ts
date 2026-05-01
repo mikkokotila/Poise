@@ -44,6 +44,7 @@ type TimeFilter = 'all' | 'today' | 'yesterday' | 'week'
 let typeFilter: TypeFilter = 'both'
 let statusFilter: StatusFilter = 'all'
 let timeFilter: TimeFilter = 'all'
+let searchQuery = ''
 let items: PrRow[] = []
 let offset = 0
 let total = 0
@@ -51,15 +52,17 @@ let done = false
 let fetching = false
 let initialized = false
 let observer: IntersectionObserver | null = null
+let searchDebounce: ReturnType<typeof setTimeout> | null = null
 
 // DOM
 let tbody: HTMLTableSectionElement
 let loader: HTMLDivElement
 let empty: HTMLParagraphElement
 let table: HTMLTableElement
-let filtersEl: HTMLElement
+let clusterEl: HTMLElement
 let timePickerEl: HTMLElement
 let countEl: HTMLSpanElement
+let searchInput: HTMLInputElement
 let sentinel: HTMLDivElement
 
 function loadFilters(): { type: TypeFilter; status: StatusFilter; time: TimeFilter } {
@@ -185,13 +188,6 @@ function updateCount() {
   countEl.textContent = total > 0 ? `${Math.min(items.length, total)} / ${total}` : ''
 }
 
-function updateSubtitle() {
-  const sub = document.getElementById('main-sub')
-  if (!sub) return
-  const org = getSettings().org
-  sub.textContent = org ? `${org} · everything you're part of` : `everything you're part of`
-}
-
 function renderAll() {
   tbody.innerHTML = ''
   if (items.length === 0 && !fetching) {
@@ -244,6 +240,7 @@ async function fetchPage(): Promise<void> {
     })
     if (win.since) params.set('since', win.since)
     if (win.until) params.set('until', win.until)
+    if (searchQuery) params.set('q', searchQuery)
     const url = `/api/cache/prs?${params.toString()}`
     const res = await fetch(url)
     if (!res.ok) throw new Error(`Cache ${res.status}`)
@@ -287,10 +284,10 @@ function resetAndFetch() {
 }
 
 function initFilterButtons() {
-  filtersEl.querySelectorAll<HTMLButtonElement>('[data-filter]').forEach((b) => {
+  clusterEl.querySelectorAll<HTMLButtonElement>('[data-filter]').forEach((b) => {
     b.classList.toggle('active', b.dataset.filter === typeFilter)
   })
-  filtersEl.querySelectorAll<HTMLButtonElement>('[data-status]').forEach((b) => {
+  clusterEl.querySelectorAll<HTMLButtonElement>('[data-status]').forEach((b) => {
     b.classList.toggle('active', b.dataset.status === statusFilter)
   })
   timePickerEl.querySelectorAll<HTMLButtonElement>('[data-time]').forEach((b) => {
@@ -299,15 +296,15 @@ function initFilterButtons() {
 }
 
 function attachHandlers() {
-  // Filters
-  filtersEl.addEventListener('click', (e) => {
+  // All filter pills live in one cluster now — single delegated click handler
+  clusterEl.addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest('button')
     if (!btn) return
     if (btn.dataset.filter) {
       const next = btn.dataset.filter as TypeFilter
       if (next === typeFilter) return
       typeFilter = next
-      filtersEl.querySelectorAll<HTMLButtonElement>('[data-filter]').forEach((b) => b.classList.remove('active'))
+      clusterEl.querySelectorAll<HTMLButtonElement>('[data-filter]').forEach((b) => b.classList.remove('active'))
       btn.classList.add('active')
       saveFilters()
       resetAndFetch()
@@ -316,24 +313,32 @@ function attachHandlers() {
       const next = btn.dataset.status as StatusFilter
       if (next === statusFilter) return
       statusFilter = next
-      filtersEl.querySelectorAll<HTMLButtonElement>('[data-status]').forEach((b) => b.classList.remove('active'))
+      clusterEl.querySelectorAll<HTMLButtonElement>('[data-status]').forEach((b) => b.classList.remove('active'))
+      btn.classList.add('active')
+      saveFilters()
+      resetAndFetch()
+    }
+    if (btn.dataset.time) {
+      const next = btn.dataset.time as TimeFilter
+      if (next === timeFilter) return
+      timeFilter = next
+      clusterEl.querySelectorAll<HTMLButtonElement>('[data-time]').forEach((b) => b.classList.remove('active'))
       btn.classList.add('active')
       saveFilters()
       resetAndFetch()
     }
   })
 
-  // Time picker — separate handler since it lives in the header, not in #filters
-  timePickerEl.addEventListener('click', (e) => {
-    const btn = (e.target as HTMLElement).closest('button')
-    if (!btn || !btn.dataset.time) return
-    const next = btn.dataset.time as TimeFilter
-    if (next === timeFilter) return
-    timeFilter = next
-    timePickerEl.querySelectorAll<HTMLButtonElement>('[data-time]').forEach((b) => b.classList.remove('active'))
-    btn.classList.add('active')
-    saveFilters()
-    resetAndFetch()
+  // Search — debounced live filter; resets pagination because the server
+  // applies the LIKE query and re-counts the result set.
+  searchInput.addEventListener('input', () => {
+    if (searchDebounce) clearTimeout(searchDebounce)
+    searchDebounce = setTimeout(() => {
+      const next = searchInput.value.trim()
+      if (next === searchQuery) return
+      searchQuery = next
+      resetAndFetch()
+    }, 150)
   })
 
   // Expand/collapse last comment (already cached — no fetch!)
@@ -422,8 +427,9 @@ export function initMainView() {
   loader = document.getElementById('loader') as HTMLDivElement
   empty = document.getElementById('empty') as HTMLParagraphElement
   table = document.getElementById('table') as HTMLTableElement
-  filtersEl = document.getElementById('filters') as HTMLElement
+  clusterEl = document.getElementById('main-filters') as HTMLElement
   timePickerEl = document.getElementById('time-picker') as HTMLElement
+  searchInput = document.getElementById('search-input') as HTMLInputElement
   countEl = document.getElementById('count') as HTMLSpanElement
 
   const saved = loadFilters()
@@ -431,7 +437,6 @@ export function initMainView() {
   statusFilter = saved.status
   timeFilter = saved.time
 
-  updateSubtitle()
   initFilterButtons()
   attachHandlers()
 
@@ -450,6 +455,5 @@ export function initMainView() {
 // Called by idle refresh
 export function refreshMainView() {
   if (!initialized) return
-  updateSubtitle()
   resetAndFetch()
 }

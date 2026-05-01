@@ -164,27 +164,69 @@ body {
   position: relative;
 }
 
-/* ── View header (shared across Main / Flow / Trust) ── */
+/* ── View header (shared across Main / Flow / Trust / Stream / Swarm) ──
+   Title text was removed app-wide — every view now centers its filter
+   cluster in the header. The burger menu (top-right, fixed) carries the
+   "which view am I on" cue, and the content itself differs enough per
+   view that an explicit page title is redundant. */
 .view-header {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
+  align-items: center;
+  justify-content: center;
   margin-bottom: var(--sp-6);
+  min-height: 32px;             /* keeps vertical rhythm with the burger */
 }
 
-.view-title {
-  font-size: 1.125rem;
-  font-weight: 600;
-  color: var(--text);
-  letter-spacing: -0.02em;
+/* Filter cluster — every range-picker group + the search input live here,
+   centered. Wraps onto multiple lines on narrow viewports. */
+.filter-cluster {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
 }
 
-.view-sub {
+/* Search input — pill-shaped, sized to match a range-picker button so
+   the cluster reads as one unified row. Live filter, no submit button. */
+.search-input {
+  font-family: inherit;
+  font-size: 0.75rem;
   font-weight: 400;
-  color: var(--text-tertiary);
-  font-size: 0.8125rem;
-  margin-left: var(--sp-3);
+  padding: 5px 14px;
+  height: 26px;                 /* matches range-picker button height */
+  width: 200px;
+  border: var(--b-base);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+  transition: border-color var(--t-base) ease, width var(--t-base) ease;
+}
+
+.search-input::placeholder { color: var(--n4); }
+
+.search-input:hover { border-color: var(--text-tertiary); }
+
+.search-input:focus {
+  border-color: var(--a1);
+  width: 240px;                 /* gentle expansion on focus */
+}
+
+.search-input:focus-visible {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
+}
+
+/* Inline match-count next to the search input (kept subtle) */
+.filter-count {
+  font-size: 0.6875rem;
+  color: var(--n4);
+  font-variant-numeric: tabular-nums;
   letter-spacing: 0;
+  white-space: nowrap;
 }
 
 /* ── Filters ── */

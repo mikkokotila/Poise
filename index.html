@@ -13,23 +13,26 @@
       <!-- Main view -->
       <section id="view-main" class="view">
         <header class="view-header">
-          <div class="view-title">Main <span class="view-sub" id="main-sub">everything you're part of</span></div>
-          <div class="range-picker" id="time-picker">
-            <button data-time="all" class="active">Any time</button>
-            <button data-time="today">Today</button>
-            <button data-time="yesterday">Yesterday</button>
-            <button data-time="week">This week</button>
+          <div class="filter-cluster" id="main-filters">
+            <div class="range-picker" id="filter-type">
+              <button data-filter="both" class="active">All</button>
+              <button data-filter="issue">Issues</button>
+              <button data-filter="pr">PRs</button>
+            </div>
+            <div class="range-picker" id="filter-status">
+              <button data-status="all" class="active">Any</button>
+              <button data-status="open">Open</button>
+            </div>
+            <div class="range-picker" id="time-picker">
+              <button data-time="all" class="active">Any time</button>
+              <button data-time="today">Today</button>
+              <button data-time="yesterday">Yesterday</button>
+              <button data-time="week">This week</button>
+            </div>
+            <input class="search-input" id="search-input" type="search" placeholder="Filter…" autocomplete="off" spellcheck="false" />
+            <span class="filter-count" id="count"></span>
           </div>
         </header>
-        <nav id="filters">
-          <button data-filter="both" class="active">All</button>
-          <button data-filter="issue">Issues</button>
-          <button data-filter="pr">PRs</button>
-          <span class="separator"></span>
-          <button data-status="all" class="active" id="status-all">Any</button>
-          <button data-status="open" id="status-open">Open</button>
-          <span class="count" id="count"></span>
-        </nav>
         <main>
           <table id="table">
             <thead>

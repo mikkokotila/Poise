@@ -55,6 +55,8 @@ let dragId: number | null = null
 let viewEl: HTMLElement
 let timeFilter: TimeFilter = 'all'
 let statusFilter: StatusFilter = 'all'
+let searchQuery = ''
+let searchDebounce: ReturnType<typeof setTimeout> | null = null
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -78,8 +80,19 @@ function laneCountEl(lane: Lane): HTMLElement {
   return laneEl(lane).querySelector('.lane-count')!
 }
 
+function matchesSearch(...haystacks: (string | null | undefined)[]): boolean {
+  if (!searchQuery) return true
+  const q = searchQuery.toLowerCase()
+  for (const h of haystacks) {
+    if (h && h.toLowerCase().includes(q)) return true
+  }
+  return false
+}
+
 function manualInLane(lane: 'idea' | 'concept' | 'plan'): ManualCard[] {
-  return manualCards.filter((c) => c.lane === lane).sort((a, b) => a.position - b.position)
+  return manualCards
+    .filter((c) => c.lane === lane && matchesSearch(c.text))
+    .sort((a, b) => a.position - b.position)
 }
 
 function timeWindow(): { since?: string; until?: string } {
@@ -91,8 +104,9 @@ function timeWindow(): { since?: string; until?: string } {
 
 function liveInLane(lane: 'issue' | 'pr'): LiveItem[] {
   const isPr = lane === 'pr' ? 1 : 0
-  // Items already arrive filtered server-side — just split by type
-  return liveItems.filter((i) => i.is_pr === isPr)
+  // Items already arrive filtered server-side by status / time — search is
+  // applied here client-side over the loaded set so typing is instant.
+  return liveItems.filter((i) => i.is_pr === isPr && matchesSearch(i.title, i.repo))
 }
 
 function relativeTime(iso: string): string {
@@ -145,8 +159,7 @@ function renderShell(): string {
 
   return `
     <header class="view-header">
-      <div class="view-title">Stream <span class="view-sub" id="stream-sub">my involvement</span></div>
-      <div class="stream-controls">
+      <div class="filter-cluster" id="stream-filters">
         <div class="range-picker" id="stream-status-filter">
           <button data-status="all" class="${statusFilter === 'all' ? 'active' : ''}">Any</button>
           <button data-status="open" class="${statusFilter === 'open' ? 'active' : ''}">Open</button>
@@ -157,6 +170,7 @@ function renderShell(): string {
           <button data-time="yesterday" class="${timeFilter === 'yesterday' ? 'active' : ''}">Yesterday</button>
           <button data-time="week" class="${timeFilter === 'week' ? 'active' : ''}">This week</button>
         </div>
+        <input class="search-input" id="stream-search" type="search" placeholder="Filter…" autocomplete="off" spellcheck="false" />
       </div>
     </header>
     <div class="kanban">${lanes}</div>
@@ -654,6 +668,20 @@ function attachFilterHandlers() {
     btn.classList.add('active')
     saveFilters()
     try { await fetchLive(); renderLiveOnly() } catch (err) { console.error(err) }
+  })
+
+  // Search — pure client-side filter over what's already loaded. Debounced
+  // so typing doesn't thrash the renderer. Re-renders BOTH manual and live
+  // lanes since search applies across the whole board.
+  const searchEl = viewEl.querySelector<HTMLInputElement>('#stream-search')!
+  searchEl.addEventListener('input', () => {
+    if (searchDebounce) clearTimeout(searchDebounce)
+    searchDebounce = setTimeout(() => {
+      const next = searchEl.value.trim()
+      if (next === searchQuery) return
+      searchQuery = next
+      renderAll()
+    }, 90)
   })
 }
 

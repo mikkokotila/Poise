@@ -29,6 +29,9 @@ let bodyEl: HTMLElement
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 let fetchInFlight = false
 let everRendered = false
+let searchQuery = ''
+let searchDebounce: ReturnType<typeof setTimeout> | null = null
+let lastDashboard: DashboardData | null = null
 
 function escapeHtml(s: string): string {
   const d = document.createElement('div'); d.textContent = s; return d.innerHTML
@@ -214,16 +217,36 @@ function flightTable(rowsHtml: string): string {
 }
 
 function renderDashboard(d: DashboardData): string {
-  const inFlightKeys = new Set(d.inFlight.map((e) => `${e.swarm}::${e.target}`))
-  const orphanKeys = [...d.history.keys()].filter((k) => !inFlightKeys.has(k))
+  // Apply search filter (client-side, over already-loaded data) — keeps a
+  // row if the query appears in target / status / message / actor.
+  const matchEvent = (e: SwarmEvent): boolean => {
+    if (!searchQuery) return true
+    const q = searchQuery.toLowerCase()
+    return (e.target ?? '').toLowerCase().includes(q)
+      || e.status.toLowerCase().includes(q)
+      || e.message.toLowerCase().includes(q)
+      || (e.actor ?? '').toLowerCase().includes(q)
+  }
+  const matchKey = (k: string): boolean => {
+    if (!searchQuery) return true
+    const hist = d.history.get(k) || []
+    if (hist.some(matchEvent)) return true
+    // Also match the key itself (so typing a repo name still works on idle
+    // rows where the latest event might not contain it textually)
+    return k.toLowerCase().includes(searchQuery.toLowerCase())
+  }
 
-  const flightRows = d.inFlight.map((e, i) => {
+  const inFlight = d.inFlight.filter(matchEvent)
+  const inFlightKeys = new Set(inFlight.map((e) => `${e.swarm}::${e.target}`))
+  const orphanKeys = [...d.history.keys()].filter((k) => !inFlightKeys.has(k) && matchKey(k))
+
+  const flightRows = inFlight.map((e, i) => {
     const k = `${e.swarm}::${e.target}`
     return renderRow(e, d.history.get(k) || [], d.now, i, false)
   }).join('')
 
-  const flightHtml = d.inFlight.length === 0
-    ? `<div class="section-empty">Nothing in flight right now.</div>`
+  const flightHtml = inFlight.length === 0
+    ? `<div class="section-empty">${searchQuery ? 'No in-flight rows match the filter.' : 'Nothing in flight right now.'}</div>`
     : flightTable(flightRows)
 
   let idleHtml = ''
@@ -240,13 +263,8 @@ function renderDashboard(d: DashboardData): string {
   }
 
   return `
-    <header class="view-header">
-      <div class="view-title">Swarm <span class="view-sub" id="swarm-sub">live</span></div>
-      <div class="refresh-note">refreshes every 15s</div>
-    </header>
-
     <div class="kpi-row swarm-kpis">
-      <div class="kpi"><div class="kpi-label">In flight</div><div class="kpi-value">${d.inFlight.length}</div><div class="kpi-sub">live targets</div></div>
+      <div class="kpi"><div class="kpi-label">In flight</div><div class="kpi-value">${inFlight.length}</div><div class="kpi-sub">live targets</div></div>
       <div class="kpi"><div class="kpi-label">Blocked</div><div class="kpi-value">${d.blocked}</div><div class="kpi-sub">need attention</div></div>
       <div class="kpi"><div class="kpi-label">PRs opened today</div><div class="kpi-value">${d.prsOpenedToday}</div><div class="kpi-sub">by worker</div></div>
       <div class="kpi"><div class="kpi-label">Milestones today</div><div class="kpi-value">${d.milestonesToday}</div><div class="kpi-sub">approved · pushed · merged · edited</div></div>
@@ -322,11 +340,10 @@ async function loadAndRender() {
     }
     const json = await res.json()
     const events: SwarmEvent[] = json.events || []
-    const data = buildDashboard(events)
-    bodyEl.innerHTML = renderDashboard(data)
+    lastDashboard = buildDashboard(events)
+    bodyEl.innerHTML = renderDashboard(lastDashboard)
     everRendered = true
     restoreOpenRows(previouslyOpen)
-    updateSubtitle()
   } catch (err) {
     if (!everRendered) {
       bodyEl.innerHTML = renderError(`Swarm service unreachable: ${(err as Error).message}`)
@@ -336,12 +353,17 @@ async function loadAndRender() {
   }
 }
 
+// Re-render only — used when only the search query changed and we want to
+// avoid re-fetching the whole dashboard from the slow upstream.
+function renderFromCache() {
+  if (!lastDashboard) return
+  const previouslyOpen = bodyEl.querySelector('.target-row') ? snapshotOpenRows() : new Set<string>()
+  bodyEl.innerHTML = renderDashboard(lastDashboard)
+  restoreOpenRows(previouslyOpen)
+}
+
 function renderLoading(): string {
   return `
-    <header class="view-header">
-      <div class="view-title">Swarm <span class="view-sub" id="swarm-sub">live</span></div>
-      <div class="refresh-note">refreshes every 15s</div>
-    </header>
     <div class="kpi-row swarm-kpis">
       <div class="kpi"><div class="kpi-label">In flight</div><div class="kpi-value swarm-skeleton">—</div><div class="kpi-sub">live targets</div></div>
       <div class="kpi"><div class="kpi-label">Blocked</div><div class="kpi-value swarm-skeleton">—</div><div class="kpi-sub">need attention</div></div>
@@ -354,22 +376,7 @@ function renderLoading(): string {
 }
 
 function renderError(msg: string): string {
-  return `
-    <header class="view-header">
-      <div class="view-title">Swarm <span class="view-sub">offline</span></div>
-    </header>
-    <div class="section-empty">${escapeHtml(msg)}</div>
-  `
-}
-
-function updateSubtitle() {
-  const sub = document.getElementById('swarm-sub')
-  if (!sub) return
-  // Lazy import to avoid a circular dep — config is already loaded at boot
-  import('../config').then((m) => {
-    const org = m.getSettings().org
-    sub.textContent = org ? `${org} · live` : 'live'
-  }).catch(() => { /* ignore */ })
+  return `<div class="section-empty">${escapeHtml(msg)}</div>`
 }
 
 export function stopSwarmRefresh() {
@@ -380,9 +387,29 @@ export async function initSwarmView() {
   viewEl = document.getElementById('view-swarm')!
   if (!initialized) {
     initialized = true
-    viewEl.innerHTML = '<div id="swarm-body"></div>'
+    // Persistent shell: header (search input) outside the body so typing
+    // survives the 15-second auto-refresh that reflows the rest of the view.
+    viewEl.innerHTML = `
+      <header class="view-header">
+        <div class="filter-cluster">
+          <input class="search-input" id="swarm-search" type="search" placeholder="Filter…" autocomplete="off" spellcheck="false" />
+        </div>
+      </header>
+      <div id="swarm-body"></div>
+    `
     bodyEl = viewEl.querySelector<HTMLElement>('#swarm-body')!
     attachToggleHandlers()
+
+    const searchEl = viewEl.querySelector<HTMLInputElement>('#swarm-search')!
+    searchEl.addEventListener('input', () => {
+      if (searchDebounce) clearTimeout(searchDebounce)
+      searchDebounce = setTimeout(() => {
+        const next = searchEl.value.trim()
+        if (next === searchQuery) return
+        searchQuery = next
+        renderFromCache()
+      }, 90)
+    })
   } else {
     bodyEl = viewEl.querySelector<HTMLElement>('#swarm-body')!
   }

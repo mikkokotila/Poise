@@ -29,11 +29,12 @@ export interface PrListArgs {
   status: 'all' | 'open'
   since?: string
   until?: string
+  q?: string                       // free-text filter (title / repo / author)
   limit: number
   offset: number
 }
 
-function buildPrWhere(args: Pick<PrListArgs, 'type' | 'status' | 'since' | 'until'>): { where: string[]; params: any[] } {
+function buildPrWhere(args: Pick<PrListArgs, 'type' | 'status' | 'since' | 'until' | 'q'>): { where: string[]; params: any[] } {
   const where: string[] = []
   const params: any[] = []
   if (args.type === 'issue') where.push('is_pr = 0')
@@ -41,6 +42,14 @@ function buildPrWhere(args: Pick<PrListArgs, 'type' | 'status' | 'since' | 'unti
   if (args.status === 'open') where.push("state = 'open'")
   if (args.since) { where.push('updated_at >= ?'); params.push(args.since) }
   if (args.until) { where.push('updated_at < ?'); params.push(args.until) }
+  if (args.q) {
+    // Match against title, repo, author — covers what someone is most likely
+    // typing into a "filter…" box. Case-insensitive courtesy of LIKE on a
+    // SQLite TEXT column with default NOCASE-friendly inputs.
+    const like = `%${args.q.replace(/[%_\\]/g, (m) => '\\' + m)}%`
+    where.push(`(title LIKE ? ESCAPE '\\' OR repo LIKE ? ESCAPE '\\' OR author LIKE ? ESCAPE '\\')`)
+    params.push(like, like, like)
+  }
   return { where, params }
 }
 
