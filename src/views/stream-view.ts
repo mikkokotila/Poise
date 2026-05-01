@@ -31,16 +31,28 @@ interface ManualCard {
 }
 
 interface LiveItem {
-  id: number
-  repo: string
+  // Full GitHub identifier — `${repo}#${number}` is unique app-wide.
+  repo: string                     // full name, "Vaquum/foo"
   number: number
   title: string
-  html_url: string
+  url: string
   is_pr: 0 | 1
-  state: string                    // 'open' | 'closed'
+  state: 'open' | 'closed' | 'merged'
   created_at: string
   merged_at: string | null
   updated_at: string
+}
+
+interface GhRecord {
+  kind: 'pr' | 'issue'
+  repo: string
+  number: number
+  state: 'open' | 'closed' | 'merged'
+  title: string
+  url: string
+  created_at: string
+  updated_at: string
+  merged_at: string | null
 }
 
 type PrStatus = 'mergeable'        // currently the only meaningful upstream signal
@@ -132,14 +144,19 @@ function relativeTime(iso: string): string {
 // the deviations — merged and closed — so the eye lands on the cards that
 // have actually moved past the "active work" state.
 function liveStateLabel(item: LiveItem): { text: string; cls: string } | null {
-  if (item.is_pr === 1 && item.merged_at) return { text: 'merged', cls: 'merged' }
-  if (item.state === 'closed')            return { text: 'closed', cls: 'closed' }
+  if (item.state === 'merged') return { text: 'merged', cls: 'merged' }
+  if (item.state === 'closed') return { text: 'closed', cls: 'closed' }
   return null
 }
 
 function prKey(item: LiveItem): string {
-  const org = getSettings().org
-  return `${org}/${item.repo}#${item.number}`
+  // repo is now the full owner/name, matching the /github record shape
+  return `${item.repo}#${item.number}`
+}
+
+function shortRepo(fullRepo: string): string {
+  const i = fullRepo.indexOf('/')
+  return i < 0 ? fullRepo : fullRepo.slice(i + 1)
 }
 
 function isFresh(item: LiveItem): boolean {
@@ -219,14 +236,14 @@ function renderLiveItem(item: LiveItem): HTMLElement {
   if (isMergeable(item))      classes.push('card-mergeable')
   else if (isFresh(item) && item.is_pr === 1) classes.push('card-fresh')
   el.className = classes.join(' ')
-  el.dataset.id = String(item.id)
+  el.dataset.id = prKey(item)        // stable id across refreshes for the FLIP
   const st = liveStateLabel(item)
   const stateBadge = st ? `<span class="state ${st.cls}">${st.text}</span>` : ''
   el.innerHTML = `
-    <a class="card-link" href="${item.html_url}" target="_blank" rel="noopener">
+    <a class="card-link" href="${item.url}" target="_blank" rel="noopener">
       <div class="card-text">${escapeHtml(item.title)}</div>
       <div class="card-meta">
-        <span class="card-repo">${escapeHtml(item.repo)}</span>
+        <span class="card-repo">${escapeHtml(shortRepo(item.repo))}</span>
         <span class="card-num">#${item.number}</span>
         ${stateBadge}
         <span class="card-time">${relativeTime(item.updated_at)}</span>
@@ -303,13 +320,13 @@ function renderLiveLaneAnimated(laneKey: 'issue' | 'pr') {
   // 2. Last — reorder existing nodes + insert any new ones. Cards no
   //    longer in newItems are dropped from the DOM (no leave animation
   //    in v1; in practice the polling rarely sees a card disappear).
-  const newIds = new Set(newItems.map((i) => String(i.id)))
+  const newIds = new Set(newItems.map(prKey))
   for (const [id, el] of existingEls) {
     if (!newIds.has(id)) el.remove()
   }
   const fragment = document.createDocumentFragment()
   for (const item of newItems) {
-    const idStr = String(item.id)
+    const idStr = prKey(item)
     const existing = existingEls.get(idStr)
     if (existing) {
       fragment.appendChild(existing)        // moved to its new index
@@ -326,9 +343,9 @@ function renderLiveLaneAnimated(laneKey: 'issue' | 'pr') {
   //    so the card LOOKS like it's still in its old position.
   const movers: HTMLElement[] = []
   for (const item of newItems) {
-    const cardEl = existingEls.get(String(item.id))
+    const cardEl = existingEls.get(prKey(item))
     if (!cardEl) continue
-    const firstRect = firstRects.get(String(item.id))
+    const firstRect = firstRects.get(prKey(item))
     if (!firstRect) continue
     const lastRect = cardEl.getBoundingClientRect()
     const dx = firstRect.left - lastRect.left
@@ -415,8 +432,8 @@ async function fetchPrStatus() {
 // the user sees no flicker when only the PR-status map changed.
 function applyPrStatusClasses() {
   for (const cardEl of viewEl.querySelectorAll<HTMLElement>('.card.card-live')) {
-    const id = Number(cardEl.dataset.id)
-    const item = liveItems.find((i) => i.id === id)
+    const id = cardEl.dataset.id || ''
+    const item = liveItems.find((i) => prKey(i) === id)
     if (!item || item.is_pr !== 1) continue
     const merge = isMergeable(item)
     const fresh = !merge && isFresh(item)
@@ -445,24 +462,42 @@ async function pollLiveTick() {
 
 async function fetchLive() {
   const win = timeWindow()
-  const params = new URLSearchParams({
-    type: 'both',
-    status: statusFilter,
-    limit: String(LIVE_LIMIT),
-    offset: '0',
+  const payload: Record<string, unknown> = {
+    operation: 'list',
+    record_type: 'all',
+    record_state: statusFilter === 'open' ? 'open' : 'all',
+    limit: LIVE_LIMIT,
+    offset: 0,
+  }
+  if (win.since) payload.updated_since = win.since
+  if (win.until) payload.updated_until = win.until
+  const res = await fetch('/api/gh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
   })
-  if (win.since) params.set('since', win.since)
-  if (win.until) params.set('until', win.until)
-  const res = await fetch(`/api/cache/prs?${params.toString()}`)
-  if (!res.ok) throw new Error(`/api/cache/prs ${res.status}`)
+  if (!res.ok) throw new Error(`/api/gh ${res.status}`)
   const data = await res.json()
-  liveItems = data.items as LiveItem[]
+  const records: GhRecord[] = data.records || []
+  liveItems = records.map((r) => ({
+    repo: r.repo,
+    number: r.number,
+    title: r.title,
+    url: r.url,
+    is_pr: r.kind === 'pr' ? 1 : 0,
+    state: r.state,
+    created_at: r.created_at,
+    merged_at: r.merged_at,
+    updated_at: r.updated_at,
+  }))
 }
 
+// Full repo names ("Vaquum/foo") seen in the loaded live set, sorted by
+// the short name so the issue dropdown reads cleanly.
 function distinctRepos(): string[] {
   const set = new Set<string>()
   for (const i of liveItems) set.add(i.repo)
-  return [...set].sort((a, b) => a.localeCompare(b))
+  return [...set].sort((a, b) => shortRepo(a).localeCompare(shortRepo(b)))
 }
 
 // ── Composers ────────────────────────────────────────────────────────────────
@@ -539,10 +574,12 @@ function openIssueComposer() {
   const addBtn = laneNode.querySelector<HTMLButtonElement>('.lane-add')!
   addBtn.hidden = true
 
+  // Show short names in the dropdown but submit the full owner/name as the
+  // value so the API call doesn't have to reassemble it.
   const repos = distinctRepos()
   const repoOptions = repos.length === 0
-    ? '<option value="">(no repos cached — sync first)</option>'
-    : repos.map((r) => `<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`).join('')
+    ? '<option value="">(no repos available)</option>'
+    : repos.map((r) => `<option value="${escapeHtml(r)}">${escapeHtml(shortRepo(r))}</option>`).join('')
 
   const composer = document.createElement('div')
   composer.className = 'composer composer-issue'
@@ -573,33 +610,34 @@ function openIssueComposer() {
   const submit = async () => {
     const title = titleInput.value.trim()
     const body = bodyTa.value.trim()
-    const repo = repoSel.value
+    const repo = repoSel.value             // already the full owner/name
     if (!title) { showError('Title is required'); titleInput.focus(); return }
     if (!repo)  { showError('Repo is required'); return }
-
-    const org = getSettings().org
-    if (!org)   { showError('Org not configured in Settings'); return }
 
     addB.disabled = true
     addB.textContent = 'Opening…'
     errEl.hidden = true
     try {
-      const ghRes = await fetch(`/api/github/repos/${org}/${repo}/issues`, {
+      const ghRes = await fetch('/api/gh', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title, body }),
+        body: JSON.stringify({
+          operation: 'open_issue',
+          repository_full_name: repo,
+          title,
+          body,
+        }),
       })
       if (!ghRes.ok) {
         const text = await ghRes.text().catch(() => '')
-        throw new Error(`GitHub ${ghRes.status}: ${text.slice(0, 160)}`)
+        throw new Error(`Github ${ghRes.status}: ${text.slice(0, 160)}`)
       }
       close()
-      // Pull the new issue into the cache and re-render the live lanes
-      try {
-        await fetch('/api/cache/sync', { method: 'POST' })
-      } catch { /* sync best-effort */ }
+      // The /github service publishes the new record into its store —
+      // pull it down via fetchLive so the new issue lands at the top of
+      // the Issue lane through the standard FLIP path.
       await fetchLive()
-      renderLiveOnly()
+      renderLiveOnly({ animate: true })
     } catch (err) {
       addB.disabled = false
       addB.textContent = 'Open issue'

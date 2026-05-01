@@ -1,31 +1,21 @@
-// Settings panel — GitHub PAT, org, username, timezone.
+// Settings panel — org, username, timezone, refresh rate.
 // Slides in from the right, same pattern as the typography panel.
+//
+// GitHub auth no longer lives here — Poise reads through the local
+// /github service which uses gh-cli auth on its own side.
 
 import { getSettings as getCachedSettings, setLocalSettings, loadSettings, getRefreshRate, setRefreshRate } from './config'
 
 let panelEl: HTMLElement | null = null
-let statusDot: HTMLElement | null = null
-let statusText: HTMLElement | null = null
-let tokenInput: HTMLInputElement | null = null
 let orgInput: HTMLInputElement | null = null
 let meInput: HTMLInputElement | null = null
 let tzSelect: HTMLSelectElement | null = null
 let saveBtn: HTMLButtonElement | null = null
-let clearBtn: HTMLButtonElement | null = null
 let helpEl: HTMLElement | null = null
-let configured = false
 
 async function refreshStatus(): Promise<void> {
-  try {
-    const res = await fetch('/api/auth/status')
-    const data = await res.json()
-    configured = !!data.configured
-  } catch {
-    configured = false
-  }
   await loadSettings()
   syncFieldsFromCache()
-  updateStatusUI()
 }
 
 function syncFieldsFromCache() {
@@ -38,21 +28,6 @@ function syncFieldsFromCache() {
   }
 }
 
-function updateStatusUI() {
-  if (!statusDot || !statusText || !tokenInput) return
-  if (configured) {
-    statusDot.className = 'st-dot ok'
-    statusText.textContent = 'Connected'
-    tokenInput.placeholder = '•••••••• (stored)'
-    clearBtn!.hidden = false
-  } else {
-    statusDot.className = 'st-dot missing'
-    statusText.textContent = 'No token'
-    tokenInput.placeholder = 'ghp_…'
-    clearBtn!.hidden = true
-  }
-}
-
 function setHelp(text: string, cls: 'info' | 'error' | 'ok' = 'info') {
   if (!helpEl) return
   helpEl.textContent = text
@@ -60,9 +35,8 @@ function setHelp(text: string, cls: 'info' | 'error' | 'ok' = 'info') {
 }
 
 async function saveAll() {
-  if (!saveBtn || !tokenInput || !orgInput || !meInput || !tzSelect) return
+  if (!saveBtn || !orgInput || !meInput || !tzSelect) return
 
-  const tokenRaw = tokenInput.value.trim()
   const org = orgInput.value.trim()
   const me = meInput.value.trim()
   const tz = tzSelect.value
@@ -75,24 +49,6 @@ async function saveAll() {
   saveBtn.disabled = true
   saveBtn.textContent = 'Saving…'
   try {
-    // Token is optional on subsequent saves. Only post a token if the user typed one,
-    // or if no token is configured yet.
-    if (tokenRaw) {
-      const tokenRes = await fetch('/api/auth/set-token', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: tokenRaw }),
-      })
-      const tokenData = await tokenRes.json()
-      if (!tokenRes.ok) {
-        setHelp(tokenData.error || 'Failed to save token', 'error')
-        return
-      }
-      configured = true
-    } else if (!configured) {
-      setHelp('Paste a PAT starting with ghp_', 'error')
-      return
-    }
-
     const res = await fetch('/api/settings', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ org, me, timezone: tz }),
@@ -103,42 +59,14 @@ async function saveAll() {
       return
     }
     setLocalSettings(data)
-
-    setHelp('Saved. Running sync…', 'ok')
-    tokenInput.value = ''
-    updateStatusUI()
-    triggerSync()
+    setHelp('Saved.', 'ok')
+    window.dispatchEvent(new CustomEvent('poise:synced'))
   } catch (err) {
     setHelp('Network error: ' + (err as Error).message, 'error')
   } finally {
     saveBtn.disabled = false
     saveBtn.textContent = 'Save'
   }
-}
-
-async function clearToken() {
-  if (!clearBtn) return
-  clearBtn.disabled = true
-  try {
-    await fetch('/api/auth/set-token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: '' }),
-    })
-    configured = false
-    updateStatusUI()
-    setHelp('Token cleared.', 'info')
-  } finally {
-    clearBtn.disabled = false
-  }
-}
-
-async function triggerSync() {
-  try {
-    const res = await fetch('/api/cache/sync', { method: 'POST' })
-    if (!res.ok) return
-    window.dispatchEvent(new CustomEvent('poise:synced'))
-  } catch { /* ignore */ }
 }
 
 function timezoneOptions(): string[] {
@@ -162,17 +90,6 @@ function buildPanel(): HTMLElement {
     <div class="tp-body">
       <div class="tp-group-label">GitHub</div>
 
-      <div class="st-status">
-        <span class="st-dot missing"></span>
-        <span class="st-status-text">No token</span>
-      </div>
-
-      <div class="tp-section">
-        <label class="tp-label">Personal access token</label>
-        <input type="password" class="st-input st-input-token" autocomplete="off" spellcheck="false" placeholder="ghp_…" />
-        <div class="st-help st-help-info">Classic PAT with <code>repo</code> + <code>read:org</code> scopes.</div>
-      </div>
-
       <div class="tp-section">
         <label class="tp-label">Organization</label>
         <input type="text" class="st-input st-input-org" autocomplete="off" spellcheck="false" placeholder="acme-corp" />
@@ -181,6 +98,7 @@ function buildPanel(): HTMLElement {
       <div class="tp-section">
         <label class="tp-label">Username (you)</label>
         <input type="text" class="st-input st-input-me" autocomplete="off" spellcheck="false" placeholder="octocat" />
+        <div class="st-help st-help-info">Used to highlight your own comments. Your GitHub auth is handled by the local <code>/github</code> service.</div>
       </div>
 
       <div class="tp-group-label">Time</div>
@@ -202,34 +120,25 @@ function buildPanel(): HTMLElement {
 
       <div class="st-row">
         <button class="st-save">Save</button>
-        <button class="st-clear" hidden>Clear token</button>
       </div>
 
       <div class="tp-hint">
-        Create a token at
-        <a href="https://github.com/settings/tokens/new?scopes=repo,read:org&description=Poise"
-           target="_blank" rel="noopener">github.com/settings/tokens</a>.
         Settings are stored locally in <code>~/.poise/cache.db</code>.
       </div>
     </div>
   `
 
-  statusDot = panel.querySelector('.st-dot')
-  statusText = panel.querySelector('.st-status-text')
-  tokenInput = panel.querySelector('.st-input-token') as HTMLInputElement
   orgInput = panel.querySelector('.st-input-org') as HTMLInputElement
   meInput = panel.querySelector('.st-input-me') as HTMLInputElement
   tzSelect = panel.querySelector('.st-input-tz') as HTMLSelectElement
   saveBtn = panel.querySelector('.st-save') as HTMLButtonElement
-  clearBtn = panel.querySelector('.st-clear') as HTMLButtonElement
   helpEl = panel.querySelector('.st-help')
 
   // Default the timezone select to the browser zone before the cache loads.
   tzSelect.value = browserTz
 
   saveBtn.addEventListener('click', saveAll)
-  clearBtn.addEventListener('click', clearToken)
-  for (const inp of [tokenInput, orgInput, meInput]) {
+  for (const inp of [orgInput, meInput]) {
     inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveAll() })
   }
 
@@ -260,11 +169,10 @@ export function openSettingsPanel() {
   refreshStatus()
   setTimeout(() => {
     // Focus the first empty required field
-    if (!tokenInput || !orgInput || !meInput) return
-    if (!configured) tokenInput.focus()
-    else if (!orgInput.value) orgInput.focus()
+    if (!orgInput || !meInput) return
+    if (!orgInput.value) orgInput.focus()
     else if (!meInput.value) meInput.focus()
-    else tokenInput.focus()
+    else orgInput.focus()
   }, 200)
 }
 
@@ -274,13 +182,8 @@ export function toggleSettingsPanel() {
   else openSettingsPanel()
 }
 
-export async function isTokenConfigured(): Promise<boolean> {
-  await refreshStatus()
-  return configured
-}
-
 export async function isFullyConfigured(): Promise<boolean> {
   await refreshStatus()
   const s = getCachedSettings()
-  return configured && !!s.org && !!s.me
+  return !!s.org && !!s.me
 }

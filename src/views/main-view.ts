@@ -1,4 +1,4 @@
-// Main table view — reads from SQLite cache (/api/cache/prs)
+// Main table view — reads through /api/gh from the unified /github API.
 
 import { getSettings, midnightInZone, startOfWeekInZone, getRefreshRateMs } from '../config'
 
@@ -227,27 +227,105 @@ function sentinelNeedsFetch(): boolean {
   return rect.top < window.innerHeight + 400
 }
 
+// Map the unified /github record shape to Poise's internal PrRow.
+// Status is derived from labels here — the API returns the raw label
+// list rather than a precomputed string per the doc.
+interface GhRecord {
+  kind: 'pr' | 'issue'
+  repo: string                      // "Vaquum/foo"
+  number: number
+  state: 'open' | 'closed' | 'merged'
+  title: string
+  url: string
+  created_at: string
+  updated_at: string
+  author: string
+  author_avatar: string | null
+  merged_at: string | null
+  comments_count: number
+  last_commenter: string | null
+  last_commenter_avatar: string | null
+  last_comment_body: string | null
+  labels: string[]
+  owner_login: string | null
+  owner_avatar: string | null
+}
+
+function deriveStatus(labels: string[]): string {
+  // IN_PROGRESS wins when both are set — later workflow stage takes precedence
+  if (labels.includes('IN_PROGRESS')) return 'BUILDING'
+  if (labels.includes('ALLOCATION'))  return 'ALLOCATED'
+  return 'IN_REVIEW'
+}
+
+function recordToRow(r: GhRecord): PrRow {
+  const shortRepo = r.repo.includes('/') ? r.repo.split('/', 2)[1] : r.repo
+  return {
+    id: 0,                          // unused — table indexes by array position
+    repo: shortRepo,
+    number: r.number,
+    title: r.title,
+    html_url: r.url,
+    author: r.author,
+    author_avatar: r.author_avatar,
+    is_pr: r.kind === 'pr' ? 1 : 0,
+    state: r.state === 'merged' ? 'closed' : r.state,   // keep the boolean state simple
+    status: deriveStatus(r.labels || []),
+    owner_login: r.owner_login,
+    owner_avatar: r.owner_avatar,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+    closed_at: null,
+    merged_at: r.merged_at,
+    comments_count: r.comments_count,
+    last_commenter: r.last_commenter,
+    last_commenter_avatar: r.last_commenter_avatar,
+    last_comment_body: r.last_comment_body,
+  }
+}
+
+function buildListPayload(): Record<string, unknown> {
+  const win = timeWindow()
+  const payload: Record<string, unknown> = {
+    operation: 'list',
+    record_type: typeFilter === 'both' ? 'all' : (typeFilter === 'pr' ? 'pull_request' : 'issue'),
+    record_state: statusFilter === 'open' ? 'open' : 'all',
+    limit: PAGE_SIZE,
+    offset,
+  }
+  if (win.since)    payload.updated_since = win.since
+  if (win.until)    payload.updated_until = win.until
+  if (searchQuery)  payload.q = searchQuery
+  return payload
+}
+
 async function fetchPage(): Promise<void> {
   if (done || fetching) return
   fetching = true
   loader.hidden = false
   try {
-    const win = timeWindow()
-    const params = new URLSearchParams({
-      type: typeFilter,
-      status: statusFilter,
-      limit: String(PAGE_SIZE),
-      offset: String(offset),
-    })
-    if (win.since) params.set('since', win.since)
-    if (win.until) params.set('until', win.until)
-    if (searchQuery) params.set('q', searchQuery)
-    const url = `/api/cache/prs?${params.toString()}`
-    const res = await fetch(url)
-    if (!res.ok) throw new Error(`Cache ${res.status}`)
-    const data = await res.json()
-    const newItems: PrRow[] = data.items
-    total = data.total
+    const payload = buildListPayload()
+    const [pageRes, countRes] = await Promise.all([
+      fetch('/api/gh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }),
+      // Total count is a separate call so the page payload doesn't carry it.
+      // count_only ignores limit/offset — it returns the size of the full
+      // filtered set so the "20 / 1083" pill stays honest as the user pages.
+      fetch('/api/gh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, count_only: true, limit: undefined, offset: undefined }),
+      }),
+    ])
+    if (!pageRes.ok)  throw new Error(`Github ${pageRes.status}`)
+    if (!countRes.ok) throw new Error(`Github ${countRes.status}`)
+    const pageData  = await pageRes.json()
+    const countData = await countRes.json()
+    const newItems: PrRow[] = (pageData.records as GhRecord[] || []).map(recordToRow)
+    total = typeof countData.count === 'number' ? countData.count : items.length + newItems.length
     const startIdx = items.length
     items.push(...newItems)
     offset += newItems.length
@@ -399,11 +477,16 @@ function attachHandlers() {
       const synthesis: string = reviewData.synthesis
       const org = getSettings().org
       if (!org) throw new Error('Org not configured')
-      const commentRes = await fetch(`/api/github/repos/${org}/${item.repo}/issues/${item.number}/comments`, {
+      const commentRes = await fetch('/api/gh', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ body: synthesis }),
+        body: JSON.stringify({
+          operation: 'post_comment',
+          repository_full_name: `${org}/${item.repo}`,
+          number: item.number,
+          body: synthesis,
+        }),
       })
-      if (!commentRes.ok) throw new Error(`GitHub comment ${commentRes.status}`)
+      if (!commentRes.ok) throw new Error(`Github ${commentRes.status}`)
       reviewed.add(item.html_url)
       saveReviewed()
       button.innerHTML = PLAY_SVG
