@@ -146,18 +146,19 @@ function renderShell(): string {
   return `
     <header class="view-header">
       <div class="view-title">Stream <span class="view-sub" id="stream-sub">my involvement</span></div>
-      <div class="range-picker" id="stream-time-picker">
-        <button data-time="all" class="${timeFilter === 'all' ? 'active' : ''}">Any time</button>
-        <button data-time="today" class="${timeFilter === 'today' ? 'active' : ''}">Today</button>
-        <button data-time="yesterday" class="${timeFilter === 'yesterday' ? 'active' : ''}">Yesterday</button>
-        <button data-time="week" class="${timeFilter === 'week' ? 'active' : ''}">This week</button>
+      <div class="stream-controls">
+        <div class="range-picker" id="stream-status-filter">
+          <button data-status="all" class="${statusFilter === 'all' ? 'active' : ''}">Any</button>
+          <button data-status="open" class="${statusFilter === 'open' ? 'active' : ''}">Open</button>
+        </div>
+        <div class="range-picker" id="stream-time-picker">
+          <button data-time="all" class="${timeFilter === 'all' ? 'active' : ''}">Any time</button>
+          <button data-time="today" class="${timeFilter === 'today' ? 'active' : ''}">Today</button>
+          <button data-time="yesterday" class="${timeFilter === 'yesterday' ? 'active' : ''}">Yesterday</button>
+          <button data-time="week" class="${timeFilter === 'week' ? 'active' : ''}">This week</button>
+        </div>
       </div>
     </header>
-    <nav id="stream-status-filter" class="stream-filters">
-      <button data-status="all" class="${statusFilter === 'all' ? 'active' : ''}">Any</button>
-      <button data-status="open" class="${statusFilter === 'open' ? 'active' : ''}">Open</button>
-      <span class="stream-filters-note">Issue + PR lanes</span>
-    </nav>
     <div class="kanban">${lanes}</div>
   `
 }

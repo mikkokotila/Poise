@@ -2022,45 +2022,16 @@ tr:hover .review-btn { opacity: 1; }
   outline-offset: 2px;
 }
 
-/* ── Stream filter bar (status: Any / Open) ──────────────────────────
-   Sits between the view header and the kanban. The time-range picker
-   lives in the header itself (right-aligned, range-picker class). */
+/* ── Stream filter cluster ─────────────────────────────────────────
+   Status (Any / Open) and Time (Any time / Today / Yesterday / This
+   week) sit side-by-side in the view header right edge — both as
+   range-picker pill groups, separated by a small gap. Both narrow
+   only the live lanes (Issue / PR); manual lanes are unaffected. */
 
-#view-stream .stream-filters {
+.stream-controls {
   display: flex;
   align-items: center;
-  gap: var(--sp-1);
-  margin-bottom: var(--sp-4);
-}
-
-#view-stream .stream-filters button {
-  font-family: inherit;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  padding: 6px 16px;
-  border: var(--b-base);
-  border-radius: var(--r-pill);
-  background: var(--surface);
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: color var(--t-base) ease, background var(--t-base) ease, border-color var(--t-base) ease;
-}
-
-#view-stream .stream-filters button:hover {
-  color: var(--text);
-  border-color: var(--text-tertiary);
-}
-
-#view-stream .stream-filters button.active {
-  background: var(--n5);
-  border-color: var(--n5);
-  color: var(--n0);
-}
-
-.stream-filters-note {
-  margin-left: var(--sp-3);
-  font-size: 0.6875rem;
-  color: var(--n4);
+  gap: var(--sp-3);
 }
 
 /* ── Issue composer (Title / Body / Repo) ────────────────────────────
