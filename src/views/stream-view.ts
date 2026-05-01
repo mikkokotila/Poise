@@ -38,9 +38,14 @@ interface LiveItem {
   html_url: string
   is_pr: 0 | 1
   state: string                    // 'open' | 'closed'
+  created_at: string
   merged_at: string | null
   updated_at: string
 }
+
+type PrStatus = 'mergeable'        // currently the only meaningful upstream signal
+const FRESH_WINDOW_MS = 6 * 60 * 60 * 1000   // PRs created in the last 6h read as "just opened"
+const PR_STATUS_POLL_MS = 60_000             // upstream caches at 1m, no point hammering faster
 
 type TimeFilter = 'all' | 'today' | 'yesterday' | 'week'
 type StatusFilter = 'all' | 'open'
@@ -57,6 +62,8 @@ let timeFilter: TimeFilter = 'all'
 let statusFilter: StatusFilter = 'all'
 let searchQuery = ''
 let searchDebounce: ReturnType<typeof setTimeout> | null = null
+let prStatus: Map<string, PrStatus> = new Map()
+let prStatusTimer: ReturnType<typeof setInterval> | null = null
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -127,6 +134,19 @@ function liveStateLabel(item: LiveItem): { text: string; cls: string } {
   return item.state === 'open' ? { text: 'open', cls: 'open' } : { text: 'closed', cls: 'closed' }
 }
 
+function prKey(item: LiveItem): string {
+  const org = getSettings().org
+  return `${org}/${item.repo}#${item.number}`
+}
+
+function isFresh(item: LiveItem): boolean {
+  return Date.now() - new Date(item.created_at).getTime() < FRESH_WINDOW_MS
+}
+
+function isMergeable(item: LiveItem): boolean {
+  return item.is_pr === 1 && prStatus.get(prKey(item)) === 'mergeable'
+}
+
 function loadFilters() {
   try {
     const raw = localStorage.getItem(FILTER_KEY)
@@ -192,7 +212,10 @@ function renderManualCard(card: ManualCard): HTMLElement {
 
 function renderLiveItem(item: LiveItem): HTMLElement {
   const el = document.createElement('article')
-  el.className = 'card card-live'
+  const classes = ['card', 'card-live']
+  if (isMergeable(item))      classes.push('card-mergeable')
+  else if (isFresh(item) && item.is_pr === 1) classes.push('card-fresh')
+  el.className = classes.join(' ')
   el.dataset.id = String(item.id)
   const st = liveStateLabel(item)
   el.innerHTML = `
@@ -256,6 +279,38 @@ async function fetchManual() {
   if (!res.ok) throw new Error(`/api/stream ${res.status}`)
   const data = await res.json()
   manualCards = data.cards.filter((c: ManualCard) => c.lane === 'idea' || c.lane === 'concept' || c.lane === 'plan')
+}
+
+async function fetchPrStatus() {
+  const prKeys = liveItems.filter((i) => i.is_pr === 1).map(prKey)
+  if (prKeys.length === 0) {
+    if (prStatus.size > 0) { prStatus.clear(); renderLiveOnly() }
+    return
+  }
+  try {
+    const res = await fetch('/api/pr-status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prs: prKeys }),
+    })
+    if (!res.ok) return
+    const data = await res.json()
+    const next = new Map<string, PrStatus>()
+    for (const [key, val] of Object.entries(data.statuses || {})) {
+      if (val === 'mergeable') next.set(key, 'mergeable')
+    }
+    // Cheap diff — only re-render if something actually changed
+    const changed = next.size !== prStatus.size
+      || [...next.entries()].some(([k, v]) => prStatus.get(k) !== v)
+    if (changed) {
+      prStatus = next
+      renderLiveOnly()
+    }
+  } catch { /* upstream offline — silent, cards stay neutral */ }
+}
+
+export function stopStreamPolling() {
+  if (prStatusTimer) { clearInterval(prStatusTimer); prStatusTimer = null }
 }
 
 async function fetchLive() {
@@ -701,7 +756,12 @@ export async function initStreamView() {
   try {
     await Promise.all([fetchManual(), fetchLive()])
     renderAll()
+    fetchPrStatus()                  // first PR-status pull, intentionally not awaited
   } catch (err) {
     console.error('[stream] failed to load:', err)
   }
+  // Poll the PR-status endpoint at the upstream's cadence. Cancelled when
+  // the user navigates away (see main.ts → showView).
+  stopStreamPolling()
+  prStatusTimer = setInterval(fetchPrStatus, PR_STATUS_POLL_MS)
 }

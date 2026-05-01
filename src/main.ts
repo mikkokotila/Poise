@@ -5,7 +5,7 @@ import { initMenu } from './menu'
 import { initMainView, refreshMainView } from './views/main-view'
 import { initFlowView } from './views/flow-view'
 import { initTrustView } from './views/trust-view'
-import { initStreamView } from './views/stream-view'
+import { initStreamView, stopStreamPolling } from './views/stream-view'
 import { initSwarmView, stopSwarmRefresh } from './views/swarm-view'
 import { loadSettings } from './config'
 
@@ -23,8 +23,9 @@ function showView(v: 'main' | 'flow' | 'trust' | 'stream' | 'swarm') {
     : v === 'stream' ? viewStreamEl
     : viewSwarmEl
 
-  // Stop the swarm auto-refresh when leaving its view
+  // Stop background polling when leaving the views that own them
   if (v !== 'swarm') stopSwarmRefresh()
+  if (v !== 'stream') stopStreamPolling()
 
   // Initialize the target first so content exists before the animation starts
   if (v === 'main') initMainView()

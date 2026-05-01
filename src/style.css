@@ -1903,6 +1903,18 @@ tr:hover .review-btn { opacity: 1; }
   letter-spacing: 0;
 }
 
+/* PR-card status accents — a 3px coloured stripe down the left edge so
+   actionable cards (mergeable, just-opened) catch the eye in a column
+   of mostly-neutral ones, without shouting. Mergeable wins if both
+   would apply: green = "this is ready", blue = "this is fresh". */
+.card.card-live.card-mergeable {
+  box-shadow: inset 3px 0 0 0 var(--a3);
+}
+
+.card.card-live.card-fresh:not(.card-mergeable) {
+  box-shadow: inset 3px 0 0 0 var(--a1);
+}
+
 /* Drop indicator = A1 (Blue), same hue as focus. Pill-shaped with a
    subtle glow so it's hard to miss between cards. */
 .drop-indicator {
