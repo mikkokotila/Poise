@@ -186,9 +186,11 @@ body {
   color: var(--text);
 }
 
+/* Active pill: N5 mid-grey, not N7 black. Matches the primary-action
+   treatment in Pipe / Settings — calm contrast, not eyepunch. */
 #filters button.active {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--n5);
+  border-color: var(--n5);
   color: var(--n0);
 }
 
@@ -934,11 +936,11 @@ tr:hover .review-btn { opacity: 1; }
 
 .range-picker button:hover { color: var(--text); background: var(--hover); }
 .range-picker button.active {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--n5);
+  border-color: var(--n5);
   color: var(--n0);
 }
-.range-picker button.active:hover { background: var(--accent); }
+.range-picker button.active:hover { background: var(--n6); border-color: var(--n6); }
 
 /* KPI row */
 .kpi-row {
@@ -1537,13 +1539,16 @@ tr:hover .review-btn { opacity: 1; }
   transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
 }
 
+/* Primary action: N5 mid-grey (matches Pipe). Lighter than N7 so it
+   doesn't shout in the panel; N6 on hover gives the press signal. */
 .st-save {
-  background: var(--accent);
+  background: var(--n5);
   color: var(--n0);
-  border-color: var(--accent);
+  border-color: var(--n5);
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
 
-.st-save:hover { opacity: 0.88; }
+.st-save:hover    { background: var(--n6); border-color: var(--n6); }
 .st-save:disabled { opacity: 0.5; cursor: default; }
 
 .st-clear:hover { color: var(--text); border-color: var(--text-tertiary); }
