@@ -221,7 +221,7 @@ thead th {
   letter-spacing: 0.08em;
   color: var(--text-tertiary);
   padding: 0 12px 10px 0;
-  border-bottom: 1px solid var(--border);
+  border-bottom: var(--b-base);
   overflow: hidden;
 }
 
@@ -264,7 +264,7 @@ td {
   padding: var(--typo-row-pad, 11px) 12px var(--typo-row-pad, 11px) 0;
   font-size: var(--typo-row-size, 0.8125rem);
   vertical-align: middle;
-  border-bottom: 1px solid var(--hairline);
+  border-bottom: var(--b-hair);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -321,8 +321,11 @@ td:first-child:has(.type-toggle) {
   color: var(--text-tertiary);
 }
 
-.type-toggle.issue { color: var(--green); }
-.type-toggle.pr    { color: var(--purple); }
+/* IS = teal (stable, secondary work), PR = violet (categorical, the
+   "ship" path). Both at full DS hue but small font + uppercase keeps
+   the wall-of-rows from shouting. */
+.type-toggle.issue { color: var(--a2); }
+.type-toggle.pr    { color: var(--a7); }
 
 /* ── Title ── */
 td a {
@@ -356,7 +359,7 @@ td a:hover {
 
 .comment-author {
   font-weight: 600;
-  color: var(--accent);
+  color: var(--text);            /* N6, not N7 — bold carries the weight */
 }
 
 .comment-author.is-me {
@@ -432,9 +435,13 @@ td a:hover {
   letter-spacing: 0.04em;
 }
 
-.state.open   { color: var(--green); }
-.state.closed { color: var(--red); }
-.state.merged { color: var(--purple); }
+/* DS hue assignments: A2 teal = "stable, active" (open) — quieter than
+   green so a feed full of open items doesn't fatigue. A3 green still
+   carries "successfully completed" for merged. A5 red flags the
+   abandoned ones the operator should notice. */
+.state.open   { color: var(--a2); }
+.state.merged { color: var(--a3); }
+.state.closed { color: var(--a5); }
 
 /* ── Status (workflow) ── */
 .status {
@@ -1017,7 +1024,7 @@ tr:hover .review-btn { opacity: 1; }
 }
 
 .flow-line-merged {
-  stroke: var(--accent);
+  stroke: var(--a2);              /* stable forward — same hue as feat */
   stroke-width: 2;
   fill: none;
 }
@@ -1061,17 +1068,20 @@ tr:hover .review-btn { opacity: 1; }
 
 .mix-segment:hover { opacity: 0.8; }
 
-.mix-segment.tag-feat     { background: var(--accent); }
-.mix-segment.tag-fix      { background: var(--red); opacity: 0.7; }
-.mix-segment.tag-chore    { background: var(--text-tertiary); }
-.mix-segment.tag-refactor { background: var(--purple); opacity: 0.5; }
-.mix-segment.tag-docs     { background: var(--text-secondary); opacity: 0.5; }
-.mix-segment.tag-test     { background: var(--green); opacity: 0.6; }
-.mix-segment.tag-style    { background: var(--border); }
-.mix-segment.tag-perf     { background: var(--purple); opacity: 0.7; }
-.mix-segment.tag-build    { background: var(--text-tertiary); opacity: 0.6; }
-.mix-segment.tag-ci       { background: var(--text-tertiary); opacity: 0.4; }
-.mix-segment.tag-revert   { background: var(--red); opacity: 0.5; }
+/* Categorical palette mapped to the DS accent wheel. Each tag gets a
+   distinct hue at uniform low-saturation alpha so the stacked bar
+   reads as a calm spectrum, not a rainbow. */
+.mix-segment.tag-feat     { background: var(--a2); }                   /* teal — main forward */
+.mix-segment.tag-fix      { background: var(--a4); opacity: 0.85; }    /* amber — bug load */
+.mix-segment.tag-chore    { background: var(--a8); opacity: 0.7; }     /* slate — neutral */
+.mix-segment.tag-refactor { background: var(--a7); opacity: 0.7; }     /* violet — categorical */
+.mix-segment.tag-docs     { background: var(--a1); opacity: 0.7; }     /* blue — info */
+.mix-segment.tag-test     { background: var(--a3); opacity: 0.7; }     /* green — quality */
+.mix-segment.tag-style    { background: var(--n3); }                   /* recedes */
+.mix-segment.tag-perf     { background: var(--a6); opacity: 0.7; }     /* rose — exception */
+.mix-segment.tag-build    { background: var(--a8); opacity: 0.5; }     /* slate, fainter */
+.mix-segment.tag-ci       { background: var(--a8); opacity: 0.35; }    /* slate, faintest */
+.mix-segment.tag-revert   { background: var(--a5); opacity: 0.7; }     /* red — destructive */
 .mix-segment.tag-other    { background: var(--a8); opacity: 0.5; }
 
 .mix-legend {
@@ -1098,17 +1108,17 @@ tr:hover .review-btn { opacity: 1; }
   margin-right: 6px;
 }
 
-.mix-label.tag-feat     .sw { background: var(--accent); }
-.mix-label.tag-fix      .sw { background: var(--red); opacity: 0.7; }
-.mix-label.tag-chore    .sw { background: var(--text-tertiary); }
-.mix-label.tag-refactor .sw { background: var(--purple); opacity: 0.5; }
-.mix-label.tag-docs     .sw { background: var(--text-secondary); opacity: 0.5; }
-.mix-label.tag-test     .sw { background: var(--green); opacity: 0.6; }
-.mix-label.tag-style    .sw { background: var(--border); }
-.mix-label.tag-perf     .sw { background: var(--purple); opacity: 0.7; }
-.mix-label.tag-build    .sw { background: var(--text-tertiary); opacity: 0.6; }
-.mix-label.tag-ci       .sw { background: var(--text-tertiary); opacity: 0.4; }
-.mix-label.tag-revert   .sw { background: var(--red); opacity: 0.5; }
+.mix-label.tag-feat     .sw { background: var(--a2); }
+.mix-label.tag-fix      .sw { background: var(--a4); opacity: 0.85; }
+.mix-label.tag-chore    .sw { background: var(--a8); opacity: 0.7; }
+.mix-label.tag-refactor .sw { background: var(--a7); opacity: 0.7; }
+.mix-label.tag-docs     .sw { background: var(--a1); opacity: 0.7; }
+.mix-label.tag-test     .sw { background: var(--a3); opacity: 0.7; }
+.mix-label.tag-style    .sw { background: var(--n3); }
+.mix-label.tag-perf     .sw { background: var(--a6); opacity: 0.7; }
+.mix-label.tag-build    .sw { background: var(--a8); opacity: 0.5; }
+.mix-label.tag-ci       .sw { background: var(--a8); opacity: 0.35; }
+.mix-label.tag-revert   .sw { background: var(--a5); opacity: 0.7; }
 .mix-label.tag-other    .sw { background: var(--a8); opacity: 0.5; }
 
 /* People table */
@@ -1131,7 +1141,7 @@ tr:hover .review-btn { opacity: 1; }
 .ppl-table td {
   padding: 10px 12px 10px 0;
   font-size: 0.8125rem;
-  border-bottom: 1px solid var(--hairline);
+  border-bottom: var(--b-hair);
 }
 
 .ppl-name {
@@ -1254,9 +1264,11 @@ tr:hover .review-btn { opacity: 1; }
   display: block;
 }
 
-.rw-feat  { fill: var(--accent); }
-.rw-fix   { fill: var(--red); opacity: 0.75; }
-.rw-other { fill: var(--border); }
+/* Bar fills: feat = A2 (stable, forward), fix = A4 (warning, signals
+   bug load), other = N3 (recedes). Calmer than feat-on-N7-black. */
+.rw-feat  { fill: var(--a2); }
+.rw-fix   { fill: var(--a4); opacity: 0.85; }
+.rw-other { fill: var(--n3); }
 
 .rework-legend {
   display: flex;
@@ -1274,9 +1286,9 @@ tr:hover .review-btn { opacity: 1; }
   vertical-align: middle;
   margin-right: 6px;
 }
-.rework-legend .sw.feat  { background: var(--accent); }
-.rework-legend .sw.fix   { background: var(--red); opacity: 0.75; }
-.rework-legend .sw.other { background: var(--border); }
+.rework-legend .sw.feat  { background: var(--a2); }
+.rework-legend .sw.fix   { background: var(--a4); opacity: 0.85; }
+.rework-legend .sw.other { background: var(--n3); }
 
 /* Buckets (engagement, iterations) */
 .buckets-title {
@@ -1312,16 +1324,19 @@ tr:hover .review-btn { opacity: 1; }
   overflow: hidden;
 }
 
+/* Bucket fills sit in tables of small bars repeated many times — calm
+   N5 reads as "data" without shouting. Warn = A5 at low alpha so the
+   "0 non-author comments" bucket still pops without being alarming. */
 .bucket-fill {
   height: 100%;
-  background: var(--accent);
-  opacity: 0.75;
+  background: var(--n5);
+  opacity: 0.85;
   transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .bucket-fill.bar-warn {
-  background: var(--red);
-  opacity: 0.5;
+  background: var(--a5);
+  opacity: 0.55;
 }
 
 .bucket-count {
@@ -1364,7 +1379,7 @@ tr:hover .review-btn { opacity: 1; }
 .hs-table td {
   padding: 10px 12px 10px 0;
   font-size: 0.8125rem;
-  border-bottom: 1px solid var(--hairline);
+  border-bottom: var(--b-hair);
   vertical-align: middle;
 }
 
@@ -1386,8 +1401,8 @@ tr:hover .review-btn { opacity: 1; }
 
 .hs-fill {
   height: 4px;
-  background: var(--accent);
-  opacity: 0.35;
+  background: var(--n5);          /* mid neutral — data, not alarm */
+  opacity: 0.7;
   border-radius: 0;
   transition: width 0.25s ease;
 }
@@ -1536,7 +1551,7 @@ tr:hover .review-btn { opacity: 1; }
 .tp-hint {
   margin-top: var(--sp-6);
   padding-top: var(--sp-4);
-  border-top: 1px solid var(--hairline);
+  border-top: var(--b-hair);
   font-size: 0.6875rem;
   color: var(--text-tertiary);
   line-height: 1.5;
@@ -1900,9 +1915,9 @@ tr:hover .review-btn { opacity: 1; }
 
 #view-swarm .swarm-kpis .kpi {
   flex: 1;
-  padding: 14px 18px;
-  background: var(--bg);
-  border: 1px solid var(--border);
+  padding: 16px 20px;
+  background: var(--surface);
+  border: var(--b-base);
   border-radius: var(--r-md);
 }
 
@@ -1943,7 +1958,7 @@ tr:hover .review-btn { opacity: 1; }
   padding: 11px 12px 11px 0;
   font-size: 0.8125rem;
   vertical-align: middle;
-  border-bottom: 1px solid var(--hairline);
+  border-bottom: var(--b-hair);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2016,7 +2031,7 @@ tr:hover .review-btn { opacity: 1; }
 .child-row > td {
   background: var(--bg);
   padding: 0 0 16px 32px !important;
-  border-bottom: 1px solid var(--hairline);
+  border-bottom: var(--b-hair);
 }
 
 .child-table {
@@ -2033,7 +2048,7 @@ tr:hover .review-btn { opacity: 1; }
   letter-spacing: 0.08em;
   color: var(--text-tertiary);
   padding: 6px 12px 6px 0;
-  border-bottom: 1px solid var(--hairline);
+  border-bottom: var(--b-hair);
   font-weight: 600;
 }
 .child-table td {
