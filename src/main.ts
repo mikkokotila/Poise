@@ -5,22 +5,22 @@ import { initMenu } from './menu'
 import { initMainView, refreshMainView } from './views/main-view'
 import { initFlowView } from './views/flow-view'
 import { initTrustView } from './views/trust-view'
-import { initPipeView } from './views/pipe-view'
+import { initStreamView } from './views/stream-view'
 import { initSwarmView, stopSwarmRefresh } from './views/swarm-view'
 import { loadSettings } from './config'
 
 const viewMainEl = document.getElementById('view-main')!
 const viewFlowEl = document.getElementById('view-flow')!
 const viewTrustEl = document.getElementById('view-trust')!
-const viewPipeEl = document.getElementById('view-pipe')!
+const viewStreamEl = document.getElementById('view-stream')!
 const viewSwarmEl = document.getElementById('view-swarm')!
 
-function showView(v: 'main' | 'flow' | 'trust' | 'pipe' | 'swarm') {
-  const all = [viewMainEl, viewFlowEl, viewTrustEl, viewPipeEl, viewSwarmEl]
+function showView(v: 'main' | 'flow' | 'trust' | 'stream' | 'swarm') {
+  const all = [viewMainEl, viewFlowEl, viewTrustEl, viewStreamEl, viewSwarmEl]
   const target = v === 'main' ? viewMainEl
     : v === 'flow' ? viewFlowEl
     : v === 'trust' ? viewTrustEl
-    : v === 'pipe' ? viewPipeEl
+    : v === 'stream' ? viewStreamEl
     : viewSwarmEl
 
   // Stop the swarm auto-refresh when leaving its view
@@ -30,7 +30,7 @@ function showView(v: 'main' | 'flow' | 'trust' | 'pipe' | 'swarm') {
   if (v === 'main') initMainView()
   else if (v === 'flow') initFlowView()
   else if (v === 'trust') initTrustView()
-  else if (v === 'pipe') initPipeView()
+  else if (v === 'stream') initStreamView()
   else initSwarmView()
 
   for (const el of all) {

@@ -1,12 +1,12 @@
 // Burger menu — Main / Flow / Trust / divider / Settings / Typography
 // Integrates with the typography and settings panels (opens them when clicked).
 
-type ViewName = 'main' | 'pipe' | 'swarm' | 'flow' | 'trust'
+type ViewName = 'main' | 'stream' | 'swarm' | 'flow' | 'trust'
 
 const VIEW_KEY = 'poise-view'
 
 const ICON_MAIN  = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 3h10M2 7h10M2 11h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
-const ICON_PIPE  = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="2" y="3" width="2.5" height="8" rx="0.6" stroke="currentColor" stroke-width="1.2"/><rect x="6" y="3" width="2.5" height="6" rx="0.6" stroke="currentColor" stroke-width="1.2"/><rect x="10" y="3" width="2.5" height="4" rx="0.6" stroke="currentColor" stroke-width="1.2"/></svg>'
+const ICON_STREAM  = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="2" y="3" width="2.5" height="8" rx="0.6" stroke="currentColor" stroke-width="1.2"/><rect x="6" y="3" width="2.5" height="6" rx="0.6" stroke="currentColor" stroke-width="1.2"/><rect x="10" y="3" width="2.5" height="4" rx="0.6" stroke="currentColor" stroke-width="1.2"/></svg>'
 const ICON_SWARM = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7"   cy="3"   r="1.5" stroke="currentColor" stroke-width="1.2"/><circle cx="2.5" cy="10"  r="1.5" stroke="currentColor" stroke-width="1.2"/><circle cx="11.5" cy="10" r="1.5" stroke="currentColor" stroke-width="1.2"/><path d="M7 4.5L3.5 8.5M7 4.5l3.5 4M3.8 10h6.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>'
 const ICON_FLOW  = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 10l3-3 3 2 4-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>'
 const ICON_TRUST = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1.5l4.5 1.8v3.8c0 2.4-1.8 4.6-4.5 5.4-2.7-.8-4.5-3-4.5-5.4V3.3L7 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="none"/></svg>'
@@ -18,7 +18,12 @@ const ICON_CLOSE = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none">
 function loadView(): ViewName {
   try {
     const v = localStorage.getItem(VIEW_KEY)
-    if (v === 'main' || v === 'pipe' || v === 'swarm' || v === 'flow' || v === 'trust') return v
+    if (v === 'pipe') {
+      // Pipe was renamed to Stream — migrate any existing preference once.
+      localStorage.setItem(VIEW_KEY, 'stream')
+      return 'stream'
+    }
+    if (v === 'main' || v === 'stream' || v === 'swarm' || v === 'flow' || v === 'trust') return v
   } catch { /* ignore */ }
   return 'main'
 }
@@ -56,8 +61,8 @@ export function initMenu(callbacks: MenuCallbacks): { switchTo: (v: ViewName) =>
     <button class="menu-item" data-view="main">
       <span class="menu-icon">${ICON_MAIN}</span><span class="menu-text">Main</span>
     </button>
-    <button class="menu-item" data-view="pipe">
-      <span class="menu-icon">${ICON_PIPE}</span><span class="menu-text">Pipe</span>
+    <button class="menu-item" data-view="stream">
+      <span class="menu-icon">${ICON_STREAM}</span><span class="menu-text">Stream</span>
     </button>
     <button class="menu-item" data-view="swarm">
       <span class="menu-icon">${ICON_SWARM}</span><span class="menu-text">Swarm</span>

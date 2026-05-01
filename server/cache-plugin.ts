@@ -4,7 +4,7 @@ import { listPrs, countPrs, getFlow, getTrust } from './queries'
 import { getMeta } from './db'
 import { getToken, setToken, hasToken } from './auth'
 import { getSettings, setSettings } from './settings'
-import { listCards, createCard, setCardText, moveCard, removeCard, type Lane } from './pipe'
+import { listCards, createCard, setCardText, moveCard, removeCard, type Lane } from './stream'
 
 function json(res: any, status: number, body: unknown) {
   res.statusCode = status
@@ -218,14 +218,14 @@ export function cachePlugin(): Plugin {
           return
         }
 
-        // ── Pipe (kanban) ──
-        // GET /api/pipe — list all cards
-        if (url === '/api/pipe' && req.method === 'GET') {
+        // ── Stream (kanban) ──
+        // GET /api/stream — list all cards
+        if (url === '/api/stream' && req.method === 'GET') {
           return json(res, 200, { cards: listCards() })
         }
 
-        // POST /api/pipe — { text, lane }
-        if (url === '/api/pipe' && req.method === 'POST') {
+        // POST /api/stream — { text, lane }
+        if (url === '/api/stream' && req.method === 'POST') {
           try {
             const body = await readBody(req)
             const parsed = body ? JSON.parse(body) : {}
@@ -236,11 +236,11 @@ export function cachePlugin(): Plugin {
           }
         }
 
-        // PATCH /api/pipe/:id — { text? } or { lane?, position? } (move)
-        // DELETE /api/pipe/:id
-        const pipeMatch = url.match(/^\/api\/pipe\/(\d+)(?:\?|$)/)
-        if (pipeMatch) {
-          const id = Number(pipeMatch[1])
+        // PATCH /api/stream/:id — { text? } or { lane?, position? } (move)
+        // DELETE /api/stream/:id
+        const streamMatch = url.match(/^\/api\/stream\/(\d+)(?:\?|$)/)
+        if (streamMatch) {
+          const id = Number(streamMatch[1])
           if (req.method === 'PATCH') {
             try {
               const body = await readBody(req)

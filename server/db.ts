@@ -78,7 +78,7 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_pr_files_filename ON pr_files(filename);
 
-  CREATE TABLE IF NOT EXISTS pipe_cards (
+  CREATE TABLE IF NOT EXISTS stream_cards (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     text TEXT NOT NULL,
     lane TEXT NOT NULL,
@@ -86,8 +86,23 @@ db.exec(`
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
-  CREATE INDEX IF NOT EXISTS idx_pipe_cards_lane ON pipe_cards(lane, position);
+  CREATE INDEX IF NOT EXISTS idx_stream_cards_lane ON stream_cards(lane, position);
 `)
+
+// One-time migration: copy any rows from the legacy pipe_cards table (from
+// before Pipe was renamed to Stream) into stream_cards, then drop the old
+// table. Idempotent — guarded by sqlite_master so it only runs while
+// pipe_cards still exists.
+const hasPipeCards = db.prepare(
+  "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'pipe_cards'"
+).get() as { name: string } | undefined
+if (hasPipeCards) {
+  db.exec(`
+    INSERT OR IGNORE INTO stream_cards (id, text, lane, position, created_at, updated_at)
+    SELECT id, text, lane, position, created_at, updated_at FROM pipe_cards;
+    DROP TABLE pipe_cards;
+  `)
+}
 
 // Migrations — add columns if missing
 const prCols = db.prepare('PRAGMA table_info(prs)').all() as { name: string }[]

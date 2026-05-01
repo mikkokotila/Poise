@@ -215,7 +215,7 @@ body {
 }
 
 /* Active pill: N5 mid-grey, not N7 black. Matches the primary-action
-   treatment in Pipe / Settings — calm contrast, not eyepunch. */
+   treatment in Stream / Settings — calm contrast, not eyepunch. */
 #filters button.active {
   background: var(--n5);
   border-color: var(--n5);
@@ -1569,7 +1569,7 @@ tr:hover .review-btn { opacity: 1; }
   transition: color var(--t-base) ease, background var(--t-base) ease, border-color var(--t-base) ease;
 }
 
-/* Primary action: N5 mid-grey (matches Pipe). Lighter than N7 so it
+/* Primary action: N5 mid-grey (matches Stream). Lighter than N7 so it
    doesn't shout in the panel; N6 on hover gives the press signal. */
 .st-save {
   background: var(--n5);
@@ -1607,19 +1607,19 @@ tr:hover .review-btn { opacity: 1; }
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
-   Pipe (kanban)
+   Stream (kanban)
    ───────────────────────────────────────────────────────────────────────── */
 
-#view-pipe { padding-bottom: 64px; }
+#view-stream { padding-bottom: 64px; }
 
-/* Pipe is the first view migrated to Design System v1. All values here
+/* Stream is the first view migrated to Design System v1. All values here
    resolve through DS tokens (--n*, --a*, --b-*, --e-*) — never the legacy
    --bg / --text / --border vars used elsewhere. Density is "calm":
    row 36, card padding 12, card gap 10, column padding 12. */
 
-#view-pipe { color: var(--n6); }
-#view-pipe .view-title { color: var(--n6); font-weight: 600; }
-#view-pipe .view-sub   { color: var(--n4); font-weight: 400; }
+#view-stream { color: var(--n6); }
+#view-stream .view-title { color: var(--n6); font-weight: 600; }
+#view-stream .view-sub   { color: var(--n4); font-weight: 400; }
 
 /* Kanban needs more horizontal real estate than the typography content
    width permits, so break out and use the full viewport. */

@@ -1,4 +1,4 @@
-// Pipe — five-lane kanban board. Cards persist in SQLite via /api/pipe.
+// Stream — five-lane kanban board. Cards persist in SQLite via /api/stream.
 
 type Lane = 'idea' | 'concept' | 'plan' | 'issue' | 'pr'
 const LANES: Array<{ key: Lane; label: string }> = [
@@ -56,7 +56,7 @@ function renderShell(): string {
   `).join('')
   return `
     <header class="view-header">
-      <div class="view-title">Pipe <span class="view-sub">five lanes, drag to move</span></div>
+      <div class="view-title">Stream <span class="view-sub">five lanes, drag to move</span></div>
     </header>
     <div class="kanban">${lanes}</div>
   `
@@ -86,8 +86,8 @@ function renderAllCards() {
 }
 
 async function fetchCards() {
-  const res = await fetch('/api/pipe')
-  if (!res.ok) throw new Error(`/api/pipe ${res.status}`)
+  const res = await fetch('/api/stream')
+  if (!res.ok) throw new Error(`/api/stream ${res.status}`)
   const data = await res.json()
   cards = data.cards
 }
@@ -142,7 +142,7 @@ function openComposer(lane: Lane) {
     if (!text) { close(); return }
     addB.disabled = true
     try {
-      const card = await api<Card>('POST', '/api/pipe', { text, lane })
+      const card = await api<Card>('POST', '/api/stream', { text, lane })
       cards.push(card)
       renderAllCards()
       close()
@@ -203,7 +203,7 @@ function startEdit(cardEl: HTMLElement) {
     const text = ta.value.trim()
     if (!text || text === original) { close(); return }
     try {
-      const updated = await api<Card>('PATCH', `/api/pipe/${id}`, { text })
+      const updated = await api<Card>('PATCH', `/api/stream/${id}`, { text })
       const idx = cards.findIndex((c) => c.id === id)
       if (idx >= 0) cards[idx] = updated
       renderAllCards()
@@ -224,7 +224,7 @@ function startEdit(cardEl: HTMLElement) {
 // ── Delete ───────────────────────────────────────────────────────────────────
 
 async function deleteCard(id: number) {
-  await api('DELETE', `/api/pipe/${id}`)
+  await api('DELETE', `/api/stream/${id}`)
   cards = cards.filter((c) => c.id !== id)
   renderAllCards()
 }
@@ -349,7 +349,7 @@ function attachDragHandlers() {
       renderAllCards()
 
       try {
-        await api('PATCH', `/api/pipe/${movingId}`, { lane: targetLane, position: idx })
+        await api('PATCH', `/api/stream/${movingId}`, { lane: targetLane, position: idx })
       } catch (err) {
         console.error('move failed:', err)
         // Refetch to recover from server-state divergence
@@ -381,8 +381,8 @@ function attachCardClickHandlers() {
   })
 }
 
-export async function initPipeView() {
-  viewEl = document.getElementById('view-pipe')!
+export async function initStreamView() {
+  viewEl = document.getElementById('view-stream')!
   if (!initialized) {
     initialized = true
     viewEl.innerHTML = renderShell()
@@ -394,6 +394,6 @@ export async function initPipeView() {
     await fetchCards()
     renderAllCards()
   } catch (err) {
-    console.error('[pipe] failed to load:', err)
+    console.error('[stream] failed to load:', err)
   }
 }
