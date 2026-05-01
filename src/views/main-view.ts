@@ -159,20 +159,26 @@ function lastCell(item: PrRow): string {
   return `<img class="${classes.join(' ')}" src="${src}" alt="${escapeHtml(name)}" title="${escapeHtml(name)}" loading="lazy" decoding="async" onerror="this.classList.add('broken')" />`
 }
 
-function buildRow(item: PrRow, animate: boolean, idx: number): HTMLTableRowElement {
+// Stable identity for a row across refreshes. Matches the format Current
+// uses for live items so the FLIP path captures the same kind of key.
+function rowKey(item: PrRow): string {
+  return `${item.repo}#${item.number}`
+}
+
+function buildRow(item: PrRow, animate: boolean): HTMLTableRowElement {
   const tr = document.createElement('tr')
   if (animate) tr.className = 'new'
-  tr.dataset.idx = String(idx)
+  tr.dataset.key = rowKey(item)
   const pr = item.is_pr === 1
   const st = stateLabel(item)
   const status = statusLabel(item)
   const isDone = reviewed.has(item.html_url)
   const actionHtml = pr
-    ? `<button class="review-btn${isDone ? ' done' : ''}" data-idx="${idx}" title="Run consensus review">${PLAY_SVG}</button>`
+    ? `<button class="review-btn${isDone ? ' done' : ''}" title="Run consensus review">${PLAY_SVG}</button>`
     : ''
 
   tr.innerHTML = `
-    <td><span class="type-toggle ${pr ? 'pr' : 'issue'}" data-idx="${idx}">${pr ? 'PR' : 'IS'}</span></td>
+    <td><span class="type-toggle ${pr ? 'pr' : 'issue'}">${pr ? 'PR' : 'IS'}</span></td>
     <td class="title-cell"><a href="${item.html_url}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a></td>
     <td class="last-cell">${lastCell(item)}</td>
     <td><span class="repo-name">${escapeHtml(item.repo)}</span></td>
@@ -199,25 +205,97 @@ function renderAll() {
   }
   table.hidden = false
   empty.hidden = true
-  for (let i = 0; i < items.length; i++) {
-    tbody.appendChild(buildRow(items[i], false, i))
+  for (const item of items) {
+    tbody.appendChild(buildRow(item, false))
   }
   updateCount()
 }
 
-function appendRows(newItems: PrRow[], startIdx: number) {
+function appendRows(newItems: PrRow[]) {
   table.hidden = false
   empty.hidden = true
   // Batch append in a fragment to reduce reflows
   const frag = document.createDocumentFragment()
   for (let i = 0; i < newItems.length; i++) {
-    const tr = buildRow(newItems[i], true, startIdx + i)
+    const tr = buildRow(newItems[i], true)
     // Tighter stagger (max 10 steps), capped at 80ms total
     tr.style.animationDelay = `${Math.min(i, 10) * 8}ms`
     frag.appendChild(tr)
   }
   tbody.appendChild(frag)
   updateCount()
+}
+
+// FLIP — same pattern Current uses for its live lanes. Reorders existing
+// rows in place via inverse-transform-then-animate-back so the user sees
+// the table settling into its new sort order rather than a cold rebuild.
+// Existing <tr> nodes are MOVED via fragment, never replaced — that
+// preserves expanded inline comments, hover state, and any in-flight
+// review buttons. Only newly-arriving rows get fresh DOM with .new for
+// the fade-in. Rows that left silently disappear.
+const FLIP_MS = 700
+
+function applyMainFlip(nextItems: PrRow[]) {
+  // 1. First — capture rects of all existing rows.
+  const firstRects = new Map<string, DOMRect>()
+  const existingEls = new Map<string, HTMLTableRowElement>()
+  for (const el of [...tbody.children] as HTMLTableRowElement[]) {
+    const k = el.dataset.key
+    if (!k) continue
+    firstRects.set(k, el.getBoundingClientRect())
+    existingEls.set(k, el)
+  }
+
+  // 2. Last — drop departed rows, then reorder/insert into a fragment.
+  const newKeys = new Set(nextItems.map(rowKey))
+  for (const [k, el] of existingEls) {
+    if (!newKeys.has(k)) el.remove()
+  }
+  const fragment = document.createDocumentFragment()
+  for (const item of nextItems) {
+    const k = rowKey(item)
+    const existing = existingEls.get(k)
+    if (existing) {
+      fragment.appendChild(existing)         // moved to its new position
+    } else {
+      fragment.appendChild(buildRow(item, true))   // .new for fade-in
+    }
+  }
+  tbody.appendChild(fragment)
+
+  // 3. Invert — for every row that existed before AND after, apply the
+  //    inverse translateY so it visually stays where it was.
+  const movers: HTMLTableRowElement[] = []
+  for (const item of nextItems) {
+    const k = rowKey(item)
+    const cardEl = existingEls.get(k)
+    if (!cardEl) continue
+    const firstRect = firstRects.get(k)
+    if (!firstRect) continue
+    const lastRect = cardEl.getBoundingClientRect()
+    const dy = firstRect.top - lastRect.top
+    if (Math.abs(dy) < 0.5) continue
+    cardEl.style.transition = 'none'
+    cardEl.style.transform = `translateY(${dy}px)`
+    movers.push(cardEl)
+  }
+
+  // 4. Play — flush layout, then animate transform back to identity.
+  if (movers.length > 0) {
+    void tbody.offsetHeight
+    requestAnimationFrame(() => {
+      for (const cardEl of movers) {
+        cardEl.style.transition = `transform ${FLIP_MS}ms cubic-bezier(0.4, 0, 0.2, 1)`
+        cardEl.style.transform = ''
+      }
+      window.setTimeout(() => {
+        for (const cardEl of movers) {
+          cardEl.style.transition = ''
+          cardEl.style.transform = ''
+        }
+      }, FLIP_MS + 50)
+    })
+  }
 }
 
 function sentinelNeedsFetch(): boolean {
@@ -326,13 +404,12 @@ async function fetchPage(): Promise<void> {
     const countData = await countRes.json()
     const newItems: PrRow[] = (pageData.records as GhRecord[] || []).map(recordToRow)
     total = typeof countData.count === 'number' ? countData.count : items.length + newItems.length
-    const startIdx = items.length
     items.push(...newItems)
     offset += newItems.length
     if (newItems.length < PAGE_SIZE || items.length >= total) done = true
 
     loader.hidden = done
-    appendRows(newItems, startIdx)
+    appendRows(newItems)
   } catch (err) {
     loader.hidden = true
     empty.textContent = `Error: ${(err as Error).message}`
@@ -424,10 +501,10 @@ function attachHandlers() {
   tbody.addEventListener('click', (e) => {
     const toggle = (e.target as HTMLElement).closest('.type-toggle')
     if (!toggle) return
-    const idx = Number((toggle as HTMLElement).dataset.idx)
-    const item = items[idx]
-    if (!item) return
     const row = toggle.closest('tr')!
+    const key = row.dataset.key
+    const item = items.find((i) => rowKey(i) === key)
+    if (!item) return
     const titleCell = row.querySelector('.title-cell')!
     const existing = titleCell.querySelector('.inline-comment')
     if (existing) {
@@ -460,8 +537,9 @@ function attachHandlers() {
     const btn = (e.target as HTMLElement).closest('.review-btn')
     if (!btn) return
     if ((btn as HTMLButtonElement).disabled) return
-    const idx = Number((btn as HTMLElement).dataset.idx)
-    const item = items[idx]
+    const row = btn.closest('tr')!
+    const key = row.dataset.key
+    const item = items.find((i) => rowKey(i) === key)
     if (!item || item.is_pr !== 1) return
     const button = btn as HTMLButtonElement
     button.disabled = true
@@ -537,16 +615,78 @@ export function initMainView() {
   startMainTimer()
 }
 
-// Called by idle refresh
-export function refreshMainView() {
-  if (!initialized) return
-  resetAndFetch()
+// Background refresh at the user-chosen cadence (1m or 5m). Pulls page 1
+// only — the visible top of the table — and stitches it onto the tail of
+// what's already loaded so scroll position is preserved and the user
+// doesn't watch the table empty out and rebuild. Existing rows glide to
+// their new positions through the FLIP animator; new rows fade in;
+// expanded inline comments and other in-row state survive.
+async function refreshMainSoft() {
+  if (!initialized || fetching) return
+  try {
+    const win = timeWindow()
+    const payload: Record<string, unknown> = {
+      operation: 'list',
+      record_type: typeFilter === 'both' ? 'all' : (typeFilter === 'pr' ? 'pull_request' : 'issue'),
+      record_state: statusFilter === 'open' ? 'open' : 'all',
+      limit: PAGE_SIZE,
+      offset: 0,
+    }
+    if (win.since)   payload.updated_since = win.since
+    if (win.until)   payload.updated_until = win.until
+    if (searchQuery) payload.q = searchQuery
+
+    const [pageRes, countRes] = await Promise.all([
+      fetch('/api/gh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }),
+      fetch('/api/gh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, count_only: true, limit: undefined, offset: undefined }),
+      }),
+    ])
+    if (!pageRes.ok || !countRes.ok) return
+    const pageData  = await pageRes.json()
+    const countData = await countRes.json()
+    const newTop: PrRow[] = (pageData.records as GhRecord[] || []).map(recordToRow)
+
+    // Stitch: new top + existing tail past PAGE_SIZE, deduped against new top
+    const newKeyset = new Set(newTop.map(rowKey))
+    const tail = items.slice(PAGE_SIZE).filter((i) => !newKeyset.has(rowKey(i)))
+    const next = [...newTop, ...tail]
+
+    total = typeof countData.count === 'number' ? countData.count : next.length
+    items = next
+    offset = items.length
+    done = items.length >= total
+    loader.hidden = done
+
+    if (next.length === 0) {
+      tbody.innerHTML = ''
+      table.hidden = true
+      empty.hidden = false
+    } else {
+      table.hidden = false
+      empty.hidden = true
+      applyMainFlip(next)
+    }
+    updateCount()
+  } catch { /* network blip — try again next tick */ }
 }
 
-// Background refresh at the user-chosen cadence (1m or 5m). Pulls page 1
-// only — the visible top of the table — so scroll position is preserved
-// for users who are reading something further down. The total count
-// updates so the "20 / 1083" pill stays honest.
+// Called by the idle timer at the user-chosen cadence (1m / 5m).
+// Soft-refreshes the visible top so the table updates feel like a
+// settling rather than a cold rebuild. Filter / search changes still go
+// through resetAndFetch (which clears + refetches) because the user
+// initiated the change and expects a hard reset.
+export function refreshMainView() {
+  if (!initialized) return
+  refreshMainSoft()
+}
+
 export function stopMainRefresh() {
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null }
 }
