@@ -226,6 +226,16 @@ body {
 }
 
 /* Inline match-count next to the search input (kept subtle) */
+/* Search input + count read as one unit and wrap together. The count
+   sits immediately to the right of the search field across every view
+   for a consistent rhythm. */
+.search-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 0 0 auto;
+}
+
 .filter-count {
   font-size: 0.6875rem;
   color: var(--n4);

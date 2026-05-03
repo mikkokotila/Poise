@@ -103,8 +103,10 @@ function renderShell() {
   viewEl.innerHTML = `
     <header class="view-header">
       <div class="filter-cluster" id="swarm-filters">
-        <input class="search-input" id="swarm-search" type="search" placeholder="Filter…" autocomplete="off" spellcheck="false" />
-        <span class="filter-count" id="swarm-count"></span>
+        <div class="search-cluster">
+          <input class="search-input" id="swarm-search" type="search" placeholder="Filter…" autocomplete="off" spellcheck="false" />
+          <span class="filter-count" id="swarm-count"></span>
+        </div>
       </div>
     </header>
     <main>
