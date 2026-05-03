@@ -172,17 +172,20 @@ body {
 .view-header {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   margin-bottom: var(--sp-6);
   min-height: 32px;             /* keeps vertical rhythm with the burger */
+  /* Reserve room on the right so a wrap-heavy filter cluster can't run
+     under the inline view-nav + burger. ~3 nav items + toggle + gap. */
+  padding-right: 280px;
 }
 
-/* Filter cluster — every range-picker group + the search input live here,
-   centered. Wraps onto multiple lines on narrow viewports. */
+/* Filter cluster — every range-picker group + the search input live
+   here, left-aligned. Wraps onto multiple lines on narrow viewports. */
 .filter-cluster {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: var(--sp-3);
   flex-wrap: wrap;
 }
@@ -879,6 +882,54 @@ tr:hover .review-btn { opacity: 1; }
 @keyframes viewIn {
   from { opacity: 0; transform: translateY(6px); }
   to   { opacity: 1; transform: none; }
+}
+
+/* Top-nav — Current · Swarm · Archive, sat to the left of the burger.
+   Plain text buttons, no chrome at rest; active item gets the full
+   text colour + a touch more weight, hover gets a soft hover bg.
+   Sharp, restrained — the nav should feel like a label trail, not a
+   button row. */
+#top-nav {
+  position: fixed;
+  top: var(--sp-4);
+  /* burger is at right: var(--sp-4) and width 32px; gap of var(--sp-2). */
+  right: calc(var(--sp-4) + 32px + var(--sp-2));
+  display: flex;
+  align-items: center;
+  height: 32px;
+  z-index: 120;
+}
+
+.nav-item {
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  padding: 0 var(--sp-3);
+  height: 32px;
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: var(--r-pill);
+  transition: color var(--t-base) ease, background var(--t-base) ease;
+  white-space: nowrap;
+}
+.nav-item:hover { color: var(--text-secondary); background: var(--hover); }
+.nav-item.active {
+  color: var(--text);
+  font-weight: 600;
+  cursor: default;
+}
+.nav-item.active:hover { background: transparent; }
+
+/* Hide the nav while a side panel is open so it doesn't overlay the
+   panel content. The burger stays visible — it's the × that closes. */
+body:has(#typo-panel.open) #top-nav,
+body:has(#settings-panel.open) #top-nav {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-base) ease;
 }
 
 /* Burger toggle — top right. Always on top so it can close any overlay. */
