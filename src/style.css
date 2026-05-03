@@ -2261,47 +2261,31 @@ body:has(#settings-panel.open) #top-nav {
 
 /* ─────────────────────────────────────────────────────────────────────────
    Swarm (agent-interface log)
-   One row per agent call. Click "view" in the response cell to expand
-   the row and reveal the full response body underneath. Uses the same
-   table primitives as Archive so the visual cadence stays consistent.
+   Same table contract as Archive — universal `table`, `thead th`,
+   `tbody tr`, `td`, hover, `.title-cell`, `.action-cell`, `.review-btn`,
+   `.state`, `.date` rules already do the heavy lifting. This block only
+   defines what's distinct: the column widths and the few cell flavors
+   Swarm has that Archive doesn't (model name, behavior tag, target
+   link, expand row).
    ───────────────────────────────────────────────────────────────────────── */
 
-#view-swarm #swarm-table {
-  width: 100%;
-  border-collapse: collapse;
-  table-layout: fixed;
-}
+/* Column widths — match Archive's proportions. Archive's fixed cols
+   sum to ~552px before the title flex; Swarm matches so the two
+   tables read as siblings, not strangers. */
+.col-model    { width: 120px; }
+.col-behavior { width: 100px; }
+.col-target   { width: 140px; }
+.col-status   { width: 80px; }
+.col-elapsed  { width: 80px; text-align: right; }
 
-#view-swarm thead th {
-  text-align: left;
-  font-size: 0.6875rem;
+/* Distinct cell flavors */
+.agent-model {
+  font-size: 0.75rem;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-tertiary);
-  padding: 0 12px 10px 0;
-  border-bottom: 1px solid var(--border);
+  letter-spacing: 0.01em;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
 }
-
-#view-swarm tbody td {
-  padding: var(--typo-row-pad, 11px) 12px var(--typo-row-pad, 11px) 0;
-  font-size: var(--typo-row-size, 0.8125rem);
-  vertical-align: middle;
-  border-bottom: var(--b-hair);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-#view-swarm tbody td:first-child { padding-left: 8px; }
-
-#view-swarm .agent-col-model    { width: 140px; }
-#view-swarm .agent-col-behavior { width: 130px; }
-#view-swarm .agent-col-target   { width: 180px; }
-#view-swarm .agent-col-prompt   { /* flex */ }
-#view-swarm .agent-col-status   { width: 110px; }
-#view-swarm .agent-col-time     { width: 80px; text-align: right; font-variant-numeric: tabular-nums; }
-#view-swarm .agent-col-response { width: 70px; text-align: right; padding-right: 0; }
 
 .agent-behavior {
   font-size: 0.75rem;
@@ -2321,70 +2305,46 @@ a.agent-target:hover {
   text-underline-offset: 3px;
   text-decoration-thickness: 1px;
 }
-.agent-target-dash {
+.agent-dash {
   color: var(--text-tertiary);
 }
 
-#view-swarm thead th:last-child { padding-right: 0; text-align: right; }
+/* Status reuses Archive's .state pill — same shape across both views.
+   Add the agent-only flavors (ok / bad / flat) for completed / failed
+   / queued so the closed vocabulary lights up correctly. */
+.state.ok   { color: var(--a3); border-color: var(--a3); }
+.state.bad  { color: var(--a5); border-color: var(--a5); }
+.state.flat { color: var(--text-tertiary); }
 
-#view-swarm tr.agent-row { transition: background var(--t-quick) ease; }
-#view-swarm tr.agent-row:hover { background: var(--hover); }
-
-.agent-model {
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-}
-
-.agent-prompt-cell {
-  color: var(--text);
-  font-weight: 400;
-}
-
-.agent-time {
+/* Expand toggle — sits in the .action-cell column, same icon-button
+   rhythm as .review-btn. Chevron rotates when the row is expanded. */
+.expand-btn {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: none;
   color: var(--text-tertiary);
-}
-
-.agent-status {
-  display: inline-block;
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  padding: 2px 10px;
-  border-radius: var(--r-pill);
-  text-transform: lowercase;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text-secondary);
-}
-.agent-status.ok  { color: var(--a3); border-color: var(--a3); }
-.agent-status.bad { color: var(--a5); border-color: var(--a5); }
-.agent-status.flat { color: var(--text-tertiary); }
-
-.agent-view-btn {
-  font-family: inherit;
-  font-size: 0.6875rem;
-  letter-spacing: 0.04em;
-  text-transform: lowercase;
-  color: var(--text-secondary);
-  background: transparent;
-  border: 1px solid var(--border);
-  padding: 2px 10px;
-  border-radius: var(--r-pill);
   cursor: pointer;
-  transition: background var(--t-quick) ease, color var(--t-quick) ease, border-color var(--t-quick) ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-sm);
+  opacity: 0.55;
+  padding: 0;
+  transition: color var(--t-base) ease, background var(--t-base) ease, transform var(--t-quick) ease;
 }
-.agent-view-btn:hover {
-  background: var(--hover);
-  color: var(--text);
-  border-color: var(--text-tertiary);
+tr:hover .expand-btn { opacity: 1; }
+.expand-btn:hover { color: var(--text); background: var(--hover); }
+.expand-btn:active { transform: scale(0.92); }
+.expand-btn .chev {
+  transition: transform var(--t-base) ease;
+}
+.expand-btn.open .chev {
+  transform: rotate(90deg);
 }
 
-/* Expanded response row — one cell spanning all columns, soft surface
-   so the body reads as a continuation of the row above rather than a
-   separate item. */
+/* Expanded response row — soft surface so the body reads as a
+   continuation of the row above rather than a separate item. */
 #view-swarm tr.agent-expand-row > td {
   padding: var(--sp-4) var(--sp-5) var(--sp-5) var(--sp-5);
   background: var(--surface);
@@ -2410,7 +2370,7 @@ a.agent-target:hover {
   font-style: italic;
 }
 
-.agent-empty {
+#swarm-empty {
   color: var(--text-tertiary);
   font-size: 0.875rem;
   text-align: center;

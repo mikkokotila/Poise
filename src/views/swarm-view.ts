@@ -48,10 +48,13 @@ function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + '…'
 }
 
+// Reuse Archive's `.state` pill class — same closed vocabulary, same
+// shape across both views. Add the closed-set agent flavors (ok / bad
+// / flat) for the three swarm statuses we care about.
 function statusCell(s: string): string {
   const k = (s || '').toLowerCase()
   const cls = k === 'completed' ? 'ok' : (k === 'error' || k === 'failed') ? 'bad' : 'flat'
-  return `<span class="agent-status ${cls}">${escapeHtml(s || '—')}</span>`
+  return `<span class="state ${cls}">${escapeHtml(s || '—')}</span>`
 }
 
 function modelCell(s: string): string {
@@ -59,7 +62,7 @@ function modelCell(s: string): string {
 }
 
 function behaviorCell(s: string | null): string {
-  if (!s) return '<span class="agent-target-dash">—</span>'
+  if (!s) return '<span class="agent-dash">—</span>'
   return `<span class="agent-behavior">${escapeHtml(s)}</span>`
 }
 
@@ -69,7 +72,7 @@ function behaviorCell(s: string | null): string {
 function targetCell(e: LogEntry): string {
   const repo = e.repo || ''
   const pr = e.pr_id ? String(e.pr_id) : ''
-  if (!repo && !pr) return '<span class="agent-target-dash">—</span>'
+  if (!repo && !pr) return '<span class="agent-dash">—</span>'
   const short = repo ? (repo.includes('/') ? repo.split('/')[1] : repo) : ''
   const label = short && pr ? `${short}#${pr}` : (short || `#${pr}`)
   if (repo && pr) {
@@ -78,6 +81,11 @@ function targetCell(e: LogEntry): string {
   }
   return `<span class="agent-target">${escapeHtml(label)}</span>`
 }
+
+// Chevron — same icon-button rhythm as Archive's .review-btn. Points
+// right when collapsed, rotates 90° (down) when the row is expanded
+// via .open class.
+const CHEV_SVG = '<svg class="chev" width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4 2.5l4 3.5-4 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
 
 function matchesSearch(e: LogEntry): boolean {
   if (!searchQuery) return true
@@ -103,18 +111,18 @@ function renderShell() {
       <table id="swarm-table">
         <thead>
           <tr>
-            <th class="agent-col-model">Model</th>
-            <th class="agent-col-behavior">Behavior</th>
-            <th class="agent-col-target">Target</th>
-            <th class="agent-col-prompt">Prompt</th>
-            <th class="agent-col-status">Status</th>
-            <th class="agent-col-time">Elapsed</th>
-            <th class="agent-col-response">Response</th>
+            <th class="col-model">Model</th>
+            <th class="col-behavior">Behavior</th>
+            <th class="col-target">Target</th>
+            <th class="col-title">Prompt</th>
+            <th class="col-status">Status</th>
+            <th class="col-elapsed">Elapsed</th>
+            <th class="col-action"></th>
           </tr>
         </thead>
         <tbody id="swarm-tbody"></tbody>
       </table>
-      <p id="swarm-empty" class="agent-empty" hidden>No agent calls.</p>
+      <p id="swarm-empty" hidden>No agent calls.</p>
       <div id="swarm-loader" class="loader" hidden><span></span><span></span><span></span></div>
     </main>
   `
@@ -137,17 +145,25 @@ function buildMainRow(e: LogEntry): HTMLTableRowElement {
   tr.dataset.id = e.id
   tr.dataset.hash = e.response || ''
   const hasResponse = !!e.response
+  const isOpen = expanded.has(e.id)
   const btn = hasResponse
-    ? `<button class="agent-view-btn" data-action="toggle">${expanded.has(e.id) ? 'hide' : 'view'}</button>`
-    : '<span class="agent-target-dash">—</span>'
+    ? `<button class="expand-btn${isOpen ? ' open' : ''}" title="${isOpen ? 'Hide response' : 'View response'}" aria-label="Toggle response">${CHEV_SVG}</button>`
+    : ''
+  // The prompt column reuses Archive's `.title-cell` so its line-clamp
+  // and overflow rules match exactly. Empty prompt is honest — many
+  // agent calls are behavior-driven (e.g. pr_review takes the PR id,
+  // not a free prompt) so the cell stays empty in those cases.
+  const promptHtml = e.prompt
+    ? `<span title="${escapeHtml(e.prompt)}">${escapeHtml(truncate(e.prompt, 140))}</span>`
+    : ''
   tr.innerHTML = `
     <td>${modelCell(e.model)}</td>
     <td>${behaviorCell(e.behavior)}</td>
     <td>${targetCell(e)}</td>
-    <td class="agent-prompt-cell" title="${escapeHtml(e.prompt || '')}">${escapeHtml(truncate(e.prompt || '', 140))}</td>
+    <td class="title-cell">${promptHtml}</td>
     <td>${statusCell(e.status)}</td>
-    <td><span class="agent-time">${escapeHtml(e.time_elapsed || '—')}</span></td>
-    <td class="agent-response-cell">${btn}</td>
+    <td><span class="date">${escapeHtml(e.time_elapsed || '—')}</span></td>
+    <td class="action-cell">${btn}</td>
   `
   return tr
 }
@@ -323,20 +339,20 @@ async function loadResponse(id: string, hash: string) {
 
 function attachClicks() {
   bodyEl.addEventListener('click', (ev) => {
-    const btn = (ev.target as HTMLElement).closest<HTMLButtonElement>('.agent-view-btn')
+    const btn = (ev.target as HTMLElement).closest<HTMLButtonElement>('.expand-btn')
     if (!btn) return
     const tr = btn.closest<HTMLTableRowElement>('tr')!
     const id = tr.dataset.id || ''
     const hash = tr.dataset.hash || ''
     if (!id || !hash) return
     if (expanded.has(id)) {
-      // Hide — surgical: remove the expand row, flip the button label.
+      // Hide — surgical: remove the expand row, rotate the chevron back.
       expanded.delete(id)
       const expandRow = bodyEl.querySelector<HTMLTableRowElement>(`.agent-expand-row[data-expand-for="${id}"]`)
       expandRow?.remove()
-      btn.textContent = 'view'
+      btn.classList.remove('open')
     } else {
-      // Show — insert the placeholder + fetch the body.
+      btn.classList.add('open')
       loadResponse(id, hash)
     }
   })
