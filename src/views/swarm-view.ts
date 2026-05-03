@@ -116,7 +116,6 @@ function renderShell() {
             <th class="col-model">Model</th>
             <th class="col-behavior">Behavior</th>
             <th class="col-target">Target</th>
-            <th class="col-title">Prompt</th>
             <th class="col-status">Status</th>
             <th class="col-elapsed">Elapsed</th>
             <th class="col-action"></th>
@@ -151,18 +150,14 @@ function buildMainRow(e: LogEntry): HTMLTableRowElement {
   const btn = hasResponse
     ? `<button class="expand-btn${isOpen ? ' open' : ''}" title="${isOpen ? 'Hide response' : 'View response'}" aria-label="Toggle response">${CHEV_SVG}</button>`
     : ''
-  // The prompt column reuses Archive's `.title-cell` so its line-clamp
-  // and overflow rules match exactly. Empty prompt is honest — many
-  // agent calls are behavior-driven (e.g. pr_review takes the PR id,
-  // not a free prompt) so the cell stays empty in those cases.
-  const promptHtml = e.prompt
-    ? `<span title="${escapeHtml(e.prompt)}">${escapeHtml(truncate(e.prompt, 140))}</span>`
-    : ''
+  // Prompt column dropped — agent-interface behaviors are mostly
+  // input-driven (pr_review takes a PR id, mergeable takes a PR), so
+  // the prompt field is empty for almost every row. The full prompt
+  // is still visible inside the expanded response view when relevant.
   tr.innerHTML = `
     <td>${modelCell(e.model)}</td>
     <td>${behaviorCell(e.behavior)}</td>
     <td>${targetCell(e)}</td>
-    <td class="title-cell">${promptHtml}</td>
     <td>${statusCell(e.status)}</td>
     <td><span class="date">${escapeHtml(e.time_elapsed || '—')}</span></td>
     <td class="action-cell">${btn}</td>
@@ -177,7 +172,7 @@ function setExpandContent(tr: HTMLTableRowElement, id: string) {
     : (state.body
         ? `<pre class="agent-response-body">${escapeHtml(state.body)}</pre>`
         : '<div class="agent-response-empty">No response body.</div>')
-  tr.innerHTML = `<td colspan="7">${inner}</td>`
+  tr.innerHTML = `<td colspan="6">${inner}</td>`
 }
 
 function buildExpandRow(e: LogEntry): HTMLTableRowElement {

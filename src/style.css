@@ -2283,14 +2283,17 @@ body:has(#settings-panel.open) #top-nav {
    link, expand row).
    ───────────────────────────────────────────────────────────────────────── */
 
-/* Column widths — match Archive's proportions. Archive's fixed cols
-   sum to ~552px before the title flex; Swarm matches so the two
-   tables read as siblings, not strangers. */
-.col-model    { width: 120px; }
-.col-behavior { width: 100px; }
-.col-target   { width: 140px; }
-.col-status   { width: 80px; }
-.col-elapsed  { width: 80px; text-align: right; }
+/* Five equally-wide data columns + the icon column. Each data column
+   takes the same fraction of (table width − action column) so the
+   layout reads as five even bays. */
+.col-model,
+.col-behavior,
+.col-target,
+.col-status,
+.col-elapsed {
+  width: calc((100% - 32px) / 5);
+}
+.col-elapsed { text-align: right; }
 
 /* Distinct cell flavors */
 .agent-model {
