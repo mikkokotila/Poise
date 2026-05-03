@@ -68,6 +68,10 @@ const LIVE_LIMIT = 200            // upper bound; time / status filters narrow f
 let initialized = false
 let manualCards: ManualCard[] = []
 let liveItems: LiveItem[] = []
+// Every Vaquum repo with any PR/issue history, populated from /api/repos
+// on view init. Used by the manual + issue composers so the dropdown
+// covers the whole org, not just the repos in the user's involvement.
+let allRepos: string[] = []
 let dragId: number | null = null
 let viewEl: HTMLElement
 let timeFilter: TimeFilter = 'all'
@@ -422,6 +426,18 @@ async function fetchManual() {
   manualCards = data.cards.filter((c: ManualCard) => c.lane === 'idea' || c.lane === 'concept' || c.lane === 'plan')
 }
 
+// Fill the org-wide repo list. Server caches 5 min so this is cheap on
+// every view init. Silently swallows errors — composers fall back to
+// the involvement-derived list.
+async function fetchAllRepos() {
+  try {
+    const res = await fetch('/api/repos')
+    if (!res.ok) return
+    const data = await res.json()
+    allRepos = Array.isArray(data.repos) ? data.repos : []
+  } catch { /* ignore */ }
+}
+
 async function fetchPrStatus() {
   if (liveItems.filter((i) => i.is_pr === 1).length === 0) {
     if (prStatus.size > 0) { prStatus.clear(); applyPrStatusClasses() }
@@ -537,9 +553,10 @@ function attachAddHandlers() {
   }
 }
 
-// "(no repo)" + every full owner/name we've seen in the live set.
+// "— no repo —" + every Vaquum repo. Falls back to the involvement set
+// only if /api/repos hasn't loaded yet (cold start race).
 function manualRepoOptionsHtml(selected: string | null = null): string {
-  const repos = distinctRepos()
+  const repos = allRepos.length > 0 ? allRepos : distinctRepos()
   const opts = ['<option value="">— no repo —</option>']
   for (const r of repos) {
     const sel = selected === r ? ' selected' : ''
@@ -612,8 +629,10 @@ function openIssueComposer() {
   addBtn.hidden = true
 
   // Show short names in the dropdown but submit the full owner/name as the
-  // value so the API call doesn't have to reassemble it.
-  const repos = distinctRepos()
+  // value so the API call doesn't have to reassemble it. Sources from
+  // /api/repos (every Vaquum repo); falls back to the involvement set
+  // only if that hasn't loaded yet.
+  const repos = allRepos.length > 0 ? allRepos : distinctRepos()
   const repoOptions = repos.length === 0
     ? '<option value="">(no repos available)</option>'
     : repos.map((r) => `<option value="${escapeHtml(r)}">${escapeHtml(shortRepo(r))}</option>`).join('')
@@ -1014,7 +1033,7 @@ export async function initCurrentView() {
     attachFilterHandlers()
   }
   try {
-    await Promise.all([fetchManual(), fetchLive()])
+    await Promise.all([fetchManual(), fetchLive(), fetchAllRepos()])
     renderAll()
     fetchPrStatus()                  // first PR-status pull, intentionally not awaited
   } catch (err) {

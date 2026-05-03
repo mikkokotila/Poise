@@ -127,6 +127,40 @@ function toLegacy(r: DatastoreRecord, kind: 'pr' | 'issue'): GhRecord {
   }
 }
 
+// Org-wide list of every repo that has any PR or issue history. Used
+// to populate Current's repo dropdowns (manual cards + issue composer)
+// — the user wants to pick from ALL Vaquum repos, not just the ones
+// they've personally touched. Cached for 5 minutes so the dropdowns
+// open instantly on subsequent edits.
+//
+// The datastore doesn't expose a dedicated `views.repos` yet, so we
+// derive the list from views.pr + views.issue (no user filter). A repo
+// with zero PRs and zero issues won't appear — fine for a "where to
+// file an issue" picker, since you can't file there anyway if there's
+// no one home.
+let repoListCache: { repos: string[], expiry: number } | null = null
+const REPO_LIST_TTL_MS = 5 * 60 * 1000
+
+function shortRepo(full: string): string {
+  return full.includes('/') ? full.split('/', 2)[1] : full
+}
+
+export async function listOrgRepos(): Promise<string[]> {
+  const now = Date.now()
+  if (repoListCache && repoListCache.expiry > now) return repoListCache.repos
+
+  const [prs, issues] = await Promise.all([
+    runCli(['view', 'pr', '--limit', '99999', '--format', 'json']),
+    runCli(['view', 'issue', '--limit', '99999', '--format', 'json']),
+  ])
+
+  const set = new Set<string>()
+  for (const r of [...prs, ...issues]) set.add(r.repo)
+  const repos = [...set].sort((a, b) => shortRepo(a).localeCompare(shortRepo(b)))
+  repoListCache = { repos, expiry: now + REPO_LIST_TTL_MS }
+  return repos
+}
+
 // Resolve the local checkout path for a repo via
 // `github-interface --local-checkout-path ORG REPO`. Returns an absolute
 // filesystem path. Used to set --pwd for `agent-interface --pr-review`,

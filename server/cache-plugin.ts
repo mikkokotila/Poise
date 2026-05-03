@@ -1,7 +1,7 @@
 import type { Plugin, Connect } from 'vite'
 import { getSettings, setSettings } from './settings'
 import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, type Lane } from './current'
-import { handleGhBody } from './gh'
+import { handleGhBody, listOrgRepos } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, triggerPrReview } from './agent'
 
 function json(res: any, status: number, body: unknown) {
@@ -69,6 +69,19 @@ export function cachePlugin(): Plugin {
             return json(res, 200, { logs })
           } catch (err: any) {
             return json(res, 502, { error: 'agent-interface --logs failed: ' + (err.message || String(err)) })
+          }
+        }
+
+        // ── /api/repos — every repo in the org with any PR/issue ──
+        // Cached 5 min server-side. Used by Current's repo selectors so
+        // the user can pick from every Vaquum repo, not just the ones
+        // they've personally touched.
+        if (url === '/api/repos' && req.method === 'GET') {
+          try {
+            const repos = await listOrgRepos()
+            return json(res, 200, { repos })
+          } catch (err: any) {
+            return json(res, 502, { error: 'listOrgRepos failed: ' + (err.message || String(err)) })
           }
         }
 
