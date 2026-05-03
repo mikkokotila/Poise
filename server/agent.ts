@@ -11,9 +11,21 @@
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
 
 const execFileP = promisify(execFile)
 const CLI = 'agent-interface'
+
+// agent-interface's DB stores some response_paths as relative
+// (`data/responses/<id>.txt`) and `--read-response` reads them without
+// resolving against the project root — so the CLI must be invoked with
+// cwd at the agent-interface project root for those entries to work.
+// Override via env if your install lives elsewhere.
+function agentCwd(): string {
+  return process.env.AGENT_INTERFACE_ROOT
+    || join(homedir(), 'dev', 'caller', 'agent_interface')
+}
 
 interface LogEntry {
   id: string
@@ -30,6 +42,7 @@ interface LogEntry {
 
 export async function fetchAgentLogs(): Promise<LogEntry[]> {
   const { stdout } = await execFileP(CLI, ['--logs'], {
+    cwd: agentCwd(),
     maxBuffer: 32 * 1024 * 1024,
   })
   const trimmed = stdout.trim()
@@ -46,6 +59,7 @@ export async function fetchAgentResponse(hash: string): Promise<{ hash: string, 
     throw new Error('invalid response hash')
   }
   const { stdout } = await execFileP(CLI, ['--read-response', hash], {
+    cwd: agentCwd(),
     maxBuffer: 32 * 1024 * 1024,
   })
   return { hash, body: stdout }
