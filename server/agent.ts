@@ -70,18 +70,18 @@ export async function fetchAgentResponse(hash: string): Promise<{ hash: string, 
   return { hash, body: stdout }
 }
 
-// Kick off `agent-interface --pr-review <url> --pwd <local-checkout>`.
+// Kick off `agent-interface --pr-review #<num> --pwd <local-checkout>`.
 // The underlying claude run takes minutes; we spawn detached and return
 // immediately. The user watches progress in the Swarm view (the agent
 // call lands as a new entry with status='running' the moment track()
 // fires upstream, then settles to completed/failed).
 export async function triggerPrReview(prUrl: string): Promise<{ ok: true }> {
-  const m = String(prUrl || '').match(/github\.com\/([^/]+)\/([^/]+)\/pull\/\d+/)
+  const m = String(prUrl || '').match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
   if (!m) throw new Error('not a github PR url')
-  const [, owner, repo] = m
+  const [, owner, repo, num] = m
   const pwd = await localCheckoutPath(owner, repo)
 
-  const child = spawn(CLI, ['--pr-review', prUrl, '--pwd', pwd], {
+  const child = spawn(CLI, ['--pr-review', `#${num}`, '--pwd', pwd], {
     cwd: agentCwd(),
     detached: true,
     stdio: 'ignore',
