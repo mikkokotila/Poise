@@ -18,10 +18,26 @@
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { mkdir } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { getMeta } from './db'
 
 const execFileP = promisify(execFile)
 const CLI = 'github-datastore'
+const GH_INTERFACE = 'github-interface'
+
+// github-interface resolves the repo from cwd's last two path parts when
+// no git remote is found. We make a no-op directory under tmpdir for each
+// repo and use that as cwd — `mkdir -p` is cheap and idempotent.
+const GH_INTERFACE_CWD_ROOT = join(tmpdir(), 'poise-gh-interface')
+
+// PR mergeable cache — once-a-minute poll cadence on the front, ~60s TTL
+// here means we do real work on each user-driven tick but skip duplicate
+// checks within the tick.
+const GREEN_TTL_MS = 60_000
+const GREEN_CONCURRENCY = 5
+const greenCache = new Map<string, { green: boolean, expiry: number }>()
 
 // Subset of fields the datastore returns. Pr-only and issue-only fields
 // are optional; the user-footprint view adds `item_type` and `reasons`.
@@ -108,6 +124,61 @@ function toLegacy(r: DatastoreRecord, kind: 'pr' | 'issue'): GhRecord {
   }
 }
 
+// Ask github-interface whether a single PR is "green" (mergeable, open,
+// not draft, mergeable_state == clean). Cached per PR for ~60s so the
+// once-a-minute frontend poll doesn't refire the whole fanout every tick.
+//
+// github-interface infers the repo from cwd when no `--repository` flag
+// or git remote is available. We just point cwd at a tmp directory whose
+// last two parts are `<owner>/<repo>` and the CLI picks it up.
+async function checkMergeable(owner: string, repo: string, number: number): Promise<boolean> {
+  const key = `${owner}/${repo}#${number}`
+  const now = Date.now()
+  const cached = greenCache.get(key)
+  if (cached && cached.expiry > now) return cached.green
+
+  const cwd = join(GH_INTERFACE_CWD_ROOT, owner, repo)
+  try {
+    await mkdir(cwd, { recursive: true })
+    const { stdout } = await execFileP(GH_INTERFACE, ['--mergeable', `#${number}`], {
+      cwd,
+      maxBuffer: 1 * 1024 * 1024,
+    })
+    const result = JSON.parse(stdout)
+    const green = !!result.mergeable
+    greenCache.set(key, { green, expiry: now + GREEN_TTL_MS })
+    return green
+  } catch {
+    // Network blip / API error / parse failure — cache the negative so we
+    // don't hammer on every retry. Better to under-show green than to
+    // over-show it.
+    greenCache.set(key, { green: false, expiry: now + GREEN_TTL_MS })
+    return false
+  }
+}
+
+// Resolve mergeable-true PRs across the user's open-PR set. Concurrency
+// capped to be polite to GitHub's REST endpoint — typical involvement
+// only has a handful of open PRs at once.
+async function fetchGreenPrs(me: string): Promise<{ repo: string, number: number }[]> {
+  const openPrs = await fetchKind('pr', { record_state: 'open', limit: 200 }, me)
+
+  const results: { repo: string, number: number }[] = []
+  for (let i = 0; i < openPrs.length; i += GREEN_CONCURRENCY) {
+    const chunk = openPrs.slice(i, i + GREEN_CONCURRENCY)
+    const checks = await Promise.all(chunk.map(async (pr) => {
+      if (!pr.repo.includes('/')) return { pr, green: false }
+      const [owner, repoName] = pr.repo.split('/', 2)
+      const green = await checkMergeable(owner, repoName, pr.number)
+      return { pr, green }
+    }))
+    for (const { pr, green } of checks) {
+      if (green) results.push({ repo: pr.repo, number: pr.number })
+    }
+  }
+  return results
+}
+
 // One CLI call for one kind. The datastore CLI doesn't support offset
 // or `q` or `updated_until`, so we pull a wider window than the caller
 // asked for whenever those proxy-side filters or count_only are in play
@@ -181,11 +252,12 @@ export async function handleGhBody(body: any): Promise<{ status: number, body: u
   }
 
   if (op === 'green_pr') {
-    // Mergeability isn't exposed by the datastore — feature soft-disabled.
-    // Returning an empty record set keeps Current's fetchPrStatus a no-op
-    // rather than an error; if a separate "green" signal is wired later,
-    // we plug it in here.
-    return { status: 200, body: { records: [] } }
+    // Mergeability isn't on the datastore views, so we fan out
+    // `github-interface --mergeable '#<n>'` across the user's open PRs.
+    // Results are cached ~60s so subsequent ticks within a refresh
+    // window are instant.
+    const records = await fetchGreenPrs(me)
+    return { status: 200, body: { records } }
   }
 
   if (op === 'open_issue' || op === 'post_comment') {
