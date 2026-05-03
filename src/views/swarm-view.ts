@@ -14,11 +14,14 @@ import { getRefreshRateMs } from '../config'
 
 interface LogEntry {
   id: string
+  pr_id: string | null
+  repo: string | null
+  actor: string
   model: string
   prompt: string
   time_elapsed: string
   status: string
-  response_path: string
+  response: string        // 8-char hash; pass to /api/agent-response/<hash> to fetch body
   error: string
 }
 
@@ -54,10 +57,28 @@ function modelCell(s: string): string {
   return `<span class="agent-model">${escapeHtml(s || '—')}</span>`
 }
 
+// Repo + PR number formatted as a short tag with a link to GitHub when
+// both are set. Either field missing → dash, so the column reads
+// honestly when the call wasn't tied to a PR.
+function targetCell(e: LogEntry): string {
+  const repo = e.repo || ''
+  const pr = e.pr_id ? String(e.pr_id) : ''
+  if (!repo && !pr) return '<span class="agent-target-dash">—</span>'
+  const short = repo ? (repo.includes('/') ? repo.split('/')[1] : repo) : ''
+  const label = short && pr ? `${short}#${pr}` : (short || `#${pr}`)
+  if (repo && pr) {
+    const href = `https://github.com/${repo}/pull/${pr}`
+    return `<a class="agent-target" href="${href}" target="_blank" rel="noopener">${escapeHtml(label)}</a>`
+  }
+  return `<span class="agent-target">${escapeHtml(label)}</span>`
+}
+
 function matchesSearch(e: LogEntry): boolean {
   if (!searchQuery) return true
   const q = searchQuery.toLowerCase()
-  return [e.id, e.model, e.prompt, e.status].some((f) => (f || '').toLowerCase().includes(q))
+  return [e.id, e.model, e.prompt, e.status, e.actor, e.repo, e.pr_id].some(
+    (f) => (f || '').toLowerCase().includes(q)
+  )
 }
 
 function visible(): LogEntry[] {
@@ -77,6 +98,7 @@ function renderShell() {
         <thead>
           <tr>
             <th class="agent-col-model">Model</th>
+            <th class="agent-col-target">Target</th>
             <th class="agent-col-prompt">Prompt</th>
             <th class="agent-col-status">Status</th>
             <th class="agent-col-time">Time</th>
@@ -106,14 +128,18 @@ function buildMainRow(e: LogEntry): HTMLTableRowElement {
   const tr = document.createElement('tr')
   tr.className = 'agent-row'
   tr.dataset.id = e.id
+  tr.dataset.hash = e.response || ''
+  const hasResponse = !!e.response
+  const btn = hasResponse
+    ? `<button class="agent-view-btn" data-action="toggle">${expanded.has(e.id) ? 'hide' : 'view'}</button>`
+    : '<span class="agent-target-dash">—</span>'
   tr.innerHTML = `
     <td>${modelCell(e.model)}</td>
+    <td>${targetCell(e)}</td>
     <td class="agent-prompt-cell" title="${escapeHtml(e.prompt || '')}">${escapeHtml(truncate(e.prompt || '', 140))}</td>
     <td>${statusCell(e.status)}</td>
     <td><span class="agent-time">${escapeHtml(e.time_elapsed || '—')}</span></td>
-    <td class="agent-response-cell">
-      <button class="agent-view-btn" data-action="toggle">${expanded.has(e.id) ? 'hide' : 'view'}</button>
-    </td>
+    <td class="agent-response-cell">${btn}</td>
   `
   return tr
 }
@@ -128,7 +154,7 @@ function buildExpandRow(e: LogEntry): HTMLTableRowElement {
     : (state.body
         ? `<pre class="agent-response-body">${escapeHtml(state.body)}</pre>`
         : '<div class="agent-response-empty">No response body.</div>')
-  tr.innerHTML = `<td colspan="5">${inner}</td>`
+  tr.innerHTML = `<td colspan="6">${inner}</td>`
   return tr
 }
 
@@ -156,12 +182,15 @@ function render() {
   bodyEl.appendChild(frag)
 }
 
-async function loadResponse(id: string) {
+async function loadResponse(id: string, hash: string) {
   expanded.set(id, { body: null, loading: true })
   render()
   try {
-    const res = await fetch(`/api/agent-response/${encodeURIComponent(id)}`)
-    if (!res.ok) throw new Error(`/api/agent-response ${res.status}`)
+    const res = await fetch(`/api/agent-response/${encodeURIComponent(hash)}`)
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      throw new Error(text ? `/api/agent-response ${res.status}: ${text.slice(0, 200)}` : `/api/agent-response ${res.status}`)
+    }
     const data = await res.json()
     expanded.set(id, { body: data.body || '', loading: false })
   } catch (err) {
@@ -175,14 +204,15 @@ function attachClicks() {
     const btn = (ev.target as HTMLElement).closest<HTMLButtonElement>('.agent-view-btn')
     if (!btn) return
     const tr = btn.closest<HTMLTableRowElement>('tr')!
-    const id = tr.dataset.id
-    if (!id) return
+    const id = tr.dataset.id || ''
+    const hash = tr.dataset.hash || ''
+    if (!id || !hash) return
     if (expanded.has(id)) {
       expanded.delete(id)
       render()
     } else {
-      // Optimistically render the placeholder row, then fetch.
-      loadResponse(id)
+      // Optimistically render the placeholder row, then fetch the body.
+      loadResponse(id, hash)
     }
   })
 }

@@ -1,34 +1,30 @@
 // Bridge to the local `agent-interface` CLI for Swarm's data source.
 //
-// `agent-interface --logs` prints a JSON array of completed agent calls,
-// each with a `response_path` relative to the agent_interface project
-// root. There's no CLI/HTTP way to fetch the response body, so we read
-// the file directly. Path is overridable via env so the install layout
-// isn't hardcoded for everyone.
+// Two operations:
+//   --logs                  → JSON array of completed agent calls
+//   --read-response <hash>  → response body, looked up by the 8-char
+//                             prefix returned in the log's `response`
+//                             field
+//
+// Everything is hash-routed now — Poise never touches the filesystem
+// the agent-interface project owns.
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { readFile } from 'node:fs/promises'
-import { join, isAbsolute } from 'node:path'
-import { homedir } from 'node:os'
 
 const execFileP = promisify(execFile)
 const CLI = 'agent-interface'
 
-// agent-interface project root (where `data/responses/<id>.txt` lives).
-// The relative response_path emitted by --logs is resolved against this.
-function agentRoot(): string {
-  return process.env.AGENT_INTERFACE_ROOT
-    || join(homedir(), 'dev', 'caller', 'agent_interface')
-}
-
 interface LogEntry {
   id: string
+  pr_id: string | null
+  repo: string | null
+  actor: string
   model: string
   prompt: string
   time_elapsed: string
   status: string
-  response_path: string
+  response: string        // 8-char hash; pass to --read-response for the body
   error: string
 }
 
@@ -41,19 +37,16 @@ export async function fetchAgentLogs(): Promise<LogEntry[]> {
   return JSON.parse(trimmed)
 }
 
-// Read the response body for one log entry. The id-based lookup runs
-// `agent-interface --logs` to find the matching entry's response_path —
-// fine because the call is on demand (only when the user clicks View).
-export async function fetchAgentResponse(id: string): Promise<{ id: string, body: string } | null> {
-  const logs = await fetchAgentLogs()
-  const entry = logs.find((e) => e.id === id)
-  if (!entry) return null
-  const rel = entry.response_path
-  const abs = isAbsolute(rel) ? rel : join(agentRoot(), rel)
-  try {
-    const body = await readFile(abs, 'utf-8')
-    return { id, body }
-  } catch {
-    return { id, body: '' }
+// Fetch one response body by its hash (the 8-char value from a log
+// entry's `response` field). agent-interface looks up the full row by
+// `id like <hash>%` and prints the body.
+export async function fetchAgentResponse(hash: string): Promise<{ hash: string, body: string }> {
+  // Guard against shell-injection-style input — only hex prefixes pass.
+  if (!/^[0-9a-fA-F]+$/.test(hash)) {
+    throw new Error('invalid response hash')
   }
+  const { stdout } = await execFileP(CLI, ['--read-response', hash], {
+    maxBuffer: 32 * 1024 * 1024,
+  })
+  return { hash, body: stdout }
 }

@@ -72,19 +72,20 @@ export function cachePlugin(): Plugin {
           }
         }
 
-        // ── /api/agent-response/:id — body of one agent call ──
-        // The CLI doesn't expose response bodies, so we resolve the
-        // response_path from --logs and read the file directly. On
-        // demand (only when the user clicks View on a row).
+        // ── /api/agent-response/:hash — body of one agent call ──
+        // Hash is the 8-char `response` value from --logs;
+        // agent-interface --read-response resolves it back to the full
+        // body. On demand (only when the user clicks View on a row).
         const agentRespMatch = url.match(/^\/api\/agent-response\/([0-9a-fA-F]+)(?:\?|$)/)
         if (agentRespMatch && req.method === 'GET') {
-          const id = agentRespMatch[1]
+          const hash = agentRespMatch[1]
           try {
-            const result = await fetchAgentResponse(id)
-            if (!result) return json(res, 404, { error: 'log entry not found: ' + id })
+            const result = await fetchAgentResponse(hash)
             return json(res, 200, result)
           } catch (err: any) {
-            return json(res, 502, { error: 'agent-interface read failed: ' + (err.message || String(err)) })
+            const stderr = err?.stderr?.toString?.() || ''
+            const msg = stderr || err?.message || String(err)
+            return json(res, 502, { error: 'agent-interface --read-response failed: ' + msg })
           }
         }
 
