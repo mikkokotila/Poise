@@ -230,6 +230,11 @@ function renderManualCard(card: ManualCard): HTMLElement {
   return el
 }
 
+// Small play icon for PR cards — same shape Archive uses for its
+// consensus-review button so the visual vocabulary stays consistent.
+const PR_REVIEW_PLAY_SVG = '<svg width="11" height="11" viewBox="0 0 14 14" fill="none"><path d="M3 2l9 5-9 5V2z" fill="currentColor"/></svg>'
+const PR_REVIEW_SPIN_SVG = '<svg width="11" height="11" viewBox="0 0 14 14" fill="none" class="spin"><circle cx="7" cy="7" r="5.5" stroke="currentColor" stroke-width="1.5" stroke-dasharray="8 6" stroke-linecap="round"/></svg>'
+
 function renderLiveItem(item: LiveItem): HTMLElement {
   const el = document.createElement('article')
   const classes = ['card', 'card-live']
@@ -239,6 +244,12 @@ function renderLiveItem(item: LiveItem): HTMLElement {
   el.dataset.id = prKey(item)        // stable id across refreshes for the FLIP
   const st = liveStateLabel(item)
   const stateBadge = st ? `<span class="state ${st.cls}">${st.text}</span>` : ''
+  // PR cards get a tiny review icon; clicking it triggers
+  // `agent-interface --pr-review` for that PR. The icon is a sibling
+  // of the <a class="card-link"> so its click doesn't navigate.
+  const reviewBtn = item.is_pr === 1
+    ? `<button class="card-review-btn" title="Run PR review" aria-label="Run PR review">${PR_REVIEW_PLAY_SVG}</button>`
+    : ''
   el.innerHTML = `
     <a class="card-link" href="${item.url}" target="_blank" rel="noopener">
       <div class="card-text">${escapeHtml(item.title)}</div>
@@ -249,6 +260,7 @@ function renderLiveItem(item: LiveItem): HTMLElement {
         <span class="card-time">${relativeTime(item.updated_at)}</span>
       </div>
     </a>
+    ${reviewBtn}
   `
   return el
 }
@@ -847,6 +859,50 @@ function attachCardClickHandlers() {
   const kanban = viewEl.querySelector<HTMLElement>('.kanban')!
   kanban.addEventListener('click', async (e) => {
     const target = e.target as HTMLElement
+
+    // PR review icon — fires off agent-interface --pr-review for the PR
+    // and shows a brief running/done indicator. Stop propagation so the
+    // card link doesn't navigate to GitHub at the same time.
+    const reviewBtn = target.closest<HTMLButtonElement>('.card-review-btn')
+    if (reviewBtn) {
+      e.preventDefault()
+      e.stopPropagation()
+      if (reviewBtn.disabled) return
+      const cardEl = reviewBtn.closest<HTMLElement>('.card')!
+      const id = cardEl.dataset.id || ''
+      const item = liveItems.find((i) => prKey(i) === id)
+      if (!item) return
+      reviewBtn.disabled = true
+      reviewBtn.classList.add('running')
+      reviewBtn.innerHTML = PR_REVIEW_SPIN_SVG
+      try {
+        const res = await fetch('/api/pr-review', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: item.url }),
+        })
+        if (!res.ok) {
+          const text = await res.text().catch(() => '')
+          throw new Error(text ? `${res.status}: ${text.slice(0, 200)}` : `HTTP ${res.status}`)
+        }
+        reviewBtn.classList.remove('running')
+        reviewBtn.classList.add('done')
+        reviewBtn.innerHTML = PR_REVIEW_PLAY_SVG
+        // Brief done state, then reset so the user can re-trigger
+        window.setTimeout(() => {
+          reviewBtn.classList.remove('done')
+          reviewBtn.disabled = false
+        }, 2500)
+      } catch (err) {
+        reviewBtn.classList.remove('running')
+        reviewBtn.disabled = false
+        reviewBtn.innerHTML = PR_REVIEW_PLAY_SVG
+        console.error('PR review trigger failed:', err)
+        alert(`Could not start review: ${(err as Error).message}`)
+      }
+      return
+    }
+
     const delBtn = target.closest<HTMLElement>('.card-delete')
     if (delBtn) {
       e.stopPropagation()

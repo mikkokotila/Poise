@@ -1827,6 +1827,35 @@ tr:hover .review-btn { opacity: 1; }
   border-color: var(--n4);
 }
 
+/* PR-card review icon — kicks off `agent-interface --pr-review` for
+   the card's PR. Hover-revealed in the top-right corner; doesn't
+   intrude on the card's primary content. Same play-icon vocabulary as
+   Archive's consensus-review button so the action reads consistently
+   across the app. */
+.card-review-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  opacity: 0;
+  transition: opacity var(--t-quick) ease, background var(--t-quick) ease, color var(--t-quick) ease;
+  z-index: 1;
+}
+.card.card-live:hover .card-review-btn { opacity: 0.7; }
+.card-review-btn:hover { opacity: 1; color: var(--text); background: var(--border); }
+.card-review-btn.running { opacity: 1; color: var(--a1); }
+.card-review-btn.done    { opacity: 1; color: var(--a3); }
+.card-review-btn:disabled { cursor: default; }
+
 .card-link {
   display: block;
   padding: 12px;

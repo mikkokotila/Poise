@@ -2,7 +2,7 @@ import type { Plugin, Connect } from 'vite'
 import { getSettings, setSettings } from './settings'
 import { listCards, createCard, setCardText, moveCard, removeCard, type Lane } from './current'
 import { handleGhBody } from './gh'
-import { fetchAgentLogs, fetchAgentResponse } from './agent'
+import { fetchAgentLogs, fetchAgentResponse, triggerPrReview } from './agent'
 
 function json(res: any, status: number, body: unknown) {
   res.statusCode = status
@@ -69,6 +69,24 @@ export function cachePlugin(): Plugin {
             return json(res, 200, { logs })
           } catch (err: any) {
             return json(res, 502, { error: 'agent-interface --logs failed: ' + (err.message || String(err)) })
+          }
+        }
+
+        // ── /api/pr-review — kick off agent-interface --pr-review ──
+        // Body: { url } where url is a github PR URL. Resolves the
+        // local checkout path via github-interface, then spawns the
+        // CLI detached. The frontend gets an immediate 200; the actual
+        // run lands in Swarm as a new agent-interface log entry.
+        if (url === '/api/pr-review' && req.method === 'POST') {
+          try {
+            const raw = await readBody(req)
+            const body = raw ? JSON.parse(raw) : {}
+            const result = await triggerPrReview(String(body.url || ''))
+            return json(res, 200, result)
+          } catch (err: any) {
+            const stderr = err?.stderr?.toString?.() || ''
+            const msg = stderr || err?.message || String(err)
+            return json(res, 502, { error: 'pr-review trigger failed: ' + msg })
           }
         }
 

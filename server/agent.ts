@@ -9,10 +9,11 @@
 // Everything is hash-routed now — Poise never touches the filesystem
 // the agent-interface project owns.
 
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { localCheckoutPath } from './gh'
 
 const execFileP = promisify(execFile)
 const CLI = 'agent-interface'
@@ -67,4 +68,24 @@ export async function fetchAgentResponse(hash: string): Promise<{ hash: string, 
     maxBuffer: 32 * 1024 * 1024,
   })
   return { hash, body: stdout }
+}
+
+// Kick off `agent-interface --pr-review <url> --pwd <local-checkout>`.
+// The underlying claude run takes minutes; we spawn detached and return
+// immediately. The user watches progress in the Swarm view (the agent
+// call lands as a new entry with status='running' the moment track()
+// fires upstream, then settles to completed/failed).
+export async function triggerPrReview(prUrl: string): Promise<{ ok: true }> {
+  const m = String(prUrl || '').match(/github\.com\/([^/]+)\/([^/]+)\/pull\/\d+/)
+  if (!m) throw new Error('not a github PR url')
+  const [, owner, repo] = m
+  const pwd = await localCheckoutPath(owner, repo)
+
+  const child = spawn(CLI, ['--pr-review', prUrl, '--pwd', pwd], {
+    cwd: agentCwd(),
+    detached: true,
+    stdio: 'ignore',
+  })
+  child.unref()
+  return { ok: true }
 }

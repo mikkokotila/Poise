@@ -127,6 +127,20 @@ function toLegacy(r: DatastoreRecord, kind: 'pr' | 'issue'): GhRecord {
   }
 }
 
+// Resolve the local checkout path for a repo via
+// `github-interface --local-checkout-path ORG REPO`. Returns an absolute
+// filesystem path. Used to set --pwd for `agent-interface --pr-review`,
+// since the underlying claude run needs the repo's files to read.
+export async function localCheckoutPath(owner: string, repo: string): Promise<string> {
+  if (!owner || !repo) throw new Error('owner and repo required')
+  const { stdout } = await execFileP(GH_INTERFACE, ['--local-checkout-path', owner, repo], {
+    maxBuffer: 1 * 1024 * 1024,
+  })
+  const result = JSON.parse(stdout)
+  if (!result.path) throw new Error('github-interface --local-checkout-path returned no path')
+  return String(result.path)
+}
+
 // Ask github-interface whether a single PR is "green" (mergeable, open,
 // not draft, mergeable_state == clean). Cached per PR for ~60s so the
 // once-a-minute frontend poll doesn't refire the whole fanout every tick.
