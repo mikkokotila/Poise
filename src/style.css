@@ -2200,11 +2200,18 @@ tr:hover .review-btn { opacity: 1; }
 #view-swarm tbody td:first-child { padding-left: 8px; }
 
 #view-swarm .agent-col-model    { width: 140px; }
+#view-swarm .agent-col-behavior { width: 130px; }
 #view-swarm .agent-col-target   { width: 180px; }
 #view-swarm .agent-col-prompt   { /* flex */ }
 #view-swarm .agent-col-status   { width: 110px; }
 #view-swarm .agent-col-time     { width: 80px; text-align: right; font-variant-numeric: tabular-nums; }
 #view-swarm .agent-col-response { width: 70px; text-align: right; padding-right: 0; }
+
+.agent-behavior {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
 
 .agent-target {
   font-size: 0.75rem;

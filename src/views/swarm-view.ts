@@ -18,6 +18,7 @@ interface LogEntry {
   repo: string | null
   actor: string
   model: string
+  behavior: string | null   // agent-interface behavior name (pr-review, mergeable, etc.)
   prompt: string
   time_elapsed: string
   status: string
@@ -57,6 +58,11 @@ function modelCell(s: string): string {
   return `<span class="agent-model">${escapeHtml(s || '—')}</span>`
 }
 
+function behaviorCell(s: string | null): string {
+  if (!s) return '<span class="agent-target-dash">—</span>'
+  return `<span class="agent-behavior">${escapeHtml(s)}</span>`
+}
+
 // Repo + PR number formatted as a short tag with a link to GitHub when
 // both are set. Either field missing → dash, so the column reads
 // honestly when the call wasn't tied to a PR.
@@ -76,7 +82,7 @@ function targetCell(e: LogEntry): string {
 function matchesSearch(e: LogEntry): boolean {
   if (!searchQuery) return true
   const q = searchQuery.toLowerCase()
-  return [e.id, e.model, e.prompt, e.status, e.actor, e.repo, e.pr_id].some(
+  return [e.id, e.model, e.behavior, e.prompt, e.status, e.actor, e.repo, e.pr_id].some(
     (f) => (f || '').toLowerCase().includes(q)
   )
 }
@@ -98,6 +104,7 @@ function renderShell() {
         <thead>
           <tr>
             <th class="agent-col-model">Model</th>
+            <th class="agent-col-behavior">Behavior</th>
             <th class="agent-col-target">Target</th>
             <th class="agent-col-prompt">Prompt</th>
             <th class="agent-col-status">Status</th>
@@ -135,6 +142,7 @@ function buildMainRow(e: LogEntry): HTMLTableRowElement {
     : '<span class="agent-target-dash">—</span>'
   tr.innerHTML = `
     <td>${modelCell(e.model)}</td>
+    <td>${behaviorCell(e.behavior)}</td>
     <td>${targetCell(e)}</td>
     <td class="agent-prompt-cell" title="${escapeHtml(e.prompt || '')}">${escapeHtml(truncate(e.prompt || '', 140))}</td>
     <td>${statusCell(e.status)}</td>
@@ -154,7 +162,7 @@ function buildExpandRow(e: LogEntry): HTMLTableRowElement {
     : (state.body
         ? `<pre class="agent-response-body">${escapeHtml(state.body)}</pre>`
         : '<div class="agent-response-empty">No response body.</div>')
-  tr.innerHTML = `<td colspan="6">${inner}</td>`
+  tr.innerHTML = `<td colspan="7">${inner}</td>`
   return tr
 }
 

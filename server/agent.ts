@@ -33,6 +33,7 @@ interface LogEntry {
   repo: string | null
   actor: string
   model: string
+  behavior: string | null   // agent-interface behavior name (pr-review, mergeable, etc.)
   prompt: string
   time_elapsed: string
   status: string
