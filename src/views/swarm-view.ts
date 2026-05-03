@@ -108,7 +108,7 @@ function renderShell() {
             <th class="agent-col-target">Target</th>
             <th class="agent-col-prompt">Prompt</th>
             <th class="agent-col-status">Status</th>
-            <th class="agent-col-time">Time</th>
+            <th class="agent-col-time">Elapsed</th>
             <th class="agent-col-response">Response</th>
           </tr>
         </thead>
@@ -152,18 +152,121 @@ function buildMainRow(e: LogEntry): HTMLTableRowElement {
   return tr
 }
 
-function buildExpandRow(e: LogEntry): HTMLTableRowElement {
-  const state = expanded.get(e.id)!
-  const tr = document.createElement('tr')
-  tr.className = 'agent-expand-row'
-  tr.dataset.expandFor = e.id
+function setExpandContent(tr: HTMLTableRowElement, id: string) {
+  const state = expanded.get(id)!
   const inner = state.loading
     ? '<div class="agent-response-loading">Loading…</div>'
     : (state.body
         ? `<pre class="agent-response-body">${escapeHtml(state.body)}</pre>`
         : '<div class="agent-response-empty">No response body.</div>')
   tr.innerHTML = `<td colspan="7">${inner}</td>`
+}
+
+function buildExpandRow(e: LogEntry): HTMLTableRowElement {
+  const tr = document.createElement('tr')
+  tr.className = 'agent-expand-row'
+  tr.dataset.expandFor = e.id
+  setExpandContent(tr, e.id)
   return tr
+}
+
+// FLIP — same standard Current uses for its live lanes. Both main rows
+// and their (optional) expand-row siblings get rect-captured before the
+// reorder, then translated back to their old positions and animated
+// home over 700ms. Expand rows ride along with their main rows so the
+// pair never visually detaches during the animation.
+const FLIP_MS = 700
+
+function applySwarmFlip(nextEntries: LogEntry[]) {
+  // 1. First — capture rects of every existing row.
+  const firstRects = new Map<string, DOMRect>()        // keyed `m:<id>` for main, `e:<id>` for expand
+  const existingMain = new Map<string, HTMLTableRowElement>()
+  const existingExpand = new Map<string, HTMLTableRowElement>()
+  for (const el of [...bodyEl.children] as HTMLTableRowElement[]) {
+    if (el.classList.contains('agent-row')) {
+      const id = el.dataset.id
+      if (!id) continue
+      firstRects.set(`m:${id}`, el.getBoundingClientRect())
+      existingMain.set(id, el)
+    } else if (el.classList.contains('agent-expand-row')) {
+      const forId = el.dataset.expandFor
+      if (!forId) continue
+      firstRects.set(`e:${forId}`, el.getBoundingClientRect())
+      existingExpand.set(forId, el)
+    }
+  }
+
+  // 2. Last — drop departed rows, then reorder/insert.
+  const newIds = new Set(nextEntries.map((e) => e.id))
+  for (const [id, el] of existingMain)   if (!newIds.has(id))    el.remove()
+  for (const [forId, el] of existingExpand) if (!newIds.has(forId)) el.remove()
+
+  const fragment = document.createDocumentFragment()
+  for (const e of nextEntries) {
+    const main = existingMain.get(e.id)
+    if (main) {
+      fragment.appendChild(main)
+    } else {
+      const row = buildMainRow(e)
+      row.classList.add('new')                     // fade-in (shared rowIn keyframe)
+      fragment.appendChild(row)
+    }
+    if (expanded.has(e.id)) {
+      const ex = existingExpand.get(e.id)
+      fragment.appendChild(ex || buildExpandRow(e))
+    }
+  }
+  bodyEl.appendChild(fragment)
+
+  // 3. Invert — main rows and their expand siblings together.
+  const movers: HTMLTableRowElement[] = []
+  for (const e of nextEntries) {
+    const mainEl = existingMain.get(e.id)
+    if (mainEl) {
+      const first = firstRects.get(`m:${e.id}`)
+      if (first) {
+        const last = mainEl.getBoundingClientRect()
+        const dy = first.top - last.top
+        if (Math.abs(dy) >= 0.5) {
+          mainEl.style.transition = 'none'
+          mainEl.style.transform = `translateY(${dy}px)`
+          movers.push(mainEl)
+        }
+      }
+    }
+    if (expanded.has(e.id)) {
+      const exEl = existingExpand.get(e.id)
+      if (exEl) {
+        const first = firstRects.get(`e:${e.id}`)
+        if (first) {
+          const last = exEl.getBoundingClientRect()
+          const dy = first.top - last.top
+          if (Math.abs(dy) >= 0.5) {
+            exEl.style.transition = 'none'
+            exEl.style.transform = `translateY(${dy}px)`
+            movers.push(exEl)
+          }
+        }
+      }
+    }
+  }
+
+  // 4. Play — flush layout, then animate transforms back to identity.
+  if (movers.length > 0) {
+    void bodyEl.offsetHeight
+    requestAnimationFrame(() => {
+      for (const el of movers) {
+        el.style.transition = `transform ${FLIP_MS}ms cubic-bezier(0.4, 0, 0.2, 1)`
+        el.style.transform = ''
+      }
+      window.setTimeout(() => {
+        for (const el of movers) {
+          el.style.transition = ''
+          el.style.transform = ''
+        }
+      }, FLIP_MS + 50)
+    })
+  }
 }
 
 function render() {
@@ -175,24 +278,32 @@ function render() {
     table.hidden = true
     empty.hidden = false
     countEl.textContent = ''
+    bodyEl.innerHTML = ''
     return
   }
   table.hidden = false
   empty.hidden = true
   countEl.textContent = list.length === entries.length ? `${entries.length}` : `${list.length} / ${entries.length}`
-
-  bodyEl.innerHTML = ''
-  const frag = document.createDocumentFragment()
-  for (const e of list) {
-    frag.appendChild(buildMainRow(e))
-    if (expanded.has(e.id)) frag.appendChild(buildExpandRow(e))
-  }
-  bodyEl.appendChild(frag)
+  applySwarmFlip(list)
 }
 
 async function loadResponse(id: string, hash: string) {
   expanded.set(id, { body: null, loading: true })
-  render()
+
+  // Optimistically insert the expand row right after its main row so
+  // the user sees the loading state immediately. The next poll's FLIP
+  // will preserve the row by id.
+  const mainRow = bodyEl.querySelector<HTMLTableRowElement>(`.agent-row[data-id="${id}"]`)
+  if (mainRow) {
+    const btn = mainRow.querySelector<HTMLButtonElement>('.agent-view-btn')
+    if (btn) btn.textContent = 'hide'
+    const e = entries.find((x) => x.id === id)
+    if (e) {
+      const expandRow = buildExpandRow(e)
+      mainRow.insertAdjacentElement('afterend', expandRow)
+    }
+  }
+
   try {
     const res = await fetch(`/api/agent-response/${encodeURIComponent(hash)}`)
     if (!res.ok) {
@@ -204,7 +315,10 @@ async function loadResponse(id: string, hash: string) {
   } catch (err) {
     expanded.set(id, { body: `Error: ${(err as Error).message}`, loading: false })
   }
-  render()
+
+  // Refresh the expand row's content in place — no rebuild, no flicker.
+  const stillThere = bodyEl.querySelector<HTMLTableRowElement>(`.agent-expand-row[data-expand-for="${id}"]`)
+  if (stillThere) setExpandContent(stillThere, id)
 }
 
 function attachClicks() {
@@ -216,10 +330,13 @@ function attachClicks() {
     const hash = tr.dataset.hash || ''
     if (!id || !hash) return
     if (expanded.has(id)) {
+      // Hide — surgical: remove the expand row, flip the button label.
       expanded.delete(id)
-      render()
+      const expandRow = bodyEl.querySelector<HTMLTableRowElement>(`.agent-expand-row[data-expand-for="${id}"]`)
+      expandRow?.remove()
+      btn.textContent = 'view'
     } else {
-      // Optimistically render the placeholder row, then fetch the body.
+      // Show — insert the placeholder + fetch the body.
       loadResponse(id, hash)
     }
   })

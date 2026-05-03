@@ -48,7 +48,10 @@ export async function fetchAgentLogs(): Promise<LogEntry[]> {
   })
   const trimmed = stdout.trim()
   if (!trimmed) return []
-  return JSON.parse(trimmed)
+  // agent-interface returns oldest-first (`order by started_at`).
+  // Surface newest-first so the front-end doesn't carry the convention.
+  const list: LogEntry[] = JSON.parse(trimmed)
+  return list.reverse()
 }
 
 // Fetch one response body by its hash (the 8-char value from a log
