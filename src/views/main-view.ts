@@ -1,6 +1,6 @@
 // Main table view — reads through /api/gh from the unified /github API.
 
-import { midnightInZone, startOfWeekInZone, getRefreshRateMs } from '../config'
+import { midnightInZone, startOfWeekInZone } from '../config'
 
 const STORAGE_KEY = 'poise-filters'
 const REVIEWED_KEY = 'poise-reviewed'
@@ -44,7 +44,11 @@ let fetching = false
 let initialized = false
 let observer: IntersectionObserver | null = null
 let searchDebounce: ReturnType<typeof setTimeout> | null = null
-let refreshTimer: ReturnType<typeof setInterval> | null = null
+// Tick listener installed when the view is initialized; removed via
+// stopMainRefresh() when navigating away. Single shared clock — see
+// startRefreshTicker() in src/config.ts.
+const onTick = () => refreshMainSoft()
+let tickListening = false
 
 // DOM
 let tbody: HTMLTableSectionElement
@@ -592,14 +596,14 @@ export function refreshMainView() {
 }
 
 export function stopMainRefresh() {
-  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null }
+  if (tickListening) {
+    window.removeEventListener('poise:refresh-tick', onTick)
+    tickListening = false
+  }
 }
 
 function startMainTimer() {
-  stopMainRefresh()
-  refreshTimer = setInterval(refreshMainView, getRefreshRateMs())
+  if (tickListening) return
+  window.addEventListener('poise:refresh-tick', onTick)
+  tickListening = true
 }
-
-window.addEventListener('poise:refresh-rate-changed', () => {
-  if (refreshTimer) startMainTimer()
-})

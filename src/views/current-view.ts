@@ -6,7 +6,7 @@
 // unaffected. The Issue lane has a richer composer (title / body / repo)
 // that opens a real GitHub issue via the proxy.
 
-import { getSettings, midnightInZone, startOfWeekInZone, getRefreshRateMs } from '../config'
+import { getSettings, midnightInZone, startOfWeekInZone } from '../config'
 
 type Lane = 'idea' | 'concept' | 'plan' | 'issue' | 'pr'
 type LaneType = 'manual' | 'live'
@@ -79,7 +79,10 @@ let statusFilter: StatusFilter = 'all'
 let searchQuery = ''
 let searchDebounce: ReturnType<typeof setTimeout> | null = null
 let prStatus: Map<string, PrStatus> = new Map()
-let liveTimer: ReturnType<typeof setInterval> | null = null
+// Tick listener installed on view init; removed via stopCurrentPolling()
+// when navigating away. Single shared clock — see startRefreshTicker().
+const onLiveTick = () => pollLiveTick()
+let liveListening = false
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -482,7 +485,10 @@ function applyPrStatusClasses() {
 }
 
 export function stopCurrentPolling() {
-  if (liveTimer) { clearInterval(liveTimer); liveTimer = null }
+  if (liveListening) {
+    window.removeEventListener('poise:refresh-tick', onLiveTick)
+    liveListening = false
+  }
 }
 
 // One-minute background tick: re-fetch live items, then re-fetch the
@@ -1048,10 +1054,7 @@ export async function initCurrentView() {
 }
 
 function startLiveTimer() {
-  stopCurrentPolling()
-  liveTimer = setInterval(pollLiveTick, getRefreshRateMs())
+  if (liveListening) return
+  window.addEventListener('poise:refresh-tick', onLiveTick)
+  liveListening = true
 }
-
-window.addEventListener('poise:refresh-rate-changed', () => {
-  if (liveTimer) startLiveTimer()
-})

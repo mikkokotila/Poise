@@ -5,7 +5,7 @@ import { initMenu } from './menu'
 import { initMainView, refreshMainView, stopMainRefresh } from './views/main-view'
 import { initCurrentView, stopCurrentPolling } from './views/current-view'
 import { initSwarmView, stopSwarmRefresh } from './views/swarm-view'
-import { loadSettings } from './config'
+import { loadSettings, startRefreshTicker } from './config'
 
 const viewMainEl = document.getElementById('view-main')!
 const viewCurrentEl = document.getElementById('view-current')!
@@ -57,6 +57,10 @@ const menu = initMenu({
 ;(async () => {
   await loadSettings()
   showView(menu.currentView())
+  // Single shared refresh clock — every view listens for poise:refresh-tick
+  // and refreshes on it. Wall-clock-aligned so switching views never causes
+  // an off-cycle re-fetch.
+  startRefreshTicker()
 
   const ready = await isFullyConfigured()
   if (!ready) openSettingsPanel()

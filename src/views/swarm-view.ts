@@ -10,7 +10,6 @@
 // is keyed by id and survives the refresh — opens stay open through a
 // FLIP-style row preservation.
 
-import { getRefreshRateMs } from '../config'
 
 interface LogEntry {
   id: string
@@ -33,11 +32,13 @@ let initialized = false
 let entries: LogEntry[] = []
 let searchQuery = ''
 let searchDebounce: ReturnType<typeof setTimeout> | null = null
-let pollTimer: ReturnType<typeof setInterval> | null = null
+// Tick listener — installed on view init, removed on view leave.
+// Single shared clock — see startRefreshTicker() in src/config.ts.
+const onSwarmTick = () => pollOnce()
+let swarmListening = false
 let fetchInFlight = false
 const expanded = new Map<string, { body: string | null, loading: boolean }>()
 
-const POLL_MS = 15_000
 
 function escapeHtml(s: string): string {
   const d = document.createElement('div'); d.textContent = s; return d.innerHTML
@@ -383,14 +384,14 @@ export async function initSwarmView() {
 }
 
 export function stopSwarmRefresh() {
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+  if (swarmListening) {
+    window.removeEventListener('poise:refresh-tick', onSwarmTick)
+    swarmListening = false
+  }
 }
 
 function startSwarmPolling() {
-  stopSwarmRefresh()
-  // Cadence stays at the dedicated 15s for now — agent-interface logs
-  // tick at their own rate, independent of the GitHub refresh-rate.
-  // Reading getRefreshRateMs() lets a future toggle govern this too.
-  void getRefreshRateMs
-  pollTimer = setInterval(pollOnce, POLL_MS)
+  if (swarmListening) return
+  window.addEventListener('poise:refresh-tick', onSwarmTick)
+  swarmListening = true
 }

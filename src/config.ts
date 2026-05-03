@@ -70,6 +70,36 @@ export function setRefreshRate(rate: RefreshRate) {
   window.dispatchEvent(new CustomEvent('poise:refresh-rate-changed', { detail: { rate } }))
 }
 
+// Shared wall-clock-aligned ticker. Every view listens for
+// `poise:refresh-tick` and refreshes on it. Anchoring to interval-
+// boundaries (Math.ceil(now / interval) * interval) means that
+// switching views mid-cycle never causes the new view to refresh
+// shortly after the one you just left — they all share one clock.
+let tickTimer: ReturnType<typeof setTimeout> | null = null
+let tickerStarted = false
+
+function scheduleNextTick() {
+  if (tickTimer) clearTimeout(tickTimer)
+  const intervalMs = getRefreshRateMs()
+  const now = Date.now()
+  // +1 to push past the current boundary if we just landed on it
+  const nextBoundary = Math.ceil((now + 1) / intervalMs) * intervalMs
+  tickTimer = setTimeout(() => {
+    window.dispatchEvent(new CustomEvent('poise:refresh-tick'))
+    scheduleNextTick()
+  }, Math.max(0, nextBoundary - now))
+}
+
+export function startRefreshTicker() {
+  if (tickerStarted) return
+  tickerStarted = true
+  scheduleNextTick()
+}
+
+window.addEventListener('poise:refresh-rate-changed', () => {
+  if (tickerStarted) scheduleNextTick()
+})
+
 // Minutes between an IANA zone's wall clock and UTC at a given UTC instant.
 // Positive for zones east of UTC. Anchoring at the desired instant handles DST.
 function tzOffsetMin(tz: string, atUtc: Date): number {
