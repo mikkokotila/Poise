@@ -43,10 +43,6 @@ function escapeHtml(s: string): string {
   const d = document.createElement('div'); d.textContent = s; return d.innerHTML
 }
 
-function truncate(s: string, n: number): string {
-  if (!s) return ''
-  return s.length <= n ? s : s.slice(0, n - 1) + '…'
-}
 
 // Reuse Archive's `.state` pill class — same closed vocabulary, same
 // shape across both views. Add the closed-set agent flavors (ok / bad
