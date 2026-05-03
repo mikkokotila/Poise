@@ -26,6 +26,7 @@ interface ManualCard {
   text: string
   lane: 'idea' | 'concept' | 'plan'
   position: number
+  repo: string | null   // optional GitHub repo (full owner/name) the card connects to
   created_at: string
   updated_at: string
 }
@@ -223,8 +224,18 @@ function renderManualCard(card: ManualCard): HTMLElement {
   el.draggable = true
   el.dataset.id = String(card.id)
   el.dataset.lane = card.lane
+  // Meta row mirrors the PR/Issue card shape — repo (if linked) on the
+  // left, timestamp at the end. Bottom-right hosts the delete action,
+  // matching the PR review-icon corner across all five lanes.
+  const repoTag = card.repo
+    ? `<span class="card-repo">${escapeHtml(shortRepo(card.repo))}</span>`
+    : ''
   el.innerHTML = `
     <div class="card-text">${escapeHtml(card.text).replace(/\n/g, '<br>')}</div>
+    <div class="card-meta">
+      ${repoTag}
+      <span class="card-time">${relativeTime(card.updated_at)}</span>
+    </div>
     <button class="card-delete" title="Delete card" aria-label="Delete card">×</button>
   `
   return el
@@ -526,6 +537,17 @@ function attachAddHandlers() {
   }
 }
 
+// "(no repo)" + every full owner/name we've seen in the live set.
+function manualRepoOptionsHtml(selected: string | null = null): string {
+  const repos = distinctRepos()
+  const opts = ['<option value="">— no repo —</option>']
+  for (const r of repos) {
+    const sel = selected === r ? ' selected' : ''
+    opts.push(`<option value="${escapeHtml(r)}"${sel}>${escapeHtml(shortRepo(r))}</option>`)
+  }
+  return opts.join('')
+}
+
 function openManualComposer(lane: 'idea' | 'concept' | 'plan') {
   const laneNode = laneEl(lane)
   const existing = laneNode.querySelector('.composer')
@@ -540,6 +562,7 @@ function openManualComposer(lane: 'idea' | 'concept' | 'plan') {
   composer.className = 'composer'
   composer.innerHTML = `
     <textarea rows="3" placeholder="Write a card..." spellcheck="true"></textarea>
+    <select class="manual-repo">${manualRepoOptionsHtml()}</select>
     <div class="composer-row">
       <button class="composer-add">Add</button>
       <button class="composer-cancel" type="button">Cancel</button>
@@ -548,6 +571,7 @@ function openManualComposer(lane: 'idea' | 'concept' | 'plan') {
   `
   laneNode.insertBefore(composer, addBtn)
   const ta = composer.querySelector<HTMLTextAreaElement>('textarea')!
+  const repoSel = composer.querySelector<HTMLSelectElement>('.manual-repo')!
   const addB = composer.querySelector<HTMLButtonElement>('.composer-add')!
   const cancelB = composer.querySelector<HTMLButtonElement>('.composer-cancel')!
 
@@ -557,7 +581,8 @@ function openManualComposer(lane: 'idea' | 'concept' | 'plan') {
     if (!text) { close(); return }
     addB.disabled = true
     try {
-      const card = await api<ManualCard>('POST', '/api/current', { text, lane })
+      const repo = repoSel.value || null
+      const card = await api<ManualCard>('POST', '/api/current', { text, lane, repo })
       manualCards.push(card)
       renderAll()
       close()
@@ -679,22 +704,27 @@ function startEdit(cardEl: HTMLElement) {
   cardEl.classList.add('editing')
   cardEl.draggable = false
 
-  const original = card.text
+  const originalText = card.text
+  const originalRepo = card.repo ?? null
   const wrapper = document.createElement('div')
   wrapper.className = 'card-edit'
   wrapper.innerHTML = `
     <textarea rows="3" spellcheck="true"></textarea>
+    <select class="manual-repo">${manualRepoOptionsHtml(originalRepo)}</select>
     <div class="composer-row">
       <button class="composer-add">Save</button>
       <button class="composer-cancel" type="button">Cancel</button>
     </div>
   `
   const ta = wrapper.querySelector<HTMLTextAreaElement>('textarea')!
-  ta.value = original
+  const repoSel = wrapper.querySelector<HTMLSelectElement>('.manual-repo')!
+  ta.value = originalText
 
   const textNode = cardEl.querySelector<HTMLElement>('.card-text')!
+  const metaNode = cardEl.querySelector<HTMLElement>('.card-meta')
   const deleteBtn = cardEl.querySelector<HTMLButtonElement>('.card-delete')!
   textNode.hidden = true
+  if (metaNode) metaNode.hidden = true
   if (deleteBtn) deleteBtn.hidden = true
   cardEl.appendChild(wrapper)
   ta.focus()
@@ -705,13 +735,19 @@ function startEdit(cardEl: HTMLElement) {
     cardEl.draggable = true
     wrapper.remove()
     textNode.hidden = false
+    if (metaNode) metaNode.hidden = false
     if (deleteBtn) deleteBtn.hidden = false
   }
   const save = async () => {
     const text = ta.value.trim()
-    if (!text || text === original) { close(); return }
+    const repo = repoSel.value || null
+    if (!text) { close(); return }
+    if (text === originalText && repo === originalRepo) { close(); return }
     try {
-      const updated = await api<ManualCard>('PATCH', `/api/current/${id}`, { text })
+      const patch: Record<string, unknown> = {}
+      if (text !== originalText) patch.text = text
+      if (repo !== originalRepo) patch.repo = repo
+      const updated = await api<ManualCard>('PATCH', `/api/current/${id}`, patch)
       const idx = manualCards.findIndex((c) => c.id === id)
       if (idx >= 0) manualCards[idx] = updated
       renderAll()

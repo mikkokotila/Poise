@@ -62,6 +62,16 @@ function migrateKanbanTable(legacy: string) {
 migrateKanbanTable('pipe_cards')
 migrateKanbanTable('stream_cards')
 
+// Add the `repo` column if it's not there yet — manual cards can be
+// linked to a repo (full owner/name, e.g. "Vaquum/foo") so the meta
+// row reads consistently with the live PR/Issue lanes.
+function ensureColumn(table: string, column: string, ddl: string) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+  if (cols.some((c) => c.name === column)) return
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`)
+}
+ensureColumn('current_cards', 'repo', 'repo TEXT')
+
 // One-time cleanup: drop the legacy GitHub-mirror tables if they exist.
 // Idempotent — runs once and the DROP is a no-op afterwards.
 for (const t of ['pr_files', 'reviews', 'prs']) {

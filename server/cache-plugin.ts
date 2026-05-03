@@ -1,6 +1,6 @@
 import type { Plugin, Connect } from 'vite'
 import { getSettings, setSettings } from './settings'
-import { listCards, createCard, setCardText, moveCard, removeCard, type Lane } from './current'
+import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, type Lane } from './current'
 import { handleGhBody } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, triggerPrReview } from './agent'
 
@@ -116,7 +116,7 @@ export function cachePlugin(): Plugin {
           try {
             const body = await readBody(req)
             const parsed = body ? JSON.parse(body) : {}
-            const card = createCard(String(parsed.text ?? ''), parsed.lane as Lane)
+            const card = createCard(String(parsed.text ?? ''), parsed.lane as Lane, parsed.repo)
             return json(res, 200, card)
           } catch (err: any) {
             return json(res, 400, { error: err.message || String(err) })
@@ -129,15 +129,17 @@ export function cachePlugin(): Plugin {
             try {
               const body = await readBody(req)
               const parsed = body ? JSON.parse(body) : {}
-              if (typeof parsed.text === 'string') {
-                const card = setCardText(id, parsed.text)
-                return json(res, 200, card)
-              }
+              // PATCH accepts any combination of {text}, {repo}, or
+              // {lane, position}. Multiple fields in one call apply in
+              // order so the edit form can save text + repo together.
+              let card = null
+              if (typeof parsed.text === 'string') card = setCardText(id, parsed.text)
+              if ('repo' in parsed)                card = setCardRepo(id, parsed.repo)
               if (typeof parsed.lane === 'string' && typeof parsed.position === 'number') {
-                const card = moveCard(id, parsed.lane as Lane, parsed.position)
-                return json(res, 200, card)
+                card = moveCard(id, parsed.lane as Lane, parsed.position)
               }
-              return json(res, 400, { error: 'Provide either { text } or { lane, position }' })
+              if (card) return json(res, 200, card)
+              return json(res, 400, { error: 'Provide one or more of { text }, { repo }, { lane, position }' })
             } catch (err: any) {
               return json(res, 400, { error: err.message || String(err) })
             }

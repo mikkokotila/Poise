@@ -1757,7 +1757,7 @@ tr:hover .review-btn { opacity: 1; }
   background: var(--n0);
   border: var(--b-base);
   border-radius: var(--r-sm);            /* r-sm */
-  padding: 12px 32px 12px 12px;  /* right inset reserves room for × */
+  padding: 12px;                  /* the bottom-right action corner is reserved on .card-meta, not here */
   font-size: 0.8125rem;
   line-height: 1.5;
   font-weight: 400;              /* sans-regular */
@@ -1791,10 +1791,13 @@ tr:hover .review-btn { opacity: 1; }
 
 .card-delete {
   position: absolute;
-  top: 8px;
-  right: 8px;
-  width: 18px;
-  height: 18px;
+  bottom: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: none;
   background: transparent;
   color: var(--n4);
@@ -1805,10 +1808,11 @@ tr:hover .review-btn { opacity: 1; }
   opacity: 0;
   transition: opacity var(--t-quick) ease, color var(--t-quick) ease, background var(--t-quick) ease;
   padding: 0;
+  z-index: 1;
 }
 
-.card:hover .card-delete { opacity: 1; }
-.card-delete:hover { color: var(--a5); background: var(--n1); }
+.card:hover .card-delete { opacity: 0.7; }
+.card-delete:hover { opacity: 1; color: var(--a5); background: var(--border); }
 .card.editing .card-delete { display: none; }
 
 /* ── Live card (Issue / PR feed) ──────────────────────────────────────
@@ -1864,11 +1868,12 @@ tr:hover .review-btn { opacity: 1; }
   border-radius: inherit;          /* inherit r-sm from card */
 }
 
-/* PR cards (which carry the bottom-right review icon) reserve a small
-   right inset on the meta row only — keeps the title using the full
-   width and prevents the icon from overlapping a long meta line.
-   Targeted via :has() so issue cards keep their tight layout. */
-.card.card-live:has(.card-review-btn) .card-meta {
+/* All five lanes share one shape: title up top, meta row at the bottom
+   (repo · time, with state badge on live cards), action icon in the
+   bottom-right corner. This inset on the meta row carves out the
+   action corner so a long meta line never collides with the icon —
+   applies to manual cards and live cards alike for visual rhythm. */
+.card .card-meta {
   padding-right: 26px;
 }
 
@@ -2178,7 +2183,9 @@ tr:hover .review-btn { opacity: 1; }
   font-weight: 400;
 }
 
-.composer-issue .issue-repo {
+.composer-issue .issue-repo,
+.composer .manual-repo,
+.card-edit .manual-repo {
   width: 100%;
   font-family: inherit;
   font-size: 0.8125rem;
@@ -2191,6 +2198,8 @@ tr:hover .review-btn { opacity: 1; }
   outline: none;
   cursor: pointer;
 }
+.composer .manual-repo,
+.card-edit .manual-repo { margin-top: 6px; }
 
 .composer-error {
   font-size: 0.75rem;

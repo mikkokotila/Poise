@@ -9,6 +9,7 @@ export interface CurrentCard {
   text: string
   lane: Lane
   position: number
+  repo: string | null     // optional GitHub repo (full owner/name) the card connects to
   created_at: string
   updated_at: string
 }
@@ -17,14 +18,21 @@ function isValidLane(s: unknown): s is Lane {
   return typeof s === 'string' && (LANES as string[]).includes(s)
 }
 
+// Empty / whitespace inputs read as "no repo" — store NULL.
+function normalizeRepo(repo: unknown): string | null {
+  if (typeof repo !== 'string') return null
+  const trimmed = repo.trim()
+  return trimmed ? trimmed : null
+}
+
 const selectAll = db.prepare(`
-  SELECT id, text, lane, position, created_at, updated_at
+  SELECT id, text, lane, position, repo, created_at, updated_at
   FROM current_cards
   ORDER BY lane, position
 `)
 
 const selectOne = db.prepare(`
-  SELECT id, text, lane, position, created_at, updated_at
+  SELECT id, text, lane, position, repo, created_at, updated_at
   FROM current_cards WHERE id = ?
 `)
 
@@ -33,12 +41,16 @@ const maxPositionInLane = db.prepare(
 )
 
 const insertCard = db.prepare(
-  `INSERT INTO current_cards(text, lane, position, created_at, updated_at)
-   VALUES (?, ?, ?, ?, ?)`
+  `INSERT INTO current_cards(text, lane, position, repo, created_at, updated_at)
+   VALUES (?, ?, ?, ?, ?, ?)`
 )
 
 const updateText = db.prepare(
   `UPDATE current_cards SET text = ?, updated_at = ? WHERE id = ?`
+)
+
+const updateRepo = db.prepare(
+  `UPDATE current_cards SET repo = ?, updated_at = ? WHERE id = ?`
 )
 
 const deleteCard = db.prepare(`DELETE FROM current_cards WHERE id = ?`)
@@ -63,13 +75,13 @@ export function getCard(id: number): CurrentCard | null {
   return (selectOne.get(id) as CurrentCard | undefined) ?? null
 }
 
-export function createCard(text: string, lane: Lane): CurrentCard {
+export function createCard(text: string, lane: Lane, repo?: unknown): CurrentCard {
   const trimmed = text.trim()
   if (!trimmed) throw new Error('Card text is required')
   if (!isValidLane(lane)) throw new Error(`Invalid lane: ${lane}`)
   const now = new Date().toISOString()
   const max = (maxPositionInLane.get(lane) as { max: number }).max
-  const result = insertCard.run(trimmed, lane, max + 1, now, now)
+  const result = insertCard.run(trimmed, lane, max + 1, normalizeRepo(repo), now, now)
   return getCard(Number(result.lastInsertRowid))!
 }
 
@@ -79,6 +91,13 @@ export function setCardText(id: number, text: string): CurrentCard {
   const trimmed = text.trim()
   if (!trimmed) throw new Error('Card text is required')
   updateText.run(trimmed, new Date().toISOString(), id)
+  return getCard(id)!
+}
+
+export function setCardRepo(id: number, repo: unknown): CurrentCard {
+  const card = getCard(id)
+  if (!card) throw new Error('Card not found')
+  updateRepo.run(normalizeRepo(repo), new Date().toISOString(), id)
   return getCard(id)!
 }
 
