@@ -1834,7 +1834,7 @@ tr:hover .review-btn { opacity: 1; }
    across the app. */
 .card-review-btn {
   position: absolute;
-  top: 6px;
+  bottom: 6px;
   right: 6px;
   width: 22px;
   height: 22px;
@@ -1864,11 +1864,12 @@ tr:hover .review-btn { opacity: 1; }
   border-radius: inherit;          /* inherit r-sm from card */
 }
 
-/* Cards with the review icon reserve space on the right so the title
-   never runs into the icon. Targeted via :has() so issue cards (which
-   don't carry the icon) keep their tight padding. */
-.card.card-live:has(.card-review-btn) .card-link {
-  padding-right: 34px;
+/* PR cards (which carry the bottom-right review icon) reserve a small
+   right inset on the meta row only — keeps the title using the full
+   width and prevents the icon from overlapping a long meta line.
+   Targeted via :has() so issue cards keep their tight layout. */
+.card.card-live:has(.card-review-btn) .card-meta {
+  padding-right: 26px;
 }
 
 .card-link:focus-visible {
@@ -1926,7 +1927,6 @@ tr:hover .review-btn { opacity: 1; }
 }
 
 .card-time {
-  margin-left: auto;
   flex: 0 0 auto;
   color: var(--n4);
   font-variant-numeric: tabular-nums;
