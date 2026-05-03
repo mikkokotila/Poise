@@ -1,6 +1,7 @@
 import type { Plugin, Connect } from 'vite'
 import { getSettings, setSettings } from './settings'
 import { listCards, createCard, setCardText, moveCard, removeCard, type Lane } from './current'
+import { handleGhBody } from './gh'
 
 function json(res: any, status: number, body: unknown) {
   res.statusCode = status
@@ -40,29 +41,21 @@ export function cachePlugin(): Plugin {
           }
         }
 
-        // ── /github bridge ──
-        // POST /api/gh forwards to the user's local /github API (default
-        // http://127.0.0.1:8788/github, override via GITHUB_API_URL). Every
-        // GitHub-related call from Poise — reads (list / green_pr / new) and
-        // writes (open_issue / post_comment) — flows through here so the
-        // host lives in one place and the views stay agnostic.
+        // ── /api/gh — github-datastore bridge ──
+        // POST /api/gh translates Poise's body shape ({ operation, record_type,
+        // record_state, updated_since, ... }) to the local `github-datastore`
+        // CLI and maps the result back to the legacy { records: [...] } envelope
+        // the views consume. See server/gh.ts for the shape mapping and the
+        // user-footprint scoping logic.
         if (url === '/api/gh' && req.method === 'POST') {
-          const body = await readBody(req)
-          const upstream = process.env.GITHUB_API_URL || 'http://127.0.0.1:8788/github'
           try {
-            const upRes = await fetch(upstream, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body,
-            })
-            const text = await upRes.text()
-            res.statusCode = upRes.status
-            res.setHeader('Content-Type', upRes.headers.get('content-type') || 'application/json')
-            res.end(text)
+            const raw = await readBody(req)
+            const body = raw ? JSON.parse(raw) : {}
+            const { status, body: respBody } = await handleGhBody(body)
+            return json(res, status, respBody)
           } catch (err: any) {
-            return json(res, 502, { error: 'github bridge unreachable: ' + (err.message || String(err)) })
+            return json(res, 502, { error: 'github-datastore call failed: ' + (err.message || String(err)) })
           }
-          return
         }
 
         // ── Swarm proxy ──

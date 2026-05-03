@@ -2,7 +2,9 @@
 // Slides in from the right, same pattern as the typography panel.
 //
 // GitHub auth no longer lives here — Poise reads through the local
-// /github service which uses gh-cli auth on its own side.
+// `github-datastore` CLI which handles auth on its own side. The
+// username here scopes the views to the user-footprint (things you're
+// involved in) rather than the whole org.
 
 import { getSettings as getCachedSettings, setLocalSettings, loadSettings, getRefreshRate, setRefreshRate } from './config'
 
@@ -98,7 +100,7 @@ function buildPanel(): HTMLElement {
       <div class="tp-section">
         <label class="tp-label">Username (you)</label>
         <input type="text" class="st-input st-input-me" autocomplete="off" spellcheck="false" placeholder="octocat" />
-        <div class="st-help st-help-info">Used to highlight your own comments. Your GitHub auth is handled by the local <code>/github</code> service.</div>
+        <div class="st-help st-help-info">Scopes Current and Archive to your user-footprint (PRs and issues you're involved in). GitHub auth is handled by the local <code>github-datastore</code> CLI.</div>
       </div>
 
       <div class="tp-group-label">Time</div>
