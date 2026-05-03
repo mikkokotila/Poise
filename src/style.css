@@ -901,7 +901,11 @@ tr:hover .review-btn { opacity: 1; }
    button row. */
 #top-nav {
   position: fixed;
-  top: var(--sp-4);
+  /* Sit on the same horizontal line as the view-header's filter row.
+     #app has padding-top: 40px and the view-header is 32px tall — both
+     the nav and the toggle pin to top:40px so all three pieces share
+     one baseline. */
+  top: 40px;
   /* burger is at right: var(--sp-4) and width 32px; gap of var(--sp-2). */
   right: calc(var(--sp-4) + 32px + var(--sp-2));
   display: flex;
@@ -942,10 +946,10 @@ body:has(#settings-panel.open) #top-nav {
   transition: opacity var(--t-base) ease;
 }
 
-/* Burger toggle — top right. Always on top so it can close any overlay. */
+/* Burger toggle — top right, aligned to the view-header's filter row. */
 #menu-toggle {
   position: fixed;
-  top: var(--sp-4);
+  top: 40px;                          /* matches #app padding-top + #top-nav */
   right: var(--sp-4);
   width: 32px;
   height: 32px;

@@ -127,17 +127,14 @@ function toLegacy(r: DatastoreRecord, kind: 'pr' | 'issue'): GhRecord {
   }
 }
 
-// Org-wide list of every repo that has any PR or issue history. Used
-// to populate Current's repo dropdowns (manual cards + issue composer)
-// — the user wants to pick from ALL Vaquum repos, not just the ones
-// they've personally touched. Cached for 5 minutes so the dropdowns
-// open instantly on subsequent edits.
+// Org-wide list of every repo. Used to populate Current's repo
+// dropdowns (manual cards + issue composer) — the user picks from the
+// entire Vaquum org, not just repos they've personally touched.
+// Cached 5 min so the dropdowns open instantly on subsequent edits.
 //
-// The datastore doesn't expose a dedicated `views.repos` yet, so we
-// derive the list from views.pr + views.issue (no user filter). A repo
-// with zero PRs and zero issues won't appear — fine for a "where to
-// file an issue" picker, since you can't file there anyway if there's
-// no one home.
+// Source is `github-interface --view-repos ORG` — that's where org-
+// level metadata belongs. Returns every repo (including ones with no
+// PRs or issues), unlike a derivation from views.pr/views.issue.
 let repoListCache: { repos: string[], expiry: number } | null = null
 const REPO_LIST_TTL_MS = 5 * 60 * 1000
 
@@ -149,14 +146,23 @@ export async function listOrgRepos(): Promise<string[]> {
   const now = Date.now()
   if (repoListCache && repoListCache.expiry > now) return repoListCache.repos
 
-  const [prs, issues] = await Promise.all([
-    runCli(['view', 'pr', '--limit', '99999', '--format', 'json']),
-    runCli(['view', 'issue', '--limit', '99999', '--format', 'json']),
-  ])
+  const me = getMeta('me') || ''
+  const org = getMeta('org') || ''
+  if (!org) {
+    // Without an org configured we can't ask github-interface; return
+    // empty so the front-end falls back to the involvement-derived set.
+    void me
+    return []
+  }
 
-  const set = new Set<string>()
-  for (const r of [...prs, ...issues]) set.add(r.repo)
-  const repos = [...set].sort((a, b) => shortRepo(a).localeCompare(shortRepo(b)))
+  const { stdout } = await execFileP(GH_INTERFACE, ['--view-repos', org], {
+    maxBuffer: 32 * 1024 * 1024,
+  })
+  const data = JSON.parse(stdout)
+  const fullNames: string[] = (data.repos || [])
+    .map((r: any) => String(r.full_name || ''))
+    .filter((s: string) => s.length > 0)
+  const repos = fullNames.sort((a, b) => shortRepo(a).localeCompare(shortRepo(b)))
   repoListCache = { repos, expiry: now + REPO_LIST_TTL_MS }
   return repos
 }
