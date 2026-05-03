@@ -1864,6 +1864,13 @@ tr:hover .review-btn { opacity: 1; }
   border-radius: inherit;          /* inherit r-sm from card */
 }
 
+/* Cards with the review icon reserve space on the right so the title
+   never runs into the icon. Targeted via :has() so issue cards (which
+   don't carry the icon) keep their tight padding. */
+.card.card-live:has(.card-review-btn) .card-link {
+  padding-right: 34px;
+}
+
 .card-link:focus-visible {
   /* The card already has the focus ring via the global rule when the
      anchor is focused (focus moves to the anchor, not the article).
