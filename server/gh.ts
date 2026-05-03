@@ -52,12 +52,15 @@ interface DatastoreRecord {
   title: string
   url: string
   comments_count: number
-  // PR-only
+  // PR-only — owner_login/avatar exist on views.pr (currently null
+  // until populated upstream); not on views.user yet.
   pr_ref?: number
   diff_ref?: number
   payload_ref?: number
   review_comments_count?: number
   commits_count?: number
+  owner_login?: string | null
+  owner_avatar?: string | null
   // Issue-only
   issue_ref?: number
   // user-footprint-only
@@ -119,8 +122,8 @@ function toLegacy(r: DatastoreRecord, kind: 'pr' | 'issue'): GhRecord {
     last_commenter_avatar: null,
     last_comment_body: null,
     labels: [],
-    owner_login: null,
-    owner_avatar: null,
+    owner_login: r.owner_login ?? null,
+    owner_avatar: r.owner_avatar ?? null,
   }
 }
 
@@ -260,10 +263,26 @@ export async function handleGhBody(body: any): Promise<{ status: number, body: u
     return { status: 200, body: { records } }
   }
 
-  if (op === 'open_issue' || op === 'post_comment') {
-    return {
-      status: 501,
-      body: { error: `${op} not available — github-datastore is read-only; writes need a separate service` },
+  if (op === 'open_issue') {
+    // Standalone issue creation via github-interface. Repo is inferred
+    // from cwd's last two parts — same hack as --mergeable.
+    const repoFull = String(body.repository_full_name || '')
+    const title = String(body.title || '').trim()
+    const issueBody = String(body.body || '').trim()
+    if (!repoFull.includes('/')) return { status: 400, body: { error: 'repository_full_name required (org/repo)' } }
+    if (!title || !issueBody)    return { status: 400, body: { error: 'title and body are required' } }
+    const [owner, repo] = repoFull.split('/', 2)
+    const cwd = join(GH_INTERFACE_CWD_ROOT, owner, repo)
+    try {
+      await mkdir(cwd, { recursive: true })
+      const { stdout } = await execFileP(GH_INTERFACE, ['--create-issue', '--title', title, '--body', issueBody], {
+        cwd,
+        maxBuffer: 4 * 1024 * 1024,
+      })
+      return { status: 200, body: JSON.parse(stdout) }
+    } catch (err: any) {
+      const msg = err?.stderr?.toString?.() || err?.message || String(err)
+      return { status: 502, body: { error: 'github-interface --create-issue failed: ' + msg } }
     }
   }
 

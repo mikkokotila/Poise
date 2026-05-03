@@ -2,6 +2,7 @@ import type { Plugin, Connect } from 'vite'
 import { getSettings, setSettings } from './settings'
 import { listCards, createCard, setCardText, moveCard, removeCard, type Lane } from './current'
 import { handleGhBody } from './gh'
+import { fetchAgentLogs, fetchAgentResponse } from './agent'
 
 function json(res: any, status: number, body: unknown) {
   res.statusCode = status
@@ -58,22 +59,33 @@ export function cachePlugin(): Plugin {
           }
         }
 
-        // ── Swarm proxy ──
-        // Proxies to the local hermes swarm-events service. Swallowing the
-        // host here so the browser never has to know the upstream URL.
-        if (url.startsWith('/api/swarm/events')) {
-          const qs = url.slice('/api/swarm/events'.length)
-          const upstream = 'http://127.0.0.1:7878/events' + qs
+        // ── /api/agent-logs — Swarm's data source ──
+        // Wraps `agent-interface --logs`. Returns the JSON array as-is
+        // under a `logs` envelope so the front-end can extend it later
+        // without a breaking change.
+        if (url === '/api/agent-logs' && req.method === 'GET') {
           try {
-            const upRes = await fetch(upstream)
-            const text = await upRes.text()
-            res.statusCode = upRes.status
-            res.setHeader('Content-Type', upRes.headers.get('content-type') || 'application/json')
-            res.end(text)
+            const logs = await fetchAgentLogs()
+            return json(res, 200, { logs })
           } catch (err: any) {
-            return json(res, 502, { error: 'swarm-events service unreachable: ' + (err.message || String(err)) })
+            return json(res, 502, { error: 'agent-interface --logs failed: ' + (err.message || String(err)) })
           }
-          return
+        }
+
+        // ── /api/agent-response/:id — body of one agent call ──
+        // The CLI doesn't expose response bodies, so we resolve the
+        // response_path from --logs and read the file directly. On
+        // demand (only when the user clicks View on a row).
+        const agentRespMatch = url.match(/^\/api\/agent-response\/([0-9a-fA-F]+)(?:\?|$)/)
+        if (agentRespMatch && req.method === 'GET') {
+          const id = agentRespMatch[1]
+          try {
+            const result = await fetchAgentResponse(id)
+            if (!result) return json(res, 404, { error: 'log entry not found: ' + id })
+            return json(res, 200, result)
+          } catch (err: any) {
+            return json(res, 502, { error: 'agent-interface read failed: ' + (err.message || String(err)) })
+          }
         }
 
         // ── Current (kanban) — manual cards (idea / concept / plan) ──

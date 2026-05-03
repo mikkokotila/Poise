@@ -1,6 +1,6 @@
 // Main table view — reads through /api/gh from the unified /github API.
 
-import { getSettings, midnightInZone, startOfWeekInZone, getRefreshRateMs } from '../config'
+import { midnightInZone, startOfWeekInZone, getRefreshRateMs } from '../config'
 
 const STORAGE_KEY = 'poise-filters'
 const REVIEWED_KEY = 'poise-reviewed'
@@ -15,26 +15,17 @@ const PLAY_SVG = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><p
 const SPIN_SVG = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" class="spin"><circle cx="7" cy="7" r="5.5" stroke="currentColor" stroke-width="1.5" stroke-dasharray="8 6" stroke-linecap="round"/></svg>'
 
 interface PrRow {
-  id: number
   repo: string
   number: number
   title: string
   html_url: string
   author: string
-  author_avatar: string | null
   is_pr: number
   state: string
-  status: string | null
   owner_login: string | null
   owner_avatar: string | null
-  created_at: string
   updated_at: string
-  closed_at: string | null
   merged_at: string | null
-  comments_count: number
-  last_commenter: string | null
-  last_commenter_avatar: string | null
-  last_comment_body: string | null
 }
 
 type TypeFilter = 'both' | 'issue' | 'pr'
@@ -118,13 +109,6 @@ function stateLabel(item: PrRow): { text: string; cls: string } {
   return item.state === 'open' ? { text: 'Open', cls: 'open' } : { text: 'Closed', cls: 'closed' }
 }
 
-function statusLabel(item: PrRow): { text: string; cls: string } {
-  const s = item.status || 'IN REVIEW'
-  if (s === 'ALLOCATED') return { text: 'Allocated', cls: 'allocated' }
-  if (s === 'BUILDING')  return { text: 'Building',  cls: 'building' }
-  return { text: 'In review', cls: 'review' }
-}
-
 function humanAvatarFallback(username: string): string {
   // Only works for real user accounts (not GitHub Apps). Used if we don't have the
   // API-reported avatar_url stored yet.
@@ -142,18 +126,11 @@ function ownerCell(item: PrRow): string {
 }
 
 function lastCell(item: PrRow): string {
-  // The "last" person on this thread. If nobody has commented yet, the original
-  // author is the most recent voice — fall through to them so we never show a dash.
-  let name = item.last_commenter
-  let avatar = item.last_commenter_avatar
-  if (!name) {
-    name = item.author
-    avatar = item.author_avatar
-  }
+  const name = item.author
   if (!name) return '<span class="last-dash">\u2014</span>'
 
   const isBot = /\[bot\]$/i.test(name)
-  const src = avatar && avatar.length > 0 ? avatar : humanAvatarFallback(name)
+  const src = humanAvatarFallback(name)
   const classes = ['last-avatar']
   if (isBot) classes.push('is-bot')
   return `<img class="${classes.join(' ')}" src="${src}" alt="${escapeHtml(name)}" title="${escapeHtml(name)}" loading="lazy" decoding="async" onerror="this.classList.add('broken')" />`
@@ -171,7 +148,6 @@ function buildRow(item: PrRow, animate: boolean): HTMLTableRowElement {
   tr.dataset.key = rowKey(item)
   const pr = item.is_pr === 1
   const st = stateLabel(item)
-  const status = statusLabel(item)
   const isDone = reviewed.has(item.html_url)
   const actionHtml = pr
     ? `<button class="review-btn${isDone ? ' done' : ''}" title="Run consensus review">${PLAY_SVG}</button>`
@@ -182,7 +158,6 @@ function buildRow(item: PrRow, animate: boolean): HTMLTableRowElement {
     <td class="title-cell"><a href="${item.html_url}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a></td>
     <td class="last-cell">${lastCell(item)}</td>
     <td><span class="repo-name">${escapeHtml(item.repo)}</span></td>
-    <td><span class="status ${status.cls}">${status.text}</span></td>
     <td class="last-cell">${ownerCell(item)}</td>
     <td><span class="state ${st.cls}">${st.text}</span></td>
     <td><span class="date">${relativeDate(item.updated_at)}</span></td>
@@ -305,9 +280,8 @@ function sentinelNeedsFetch(): boolean {
   return rect.top < window.innerHeight + 400
 }
 
-// Map the unified /github record shape to Poise's internal PrRow.
-// Status is derived from labels here — the API returns the raw label
-// list rather than a precomputed string per the doc.
+// Subset of the /api/gh record shape used by Archive. The proxy keeps
+// the legacy envelope; we only pluck what the table needs.
 interface GhRecord {
   kind: 'pr' | 'issue'
   repo: string                      // "Vaquum/foo"
@@ -315,50 +289,27 @@ interface GhRecord {
   state: 'open' | 'closed' | 'merged'
   title: string
   url: string
-  created_at: string
   updated_at: string
   author: string
-  author_avatar: string | null
   merged_at: string | null
-  comments_count: number
-  last_commenter: string | null
-  last_commenter_avatar: string | null
-  last_comment_body: string | null
-  labels: string[]
   owner_login: string | null
   owner_avatar: string | null
-}
-
-function deriveStatus(labels: string[]): string {
-  // IN_PROGRESS wins when both are set — later workflow stage takes precedence
-  if (labels.includes('IN_PROGRESS')) return 'BUILDING'
-  if (labels.includes('ALLOCATION'))  return 'ALLOCATED'
-  return 'IN_REVIEW'
 }
 
 function recordToRow(r: GhRecord): PrRow {
   const shortRepo = r.repo.includes('/') ? r.repo.split('/', 2)[1] : r.repo
   return {
-    id: 0,                          // unused — table indexes by array position
     repo: shortRepo,
     number: r.number,
     title: r.title,
     html_url: r.url,
     author: r.author,
-    author_avatar: r.author_avatar,
     is_pr: r.kind === 'pr' ? 1 : 0,
-    state: r.state === 'merged' ? 'closed' : r.state,   // keep the boolean state simple
-    status: deriveStatus(r.labels || []),
+    state: r.state === 'merged' ? 'closed' : r.state,   // collapse to open/closed; merged_at distinguishes
     owner_login: r.owner_login,
     owner_avatar: r.owner_avatar,
-    created_at: r.created_at,
     updated_at: r.updated_at,
-    closed_at: null,
     merged_at: r.merged_at,
-    comments_count: r.comments_count,
-    last_commenter: r.last_commenter,
-    last_commenter_avatar: r.last_commenter_avatar,
-    last_comment_body: r.last_comment_body,
   }
 }
 
@@ -497,42 +448,9 @@ function attachHandlers() {
     }, 150)
   })
 
-  // Expand/collapse last comment (already cached — no fetch!)
-  tbody.addEventListener('click', (e) => {
-    const toggle = (e.target as HTMLElement).closest('.type-toggle')
-    if (!toggle) return
-    const row = toggle.closest('tr')!
-    const key = row.dataset.key
-    const item = items.find((i) => rowKey(i) === key)
-    if (!item) return
-    const titleCell = row.querySelector('.title-cell')!
-    const existing = titleCell.querySelector('.inline-comment')
-    if (existing) {
-      existing.classList.add('closing')
-      existing.addEventListener('animationend', () => existing.remove(), { once: true })
-      row.classList.remove('expanded')
-      return
-    }
-    row.classList.add('expanded')
-    const wrapper = document.createElement('div')
-    wrapper.className = 'inline-comment'
-
-    const commenter = item.last_commenter || ''
-    const me = (getSettings().me || '').toLowerCase()
-    const isMe = !!me && commenter.toLowerCase() === me
-    const nameHtml = commenter
-      ? `<span class="comment-author ${isMe ? 'is-me' : ''}">${escapeHtml(commenter)}</span> `
-      : ''
-
-    if (item.last_comment_body) {
-      wrapper.innerHTML = `${nameHtml}${escapeHtml(item.last_comment_body)}`
-    } else {
-      wrapper.innerHTML = '<span class="comment-none">no comments</span>'
-    }
-    titleCell.appendChild(wrapper)
-  })
-
-  // Consensus review
+  // Consensus review — Confab does the work and any side effects (e.g.
+  // posting a comment back on the PR). Poise just kicks it off and
+  // marks the row as reviewed when Confab returns OK.
   tbody.addEventListener('click', async (e) => {
     const btn = (e.target as HTMLElement).closest('.review-btn')
     if (!btn) return
@@ -551,20 +469,6 @@ function attachHandlers() {
         body: JSON.stringify({ url: item.html_url }),
       })
       if (!reviewRes.ok) throw new Error(`Review API ${reviewRes.status}`)
-      const reviewData = await reviewRes.json()
-      const synthesis: string = reviewData.synthesis
-      const org = getSettings().org
-      if (!org) throw new Error('Org not configured')
-      const commentRes = await fetch('/api/gh', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          operation: 'post_comment',
-          repository_full_name: `${org}/${item.repo}`,
-          number: item.number,
-          body: synthesis,
-        }),
-      })
-      if (!commentRes.ok) throw new Error(`Github ${commentRes.status}`)
       reviewed.add(item.html_url)
       saveReviewed()
       button.innerHTML = PLAY_SVG
