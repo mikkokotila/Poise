@@ -986,12 +986,16 @@ function attachCardClickHandlers() {
         reviewBtn.classList.remove('running')
         reviewBtn.classList.add('done')
         reviewBtn.innerHTML = PR_REVIEW_PLAY_SVG
-        // Optimistically mark this card as active so the breathing
-        // accent shows up immediately. The next refresh tick will
-        // confirm via /api/agent-logs (and remove the class once the
-        // upstream job leaves status=running).
-        agentActiveKeys.add(prKey(item))
-        applyActiveClasses()
+        // The breathing accent is driven entirely by /api/agent-logs
+        // — it captures every running job, not just card-initiated
+        // ones. Just nudge a re-poll after agent-interface has had a
+        // moment to spawn its Python and write the running row, so
+        // the user sees feedback in ~1.5s instead of waiting for the
+        // next shared tick boundary.
+        window.setTimeout(async () => {
+          await fetchAgentActive()
+          applyActiveClasses()
+        }, 1500)
         // Brief done state, then reset so the user can re-trigger
         window.setTimeout(() => {
           reviewBtn.classList.remove('done')
