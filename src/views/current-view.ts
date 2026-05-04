@@ -72,6 +72,10 @@ let liveItems: LiveItem[] = []
 // on view init. Used by the manual + issue composers so the dropdown
 // covers the whole org, not just the repos in the user's involvement.
 let allRepos: string[] = []
+// Set of `${repo}#${pr_id}` for agent-interface jobs currently running.
+// Cards whose key matches get a subtle breathing accent so the user
+// sees that something is going on behind the scenes for that ticket.
+let agentActiveKeys: Set<string> = new Set()
 let dragId: number | null = null
 let viewEl: HTMLElement
 let timeFilter: TimeFilter = 'all'
@@ -258,6 +262,7 @@ function renderLiveItem(item: LiveItem): HTMLElement {
   const classes = ['card', 'card-live']
   if (isMergeable(item))      classes.push('card-mergeable')
   else if (isFresh(item) && item.is_pr === 1) classes.push('card-fresh')
+  if (agentActiveKeys.has(prKey(item))) classes.push('card-active')
   el.className = classes.join(' ')
   el.dataset.id = prKey(item)        // stable id across refreshes for the FLIP
   const st = liveStateLabel(item)
@@ -441,6 +446,34 @@ async function fetchAllRepos() {
   } catch { /* ignore */ }
 }
 
+// Pull /api/agent-logs and rebuild the set of running-job keys. Called
+// alongside fetchLive on each refresh tick. Errors are swallowed —
+// the breathing accent simply doesn't show.
+async function fetchAgentActive() {
+  try {
+    const res = await fetch('/api/agent-logs')
+    if (!res.ok) return
+    const data = await res.json()
+    const next = new Set<string>()
+    for (const e of (data.logs || [])) {
+      if (e.status === 'running' && e.repo && e.pr_id) {
+        next.add(`${e.repo}#${e.pr_id}`)
+      }
+    }
+    agentActiveKeys = next
+  } catch { /* ignore */ }
+}
+
+// Toggle `.card-active` in place across all live cards. Doesn't touch
+// other classes or run a re-render — works alongside the FLIP that
+// owns positional updates, similar to applyPrStatusClasses.
+function applyActiveClasses() {
+  for (const cardEl of viewEl.querySelectorAll<HTMLElement>('.card.card-live')) {
+    const id = cardEl.dataset.id || ''
+    cardEl.classList.toggle('card-active', agentActiveKeys.has(id))
+  }
+}
+
 async function fetchPrStatus() {
   if (liveItems.filter((i) => i.is_pr === 1).length === 0) {
     if (prStatus.size > 0) { prStatus.clear(); applyPrStatusClasses() }
@@ -491,10 +524,10 @@ export function stopCurrentPolling() {
   }
 }
 
-// One-minute background tick: re-fetch live items, then re-fetch the
-// PR-status map. The live re-render uses the FLIP path so cards glide
-// to their new positions; the PR-status pass only twiddles classes so
-// it doesn't disturb the FLIP that just played.
+// Background tick: re-fetch live items, refresh PR mergeable status,
+// and rebuild the agent-active set. The live re-render uses the FLIP
+// path so cards glide to their new positions; PR-status and active
+// passes only twiddle classes so they don't disturb the FLIP.
 async function pollLiveTick() {
   try {
     await fetchLive()
@@ -502,6 +535,10 @@ async function pollLiveTick() {
   } catch { /* network blip — try again next tick */ }
   try {
     await fetchPrStatus()
+  } catch { /* same */ }
+  try {
+    await fetchAgentActive()
+    applyActiveClasses()
   } catch { /* same */ }
 }
 
@@ -949,6 +986,12 @@ function attachCardClickHandlers() {
         reviewBtn.classList.remove('running')
         reviewBtn.classList.add('done')
         reviewBtn.innerHTML = PR_REVIEW_PLAY_SVG
+        // Optimistically mark this card as active so the breathing
+        // accent shows up immediately. The next refresh tick will
+        // confirm via /api/agent-logs (and remove the class once the
+        // upstream job leaves status=running).
+        agentActiveKeys.add(prKey(item))
+        applyActiveClasses()
         // Brief done state, then reset so the user can re-trigger
         window.setTimeout(() => {
           reviewBtn.classList.remove('done')
@@ -1039,7 +1082,7 @@ export async function initCurrentView() {
     attachFilterHandlers()
   }
   try {
-    await Promise.all([fetchManual(), fetchLive(), fetchAllRepos()])
+    await Promise.all([fetchManual(), fetchLive(), fetchAllRepos(), fetchAgentActive()])
     renderAll()
     fetchPrStatus()                  // first PR-status pull, intentionally not awaited
   } catch (err) {

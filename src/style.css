@@ -2023,6 +2023,35 @@ body:has(#settings-panel.open) #top-nav {
   box-shadow: inset 3px 0 0 0 var(--a1);
 }
 
+/* Active — an agent-interface job is currently running for this PR or
+   issue. A soft amber breathing accent on the right edge says
+   "something is happening behind the scenes" without competing with
+   the green/blue left-edge state markers or the action icons. */
+.card.card-live.card-active {
+  position: relative;
+}
+.card.card-live.card-active::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  right: 0;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--a4);
+  pointer-events: none;
+  animation: card-active-breathe 1.8s ease-in-out infinite;
+}
+
+@keyframes card-active-breathe {
+  0%, 100% { opacity: 0.25; }
+  50%      { opacity: 0.9; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card.card-live.card-active::after { animation: none; opacity: 0.65; }
+}
+
 /* New live cards drop in from a few pixels above their final position
    while fading in. Keeps the once-a-minute refresh from feeling like
    a sudden insertion. The FLIP animator handles the *movement* of
