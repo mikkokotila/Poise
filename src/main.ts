@@ -5,7 +5,7 @@ import { initMenu } from './menu'
 import { initMainView, refreshMainView, stopMainRefresh } from './views/main-view'
 import { initCurrentView, stopCurrentPolling } from './views/current-view'
 import { initSwarmView, stopSwarmRefresh } from './views/swarm-view'
-import { loadSettings, startRefreshTicker } from './config'
+import { loadSettings, startRefreshTicker, applyTheme, getTheme } from './config'
 
 const viewMainEl = document.getElementById('view-main')!
 const viewCurrentEl = document.getElementById('view-current')!
@@ -40,6 +40,10 @@ function showView(v: 'main' | 'current' | 'swarm') {
   }
   window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior })
 }
+
+// Apply the saved theme as early as possible so the first paint matches
+// the user's preference (no light → dark flash on dark-mode boots).
+applyTheme(getTheme())
 
 // Init order: typography → settings → menu → initial view
 initTypography()

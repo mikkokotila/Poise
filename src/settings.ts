@@ -6,7 +6,7 @@
 // username here scopes the views to the user-footprint (things you're
 // involved in) rather than the whole org.
 
-import { getSettings as getCachedSettings, setLocalSettings, loadSettings, getRefreshRate, setRefreshRate } from './config'
+import { getSettings as getCachedSettings, setLocalSettings, loadSettings, getRefreshRate, setRefreshRate, getTheme, setTheme } from './config'
 
 let panelEl: HTMLElement | null = null
 let orgInput: HTMLInputElement | null = null
@@ -120,6 +120,17 @@ function buildPanel(): HTMLElement {
         <div class="st-help st-help-info">How often Current, Swarm, and Archive pull fresh data.</div>
       </div>
 
+      <div class="tp-group-label">Appearance</div>
+
+      <div class="tp-section">
+        <label class="tp-label">Theme</label>
+        <div class="range-picker st-theme-picker">
+          <button type="button" data-theme="light" class="${getTheme() === 'light' ? 'active' : ''}">Light</button>
+          <button type="button" data-theme="dark"  class="${getTheme() === 'dark'  ? 'active' : ''}">Dark</button>
+        </div>
+        <div class="st-help st-help-info">Applies instantly. Stored locally; no reload needed.</div>
+      </div>
+
       <div class="st-row">
         <button class="st-save">Save</button>
       </div>
@@ -154,6 +165,17 @@ function buildPanel(): HTMLElement {
     refreshPicker.querySelectorAll<HTMLButtonElement>('[data-rate]').forEach((b) => b.classList.remove('active'))
     btn.classList.add('active')
     setRefreshRate(rate)
+  })
+
+  // Theme toggle — applies live, persisted in localStorage.
+  const themePicker = panel.querySelector<HTMLElement>('.st-theme-picker')!
+  themePicker.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest('button')
+    if (!btn || !btn.dataset.theme) return
+    const theme = btn.dataset.theme as 'light' | 'dark'
+    themePicker.querySelectorAll<HTMLButtonElement>('[data-theme]').forEach((b) => b.classList.remove('active'))
+    btn.classList.add('active')
+    setTheme(theme)
   })
 
   return panel

@@ -42,6 +42,34 @@ export function effectiveTimezone(): string {
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone } catch { return 'UTC' }
 }
 
+// ── Theme ─────────────────────────────────────────────────────────────
+// Light or dark, persisted client-side. Applied via `data-theme="dark"`
+// on <html> so [data-theme="dark"] CSS overrides take effect. The page
+// listens for `poise:theme-changed` to react in JS where needed.
+
+const THEME_KEY = 'poise-theme'
+export type Theme = 'light' | 'dark'
+
+export function getTheme(): Theme {
+  try {
+    const v = localStorage.getItem(THEME_KEY)
+    if (v === 'light' || v === 'dark') return v
+  } catch { /* ignore */ }
+  return 'light'
+}
+
+export function applyTheme(theme: Theme) {
+  document.documentElement.setAttribute('data-theme', theme)
+}
+
+export function setTheme(theme: Theme) {
+  if (theme !== 'light' && theme !== 'dark') return
+  if (getTheme() === theme) return
+  try { localStorage.setItem(THEME_KEY, theme) } catch { /* ignore */ }
+  applyTheme(theme)
+  window.dispatchEvent(new CustomEvent('poise:theme-changed', { detail: { theme } }))
+}
+
 // ── Refresh rate ──────────────────────────────────────────────────────
 // How often the live views (Current, Swarm, Archive) re-fetch their data.
 // Two presets only — "1m" or "5m" — picked from the Settings panel.

@@ -96,6 +96,60 @@
   --ease:    cubic-bezier(0.2, 0, 0, 1);
 }
 
+/* ─────────────────────────────────────────────────────────────────────────
+   Dark mode — perfect counterpart to the light system.
+
+   Strategy: rebind the neutral scale itself rather than override every
+   semantic alias. Aliases (--bg, --surface, --text, --border, --hairline,
+   --hover, --green-soft, --red-soft) and any rule that uses var(--nX)
+   directly auto-flips. Accents hold (A1–A8 unchanged). Tints raise to
+   ~25% alpha per DS rule. Elevation alphas climb so shadows still
+   register on a dark canvas.
+
+   The neutral mapping is NOT a literal lightness inversion of the DS
+   palette — that produces too-contrasty borders and breaks the DS hint
+   that N4 is the bridge tone working as secondary text in both modes.
+   Instead: N4 holds; the dark stack steps tightly from #161A20 (bg) up
+   through a custom #1C2129 (surface lift) so the bg→surface gap feels
+   the same low-contrast "calm" as light mode's N0 → N1.
+   ───────────────────────────────────────────────────────────────────────── */
+
+[data-theme="dark"] {
+  /* Neutrals — N4 unchanged (DS bridge), the rest swap roles. */
+  --n0: #161A20;       /* app bg               (was N7) */
+  --n1: #1C2129;       /* panels, raised       (custom step) */
+  --n2: #2F353D;       /* hairlines, dividers  (was N6) */
+  --n3: #5C636D;       /* borders              (was N5) */
+  --n4: #8E959E;       /* secondary text       (unchanged — DS bridge) */
+  --n5: #C5CBD1;       /* mid-light            (was N3) */
+  --n6: #DEE2E6;       /* primary text         (was N2) */
+  --n7: #F7F8F9;       /* maximum contrast     (was N0) */
+
+  /* Pill borders — pastels don't read on dark; use accent at higher
+     alpha so the colour still telegraphs success / blocked without
+     leaning pastel. */
+  --green-soft: rgba(74, 142, 94, 0.6);
+  --red-soft:   rgba(184, 80, 72, 0.6);
+
+  /* Tint backgrounds — DS dark-mode rule: ~25% alpha for badges. */
+  --tint-a1: rgba(58, 114, 176, 0.20);
+  --tint-a3: rgba(74, 142, 94, 0.20);
+  --tint-a5: rgba(184, 80, 72, 0.20);
+
+  /* Elevation — light-mode shadows used rgba(22,26,32,…) which
+     vanishes on a dark canvas. Pure black at higher alpha lets the
+     hover/popover/modal lift register. */
+  --e-1: 0 1px 2px rgba(0, 0, 0, .35), 0 2px 4px rgba(0, 0, 0, .25);
+  --e-2: 0 4px 8px rgba(0, 0, 0, .45), 0 2px 4px rgba(0, 0, 0, .30);
+  --e-3: 0 12px 24px rgba(0, 0, 0, .55), 0 4px 8px rgba(0, 0, 0, .35);
+}
+
+/* Tell the browser its native chrome (form controls, scrollbars,
+   placeholders) about the theme so they match instead of fighting. */
+[data-theme="dark"] {
+  color-scheme: dark;
+}
+
 *,
 *::before,
 *::after {
