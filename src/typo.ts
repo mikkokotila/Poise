@@ -163,14 +163,14 @@ function apply() {
   root.style.setProperty('--typo-comment-size', `${config.commentFontSize}rem`)
   root.style.setProperty('--typo-comment-weight', `${config.commentFontWeight}`)
 
-  // Colors
-  root.style.setProperty('--text', config.textColor)
-  root.style.setProperty('--text-secondary', config.textSecondary)
-  root.style.setProperty('--text-tertiary', config.textTertiary)
-  root.style.setProperty('--accent', config.accentColor)
-  root.style.setProperty('--bg', config.bgColor)
-  root.style.setProperty('--border', config.borderColor)
-  root.style.setProperty('--hover', config.hoverColor)
+  // Colors are governed by the DS / theme system (see [data-theme="dark"]
+  // overrides in style.css). Setting them inline here would beat the
+  // theme cascade because inline-style specificity is (1,0,0,0). The
+  // typo config still carries color fields for forward compatibility,
+  // but writing them as inline overrides is suppressed by default.
+  // (If we want a per-user color customizer later, reintroduce these
+  // setProperty calls behind a "dirty" flag that tracks whether the
+  // user has actually deviated from DS defaults.)
 }
 
 function buildPanel(): HTMLElement {

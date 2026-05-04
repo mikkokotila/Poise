@@ -40,23 +40,27 @@
      without per-rule edits. New code should use the DS tokens directly.
      ──────────────────────────────────────────────────────────────────── */
 
-  /* Surfaces */
-  --bg:       var(--n0);
-  --surface:  var(--n1);   /* DS: panels & raised surfaces sit one tone above app bg */
-  --hover:    var(--n2);
+  /* Surfaces — literal values (NOT var(--nX)) so dark-mode overrides
+     win cleanly. Chrome's resolution of chained custom properties
+     declared in :root caches the substituted value, so a later
+     [data-theme="dark"] override of the underlying neutral doesn't
+     propagate up through the alias. Keep it flat. */
+  --bg:       #F7F8F9;     /* N0 */
+  --surface:  #EEF0F2;     /* N1 — DS: panels & raised surfaces sit one tone above app bg */
+  --hover:    #DEE2E6;     /* N2 */
 
   /* Text */
-  --text:           var(--n6);
-  --text-secondary: var(--n5);
-  --text-tertiary:  var(--n4);
+  --text:           #2F353D;     /* N6 */
+  --text-secondary: #5C636D;     /* N5 */
+  --text-tertiary:  #8E959E;     /* N4 */
 
   /* Lines */
-  --border:   var(--n3);
-  --hairline: var(--n2);
+  --border:   #C5CBD1;     /* N3 */
+  --hairline: #DEE2E6;     /* N2 */
 
   /* Action / accents — kept as DS approximations of the old hues so
      status pills (Trust feat/fix, Swarm pills) still read the same. */
-  --accent:     var(--n7);
+  --accent:     #161A20;       /* N7 — flat literal for dark-mode overrideability */
   --green:      var(--a3);
   --green-soft: #8FBE9C;       /* lighter A3 — approval pill borders */
   --purple:     var(--a7);
@@ -124,6 +128,28 @@
   --n5: #C5CBD1;       /* mid-light            (was N3) */
   --n6: #DEE2E6;       /* primary text         (was N2) */
   --n7: #F7F8F9;       /* maximum contrast     (was N0) */
+
+  /* Semantic aliases — declared explicitly here (with literal values)
+     instead of relying on the var(--nX) chain through :root. The chain
+     resolves stale on initial paint (Chrome caches the chained
+     substitution against the original neutral values, so flipping the
+     N tokens leaves --bg, --text, --border etc. pointing at the light
+     values until a layout-changing recompute kicks them). Direct
+     overrides here are bullet-proof. */
+  --bg:             #161A20;
+  --surface:        #1C2129;
+  --hover:          #2F353D;
+  --text:           #DEE2E6;
+  --text-secondary: #C5CBD1;
+  --text-tertiary:  #8E959E;
+  --border:         #5C636D;
+  --hairline:       #2F353D;
+  --accent:         #F7F8F9;
+
+  /* Border shorthands — same story; the chain through var(--nX) gets
+     stranded on light values without explicit redeclaration. */
+  --b-hair: 0.5px solid #2F353D;
+  --b-base: 1px solid #5C636D;
 
   /* Pill borders — pastels don't read on dark; use accent at higher
      alpha so the colour still telegraphs success / blocked without
@@ -200,6 +226,13 @@ html {
   /* Reserve the vertical scrollbar gutter so filter changes don't nudge
      the page sideways when the content shrinks enough to hide the scrollbar. */
   scrollbar-gutter: stable;
+  /* Paint html itself so that any visible area outside body's painted
+     box (overscroll, scrollbar gutter, edge cases during scroll) still
+     reads as the canvas — critical in dark mode where a flash of
+     default-white html is jarring. */
+  background: var(--bg);
+  /* Tinted scrollbar that follows the theme — saves a per-mode override. */
+  scrollbar-color: var(--border) transparent;
 }
 
 body {

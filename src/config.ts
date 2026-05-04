@@ -60,6 +60,13 @@ export function getTheme(): Theme {
 
 export function applyTheme(theme: Theme) {
   document.documentElement.setAttribute('data-theme', theme)
+  // Clear any inline-style overrides of the alias variables that older
+  // typo-panel runs may have written. Those have inline-specificity
+  // (1,0,0,0) and would shadow the theme cascade if left in place.
+  const root = document.documentElement
+  for (const v of ['--bg', '--text', '--text-secondary', '--text-tertiary', '--border', '--hover', '--hairline', '--surface', '--accent']) {
+    if (root.style.getPropertyValue(v)) root.style.removeProperty(v)
+  }
 }
 
 export function setTheme(theme: Theme) {
