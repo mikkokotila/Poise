@@ -3020,23 +3020,27 @@ tr:hover .expand-btn { opacity: 1; }
 }
 .chat-attachment-remove:hover { color: var(--text); background: var(--hover); }
 
+/* Send button — same ghost-icon treatment as the close X and the
+   attach +, but tinted to full --text so it reads as the row's
+   primary action through colour weight rather than a heavy dark fill.
+   Hover lifts a soft surface bg, matching the rest of the chrome. */
 .chat-send {
   width: 26px;
   height: 26px;
   border: none;
   border-radius: var(--r-sm);
-  background: var(--text);
-  color: var(--bg);
+  background: transparent;
+  color: var(--text);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background var(--t-quick) ease, opacity var(--t-quick) ease;
+  transition: color var(--t-quick) ease, background var(--t-quick) ease, opacity var(--t-quick) ease;
   padding: 0;
   flex-shrink: 0;
 }
-.chat-send:hover { background: var(--text-secondary); }
-.chat-send:disabled { opacity: 0.4; cursor: not-allowed; }
+.chat-send:hover { background: var(--hover); }
+.chat-send:disabled { opacity: 0.35; cursor: not-allowed; }
 .chat-send svg { width: 13px; height: 13px; display: block; }
 
 /* Card chat icon — top-right of every card. Hover-revealed in the
