@@ -2521,13 +2521,15 @@ tr:hover .expand-btn { opacity: 1; }
    ───────────────────────────────────────────────────────────────────────── */
 
 .col-owner-wide { width: 180px; }
+.col-setting    { width: 130px; }
 .col-active     { width: 120px; }
 
 /* The universal `td:nth-last-child(2) { text-align: right }` rule is
    meant for Archive's "Updated" column — it shouldn't apply here.
-   Force-left for behaviors' Owner cell so the avatar + handle line
-   up under the OWNER header, matching every other table's content
-   alignment. */
+   Force-left for behaviors' Setting cell so the dropdown lines up
+   under the SETTING header, matching every other table's content
+   alignment. (Owner is now further from the right edge so the
+   universal rule doesn't reach it anymore.) */
 #behaviors-table tbody td:nth-last-child(2) {
   text-align: left;
 }
@@ -2618,6 +2620,40 @@ tr:hover .expand-btn { opacity: 1; }
 }
 
 .toggle input:focus-visible + .toggle-slider {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
+}
+
+/* Setting dropdown — pill-shaped, neutral chrome at rest, matches the
+   visual weight of the toggle next to it. Arrow indicator drawn with
+   a tiny inline SVG via mask so it tints with theme colour. */
+.behavior-setting {
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  padding: 4px 26px 4px 10px;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--text-tertiary) 50%),
+    linear-gradient(135deg, var(--text-tertiary) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  transition: border-color var(--t-base) ease, color var(--t-base) ease;
+}
+.behavior-setting:hover {
+  border-color: var(--text-tertiary);
+  color: var(--text);
+}
+.behavior-setting:focus-visible {
   outline-width: 2px;
   outline-style: solid;
   outline-color: var(--a1);

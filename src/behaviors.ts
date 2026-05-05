@@ -16,12 +16,29 @@ export const BEHAVIORS: BehaviorMeta[] = [
   { key: 'review-new-prs', label: 'Review New Pull Requests' },
 ]
 
-// In-memory mirror of the server's enabled map, kept in sync via the
-// /api/behaviors GET on view init and every successful toggle POST.
+export type BehaviorSetting = 'p0' | 'p1' | 'p2'
+
+// In-memory mirror of the server's enabled + setting maps, kept in
+// sync via /api/behaviors GET on view init and every successful POST.
 const enabledByKey: Partial<Record<BehaviorKey, boolean>> = {}
+const settingByKey: Partial<Record<BehaviorKey, BehaviorSetting>> = {}
 
 export function isEnabled(key: BehaviorKey): boolean {
   return !!enabledByKey[key]
+}
+
+export function getSetting(key: BehaviorKey): BehaviorSetting {
+  return settingByKey[key] || 'p2'
+}
+
+async function postBehavior(key: BehaviorKey, body: { enabled?: boolean, setting?: BehaviorSetting }) {
+  const res = await fetch(`/api/behaviors/${encodeURIComponent(key)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
 }
 
 export async function setEnabled(key: BehaviorKey, enabled: boolean): Promise<void> {
@@ -30,21 +47,25 @@ export async function setEnabled(key: BehaviorKey, enabled: boolean): Promise<vo
   // correct any drift.
   enabledByKey[key] = enabled
   try {
-    const res = await fetch(`/api/behaviors/${encodeURIComponent(key)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled }),
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = await res.json()
-    // Trust the server's echoed value
+    const data = await postBehavior(key, { enabled })
     enabledByKey[key] = !!data.enabled
   } catch (err) {
-    // Roll back on failure so the UI matches reality
     enabledByKey[key] = !enabled
     throw err
   }
   window.dispatchEvent(new CustomEvent('poise:behaviors-changed', { detail: { key, enabled: enabledByKey[key] } }))
+}
+
+export async function setSetting(key: BehaviorKey, setting: BehaviorSetting): Promise<void> {
+  const previous = settingByKey[key] ?? 'p2'
+  settingByKey[key] = setting
+  try {
+    const data = await postBehavior(key, { setting })
+    if (data.setting) settingByKey[key] = data.setting
+  } catch (err) {
+    settingByKey[key] = previous
+    throw err
+  }
 }
 
 // Called by the view on init to load the current state from the server.
@@ -55,6 +76,7 @@ export async function refreshState(): Promise<void> {
     const data = await res.json()
     for (const k of Object.keys(data) as BehaviorKey[]) {
       enabledByKey[k] = !!data[k]?.enabled
+      if (data[k]?.setting) settingByKey[k] = data[k].setting
     }
   } catch { /* leave as-is */ }
 }

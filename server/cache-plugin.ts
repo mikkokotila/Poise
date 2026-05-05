@@ -3,7 +3,7 @@ import { getSettings, setSettings } from './settings'
 import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, type Lane } from './current'
 import { handleGhBody, listOrgRepos } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, triggerPrReview } from './agent'
-import { setEnabled as setBehaviorEnabled, getEnabledMap, startBehaviorsRuntime, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
+import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, getEnabledMap, getSettingMap, isValidSetting, startBehaviorsRuntime, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
 
 function json(res: any, status: number, body: unknown) {
   res.statusCode = status
@@ -85,22 +85,25 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
         }
 
         // ── /api/behaviors — state + metadata for behavior automations ──
-        // GET returns owner (from server env) AND enabled flag (from
-        // cache.db meta) per behavior. Owner is who the agent acts
-        // as; enabled is whether the server-side runtime is currently
-        // running this behavior on every tick.
+        // GET returns owner (from server env), enabled flag, and the
+        // per-behavior setting (e.g. "p2") from cache.db meta. Owner is
+        // who the agent acts as; enabled is whether the server-side
+        // runtime is running this behavior; setting is the threshold
+        // value passed to agent-interface as `--p`.
         if (url === '/api/behaviors' && req.method === 'GET') {
           const enabled = getEnabledMap()
+          const settings = getSettingMap()
           return json(res, 200, {
             'review-new-prs': {
               owner: opts.reviewAgentUsername || null,
               enabled: enabled['review-new-prs'],
+              setting: settings['review-new-prs'],
             },
           })
         }
 
-        // POST /api/behaviors/<key> { enabled: bool } toggles the
-        // server-side runtime for one behavior.
+        // POST /api/behaviors/<key> { enabled?: bool, setting?: 'p0'|'p1'|'p2' }
+        // — either field optional; both can be sent in one call.
         const behaviorMatch = url.match(/^\/api\/behaviors\/([a-z0-9-]+)(?:\?|$)/)
         if (behaviorMatch && req.method === 'POST') {
           const key = behaviorMatch[1] as BehaviorKey
@@ -110,9 +113,18 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
           try {
             const raw = await readBody(req)
             const body = raw ? JSON.parse(raw) : {}
-            const enabled = !!body.enabled
-            await setBehaviorEnabled(key, enabled)
-            return json(res, 200, { ok: true, enabled })
+            if ('enabled' in body) await setBehaviorEnabled(key, !!body.enabled)
+            if ('setting' in body) {
+              if (!isValidSetting(body.setting)) {
+                return json(res, 400, { error: 'invalid setting: ' + String(body.setting) })
+              }
+              setBehaviorSetting(key, body.setting)
+            }
+            return json(res, 200, {
+              ok: true,
+              enabled: getEnabledMap()[key],
+              setting: getSettingMap()[key],
+            })
           } catch (err: any) {
             return json(res, 400, { error: err.message || String(err) })
           }

@@ -44,14 +44,37 @@ export const BEHAVIOR_KEYS: BehaviorKey[] = ['review-new-prs']
 
 const META_PREFIX = 'behavior_'
 
-function metaKey(k: BehaviorKey): string { return META_PREFIX + k.replace(/-/g, '_') + '_enabled' }
+function enabledKey(k: BehaviorKey): string { return META_PREFIX + k.replace(/-/g, '_') + '_enabled' }
+function settingKey(k: BehaviorKey): string { return META_PREFIX + k.replace(/-/g, '_') + '_setting' }
 
 export function isEnabled(key: BehaviorKey): boolean {
-  return getMeta(metaKey(key)) === '1'
+  return getMeta(enabledKey(key)) === '1'
 }
 
 function setPersistedEnabled(key: BehaviorKey, enabled: boolean) {
-  setMeta(metaKey(key), enabled ? '1' : '0')
+  setMeta(enabledKey(key), enabled ? '1' : '0')
+}
+
+// Per-behavior setting (the priority ceiling for review-new-prs:
+// "p0" / "p1" / "p2"). Default "p2" so a freshly-enabled behavior
+// catches p0..p2 unless the user narrows it.
+export type BehaviorSetting = 'p0' | 'p1' | 'p2'
+const VALID_SETTINGS: BehaviorSetting[] = ['p0', 'p1', 'p2']
+const DEFAULT_SETTING: BehaviorSetting = 'p2'
+
+export function getSetting(key: BehaviorKey): BehaviorSetting {
+  const v = getMeta(settingKey(key))
+  return (VALID_SETTINGS as string[]).includes(v || '')
+    ? (v as BehaviorSetting)
+    : DEFAULT_SETTING
+}
+
+function setPersistedSetting(key: BehaviorKey, setting: BehaviorSetting) {
+  setMeta(settingKey(key), setting)
+}
+
+export function isValidSetting(v: unknown): v is BehaviorSetting {
+  return typeof v === 'string' && (VALID_SETTINGS as string[]).includes(v)
 }
 
 // ── Seen-sets (in-memory only) ──────────────────────────────────────────
@@ -89,7 +112,7 @@ async function localCheckoutPath(owner: string, repo: string): Promise<string> {
   return String(result.path)
 }
 
-async function fireReview(pr: DatastorePr): Promise<void> {
+async function fireReview(pr: DatastorePr, setting: BehaviorSetting): Promise<void> {
   const m = pr.url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
   if (!m) throw new Error('not a github PR url: ' + pr.url)
   const [, owner, repo, num] = m
@@ -97,7 +120,10 @@ async function fireReview(pr: DatastorePr): Promise<void> {
   // mkdir the cwd hack dir — agent-interface needs it to exist for
   // --pwd resolution behavior identical to triggerPrReview in agent.ts.
   await mkdir(join(GH_INTERFACE_CWD_ROOT, owner, repo), { recursive: true })
-  const child = spawn(AGENT_INTERFACE, ['--pr-review', `#${num}`, '--pwd', pwd], {
+  // Pass the priority ceiling through as `--p`. agent-interface forwards
+  // it to github-interface as `--p <value>`; for review-new-prs the
+  // possible values are p0 / p1 / p2.
+  const child = spawn(AGENT_INTERFACE, ['--pr-review', `#${num}`, '--pwd', pwd, '--p', setting], {
     cwd: agentInterfaceCwd(),
     detached: true,
     stdio: 'ignore',
@@ -124,6 +150,7 @@ async function tickReviewNewPrs(): Promise<void> {
     await snapshotReviewNewPrs()
     return
   }
+  const setting = getSetting('review-new-prs')
   try {
     const prs = await listOpenPrsByAuthor(author)
     const seen = seenSets['review-new-prs']!
@@ -132,8 +159,8 @@ async function tickReviewNewPrs(): Promise<void> {
       if (seen.has(key)) continue
       seen.add(key)
       try {
-        await fireReview(pr)
-        console.log(`[behaviors] review-new-prs fired for ${key}`)
+        await fireReview(pr, setting)
+        console.log(`[behaviors] review-new-prs fired for ${key} (p=${setting})`)
       } catch (err) {
         console.error(`[behaviors] fireReview failed for ${key}:`, err)
       }
@@ -155,6 +182,10 @@ export async function setEnabled(key: BehaviorKey, enabled: boolean): Promise<vo
       seenSets[key] = null
     }
   }
+}
+
+export function setSetting(key: BehaviorKey, setting: BehaviorSetting): void {
+  setPersistedSetting(key, setting)
 }
 
 // Wall-clock-aligned ticker — mirrors src/config.ts startRefreshTicker.
@@ -193,5 +224,11 @@ export function startBehaviorsRuntime(): void {
 export function getEnabledMap(): Record<BehaviorKey, boolean> {
   const out: Record<BehaviorKey, boolean> = {} as any
   for (const k of BEHAVIOR_KEYS) out[k] = isEnabled(k)
+  return out
+}
+
+export function getSettingMap(): Record<BehaviorKey, BehaviorSetting> {
+  const out: Record<BehaviorKey, BehaviorSetting> = {} as any
+  for (const k of BEHAVIOR_KEYS) out[k] = getSetting(k)
   return out
 }

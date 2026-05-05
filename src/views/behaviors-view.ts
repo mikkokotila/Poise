@@ -9,7 +9,7 @@
 // runtime — the view is just a UI for state, not the place where
 // agent automations actually run.
 
-import { BEHAVIORS, isEnabled, setEnabled, refreshState, type BehaviorKey } from '../behaviors'
+import { BEHAVIORS, isEnabled, setEnabled, getSetting, setSetting, refreshState, type BehaviorKey, type BehaviorSetting } from '../behaviors'
 
 let viewEl: HTMLElement
 let initialized = false
@@ -50,6 +50,26 @@ function toggleCell(key: BehaviorKey): string {
   `
 }
 
+// Setting dropdown — priority ceiling for the behavior. p0 is shown as
+// `==p0` (only p0); the rest as `<=pX` (pX and below).
+const SETTING_OPTIONS: { value: BehaviorSetting, label: string }[] = [
+  { value: 'p0', label: '==p0' },
+  { value: 'p1', label: '<=p1' },
+  { value: 'p2', label: '<=p2' },
+]
+
+function settingCell(key: BehaviorKey): string {
+  const current = getSetting(key)
+  const opts = SETTING_OPTIONS.map((o) =>
+    `<option value="${o.value}"${o.value === current ? ' selected' : ''}>${escapeHtml(o.label)}</option>`
+  ).join('')
+  return `
+    <select class="behavior-setting" data-behavior="${escapeHtml(key)}" aria-label="Setting for ${escapeHtml(key)}">
+      ${opts}
+    </select>
+  `
+}
+
 function renderShell(): string {
   return `
     <header class="view-header">
@@ -61,6 +81,7 @@ function renderShell(): string {
           <tr>
             <th class="col-title">Behavior</th>
             <th class="col-owner-wide">Owner</th>
+            <th class="col-setting">Setting</th>
             <th class="col-active">Active</th>
           </tr>
         </thead>
@@ -77,6 +98,7 @@ function renderRow(meta: typeof BEHAVIORS[number]): HTMLTableRowElement {
   tr.innerHTML = `
     <td class="title-cell"><span class="behavior-name">${escapeHtml(meta.label)}</span></td>
     <td>${ownerCell(owner)}</td>
+    <td class="behavior-setting-cell">${settingCell(meta.key)}</td>
     <td class="behavior-active-cell">${toggleCell(meta.key)}</td>
   `
   return tr
@@ -107,10 +129,21 @@ function renderRows() {
 function attachToggleHandler() {
   const tbody = viewEl.querySelector<HTMLTableSectionElement>('#behaviors-tbody')!
   tbody.addEventListener('change', (e) => {
-    const target = e.target as HTMLInputElement
-    if (!target.matches('input[type="checkbox"][data-behavior]')) return
-    const key = target.dataset.behavior as BehaviorKey
-    setEnabled(key, target.checked)
+    const target = e.target as HTMLElement
+    // Toggle (Active column)
+    if (target.matches('input[type="checkbox"][data-behavior]')) {
+      const cb = target as HTMLInputElement
+      const key = cb.dataset.behavior as BehaviorKey
+      setEnabled(key, cb.checked)
+      return
+    }
+    // Setting dropdown
+    if (target.matches('select.behavior-setting[data-behavior]')) {
+      const sel = target as HTMLSelectElement
+      const key = sel.dataset.behavior as BehaviorKey
+      setSetting(key, sel.value as BehaviorSetting)
+      return
+    }
   })
 }
 
