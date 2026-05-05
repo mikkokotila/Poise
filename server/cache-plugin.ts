@@ -3,6 +3,7 @@ import { getSettings, setSettings } from './settings'
 import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, type Lane } from './current'
 import { handleGhBody, listOrgRepos } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, triggerPrReview } from './agent'
+import { listChatHistory, sendChat } from './chat'
 import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, getEnabledMap, getSettingMap, getLastFiredMap, isValidSetting, startBehaviorsRuntime, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
 
 function json(res: any, status: number, body: unknown) {
@@ -142,6 +143,35 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
             return json(res, 200, { repos })
           } catch (err: any) {
             return json(res, 502, { error: 'listOrgRepos failed: ' + (err.message || String(err)) })
+          }
+        }
+
+        // ── /api/chat — per-card long-lived chats via agent-interface ──
+        // GET /api/chat?session=<id> returns the chat transcript for
+        // that session (oldest-first; each entry has the user prompt
+        // and a response hash for fetching the reply body).
+        // POST /api/chat { session, message } spawns
+        // `agent-interface --chat <message> --model gpt --session <id>`
+        // detached and returns immediately; the front-end polls GET
+        // for status updates.
+        if (url?.startsWith('/api/chat') && req.method === 'GET') {
+          const qs = new URLSearchParams(url.split('?')[1] || '')
+          const session = qs.get('session') || ''
+          try {
+            const messages = await listChatHistory(session)
+            return json(res, 200, { messages })
+          } catch (err: any) {
+            return json(res, 502, { error: 'chat history failed: ' + (err.message || String(err)) })
+          }
+        }
+        if (url === '/api/chat' && req.method === 'POST') {
+          try {
+            const raw = await readBody(req)
+            const body = raw ? JSON.parse(raw) : {}
+            const result = await sendChat(String(body.session || ''), String(body.message || ''))
+            return json(res, 200, result)
+          } catch (err: any) {
+            return json(res, 400, { error: err.message || String(err) })
           }
         }
 

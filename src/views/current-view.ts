@@ -229,6 +229,24 @@ function renderShell(): string {
   `
 }
 
+// Small chat-bubble glyph — appears top-right on every card across all
+// five lanes. Click → opens the card's chat pane; click again on an
+// already-open pane closes it. Session ids are deterministic per card
+// so re-opening picks up the same conversation history.
+const CHAT_ICON_SVG = '<svg width="11" height="11" viewBox="0 0 14 14" fill="none"><path d="M2.5 3h9a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H7l-2.5 2v-2H2.5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linejoin="round"/></svg>'
+
+function chatButton(sessionId: string, label: string): string {
+  return `<button class="card-chat-btn" data-session="${escapeHtml(sessionId)}" data-label="${escapeHtml(label)}" title="Chat about this card" aria-label="Chat">${CHAT_ICON_SVG}</button>`
+}
+
+function manualSessionId(card: ManualCard): string {
+  return `poise.card.${card.id}`
+}
+
+function liveSessionId(item: LiveItem): string {
+  return `poise.${item.is_pr === 1 ? 'pr' : 'issue'}.${item.repo}.${item.number}`
+}
+
 function renderManualCard(card: ManualCard): HTMLElement {
   const el = document.createElement('article')
   el.className = 'card'
@@ -237,7 +255,7 @@ function renderManualCard(card: ManualCard): HTMLElement {
   el.dataset.lane = card.lane
   // Meta row mirrors the PR/Issue card shape — repo (if linked) on the
   // left, timestamp at the end. Bottom-right hosts the delete action,
-  // matching the PR review-icon corner across all five lanes.
+  // top-right the chat icon — matching live cards' chrome layout.
   const repoTag = card.repo
     ? `<span class="card-repo">${escapeHtml(shortRepo(card.repo))}</span>`
     : ''
@@ -247,6 +265,7 @@ function renderManualCard(card: ManualCard): HTMLElement {
       ${repoTag}
       <span class="card-time">${relativeTime(card.updated_at)}</span>
     </div>
+    ${chatButton(manualSessionId(card), card.text.slice(0, 60))}
     <button class="card-delete" title="Delete card" aria-label="Delete card">×</button>
   `
   return el
@@ -283,6 +302,7 @@ function renderLiveItem(item: LiveItem): HTMLElement {
         <span class="card-time">${relativeTime(item.updated_at)}</span>
       </div>
     </a>
+    ${chatButton(liveSessionId(item), `${shortRepo(item.repo)}#${item.number}`)}
     ${reviewBtn}
   `
   return el
@@ -957,6 +977,21 @@ function attachCardClickHandlers() {
   const kanban = viewEl.querySelector<HTMLElement>('.kanban')!
   kanban.addEventListener('click', async (e) => {
     const target = e.target as HTMLElement
+
+    // Chat icon — opens (or toggles) the per-card chat pane on the
+    // left. Sibling of card-link / card-text so it doesn't propagate
+    // into navigation or edit. Always handled before review-btn /
+    // delete / edit so a click on the chat icon is unambiguous.
+    const chatBtn = target.closest<HTMLButtonElement>('.card-chat-btn')
+    if (chatBtn) {
+      e.preventDefault()
+      e.stopPropagation()
+      const session = chatBtn.dataset.session || ''
+      const label = chatBtn.dataset.label || ''
+      if (!session) return
+      window.dispatchEvent(new CustomEvent('poise:open-chat', { detail: { session, label } }))
+      return
+    }
 
     // PR review icon — fires off agent-interface --pr-review for the PR
     // and shows a brief running/done indicator. Stop propagation so the

@@ -1939,6 +1939,10 @@ body:has(#settings-panel.open) #top-nav {
 .card-text {
   white-space: pre-wrap;
   word-wrap: break-word;
+  /* Reserve a right inset on every card's title/body text so the
+     hover-revealed chat icon at top:6/right:6 doesn't sit on top of
+     the text. 22px = icon-width + small gap. */
+  padding-right: 22px;
 }
 
 .card-delete {
@@ -2689,3 +2693,205 @@ tr:hover .expand-btn { opacity: 1; }
   outline-color: var(--a1);
   outline-offset: 2px;
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Chat pane (per-card, slides in from the LEFT)
+
+   Mirror of the right-side Settings/Typography panel pattern but
+   anchored left. Width is responsive at 25vw with a 360px floor so
+   the conversation stays readable on narrower viewports.
+   ───────────────────────────────────────────────────────────────────────── */
+
+#chat-panel {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 25vw;
+  min-width: 360px;
+  height: 100vh;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  box-shadow: var(--e-3);
+  z-index: 110;
+  transform: translateX(-100%);
+  transition: transform var(--t-slow) var(--ease);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#chat-panel.open { transform: translateX(0); }
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-5) var(--sp-5) var(--sp-4);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.chat-title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-right: var(--sp-3);
+}
+
+.chat-close {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-sm);
+  flex-shrink: 0;
+  transition: color var(--t-quick) ease, background var(--t-quick) ease;
+}
+.chat-close:hover { color: var(--text); background: var(--hover); }
+
+.chat-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--sp-4) var(--sp-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.chat-empty {
+  color: var(--text-tertiary);
+  font-size: 0.8125rem;
+  text-align: center;
+  padding: var(--sp-7) 0;
+}
+
+/* Message bubble — user is right-aligned with an A1 tint, agent is
+   left-aligned in the surface tone. Mono only for the agent's body
+   (matches DS — IDs and code-shaped output). */
+.chat-msg {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  max-width: 88%;
+}
+.chat-msg-user  { align-self: flex-end;   text-align: right; }
+.chat-msg-agent { align-self: flex-start; text-align: left;  }
+
+.chat-msg-meta {
+  font-size: 0.625rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.chat-msg-label { font-weight: 600; }
+
+.chat-msg-body {
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--surface);
+  border: var(--b-base);
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-3);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+.chat-msg-user .chat-msg-body {
+  background: var(--tint-a1);
+  border-color: var(--tint-a1);
+}
+.chat-msg-agent pre.chat-msg-body {
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-size: 0.75rem;
+}
+.chat-msg-error .chat-msg-body {
+  color: var(--a5);
+  border-color: var(--a5);
+}
+
+.chat-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-5) var(--sp-5);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.chat-input {
+  flex: 1;
+  resize: none;
+  font-family: inherit;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  font-weight: 400;
+  color: var(--text);
+  background: var(--bg);
+  border: var(--b-base);
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-3);
+  outline: none;
+  transition: border-color var(--t-quick) ease;
+}
+.chat-input:focus-visible {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
+}
+.chat-input::placeholder { color: var(--text-tertiary); }
+
+.chat-send {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: color var(--t-quick) ease, background var(--t-quick) ease, border-color var(--t-quick) ease;
+}
+.chat-send:hover {
+  color: var(--text);
+  background: var(--hover);
+  border-color: var(--text-tertiary);
+}
+.chat-send:disabled { opacity: 0.5; cursor: default; }
+
+/* Card chat icon — top-right of every card. Hover-revealed in the
+   same opacity rhythm as card-delete and card-review-btn so the four
+   chrome elements (chat top-right, delete bottom-right, review
+   bottom-right, breathing accent right edge) follow one rule. */
+.card-chat-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  opacity: 0;
+  transition: opacity var(--t-quick) ease, background var(--t-quick) ease, color var(--t-quick) ease;
+  z-index: 1;
+}
+.card:hover .card-chat-btn { opacity: 0.7; }
+.card-chat-btn:hover { opacity: 1; color: var(--text); background: var(--border); }

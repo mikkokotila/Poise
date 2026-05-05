@@ -6,6 +6,7 @@ import { initMainView, refreshMainView, stopMainRefresh } from './views/main-vie
 import { initCurrentView, stopCurrentPolling } from './views/current-view'
 import { initSwarmView, stopSwarmRefresh, focusRow as focusSwarmRow } from './views/swarm-view'
 import { initBehaviorsView } from './views/behaviors-view'
+import { toggle as toggleChat } from './views/chat-pane'
 import { loadSettings, startRefreshTicker, applyTheme, getTheme } from './config'
 
 const viewMainEl = document.getElementById('view-main')!
@@ -83,6 +84,15 @@ const menu = initMenu({
 window.addEventListener('poise:synced', () => {
   if (menu.currentView() === 'main') refreshMainView()
   else showView(menu.currentView())
+})
+
+// Card chat icon → toggle the chat pane bound to that card's session.
+// Clicking the same card's icon again closes the pane; switching to a
+// different card swaps the conversation in place.
+window.addEventListener('poise:open-chat', (ev) => {
+  const detail = (ev as CustomEvent<{ session: string, label: string }>).detail
+  if (!detail) return
+  toggleChat(detail.session, detail.label)
 })
 
 // Behaviors view → Swarm row navigation. The "Last triggered" link
