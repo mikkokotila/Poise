@@ -66,8 +66,18 @@ const SLOW_POLL_MS = 20_000
 // fixed and the send button never collides with text or scrollbars.
 const MAX_INPUT_PX = 210
 
+// Attribute-safe HTML escape. textContent → innerHTML only escapes &,
+// <, >, which is fine for text content but NOT for attribute values:
+// an unescaped " in `data-draft="..."` would close the attribute and
+// truncate the draft. We use this for both attributes and text.
 function escapeHtml(s: string): string {
-  const d = document.createElement('div'); d.textContent = s; return d.innerHTML
+  return String(s).replace(/[&<>"']/g, (c) => (
+    c === '&' ? '&amp;' :
+    c === '<' ? '&lt;' :
+    c === '>' ? '&gt;' :
+    c === '"' ? '&quot;' :
+                '&#39;'
+  ))
 }
 
 const ICON_CLOSE = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'

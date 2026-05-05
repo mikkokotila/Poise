@@ -90,8 +90,20 @@ let liveListening = false
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+// Attribute-safe HTML escape. textContent → innerHTML only escapes &,
+// <, >, which is fine for text-content interpolation but NOT for
+// attribute values: an unescaped " or ' will close the attribute and
+// the rest of the string will leak out as raw HTML (or just get
+// dropped). We use this in both text and attribute positions, so the
+// escape covers all five characters.
 function escapeHtml(s: string): string {
-  const d = document.createElement('div'); d.textContent = s; return d.innerHTML
+  return String(s).replace(/[&<>"']/g, (c) => (
+    c === '&' ? '&amp;' :
+    c === '<' ? '&lt;' :
+    c === '>' ? '&gt;' :
+    c === '"' ? '&quot;' :
+                '&#39;'
+  ))
 }
 
 function laneCfg(lane: Lane): LaneConfig {

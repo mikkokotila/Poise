@@ -18,8 +18,17 @@ let initialized = false
 // the actual GitHub usernames the automations act as.
 let behaviorOwners: Partial<Record<BehaviorKey, string | null>> = {}
 
+// Attribute-safe HTML escape. textContent → innerHTML only escapes &,
+// <, >; we also need to escape " and ' so attribute interpolations
+// like `title="${escapeHtml(text)}"` don't break on quoted content.
 function escapeHtml(s: string): string {
-  const d = document.createElement('div'); d.textContent = s; return d.innerHTML
+  return String(s).replace(/[&<>"']/g, (c) => (
+    c === '&' ? '&amp;' :
+    c === '<' ? '&lt;' :
+    c === '>' ? '&gt;' :
+    c === '"' ? '&quot;' :
+                '&#39;'
+  ))
 }
 
 function humanAvatarFallback(username: string): string {

@@ -104,8 +104,17 @@ function relativeDate(iso: string): string {
   return `${Math.floor(months / 12)}y`
 }
 
+// Attribute-safe HTML escape. textContent → innerHTML only escapes &,
+// <, >; we also need to escape " and ' so attribute interpolations
+// like `title="${escapeHtml(text)}"` don't break on quoted content.
 function escapeHtml(s: string): string {
-  const d = document.createElement('div'); d.textContent = s; return d.innerHTML
+  return String(s).replace(/[&<>"']/g, (c) => (
+    c === '&' ? '&amp;' :
+    c === '<' ? '&lt;' :
+    c === '>' ? '&gt;' :
+    c === '"' ? '&quot;' :
+                '&#39;'
+  ))
 }
 
 function stateLabel(item: PrRow): { text: string; cls: string } {
