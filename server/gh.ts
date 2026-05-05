@@ -340,7 +340,40 @@ export async function handleGhBody(body: any): Promise<{ status: number, body: u
         cwd,
         maxBuffer: 4 * 1024 * 1024,
       })
-      return { status: 200, body: JSON.parse(stdout) }
+      // github-interface returns the full GitHub API issue payload under
+      // `issue`. Normalize to a GhRecord so the frontend can splice the
+      // new issue straight into its liveItems while github-datastore
+      // catches up (the datastore is a polling consumer view, so the
+      // moment after creation it doesn't yet know about the new issue —
+      // an immediate fetch would come back empty).
+      const data = JSON.parse(stdout)
+      const issue = data?.issue || {}
+      const number = Number(issue.number || 0)
+      if (!number) {
+        return { status: 502, body: { error: 'github-interface --create-issue: missing issue.number in response' } }
+      }
+      const nowIso = new Date().toISOString()
+      const record: GhRecord = {
+        kind: 'issue',
+        repo: repoFull,
+        number,
+        state: (issue.state as 'open' | 'closed' | 'merged') || 'open',
+        title: String(issue.title || title),
+        url: String(issue.html_url || `https://github.com/${repoFull}/issues/${number}`),
+        created_at: String(issue.created_at || nowIso),
+        updated_at: String(issue.updated_at || issue.created_at || nowIso),
+        author: String(issue.user?.login || ''),
+        author_avatar: issue.user?.avatar_url ? String(issue.user.avatar_url) : null,
+        merged_at: null,
+        comments_count: 0,
+        last_commenter: null,
+        last_commenter_avatar: null,
+        last_comment_body: null,
+        labels: [],
+        owner_login: null,
+        owner_avatar: null,
+      }
+      return { status: 200, body: { record } }
     } catch (err: any) {
       const msg = err?.stderr?.toString?.() || err?.message || String(err)
       return { status: 502, body: { error: 'github-interface --create-issue failed: ' + msg } }

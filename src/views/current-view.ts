@@ -83,6 +83,17 @@ let statusFilter: StatusFilter = 'all'
 let searchQuery = ''
 let searchDebounce: ReturnType<typeof setTimeout> | null = null
 let prStatus: Map<string, PrStatus> = new Map()
+// Optimistic queue for items the user just created (currently only
+// the issue composer pushes into it). github-datastore is a polling
+// consumer view — the moment after creation the datastore still
+// returns the pre-creation list, which would make the new issue
+// invisible. We park it here and prepend to liveItems on every
+// fetchLive() until the datastore catches up; once it does, the
+// canonical record from /api/gh takes over and the entry is dropped.
+// One-hour TTL is a safety net so a stalled sync can't leave a ghost
+// pinned at the top forever.
+let pendingLiveItems: LiveItem[] = []
+const PENDING_TTL_MS = 60 * 60 * 1000
 // Tick listener installed on view init; removed via stopCurrentPolling()
 // when navigating away. Single shared clock — see startRefreshTicker().
 const onLiveTick = () => pollLiveTick()
@@ -606,6 +617,23 @@ async function fetchLive() {
     merged_at: r.merged_at,
     updated_at: r.updated_at,
   }))
+  reconcilePending()
+}
+
+// Drop pending entries the datastore has now picked up (matched by
+// repo + number) and any older than PENDING_TTL_MS, then prepend the
+// remaining optimistic items so they appear at the top of their lane.
+// Called from fetchLive() right after liveItems is replaced.
+function reconcilePending() {
+  if (!pendingLiveItems.length) return
+  const cutoff = Date.now() - PENDING_TTL_MS
+  pendingLiveItems = pendingLiveItems.filter((p) => {
+    if (new Date(p.created_at).getTime() < cutoff) return false
+    return !liveItems.some((li) => li.repo === p.repo && li.number === p.number)
+  })
+  if (pendingLiveItems.length) {
+    liveItems = [...pendingLiveItems, ...liveItems]
+  }
 }
 
 // Full repo names ("Vaquum/foo") seen in the loaded live set, sorted by
@@ -765,10 +793,31 @@ function openIssueComposer() {
         const text = await ghRes.text().catch(() => '')
         throw new Error(`Github ${ghRes.status}: ${text.slice(0, 160)}`)
       }
+      // The server returns the freshly-created issue normalized as a
+      // GhRecord. github-datastore is a polling consumer, so the
+      // canonical record won't show up in /api/gh for some seconds —
+      // we park the issue in pendingLiveItems and prepend it on every
+      // fetchLive() until the datastore catches up. This guarantees
+      // the new issue is visible the moment the composer closes.
+      try {
+        const result = await ghRes.json()
+        const r = result?.record
+        if (r && r.kind === 'issue' && r.number) {
+          pendingLiveItems = pendingLiveItems.filter((p) => !(p.repo === r.repo && p.number === r.number))
+          pendingLiveItems.unshift({
+            repo: String(r.repo),
+            number: Number(r.number),
+            title: String(r.title),
+            url: String(r.url),
+            is_pr: 0,
+            state: (r.state as 'open' | 'closed' | 'merged') || 'open',
+            created_at: String(r.created_at),
+            merged_at: r.merged_at ? String(r.merged_at) : null,
+            updated_at: String(r.updated_at),
+          })
+        }
+      } catch { /* fall through — fetchLive on its own may still surface it */ }
       close()
-      // The /github service publishes the new record into its store —
-      // pull it down via fetchLive so the new issue lands at the top of
-      // the Issue lane through the standard FLIP path.
       await fetchLive()
       renderLiveOnly({ animate: true })
     } catch (err) {
