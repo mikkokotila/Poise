@@ -19,10 +19,32 @@ interface LogEntry {
   model: string
   behavior: string | null   // agent-interface behavior name (pr-review, mergeable, etc.)
   prompt: string
+  started_at: string        // ISO-ish "YYYY-MM-DDTHH:MM:SS" — UTC implied by upstream
   time_elapsed: string
   status: string
   response: string        // 8-char hash; pass to /api/agent-response/<hash> to fetch body
   error: string
+}
+
+// Relative-time formatter for the Started column. Mirrors the
+// `relativeTime` used on Current's live cards so the two views read
+// the same vocabulary (s / m / h / d / mo / y).
+function startedRel(iso: string): string {
+  if (!iso) return '—'
+  // agent-interface emits a naive ISO without a Z or offset; treat as
+  // UTC so the relative diff is correct regardless of the user's TZ.
+  const normalized = /[Zz]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + 'Z'
+  const t = new Date(normalized).getTime()
+  if (!isFinite(t)) return '—'
+  const secs = Math.max(0, Math.floor((Date.now() - t) / 1000))
+  if (secs < 60) return `${secs}s`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m`
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h`
+  const days = Math.floor(secs / 86400)
+  if (days < 30) return `${days}d`
+  const months = Math.floor(days / 30)
+  if (months < 12) return `${months}mo`
+  return `${Math.floor(months / 12)}y`
 }
 
 let viewEl: HTMLElement
@@ -114,6 +136,7 @@ function renderShell() {
             <th class="col-behavior">Behavior</th>
             <th class="col-target">Target</th>
             <th class="col-status">Status</th>
+            <th class="col-started">Started</th>
             <th class="col-elapsed">Elapsed</th>
             <th class="col-action"></th>
           </tr>
@@ -156,6 +179,7 @@ function buildMainRow(e: LogEntry): HTMLTableRowElement {
     <td>${behaviorCell(e.behavior)}</td>
     <td>${targetCell(e)}</td>
     <td>${statusCell(e.status)}</td>
+    <td><span class="date">${escapeHtml(startedRel(e.started_at))}</span></td>
     <td><span class="date">${escapeHtml(e.time_elapsed || '—')}</span></td>
     <td class="action-cell">${btn}</td>
   `
@@ -169,7 +193,7 @@ function setExpandContent(tr: HTMLTableRowElement, id: string) {
     : (state.body
         ? `<pre class="agent-response-body">${escapeHtml(state.body)}</pre>`
         : '<div class="agent-response-empty">No response body.</div>')
-  tr.innerHTML = `<td colspan="6">${inner}</td>`
+  tr.innerHTML = `<td colspan="7">${inner}</td>`
 }
 
 function buildExpandRow(e: LogEntry): HTMLTableRowElement {

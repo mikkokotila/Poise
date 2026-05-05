@@ -2399,16 +2399,19 @@ body:has(#settings-panel.open) #top-nav {
    link, expand row).
    ───────────────────────────────────────────────────────────────────────── */
 
-/* Five equally-wide data columns + the icon column. Each data column
+/* Six equally-wide data columns + the icon column. Each data column
    takes the same fraction of (table width − action column) so the
-   layout reads as five even bays. */
+   layout reads as six even bays. Started + Elapsed right-align as
+   numeric columns. */
 .col-model,
 .col-behavior,
 .col-target,
 .col-status,
+.col-started,
 .col-elapsed {
-  width: calc((100% - 32px) / 5);
+  width: calc((100% - 32px) / 6);
 }
+.col-started { text-align: right; }
 .col-elapsed { text-align: right; }
 
 /* Distinct cell flavors */
