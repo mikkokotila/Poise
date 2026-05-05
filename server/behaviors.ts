@@ -46,6 +46,8 @@ const META_PREFIX = 'behavior_'
 
 function enabledKey(k: BehaviorKey): string { return META_PREFIX + k.replace(/-/g, '_') + '_enabled' }
 function settingKey(k: BehaviorKey): string { return META_PREFIX + k.replace(/-/g, '_') + '_setting' }
+function lastFiredAtKey(k: BehaviorKey): string { return META_PREFIX + k.replace(/-/g, '_') + '_last_at' }
+function lastFiredTargetKey(k: BehaviorKey): string { return META_PREFIX + k.replace(/-/g, '_') + '_last_target' }
 
 export function isEnabled(key: BehaviorKey): boolean {
   return getMeta(enabledKey(key)) === '1'
@@ -75,6 +77,30 @@ function setPersistedSetting(key: BehaviorKey, setting: BehaviorSetting) {
 
 export function isValidSetting(v: unknown): v is BehaviorSetting {
   return typeof v === 'string' && (VALID_SETTINGS as string[]).includes(v)
+}
+
+// Last-fired metadata — lets the Behaviors view show "X minutes ago"
+// and link to the matching row in Swarm. Recorded immediately after a
+// successful spawn; stored as ISO timestamp + a "repo#num" target
+// string for cross-referencing the agent-interface log.
+export interface LastFired { at: string; target: string }
+
+export function getLastFired(key: BehaviorKey): LastFired | null {
+  const at = getMeta(lastFiredAtKey(key))
+  const target = getMeta(lastFiredTargetKey(key))
+  if (!at || !target) return null
+  return { at, target }
+}
+
+function recordLastFired(key: BehaviorKey, target: string) {
+  setMeta(lastFiredAtKey(key), new Date().toISOString())
+  setMeta(lastFiredTargetKey(key), target)
+}
+
+export function getLastFiredMap(): Record<BehaviorKey, LastFired | null> {
+  const out: Record<BehaviorKey, LastFired | null> = {} as any
+  for (const k of BEHAVIOR_KEYS) out[k] = getLastFired(k)
+  return out
 }
 
 // ── Seen-sets (in-memory only) ──────────────────────────────────────────
@@ -160,6 +186,7 @@ async function tickReviewNewPrs(): Promise<void> {
       seen.add(key)
       try {
         await fireReview(pr, setting)
+        recordLastFired('review-new-prs', key)
         console.log(`[behaviors] review-new-prs fired for ${key} (p=${setting})`)
       } catch (err) {
         console.error(`[behaviors] fireReview failed for ${key}:`, err)

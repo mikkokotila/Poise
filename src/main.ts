@@ -4,7 +4,7 @@ import { initSettings, toggleSettingsPanel, openSettingsPanel, isFullyConfigured
 import { initMenu } from './menu'
 import { initMainView, refreshMainView, stopMainRefresh } from './views/main-view'
 import { initCurrentView, stopCurrentPolling } from './views/current-view'
-import { initSwarmView, stopSwarmRefresh } from './views/swarm-view'
+import { initSwarmView, stopSwarmRefresh, focusRow as focusSwarmRow } from './views/swarm-view'
 import { initBehaviorsView } from './views/behaviors-view'
 import { loadSettings, startRefreshTicker, applyTheme, getTheme } from './config'
 
@@ -83,4 +83,19 @@ const menu = initMenu({
 window.addEventListener('poise:synced', () => {
   if (menu.currentView() === 'main') refreshMainView()
   else showView(menu.currentView())
+})
+
+// Behaviors view → Swarm row navigation. The "Last triggered" link
+// dispatches `poise:goto-swarm-row` with { repo, pr_id }; switch to
+// Swarm, wait for it to mount, then ask it to focus the matching log
+// entry (scroll + expand if completed).
+window.addEventListener('poise:goto-swarm-row', (ev) => {
+  const detail = (ev as CustomEvent<{ repo: string, pr_id: string }>).detail
+  if (!detail) return
+  menu.switchTo('swarm')
+  // Defer one frame so showView's animation classes have applied and
+  // initSwarmView() has run before we ask for a focus.
+  window.requestAnimationFrame(() => {
+    focusSwarmRow(detail.repo, detail.pr_id)
+  })
 })

@@ -9,7 +9,7 @@
 // runtime — the view is just a UI for state, not the place where
 // agent automations actually run.
 
-import { BEHAVIORS, isEnabled, setEnabled, getSetting, setSetting, refreshState, type BehaviorKey, type BehaviorSetting } from '../behaviors'
+import { BEHAVIORS, isEnabled, setEnabled, getSetting, setSetting, getLastTriggered, refreshState, type BehaviorKey, type BehaviorSetting } from '../behaviors'
 
 let viewEl: HTMLElement
 let initialized = false
@@ -58,6 +58,29 @@ const SETTING_OPTIONS: { value: BehaviorSetting, label: string }[] = [
   { value: 'p2', label: '<=p2' },
 ]
 
+// Relative-time formatter shared with the Started column on Swarm.
+function relTime(iso: string): string {
+  if (!iso) return ''
+  const normalized = /[Zz]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + 'Z'
+  const t = new Date(normalized).getTime()
+  if (!isFinite(t)) return ''
+  const secs = Math.max(0, Math.floor((Date.now() - t) / 1000))
+  if (secs < 60) return `${secs}s`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m`
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h`
+  const days = Math.floor(secs / 86400)
+  if (days < 30) return `${days}d`
+  const months = Math.floor(days / 30)
+  if (months < 12) return `${months}mo`
+  return `${Math.floor(months / 12)}y`
+}
+
+function lastTriggeredCell(key: BehaviorKey): string {
+  const last = getLastTriggered(key)
+  if (!last) return '<span class="last-dash">—</span>'
+  return `<a class="behavior-last-link" href="#" data-target="${escapeHtml(last.target)}" title="${escapeHtml(last.target)} · ${escapeHtml(last.at)}">${escapeHtml(relTime(last.at))}</a>`
+}
+
 function settingCell(key: BehaviorKey): string {
   const current = getSetting(key)
   const opts = SETTING_OPTIONS.map((o) =>
@@ -82,6 +105,7 @@ function renderShell(): string {
             <th class="col-title">Behavior</th>
             <th class="col-owner-wide">Owner</th>
             <th class="col-setting">Setting</th>
+            <th class="col-last">Last triggered</th>
             <th class="col-active">Active</th>
           </tr>
         </thead>
@@ -99,6 +123,7 @@ function renderRow(meta: typeof BEHAVIORS[number]): HTMLTableRowElement {
     <td class="title-cell"><span class="behavior-name">${escapeHtml(meta.label)}</span></td>
     <td>${ownerCell(owner)}</td>
     <td class="behavior-setting-cell">${settingCell(meta.key)}</td>
+    <td class="behavior-last-cell">${lastTriggeredCell(meta.key)}</td>
     <td class="behavior-active-cell">${toggleCell(meta.key)}</td>
   `
   return tr
@@ -126,7 +151,7 @@ function renderRows() {
   tbody.appendChild(frag)
 }
 
-function attachToggleHandler() {
+function attachHandlers() {
   const tbody = viewEl.querySelector<HTMLTableSectionElement>('#behaviors-tbody')!
   tbody.addEventListener('change', (e) => {
     const target = e.target as HTMLElement
@@ -145,6 +170,21 @@ function attachToggleHandler() {
       return
     }
   })
+  // Last-triggered click → navigate to Swarm and focus the matching row.
+  // The actual view-switch + focus is bridged through main.ts so this
+  // module doesn't need to know about the menu.
+  tbody.addEventListener('click', (e) => {
+    const link = (e.target as HTMLElement).closest<HTMLAnchorElement>('.behavior-last-link')
+    if (!link) return
+    e.preventDefault()
+    const targetStr = link.dataset.target || ''
+    const m = targetStr.match(/^(.+)#(\d+)$/)
+    if (!m) return
+    const [, repo, num] = m
+    window.dispatchEvent(new CustomEvent('poise:goto-swarm-row', {
+      detail: { repo, pr_id: num },
+    }))
+  })
 }
 
 export async function initBehaviorsView() {
@@ -152,7 +192,7 @@ export async function initBehaviorsView() {
   if (!initialized) {
     initialized = true
     viewEl.innerHTML = renderShell()
-    attachToggleHandler()
+    attachHandlers()
     // Re-render when behavior state changes from elsewhere (e.g. boot
     // re-snapshot, programmatic toggle) so the UI never drifts.
     window.addEventListener('poise:behaviors-changed', () => renderRows())

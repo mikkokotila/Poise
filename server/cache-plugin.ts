@@ -3,7 +3,7 @@ import { getSettings, setSettings } from './settings'
 import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, type Lane } from './current'
 import { handleGhBody, listOrgRepos } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, triggerPrReview } from './agent'
-import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, getEnabledMap, getSettingMap, isValidSetting, startBehaviorsRuntime, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
+import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, getEnabledMap, getSettingMap, getLastFiredMap, isValidSetting, startBehaviorsRuntime, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
 
 function json(res: any, status: number, body: unknown) {
   res.statusCode = status
@@ -93,11 +93,13 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
         if (url === '/api/behaviors' && req.method === 'GET') {
           const enabled = getEnabledMap()
           const settings = getSettingMap()
+          const lastFired = getLastFiredMap()
           return json(res, 200, {
             'review-new-prs': {
               owner: opts.reviewAgentUsername || null,
               enabled: enabled['review-new-prs'],
               setting: settings['review-new-prs'],
+              lastTriggered: lastFired['review-new-prs'],
             },
           })
         }

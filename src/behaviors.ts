@@ -17,11 +17,13 @@ export const BEHAVIORS: BehaviorMeta[] = [
 ]
 
 export type BehaviorSetting = 'p0' | 'p1' | 'p2'
+export interface LastTriggered { at: string; target: string }
 
-// In-memory mirror of the server's enabled + setting maps, kept in
-// sync via /api/behaviors GET on view init and every successful POST.
+// In-memory mirror of the server's state, kept in sync via
+// /api/behaviors GET on view init and every successful POST.
 const enabledByKey: Partial<Record<BehaviorKey, boolean>> = {}
 const settingByKey: Partial<Record<BehaviorKey, BehaviorSetting>> = {}
+const lastByKey: Partial<Record<BehaviorKey, LastTriggered | null>> = {}
 
 export function isEnabled(key: BehaviorKey): boolean {
   return !!enabledByKey[key]
@@ -29,6 +31,10 @@ export function isEnabled(key: BehaviorKey): boolean {
 
 export function getSetting(key: BehaviorKey): BehaviorSetting {
   return settingByKey[key] || 'p2'
+}
+
+export function getLastTriggered(key: BehaviorKey): LastTriggered | null {
+  return lastByKey[key] || null
 }
 
 async function postBehavior(key: BehaviorKey, body: { enabled?: boolean, setting?: BehaviorSetting }) {
@@ -77,6 +83,7 @@ export async function refreshState(): Promise<void> {
     for (const k of Object.keys(data) as BehaviorKey[]) {
       enabledByKey[k] = !!data[k]?.enabled
       if (data[k]?.setting) settingByKey[k] = data[k].setting
+      lastByKey[k] = data[k]?.lastTriggered ?? null
     }
   } catch { /* leave as-is */ }
 }

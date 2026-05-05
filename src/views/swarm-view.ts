@@ -376,6 +376,37 @@ function attachClicks() {
   })
 }
 
+// Find and focus the most-recent pr_review log entry for repo+pr_id.
+// Caller is responsible for switching to this view first; we await a
+// poll so the data is fresh, then scroll the matching row into view
+// and (if completed) expand it inline.
+export async function focusRow(repo: string, pr_id: string): Promise<void> {
+  if (!viewEl || !bodyEl) return
+  // Pull fresh logs so behaviors that just fired show up immediately.
+  await pollOnce()
+  // entries are newest-first per the proxy, so the first match is the
+  // most-recent pr_review for this PR.
+  const match = entries.find((e) =>
+    e.repo === repo &&
+    String(e.pr_id) === String(pr_id) &&
+    e.behavior === 'pr_review',
+  )
+  if (!match) return
+  const row = bodyEl.querySelector<HTMLTableRowElement>(`tr.agent-row[data-id="${match.id}"]`)
+  if (!row) return
+  row.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  // Highlight briefly so the eye lands on the right row.
+  row.classList.add('agent-row-focus')
+  window.setTimeout(() => row.classList.remove('agent-row-focus'), 1500)
+  // If the run is finished and has a response body, expand it inline.
+  // Otherwise (running / failed-without-body) just show the row.
+  if (match.status === 'completed' && match.response && !expanded.has(match.id)) {
+    const btn = row.querySelector<HTMLButtonElement>('.expand-btn')
+    if (btn) btn.classList.add('open')
+    loadResponse(match.id, match.response)
+  }
+}
+
 async function pollOnce() {
   if (fetchInFlight) return
   fetchInFlight = true

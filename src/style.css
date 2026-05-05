@@ -2479,6 +2479,16 @@ tr:hover .expand-btn { opacity: 1; }
   transform: rotate(90deg);
 }
 
+/* Brief highlight when a row is focused via behaviors → swarm
+   navigation, so the eye lands on the right one. */
+@keyframes agent-row-focus-pulse {
+  0%, 100% { background: transparent; }
+  20%       { background: var(--tint-a1); }
+}
+#view-swarm tr.agent-row.agent-row-focus {
+  animation: agent-row-focus-pulse 1.5s ease-out 1;
+}
+
 /* Expanded response row — soft surface so the body reads as a
    continuation of the row above rather than a separate item. */
 #view-swarm tr.agent-expand-row > td {
@@ -2522,16 +2532,26 @@ tr:hover .expand-btn { opacity: 1; }
 
 .col-owner-wide { width: 180px; }
 .col-setting    { width: 130px; }
+.col-last       { width: 130px; }
 .col-active     { width: 120px; }
 
 /* The universal `td:nth-last-child(2) { text-align: right }` rule is
    meant for Archive's "Updated" column — it shouldn't apply here.
-   Force-left for behaviors' Setting cell so the dropdown lines up
-   under the SETTING header, matching every other table's content
-   alignment. (Owner is now further from the right edge so the
-   universal rule doesn't reach it anymore.) */
+   Force-left for behaviors' nth-last-child(2) cell (Last triggered)
+   so the link lines up under its header. */
 #behaviors-table tbody td:nth-last-child(2) {
   text-align: left;
+}
+
+.behavior-last-link {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  text-decoration: none;
+  border-bottom: 1px dashed var(--border);
+}
+.behavior-last-link:hover {
+  color: var(--text);
+  border-bottom-color: var(--text-tertiary);
 }
 
 .behavior-name {
