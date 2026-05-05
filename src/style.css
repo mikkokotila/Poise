@@ -2544,11 +2544,18 @@ tr:hover .expand-btn { opacity: 1; }
   color: var(--text-secondary);
 }
 
-/* Toggle cell — left-aligned (so the switch sits a measured way in
-   from the column's left edge instead of crammed against the table's
-   right boundary). The header ACTIVE label sits at the same x. */
-.behavior-active-cell {
-  text-align: left;
+/* Toggle cell — right-aligned with breathing room. The universal
+   `td:last-child { padding-right: 0 }` is meant for Archive's narrow
+   icon-only action column; for the toggle we want some inset so the
+   switch doesn't kiss the table edge. The header ACTIVE label gets
+   the same inset so it lines up over the toggle. */
+#behaviors-table .behavior-active-cell {
+  text-align: right;
+  padding-right: var(--sp-3);
+}
+#behaviors-table th.col-active {
+  text-align: right;
+  padding-right: var(--sp-3);
 }
 
 /* DS-aligned toggle — pill body, knob slides on activate, accent fill
