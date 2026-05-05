@@ -16,7 +16,7 @@ export const BEHAVIORS: BehaviorMeta[] = [
   { key: 'review-new-prs', label: 'Review New Pull Requests' },
 ]
 
-export type BehaviorSetting = 'p0' | 'p1' | 'p2'
+export type BehaviorSetting = 'p0' | 'p1' | 'p2' | 'p3' | 'p4'
 export interface LastTriggered { at: string; target: string }
 
 // In-memory mirror of the server's state, kept in sync via

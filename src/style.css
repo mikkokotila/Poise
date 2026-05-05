@@ -2413,6 +2413,11 @@ body:has(#settings-panel.open) #top-nav {
 }
 .col-started { text-align: right; }
 .col-elapsed { text-align: right; }
+/* The text-align on the .col-* classes only hits the THs. The TDs need
+   their own pin so the values right-align under their headers. Elapsed
+   is the table's nth-last-child(2) and gets right-align from the
+   universal td rule for free; Started needs an explicit cell class. */
+#view-swarm tbody td.started-cell { text-align: right; }
 
 /* Distinct cell flavors */
 .agent-model {
@@ -2657,14 +2662,19 @@ tr:hover .expand-btn { opacity: 1; }
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r-pill);
-  padding: 4px 26px 4px 10px;
+  /* The pill's border-radius (999px → effectively half-height) curves
+     inward ~11.5px on each side at the standard 23px height; arrows
+     and labels need to sit OUTSIDE that arc or they read as clipped.
+     Padding-right is bumped to 32px and the arrow is shifted left to
+     end at right:14px — well clear of the rounded corner. */
+  padding: 4px 32px 4px 14px;
   cursor: pointer;
   appearance: none;
   -webkit-appearance: none;
   background-image:
     linear-gradient(45deg, transparent 50%, var(--text-tertiary) 50%),
     linear-gradient(135deg, var(--text-tertiary) 50%, transparent 50%);
-  background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50%;
+  background-position: calc(100% - 19px) 50%, calc(100% - 14px) 50%;
   background-size: 5px 5px, 5px 5px;
   background-repeat: no-repeat;
   transition: border-color var(--t-base) ease, color var(--t-base) ease;

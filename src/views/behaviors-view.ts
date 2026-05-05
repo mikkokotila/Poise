@@ -56,6 +56,8 @@ const SETTING_OPTIONS: { value: BehaviorSetting, label: string }[] = [
   { value: 'p0', label: '==p0' },
   { value: 'p1', label: '<=p1' },
   { value: 'p2', label: '<=p2' },
+  { value: 'p3', label: '<=p3' },
+  { value: 'p4', label: '<=p4' },
 ]
 
 // Relative-time formatter shared with the Started column on Swarm.

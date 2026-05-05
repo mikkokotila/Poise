@@ -58,10 +58,10 @@ function setPersistedEnabled(key: BehaviorKey, enabled: boolean) {
 }
 
 // Per-behavior setting (the priority ceiling for review-new-prs:
-// "p0" / "p1" / "p2"). Default "p2" so a freshly-enabled behavior
-// catches p0..p2 unless the user narrows it.
-export type BehaviorSetting = 'p0' | 'p1' | 'p2'
-const VALID_SETTINGS: BehaviorSetting[] = ['p0', 'p1', 'p2']
+// "p0" / "p1" / "p2" / "p3" / "p4"). Default "p2" so a freshly-enabled
+// behavior catches p0..p2 unless the user narrows or widens it.
+export type BehaviorSetting = 'p0' | 'p1' | 'p2' | 'p3' | 'p4'
+const VALID_SETTINGS: BehaviorSetting[] = ['p0', 'p1', 'p2', 'p3', 'p4']
 const DEFAULT_SETTING: BehaviorSetting = 'p2'
 
 export function getSetting(key: BehaviorKey): BehaviorSetting {
