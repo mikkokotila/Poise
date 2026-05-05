@@ -10,7 +10,6 @@
 // agent automations actually run.
 
 import { BEHAVIORS, isEnabled, setEnabled, type BehaviorKey } from '../behaviors'
-import { getSettings } from './../config'
 
 let viewEl: HTMLElement
 let initialized = false
@@ -23,7 +22,7 @@ function humanAvatarFallback(username: string): string {
   return `https://github.com/${encodeURIComponent(username)}.png?size=48`
 }
 
-function ownerCell(username: string): string {
+function ownerCell(username: string | null): string {
   if (!username) return '<span class="last-dash">—</span>'
   const isBot = /\[bot\]$/i.test(username)
   const classes = ['last-avatar']
@@ -70,10 +69,14 @@ function renderShell(): string {
 function renderRow(meta: typeof BEHAVIORS[number]): HTMLTableRowElement {
   const tr = document.createElement('tr')
   tr.dataset.behavior = meta.key
-  const owner = getSettings().me || ''
+  // Owner = the actor the behavior's CLI call is made AS. This is not
+  // settings.me — it's whoever agent-interface actually authenticates
+  // as when the behavior fires. We don't know that pre-flight, so the
+  // cell is a placeholder until the wire question is answered (see
+  // git log for the open question).
   tr.innerHTML = `
     <td class="title-cell"><span class="behavior-name">${escapeHtml(meta.label)}</span></td>
-    <td>${ownerCell(owner)}</td>
+    <td>${ownerCell(null)}</td>
     <td class="behavior-active-cell">${toggleCell(meta.key)}</td>
   `
   return tr

@@ -2518,7 +2518,16 @@ tr:hover .expand-btn { opacity: 1; }
    ───────────────────────────────────────────────────────────────────────── */
 
 .col-owner-wide { width: 180px; }
-.col-active     { width: 100px; text-align: right; }
+.col-active     { width: 120px; }
+
+/* The universal `td:nth-last-child(2) { text-align: right }` rule is
+   meant for Archive's "Updated" column — it shouldn't apply here.
+   Force-left for behaviors' Owner cell so the avatar + handle line
+   up under the OWNER header, matching every other table's content
+   alignment. */
+#behaviors-table tbody td:nth-last-child(2) {
+  text-align: left;
+}
 
 .behavior-name {
   font-weight: 600;
@@ -2535,9 +2544,11 @@ tr:hover .expand-btn { opacity: 1; }
   color: var(--text-secondary);
 }
 
+/* Toggle cell — left-aligned (so the switch sits a measured way in
+   from the column's left edge instead of crammed against the table's
+   right boundary). The header ACTIVE label sits at the same x. */
 .behavior-active-cell {
-  text-align: right;
-  padding-right: 0;
+  text-align: left;
 }
 
 /* DS-aligned toggle — pill body, knob slides on activate, accent fill
