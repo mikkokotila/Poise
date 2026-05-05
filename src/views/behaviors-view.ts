@@ -13,6 +13,10 @@ import { BEHAVIORS, isEnabled, setEnabled, type BehaviorKey } from '../behaviors
 
 let viewEl: HTMLElement
 let initialized = false
+// Owner per behavior, fetched once from /api/behaviors. Server-side
+// values come from env vars (REVIEW_AGENT_USERNAME, etc.) — these are
+// the actual GitHub usernames the automations act as.
+let behaviorOwners: Partial<Record<BehaviorKey, string | null>> = {}
 
 function escapeHtml(s: string): string {
   const d = document.createElement('div'); d.textContent = s; return d.innerHTML
@@ -69,17 +73,24 @@ function renderShell(): string {
 function renderRow(meta: typeof BEHAVIORS[number]): HTMLTableRowElement {
   const tr = document.createElement('tr')
   tr.dataset.behavior = meta.key
-  // Owner = the actor the behavior's CLI call is made AS. This is not
-  // settings.me — it's whoever agent-interface actually authenticates
-  // as when the behavior fires. We don't know that pre-flight, so the
-  // cell is a placeholder until the wire question is answered (see
-  // git log for the open question).
+  const owner = behaviorOwners[meta.key] || null
   tr.innerHTML = `
     <td class="title-cell"><span class="behavior-name">${escapeHtml(meta.label)}</span></td>
-    <td>${ownerCell(null)}</td>
+    <td>${ownerCell(owner)}</td>
     <td class="behavior-active-cell">${toggleCell(meta.key)}</td>
   `
   return tr
+}
+
+async function fetchBehaviorOwners() {
+  try {
+    const res = await fetch('/api/behaviors')
+    if (!res.ok) return
+    const data = await res.json()
+    for (const key of Object.keys(data)) {
+      behaviorOwners[key as BehaviorKey] = data[key]?.owner ?? null
+    }
+  } catch { /* leave owners null — cell will show a dash */ }
 }
 
 function renderRows() {
@@ -100,7 +111,7 @@ function attachToggleHandler() {
   })
 }
 
-export function initBehaviorsView() {
+export async function initBehaviorsView() {
   viewEl = document.getElementById('view-behaviors')!
   if (!initialized) {
     initialized = true
@@ -109,9 +120,9 @@ export function initBehaviorsView() {
     // Re-render when behavior state changes from elsewhere (e.g. boot
     // re-snapshot, programmatic toggle) so the UI never drifts.
     window.addEventListener('poise:behaviors-changed', () => renderRows())
-    // Re-render when settings change so the owner avatar / handle
-    // reflects the configured username.
-    window.addEventListener('poise:synced', () => renderRows())
   }
+  // Fetch the server-provided owner map first so the very first paint
+  // shows the right username/avatar instead of a flash of "—".
+  await fetchBehaviorOwners()
   renderRows()
 }

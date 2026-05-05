@@ -18,7 +18,14 @@ async function readBody(req: any): Promise<string> {
   })
 }
 
-export function cachePlugin(): Plugin {
+export interface CachePluginOptions {
+  /** GitHub username the review-agent acts as (from REVIEW_AGENT_USERNAME).
+   *  Surfaced through /api/behaviors so the Behaviors view can show who
+   *  the "Review New Pull Requests" automation will speak as. */
+  reviewAgentUsername?: string
+}
+
+export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
   return {
     name: 'poise-cache',
     configureServer(server) {
@@ -70,6 +77,17 @@ export function cachePlugin(): Plugin {
           } catch (err: any) {
             return json(res, 502, { error: 'agent-interface --logs failed: ' + (err.message || String(err)) })
           }
+        }
+
+        // ── /api/behaviors — metadata for behavior automations ──
+        // Returns the list of behaviors with their actor/owner so the
+        // Behaviors view can render the username/avatar of whoever
+        // each automation speaks as. Owner values come from server
+        // env (REVIEW_AGENT_USERNAME) — Poise doesn't pick them.
+        if (url === '/api/behaviors' && req.method === 'GET') {
+          return json(res, 200, {
+            'review-new-prs': { owner: opts.reviewAgentUsername || null },
+          })
         }
 
         // ── /api/repos — every repo in the org with any PR/issue ──
