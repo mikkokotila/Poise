@@ -2509,3 +2509,96 @@ tr:hover .expand-btn { opacity: 1; }
   text-align: center;
   padding: var(--sp-7) 0;
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Behaviors (agent automations table)
+   Same table contract as Archive / Swarm — universal `table`,
+   `thead th`, `tbody tr`, `td`, hover, animate-in already do the work.
+   This block only declares the column widths and the toggle switch.
+   ───────────────────────────────────────────────────────────────────────── */
+
+.col-owner-wide { width: 180px; }
+.col-active     { width: 100px; text-align: right; }
+
+.behavior-name {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.behavior-owner {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.behavior-owner-name {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+
+.behavior-active-cell {
+  text-align: right;
+  padding-right: 0;
+}
+
+/* DS-aligned toggle — pill body, knob slides on activate, accent fill
+   on. Hover and focus follow the same grammar as range-picker buttons
+   so toggles read as the same kind of control. */
+.toggle {
+  position: relative;
+  display: inline-block;
+  width: 32px;
+  height: 18px;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  margin: 0;
+  pointer-events: none;
+}
+
+.toggle-slider {
+  position: absolute;
+  inset: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  transition: background var(--t-base) ease, border-color var(--t-base) ease;
+}
+
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  transform: translateY(-50%);
+  transition: transform var(--t-base) ease, background var(--t-base) ease;
+}
+
+.toggle:hover .toggle-slider {
+  border-color: var(--text-tertiary);
+}
+
+.toggle input:checked + .toggle-slider {
+  background: var(--a3);
+  border-color: var(--a3);
+}
+.toggle input:checked + .toggle-slider::before {
+  transform: translate(14px, -50%);
+  background: var(--n0);                      /* canvas tone — high contrast on the green pill */
+}
+
+.toggle input:focus-visible + .toggle-slider {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
+}

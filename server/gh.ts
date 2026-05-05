@@ -245,7 +245,14 @@ async function fetchGreenPrs(me: string): Promise<{ repo: string, number: number
 // is cheap.
 async function fetchKind(itemType: 'pr' | 'issue', body: any, me: string): Promise<GhRecord[]> {
   const args: string[] = ['view']
-  if (me) {
+  // When body.author is set, scope is "PRs/issues authored by X across
+  // the org" (uses views.pr / views.issue with --author). Otherwise
+  // scope is "things `me` is involved in" via views.user. The author
+  // path lets behaviors target a specific user (e.g. the Poise account)
+  // even when the configured `me` is a different user.
+  if (body.author) {
+    args.push(itemType, '--author', String(body.author))
+  } else if (me) {
     args.push('user', '--username', me, '--item-type', itemType)
   } else {
     args.push(itemType)

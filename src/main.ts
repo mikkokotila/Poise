@@ -5,27 +5,35 @@ import { initMenu } from './menu'
 import { initMainView, refreshMainView, stopMainRefresh } from './views/main-view'
 import { initCurrentView, stopCurrentPolling } from './views/current-view'
 import { initSwarmView, stopSwarmRefresh } from './views/swarm-view'
+import { initBehaviorsView } from './views/behaviors-view'
+import { startBehaviorsRuntime } from './behaviors'
 import { loadSettings, startRefreshTicker, applyTheme, getTheme } from './config'
 
 const viewMainEl = document.getElementById('view-main')!
 const viewCurrentEl = document.getElementById('view-current')!
 const viewSwarmEl = document.getElementById('view-swarm')!
+const viewBehaviorsEl = document.getElementById('view-behaviors')!
 
-function showView(v: 'main' | 'current' | 'swarm') {
-  const all = [viewMainEl, viewCurrentEl, viewSwarmEl]
-  const target = v === 'main' ? viewMainEl
-    : v === 'current' ? viewCurrentEl
-    : viewSwarmEl
+type ViewSlug = 'main' | 'current' | 'swarm' | 'behaviors'
+
+function showView(v: ViewSlug) {
+  const all = [viewMainEl, viewCurrentEl, viewSwarmEl, viewBehaviorsEl]
+  const target =
+      v === 'main'      ? viewMainEl
+    : v === 'current'   ? viewCurrentEl
+    : v === 'swarm'     ? viewSwarmEl
+    :                     viewBehaviorsEl
 
   // Stop background polling when leaving the views that own them
-  if (v !== 'swarm') stopSwarmRefresh()
+  if (v !== 'swarm')   stopSwarmRefresh()
   if (v !== 'current') stopCurrentPolling()
-  if (v !== 'main') stopMainRefresh()
+  if (v !== 'main')    stopMainRefresh()
 
   // Initialize the target first so content exists before the animation starts
-  if (v === 'main') initMainView()
-  else if (v === 'current') initCurrentView()
-  else initSwarmView()
+  if (v === 'main')           initMainView()
+  else if (v === 'current')   initCurrentView()
+  else if (v === 'swarm')     initSwarmView()
+  else                        initBehaviorsView()
 
   for (const el of all) {
     if (el === target) {
@@ -65,6 +73,9 @@ const menu = initMenu({
   // and refreshes on it. Wall-clock-aligned so switching views never causes
   // an off-cycle re-fetch.
   startRefreshTicker()
+  // Behaviors run on the same shared tick regardless of which view is
+  // active, so init the runtime once at boot.
+  startBehaviorsRuntime()
 
   const ready = await isFullyConfigured()
   if (!ready) openSettingsPanel()
