@@ -9,7 +9,7 @@
 // runtime — the view is just a UI for state, not the place where
 // agent automations actually run.
 
-import { BEHAVIORS, isEnabled, setEnabled, type BehaviorKey } from '../behaviors'
+import { BEHAVIORS, isEnabled, setEnabled, refreshState, type BehaviorKey } from '../behaviors'
 
 let viewEl: HTMLElement
 let initialized = false
@@ -91,6 +91,9 @@ async function fetchBehaviorOwners() {
       behaviorOwners[key as BehaviorKey] = data[key]?.owner ?? null
     }
   } catch { /* leave owners null — cell will show a dash */ }
+  // Same call also pulls enabled flags into the client mirror so the
+  // toggle reflects server truth at first render.
+  await refreshState()
 }
 
 function renderRows() {

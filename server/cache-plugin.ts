@@ -3,6 +3,7 @@ import { getSettings, setSettings } from './settings'
 import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, type Lane } from './current'
 import { handleGhBody, listOrgRepos } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, triggerPrReview } from './agent'
+import { setEnabled as setBehaviorEnabled, getEnabledMap, startBehaviorsRuntime, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
 
 function json(res: any, status: number, body: unknown) {
   res.statusCode = status
@@ -29,6 +30,10 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
   return {
     name: 'poise-cache',
     configureServer(server) {
+      // Server-side behavior runtime — wall-clock-aligned ticker that
+      // runs whether the browser tab is open or not. See
+      // server/behaviors.ts for details.
+      startBehaviorsRuntime()
       const mw: Connect.NextHandleFunction = async (req, res, next) => {
         const url = req.url || ''
 
@@ -79,15 +84,38 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
           }
         }
 
-        // ── /api/behaviors — metadata for behavior automations ──
-        // Returns the list of behaviors with their actor/owner so the
-        // Behaviors view can render the username/avatar of whoever
-        // each automation speaks as. Owner values come from server
-        // env (REVIEW_AGENT_USERNAME) — Poise doesn't pick them.
+        // ── /api/behaviors — state + metadata for behavior automations ──
+        // GET returns owner (from server env) AND enabled flag (from
+        // cache.db meta) per behavior. Owner is who the agent acts
+        // as; enabled is whether the server-side runtime is currently
+        // running this behavior on every tick.
         if (url === '/api/behaviors' && req.method === 'GET') {
+          const enabled = getEnabledMap()
           return json(res, 200, {
-            'review-new-prs': { owner: opts.reviewAgentUsername || null },
+            'review-new-prs': {
+              owner: opts.reviewAgentUsername || null,
+              enabled: enabled['review-new-prs'],
+            },
           })
+        }
+
+        // POST /api/behaviors/<key> { enabled: bool } toggles the
+        // server-side runtime for one behavior.
+        const behaviorMatch = url.match(/^\/api\/behaviors\/([a-z0-9-]+)(?:\?|$)/)
+        if (behaviorMatch && req.method === 'POST') {
+          const key = behaviorMatch[1] as BehaviorKey
+          if (!(BEHAVIOR_KEYS as string[]).includes(key)) {
+            return json(res, 400, { error: 'unknown behavior: ' + key })
+          }
+          try {
+            const raw = await readBody(req)
+            const body = raw ? JSON.parse(raw) : {}
+            const enabled = !!body.enabled
+            await setBehaviorEnabled(key, enabled)
+            return json(res, 200, { ok: true, enabled })
+          } catch (err: any) {
+            return json(res, 400, { error: err.message || String(err) })
+          }
         }
 
         // ── /api/repos — every repo in the org with any PR/issue ──

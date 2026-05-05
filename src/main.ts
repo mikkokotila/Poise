@@ -6,7 +6,6 @@ import { initMainView, refreshMainView, stopMainRefresh } from './views/main-vie
 import { initCurrentView, stopCurrentPolling } from './views/current-view'
 import { initSwarmView, stopSwarmRefresh } from './views/swarm-view'
 import { initBehaviorsView } from './views/behaviors-view'
-import { startBehaviorsRuntime } from './behaviors'
 import { loadSettings, startRefreshTicker, applyTheme, getTheme } from './config'
 
 const viewMainEl = document.getElementById('view-main')!
@@ -71,11 +70,9 @@ const menu = initMenu({
   showView(menu.currentView())
   // Single shared refresh clock — every view listens for poise:refresh-tick
   // and refreshes on it. Wall-clock-aligned so switching views never causes
-  // an off-cycle re-fetch.
+  // an off-cycle re-fetch. (Behaviors run server-side on their own
+  // wall-clock ticker — see server/behaviors.ts.)
   startRefreshTicker()
-  // Behaviors run on the same shared tick regardless of which view is
-  // active, so init the runtime once at boot.
-  startBehaviorsRuntime()
 
   const ready = await isFullyConfigured()
   if (!ready) openSettingsPanel()
