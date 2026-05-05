@@ -2900,11 +2900,125 @@ tr:hover .expand-btn { opacity: 1; }
 
 .chat-controls {
   display: flex;
-  justify-content: flex-end;
   align-items: center;
+  gap: var(--sp-1);
   padding: 4px 6px 6px;
   flex-shrink: 0;
 }
+/* Push the send button to the far right; attach + model sit on the
+   left, the spacer fills the gap. */
+.chat-controls-spacer { flex: 1; }
+
+/* Attach (+) — quiet ghost icon on the left of the controls row.
+   Same hover rhythm as the close X so the four chrome glyphs (close,
+   plus, model chevron, send) feel related. */
+.chat-attach {
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: color var(--t-quick) ease, background var(--t-quick) ease;
+}
+.chat-attach:hover { color: var(--text); background: var(--hover); }
+.chat-attach svg { display: block; }
+
+/* Model selector — a native <select> stripped of its OS chrome, with
+   a small chevron rendered as a sibling on the right. Clicking the
+   select opens the real OS popover (a11y for free); the chevron is
+   purely visual and pointer-event-transparent so it doesn't intercept
+   clicks. Quiet text-secondary tone so the selector reads as a
+   label rather than a heavy control. */
+.chat-model {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+}
+.chat-model-select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background: transparent;
+  border: none;
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--text-secondary);
+  height: 26px;
+  padding: 0 18px 0 8px;        /* right pad reserves room for chevron */
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  outline: none;
+  transition: color var(--t-quick) ease, background var(--t-quick) ease;
+}
+.chat-model-select:hover,
+.chat-model-select:focus { color: var(--text); background: var(--hover); }
+.chat-model-chevron {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.625rem;
+  line-height: 1;
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+
+/* Attachment chips — sit in their own row above the textarea,
+   horizontally scrollable if the user piles on a lot of files. Pill
+   shape + soft background mirrors Confab's treatment, scaled to our
+   tighter pane. */
+.chat-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 10px 0;
+}
+.chat-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 4px 0 8px;
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 0.6875rem;
+  line-height: 1;
+  max-width: 220px;
+}
+.chat-attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-attachment-remove {
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+  flex-shrink: 0;
+  transition: color var(--t-quick) ease, background var(--t-quick) ease;
+}
+.chat-attachment-remove:hover { color: var(--text); background: var(--hover); }
 
 .chat-send {
   width: 26px;
@@ -2919,6 +3033,7 @@ tr:hover .expand-btn { opacity: 1; }
   justify-content: center;
   transition: background var(--t-quick) ease, opacity var(--t-quick) ease;
   padding: 0;
+  flex-shrink: 0;
 }
 .chat-send:hover { background: var(--text-secondary); }
 .chat-send:disabled { opacity: 0.4; cursor: not-allowed; }

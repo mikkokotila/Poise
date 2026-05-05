@@ -1,14 +1,16 @@
 // Chat pane — slides in from the LEFT, occupies ~25vw (min 360px).
 // Each card has a deterministic session id; the pane reuses or starts
 // the conversation tied to that id whenever the card's chat icon is
-// clicked. Messages flow through agent-interface --chat (codex-backed
-// `gpt` model). History is persisted server-side; the pane just
-// renders + polls.
+// clicked. Messages flow through agent-interface --chat against one
+// of four models (opus default, gpt, gemini, grok). History is
+// persisted server-side; the pane just renders + polls.
 //
 // Composer pattern follows Confab's: a single bordered "input wrap"
-// with a focus-within ring, a borderless auto-growing textarea, and
-// the send button absolute-positioned inside the wrap. Auto-grow caps
-// at ~6 lines; Enter sends, Shift+Enter inserts a newline.
+// with a focus-within ring, a borderless auto-growing textarea on
+// top, and a controls row beneath holding the attach button, the
+// model selector, and the send button. Attachments land in the
+// session's pwd directory so the agent can read them via cwd; their
+// names are appended to the prompt so the agent knows they're there.
 
 interface ChatLogEntry {
   id: string
@@ -20,15 +22,34 @@ interface ChatLogEntry {
   error: string
 }
 
+interface Attachment {
+  // Sanitized filename returned by the server — what we send back in
+  // the chat payload so the agent knows which files to look at.
+  name: string
+  // Original (display) name — what the chip shows.
+  displayName: string
+  size: number
+}
+
+const MODELS = ['opus', 'gpt', 'gemini', 'grok'] as const
+type ModelKey = typeof MODELS[number]
+const DEFAULT_MODEL: ModelKey = 'opus'
+
 let panelEl: HTMLElement | null = null
 let titleEl: HTMLElement | null = null
 let bodyEl: HTMLElement | null = null
 let inputEl: HTMLTextAreaElement | null = null
 let sendBtn: HTMLButtonElement | null = null
+let attachBtn: HTMLButtonElement | null = null
+let fileInputEl: HTMLInputElement | null = null
+let modelSelectEl: HTMLSelectElement | null = null
+let chipsEl: HTMLElement | null = null
 let initialized = false
 
 let currentSession: string | null = null
 let messages: ChatLogEntry[] = []
+let attachments: Attachment[] = []
+let selectedModel: ModelKey = DEFAULT_MODEL
 // Cache of fetched reply bodies, keyed by call id, so we don't refetch.
 const repliesById: Map<string, string> = new Map()
 // Polling — fast while there's an in-flight (running) message, idle otherwise.
@@ -54,10 +75,16 @@ const ICON_CLOSE = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none">
 // to the conversation above"). Stroked rather than filled so it sits
 // quietly inside the dark pill.
 const ICON_SEND = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>'
+// Plus glyph for the attach button — same stroke weight as the close
+// X so the two ghost-icons in the pane chrome share visual weight.
+const ICON_PLUS = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 2v10M2 7h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
 
 function renderShell() {
   panelEl = document.createElement('aside')
   panelEl.id = 'chat-panel'
+  const modelOptions = MODELS
+    .map((m) => `<option value="${m}"${m === DEFAULT_MODEL ? ' selected' : ''}>${m}</option>`)
+    .join('')
   panelEl.innerHTML = `
     <header class="chat-header">
       <span class="chat-title"></span>
@@ -66,11 +93,19 @@ function renderShell() {
     <div class="chat-body" id="chat-body"></div>
     <form class="chat-composer">
       <div class="chat-input-wrap">
+        <div class="chat-attachments" hidden></div>
         <textarea class="chat-input" rows="1" placeholder="Message…" spellcheck="true"></textarea>
         <div class="chat-controls">
+          <button class="chat-attach" type="button" aria-label="Attach file" title="Attach file">${ICON_PLUS}</button>
+          <div class="chat-model">
+            <select class="chat-model-select" aria-label="Model">${modelOptions}</select>
+            <span class="chat-model-chevron" aria-hidden="true">▾</span>
+          </div>
+          <span class="chat-controls-spacer"></span>
           <button class="chat-send" type="submit" aria-label="Send">${ICON_SEND}</button>
         </div>
       </div>
+      <input class="chat-file-input" type="file" multiple hidden />
     </form>
   `
   document.body.appendChild(panelEl)
@@ -79,6 +114,10 @@ function renderShell() {
   bodyEl  = panelEl.querySelector('.chat-body')!
   inputEl = panelEl.querySelector('.chat-input') as HTMLTextAreaElement
   sendBtn = panelEl.querySelector('.chat-send') as HTMLButtonElement
+  attachBtn = panelEl.querySelector('.chat-attach') as HTMLButtonElement
+  fileInputEl = panelEl.querySelector('.chat-file-input') as HTMLInputElement
+  modelSelectEl = panelEl.querySelector('.chat-model-select') as HTMLSelectElement
+  chipsEl = panelEl.querySelector('.chat-attachments') as HTMLElement
 
   panelEl.querySelector('.chat-close')!.addEventListener('click', close)
   panelEl.querySelector('.chat-composer')!.addEventListener('submit', (e) => {
@@ -98,6 +137,24 @@ function renderShell() {
       void send()
     }
   })
+  attachBtn.addEventListener('click', () => fileInputEl?.click())
+  fileInputEl.addEventListener('change', () => {
+    const files = Array.from(fileInputEl?.files || [])
+    if (files.length) void uploadFiles(files)
+    // Reset so picking the same filename twice still triggers change
+    if (fileInputEl) fileInputEl.value = ''
+  })
+  modelSelectEl.addEventListener('change', () => {
+    const v = modelSelectEl?.value as ModelKey
+    if ((MODELS as readonly string[]).includes(v)) selectedModel = v
+  })
+  chipsEl.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('.chat-attachment-remove')
+    if (!btn) return
+    const name = btn.dataset.name || ''
+    attachments = attachments.filter((a) => a.name !== name)
+    renderChips()
+  })
 }
 
 // Auto-grow the textarea to fit its content, capped at MAX_INPUT_PX
@@ -112,6 +169,46 @@ function autoResize() {
   const next = Math.min(inputEl.scrollHeight, MAX_INPUT_PX)
   inputEl.style.height = `${next}px`
   inputEl.style.overflowY = inputEl.scrollHeight > MAX_INPUT_PX ? 'auto' : 'hidden'
+}
+
+function renderChips() {
+  if (!chipsEl) return
+  if (!attachments.length) {
+    chipsEl.hidden = true
+    chipsEl.innerHTML = ''
+    return
+  }
+  chipsEl.hidden = false
+  chipsEl.innerHTML = attachments.map((a) => `
+    <span class="chat-attachment-chip" title="${escapeHtml(a.name)} · ${a.size} bytes">
+      <span class="chat-attachment-name">${escapeHtml(a.displayName)}</span>
+      <button type="button" class="chat-attachment-remove" data-name="${escapeHtml(a.name)}" aria-label="Remove ${escapeHtml(a.displayName)}">×</button>
+    </span>
+  `).join('')
+}
+
+async function uploadFiles(files: File[]) {
+  if (!currentSession) return
+  for (const f of files) {
+    try {
+      const url = `/api/chat-attachment?session=${encodeURIComponent(currentSession)}&filename=${encodeURIComponent(f.name)}`
+      const res = await fetch(url, { method: 'POST', body: f })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      // Server returns the sanitized name + size. We use that for the
+      // payload sent with the message; the original filename stays
+      // visible on the chip for human readability.
+      attachments.push({
+        name: String(data.name || f.name),
+        displayName: f.name,
+        size: Number(data.size || f.size),
+      })
+      renderChips()
+    } catch (err) {
+      console.error('[chat] attachment upload failed:', err)
+      alert(`Couldn't attach "${f.name}": ${(err as Error).message}`)
+    }
+  }
 }
 
 function renderMessages() {
@@ -217,7 +314,12 @@ async function send() {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session: currentSession, message: text }),
+      body: JSON.stringify({
+        session: currentSession,
+        message: text,
+        model: selectedModel,
+        attachments: attachments.map((a) => a.name),
+      }),
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     inputEl.value = ''
@@ -233,6 +335,11 @@ async function send() {
       response: '',
       error: '',
     })
+    // Attachments stick to the message they were sent with — clear
+    // the chip row so the next message starts fresh. Files remain in
+    // pwd indefinitely so the agent can re-reference them.
+    attachments = []
+    renderChips()
     renderMessages()
     // Pull right after a small delay so agent-interface has time to
     // insert its row and our optimistic placeholder gets replaced by
@@ -264,14 +371,16 @@ export async function open(sessionId: string, label: string, draft?: string) {
     renderShell()
   }
   // Switching to a new session resets the message buffer, reply
-  // cache, and any in-flight draft so the previous card's text
-  // doesn't leak into the new card's composer. Reopening the same
-  // session preserves all of it — including whatever the user had
-  // typed but not sent.
+  // cache, attachments, and any in-flight draft so nothing leaks
+  // across cards. Reopening the same session preserves all of it —
+  // including whatever the user had typed but not sent and any
+  // chips they'd added.
   if (currentSession !== sessionId) {
     currentSession = sessionId
     messages = []
     repliesById.clear()
+    attachments = []
+    renderChips()
     if (titleEl) titleEl.textContent = label
     if (bodyEl) bodyEl.innerHTML = '<div class="chat-empty">Loading…</div>'
     if (inputEl) {

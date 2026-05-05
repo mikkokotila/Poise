@@ -3,7 +3,7 @@ import { getSettings, setSettings } from './settings'
 import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, type Lane } from './current'
 import { handleGhBody, listOrgRepos } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, triggerPrReview } from './agent'
-import { listChatHistory, sendChat } from './chat'
+import { listChatHistory, sendChat, saveAttachment } from './chat'
 import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, getEnabledMap, getSettingMap, getLastFiredMap, isValidSetting, startBehaviorsRuntime, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
 
 function json(res: any, status: number, body: unknown) {
@@ -168,7 +168,37 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
           try {
             const raw = await readBody(req)
             const body = raw ? JSON.parse(raw) : {}
-            const result = await sendChat(String(body.session || ''), String(body.message || ''))
+            const result = await sendChat(
+              String(body.session || ''),
+              String(body.message || ''),
+              body.model ? String(body.model) : undefined,
+              Array.isArray(body.attachments) ? body.attachments.map(String) : [],
+            )
+            return json(res, 200, result)
+          } catch (err: any) {
+            return json(res, 400, { error: err.message || String(err) })
+          }
+        }
+
+        // POST /api/chat-attachment?session=<id>&filename=<name>
+        // Raw request body is the file bytes. The server sanitizes the
+        // filename and writes it under chatPwd(session) so the agent
+        // sees the attachment in its cwd. Returns the sanitized name
+        // the front-end should reference when it sends the chat
+        // message that uses these files.
+        if (url?.startsWith('/api/chat-attachment') && req.method === 'POST') {
+          try {
+            const qs = new URLSearchParams(url.split('?')[1] || '')
+            const session = qs.get('session') || ''
+            const filename = qs.get('filename') || ''
+            const chunks: Buffer[] = []
+            await new Promise<void>((resolve, reject) => {
+              req.on('data', (c: Buffer) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)))
+              req.on('end', () => resolve())
+              req.on('error', reject)
+            })
+            const body = Buffer.concat(chunks)
+            const result = await saveAttachment(session, filename, body)
             return json(res, 200, result)
           } catch (err: any) {
             return json(res, 400, { error: err.message || String(err) })
