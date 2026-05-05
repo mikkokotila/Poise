@@ -4,6 +4,11 @@
 // clicked. Messages flow through agent-interface --chat (codex-backed
 // `gpt` model). History is persisted server-side; the pane just
 // renders + polls.
+//
+// Composer pattern follows Confab's: a single bordered "input wrap"
+// with a focus-within ring, a borderless auto-growing textarea, and
+// the send button absolute-positioned inside the wrap. Auto-grow caps
+// at ~6 lines; Enter sends, Shift+Enter inserts a newline.
 
 interface ChatLogEntry {
   id: string
@@ -33,12 +38,22 @@ let inflight = false
 const FAST_POLL_MS = 2_000
 const SLOW_POLL_MS = 20_000
 
+// Composer auto-grow cap — ~10 lines at our 13/1.45 type scale. The
+// textarea grows upward from one row up to this height; only beyond
+// it do we surrender and start scrolling. The controls row sits in
+// its own flex child below, so the bottom of the composer is always
+// fixed and the send button never collides with text or scrollbars.
+const MAX_INPUT_PX = 210
+
 function escapeHtml(s: string): string {
   const d = document.createElement('div'); d.textContent = s; return d.innerHTML
 }
 
 const ICON_CLOSE = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
-const ICON_SEND = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 12L12 7L2 2v4l7 1-7 1v4z" fill="currentColor"/></svg>'
+// Up-arrow send glyph — matches Confab's composer affordance ("send up
+// to the conversation above"). Stroked rather than filled so it sits
+// quietly inside the dark pill.
+const ICON_SEND = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>'
 
 function renderShell() {
   panelEl = document.createElement('aside')
@@ -50,8 +65,12 @@ function renderShell() {
     </header>
     <div class="chat-body" id="chat-body"></div>
     <form class="chat-composer">
-      <textarea class="chat-input" rows="2" placeholder="Send a message…" spellcheck="true"></textarea>
-      <button class="chat-send" type="submit" aria-label="Send">${ICON_SEND}</button>
+      <div class="chat-input-wrap">
+        <textarea class="chat-input" rows="1" placeholder="Message…" spellcheck="true"></textarea>
+        <div class="chat-controls">
+          <button class="chat-send" type="submit" aria-label="Send">${ICON_SEND}</button>
+        </div>
+      </div>
     </form>
   `
   document.body.appendChild(panelEl)
@@ -66,12 +85,33 @@ function renderShell() {
     e.preventDefault()
     void send()
   })
+  inputEl.addEventListener('input', () => autoResize())
   inputEl.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    // Enter sends; Shift+Enter inserts a newline (standard chat
+    // convention). Cmd/Ctrl+Enter also sends — kept for muscle-memory
+    // from the previous build.
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      void send()
+    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault()
       void send()
     }
   })
+}
+
+// Auto-grow the textarea to fit its content, capped at MAX_INPUT_PX
+// (~10 lines). Resetting to `auto` first lets the browser report the
+// natural scrollHeight for both the empty and the multi-line case, so
+// we don't need a separate single-line branch. Beyond the cap we
+// switch on a real scrollbar — which lives entirely inside the
+// textarea, never bleeding into the controls row below it.
+function autoResize() {
+  if (!inputEl) return
+  inputEl.style.height = 'auto'
+  const next = Math.min(inputEl.scrollHeight, MAX_INPUT_PX)
+  inputEl.style.height = `${next}px`
+  inputEl.style.overflowY = inputEl.scrollHeight > MAX_INPUT_PX ? 'auto' : 'hidden'
 }
 
 function renderMessages() {
@@ -80,7 +120,9 @@ function renderMessages() {
     bodyEl.innerHTML = '<div class="chat-empty">No messages yet — send the first one below.</div>'
     return
   }
-  // Each entry is a user prompt + an agent reply. Render both.
+  // Each entry is a user prompt + an agent reply. User → bubble pill
+  // on the right; agent → flat prose on the left (no bubble bg) so
+  // long replies read like a document, matching Confab.
   const parts: string[] = []
   for (const m of messages) {
     if (m.prompt) {
@@ -94,28 +136,26 @@ function renderMessages() {
     if (m.status === 'running') {
       parts.push(`
         <div class="chat-msg chat-msg-agent">
-          <div class="chat-msg-meta"><span class="chat-msg-label">gpt</span> · thinking…</div>
+          <div class="chat-thinking"><span></span><span></span><span></span></div>
         </div>
       `)
     } else if (m.status === 'failed') {
       parts.push(`
         <div class="chat-msg chat-msg-agent chat-msg-error">
-          <div class="chat-msg-meta"><span class="chat-msg-label">gpt</span> · error</div>
           <div class="chat-msg-body">${escapeHtml(m.error || 'failed')}</div>
         </div>
       `)
     } else if (reply !== undefined) {
       parts.push(`
         <div class="chat-msg chat-msg-agent">
-          <div class="chat-msg-meta"><span class="chat-msg-label">gpt</span></div>
-          <pre class="chat-msg-body">${escapeHtml(reply)}</pre>
+          <pre class="chat-msg-body chat-msg-mono">${escapeHtml(reply)}</pre>
         </div>
       `)
     } else if (m.response) {
       // Completed but body not yet fetched
       parts.push(`
         <div class="chat-msg chat-msg-agent">
-          <div class="chat-msg-meta"><span class="chat-msg-label">gpt</span> · loading response…</div>
+          <div class="chat-thinking"><span></span><span></span><span></span></div>
         </div>
       `)
     }
@@ -181,6 +221,7 @@ async function send() {
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     inputEl.value = ''
+    autoResize()
     // Optimistically add the user's message so the bubble shows
     // immediately; the next poll will reconcile against server truth.
     messages.push({
@@ -217,31 +258,50 @@ export function close() {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null }
 }
 
-export async function open(sessionId: string, label: string) {
+export async function open(sessionId: string, label: string, draft?: string) {
   if (!initialized) {
     initialized = true
     renderShell()
   }
-  // Switching to a new session resets the message buffer and reply
-  // cache; reopening the same session preserves them so the user's
-  // previous load is still on screen while we re-poll.
+  // Switching to a new session resets the message buffer, reply
+  // cache, and any in-flight draft so the previous card's text
+  // doesn't leak into the new card's composer. Reopening the same
+  // session preserves all of it — including whatever the user had
+  // typed but not sent.
   if (currentSession !== sessionId) {
     currentSession = sessionId
     messages = []
     repliesById.clear()
     if (titleEl) titleEl.textContent = label
     if (bodyEl) bodyEl.innerHTML = '<div class="chat-empty">Loading…</div>'
+    if (inputEl) {
+      inputEl.value = ''
+      autoResize()
+    }
   }
   panelEl!.classList.add('open')
   inputEl?.focus()
   await refresh()
+  // First-time pre-fill: if the chat has never been used and the
+  // user hasn't already started typing, seed the composer with the
+  // card's content so the first message is one keystroke (or paste,
+  // or edit) away. We never auto-send — the user always pulls the
+  // trigger.
+  if (draft && messages.length === 0 && inputEl && !inputEl.value) {
+    inputEl.value = draft
+    autoResize()
+    // Place caret at the end so a follow-up keystroke appends rather
+    // than overwriting the seeded text.
+    const len = inputEl.value.length
+    try { inputEl.setSelectionRange(len, len) } catch { /* fine */ }
+  }
   schedulePoll()
 }
 
-export function toggle(sessionId: string, label: string) {
+export function toggle(sessionId: string, label: string, draft?: string) {
   if (isOpen() && currentSession === sessionId) {
     close()
   } else {
-    void open(sessionId, label)
+    void open(sessionId, label, draft)
   }
 }

@@ -232,11 +232,13 @@ function renderShell(): string {
 // Small chat-bubble glyph — appears top-right on every card across all
 // five lanes. Click → opens the card's chat pane; click again on an
 // already-open pane closes it. Session ids are deterministic per card
-// so re-opening picks up the same conversation history.
+// so re-opening picks up the same conversation history. The `draft`
+// field carries the card's content so the pane can pre-fill the
+// composer for a fresh chat (no auto-send — user always confirms).
 const CHAT_ICON_SVG = '<svg width="11" height="11" viewBox="0 0 14 14" fill="none"><path d="M2.5 3h9a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H7l-2.5 2v-2H2.5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linejoin="round"/></svg>'
 
-function chatButton(sessionId: string, label: string): string {
-  return `<button class="card-chat-btn" data-session="${escapeHtml(sessionId)}" data-label="${escapeHtml(label)}" title="Chat about this card" aria-label="Chat">${CHAT_ICON_SVG}</button>`
+function chatButton(sessionId: string, label: string, draft: string): string {
+  return `<button class="card-chat-btn" data-session="${escapeHtml(sessionId)}" data-label="${escapeHtml(label)}" data-draft="${escapeHtml(draft)}" title="Chat about this card" aria-label="Chat">${CHAT_ICON_SVG}</button>`
 }
 
 function manualSessionId(card: ManualCard): string {
@@ -265,7 +267,7 @@ function renderManualCard(card: ManualCard): HTMLElement {
       ${repoTag}
       <span class="card-time">${relativeTime(card.updated_at)}</span>
     </div>
-    ${chatButton(manualSessionId(card), card.text.slice(0, 60))}
+    ${chatButton(manualSessionId(card), card.text.slice(0, 60), card.text)}
     <button class="card-delete" title="Delete card" aria-label="Delete card">×</button>
   `
   return el
@@ -302,7 +304,7 @@ function renderLiveItem(item: LiveItem): HTMLElement {
         <span class="card-time">${relativeTime(item.updated_at)}</span>
       </div>
     </a>
-    ${chatButton(liveSessionId(item), `${shortRepo(item.repo)}#${item.number}`)}
+    ${chatButton(liveSessionId(item), `${shortRepo(item.repo)}#${item.number}`, `${item.title}\n${item.url}`)}
     ${reviewBtn}
   `
   return el
@@ -988,8 +990,9 @@ function attachCardClickHandlers() {
       e.stopPropagation()
       const session = chatBtn.dataset.session || ''
       const label = chatBtn.dataset.label || ''
+      const draft = chatBtn.dataset.draft || ''
       if (!session) return
-      window.dispatchEvent(new CustomEvent('poise:open-chat', { detail: { session, label } }))
+      window.dispatchEvent(new CustomEvent('poise:open-chat', { detail: { session, label, draft } }))
       return
     }
 

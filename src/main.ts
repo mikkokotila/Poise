@@ -90,9 +90,9 @@ window.addEventListener('poise:synced', () => {
 // Clicking the same card's icon again closes the pane; switching to a
 // different card swaps the conversation in place.
 window.addEventListener('poise:open-chat', (ev) => {
-  const detail = (ev as CustomEvent<{ session: string, label: string }>).detail
+  const detail = (ev as CustomEvent<{ session: string, label: string, draft?: string }>).detail
   if (!detail) return
-  toggleChat(detail.session, detail.label)
+  toggleChat(detail.session, detail.label, detail.draft)
 })
 
 // Behaviors view → Swarm row navigation. The "Last triggered" link
