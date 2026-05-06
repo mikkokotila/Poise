@@ -33,8 +33,11 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
     configureServer(server) {
       // Server-side behavior runtime — wall-clock-aligned ticker that
       // runs whether the browser tab is open or not. See
-      // server/behaviors.ts for details.
-      startBehaviorsRuntime()
+      // server/behaviors.ts for details. The reviewAgentUsername is
+      // threaded through here (via Vite's loadEnv at config time) so
+      // approve-prs can pass it as `--username` to github-interface;
+      // process.env is unreliable inside Vite plugins.
+      startBehaviorsRuntime({ reviewAgentUsername: opts.reviewAgentUsername })
       const mw: Connect.NextHandleFunction = async (req, res, next) => {
         const url = req.url || ''
 

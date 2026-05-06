@@ -255,8 +255,11 @@ async function fireApprove(pr: DatastorePr): Promise<void> {
 async function tickApprovePrs(): Promise<void> {
   const author = getMeta('me') || ''
   // The reviewer is whoever left the change-requests we're checking
-  // against — that's the bot identity surfaced as REVIEW_AGENT_USERNAME.
-  const reviewer = process.env.REVIEW_AGENT_USERNAME || ''
+  // against — that's the bot identity threaded through from
+  // cachePlugin.opts.reviewAgentUsername. Reading process.env here is
+  // a trap: Vite's loadEnv populates the config-time options object
+  // but doesn't propagate to process.env at runtime.
+  const reviewer = reviewAgentUsername
   if (!author || !reviewer) return
   try {
     const prs = await listOpenPrsByAuthor(author)
@@ -382,6 +385,15 @@ let tickerStarted = false
 let tickTimer: ReturnType<typeof setTimeout> | null = null
 const TICK_MS = 60_000
 
+// Identity the bot uses on GitHub — passed through from cachePlugin's
+// opts (which read it via Vite's loadEnv at config time). We can NOT
+// pull it from process.env here: Vite's loadEnv populates the plugin
+// options object but does not inject the var into process.env, so a
+// tickApprovePrs reading process.env.REVIEW_AGENT_USERNAME silently
+// finds it empty and never fires. This module-level slot is the
+// single source of truth at runtime — set once by startBehaviorsRuntime.
+let reviewAgentUsername = ''
+
 function scheduleNextTick() {
   if (tickTimer) clearTimeout(tickTimer)
   const now = Date.now()
@@ -398,9 +410,14 @@ function scheduleNextTick() {
   }, Math.max(0, nextBoundary - now))
 }
 
-export function startBehaviorsRuntime(): void {
+export interface BehaviorsRuntimeConfig {
+  reviewAgentUsername?: string
+}
+
+export function startBehaviorsRuntime(config: BehaviorsRuntimeConfig = {}): void {
   if (tickerStarted) return
   tickerStarted = true
+  reviewAgentUsername = String(config.reviewAgentUsername || '')
   // If a behavior was on from a prior dev-server run, take a fresh
   // snapshot so PRs that opened during downtime aren't auto-reviewed.
   if (isEnabled('review-new-prs')) {
