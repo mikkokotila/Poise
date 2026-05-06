@@ -4,7 +4,7 @@ import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, 
 import { handleGhBody, listOrgRepos } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, triggerPrReview } from './agent'
 import { listChatHistory, sendChat, saveAttachment } from './chat'
-import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, getEnabledMap, getSettingMap, getLastFiredMap, isValidSetting, startBehaviorsRuntime, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
+import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, getEnabledMap, getSettingMap, isValidSetting, startBehaviorsRuntime, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
 
 function json(res: any, status: number, body: unknown) {
   res.statusCode = status
@@ -94,16 +94,33 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
         // who the agent acts as; enabled is whether the server-side
         // runtime is running this behavior; setting is the threshold
         // value passed to agent-interface as `--p`.
+        //
+        // `lastTriggered` is NOT persisted by Poise — it's derived
+        // straight from `agent-interface --logs` (the canonical record
+        // of every pr_review / pr_approve run). Each behavior maps to
+        // a `behavior` field value in that log: review-new-prs ↔
+        // pr_review, approve-prs ↔ pr_approve. resolve-unblocking has
+        // no log surface (github-interface doesn't persist its calls)
+        // so its lastTriggered stays null — the dash in the Behaviors
+        // view reflects the actual state of the world.
         if (url === '/api/behaviors' && req.method === 'GET') {
           const enabled = getEnabledMap()
           const settings = getSettingMap()
-          const lastFired = getLastFiredMap()
+          let logs: Awaited<ReturnType<typeof fetchAgentLogs>> = []
+          try { logs = await fetchAgentLogs() } catch { /* logs unavailable — lastTriggered nulls */ }
+          // fetchAgentLogs returns newest-first, so .find() picks the
+          // most recent matching row. We only consider rows that have
+          // both a repo and pr_id so the link to Swarm works.
+          const lastFor = (cliBehavior: string) => {
+            const r = logs.find((e) => e.behavior === cliBehavior && e.repo && e.pr_id)
+            return r ? { at: r.started_at, target: `${r.repo}#${r.pr_id}` } : null
+          }
           return json(res, 200, {
             'review-new-prs': {
               owner: opts.reviewAgentUsername || null,
               enabled: enabled['review-new-prs'],
               setting: settings['review-new-prs'],
-              lastTriggered: lastFired['review-new-prs'],
+              lastTriggered: lastFor('pr_review'),
             },
             // approve-prs has no priority setting — `setting: null` so
             // the Behaviors view can render an em dash instead of a
@@ -112,15 +129,15 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
               owner: opts.reviewAgentUsername || null,
               enabled: enabled['approve-prs'],
               setting: null,
-              lastTriggered: lastFired['approve-prs'],
+              lastTriggered: lastFor('pr_approve'),
             },
             // resolve-unblocking calls github-interface directly (no
-            // agent), so no priority setting either.
+            // agent), so no priority setting and no log surface today.
             'resolve-unblocking': {
               owner: opts.reviewAgentUsername || null,
               enabled: enabled['resolve-unblocking'],
               setting: null,
-              lastTriggered: lastFired['resolve-unblocking'],
+              lastTriggered: null,
             },
           })
         }

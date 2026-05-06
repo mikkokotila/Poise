@@ -69,11 +69,14 @@ const SETTING_OPTIONS: { value: BehaviorSetting, label: string }[] = [
   { value: 'p4', label: '<=p4' },
 ]
 
-// Relative-time formatter shared with the Started column on Swarm.
+// Relative-time formatter for the Last-triggered column. The value
+// now flows from `agent-interface --logs` straight through the API,
+// which emits naive ISO in local time (datetime.fromtimestamp().isoformat()
+// — see the same parsing fix in swarm-view's startedRel). JavaScript's
+// Date constructor parses naive ISO as local, which is what we want.
 function relTime(iso: string): string {
   if (!iso) return ''
-  const normalized = /[Zz]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + 'Z'
-  const t = new Date(normalized).getTime()
+  const t = new Date(iso).getTime()
   if (!isFinite(t)) return ''
   const secs = Math.max(0, Math.floor((Date.now() - t) / 1000))
   if (secs < 60) return `${secs}s`

@@ -94,6 +94,11 @@ for (const t of ['pr_files', 'reviews', 'prs']) {
 for (const k of ['github_token', 'last_sync_at', 'mig_status_v2']) {
   db.prepare('DELETE FROM meta WHERE key = ?').run(k)
 }
+// behavior_*_last_at / behavior_*_last_target were Poise's parallel
+// log of agent-interface fires. They're now derived live from
+// `agent-interface --logs` — the persisted copy is dead data. Wipe
+// idempotently on boot so cache.db doesn't accumulate orphans.
+db.prepare("DELETE FROM meta WHERE key LIKE 'behavior_%_last_at' OR key LIKE 'behavior_%_last_target'").run()
 
 export function getMeta(key: string): string | null {
   const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined

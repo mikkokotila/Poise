@@ -46,8 +46,6 @@ const META_PREFIX = 'behavior_'
 
 function enabledKey(k: BehaviorKey): string { return META_PREFIX + k.replace(/-/g, '_') + '_enabled' }
 function settingKey(k: BehaviorKey): string { return META_PREFIX + k.replace(/-/g, '_') + '_setting' }
-function lastFiredAtKey(k: BehaviorKey): string { return META_PREFIX + k.replace(/-/g, '_') + '_last_at' }
-function lastFiredTargetKey(k: BehaviorKey): string { return META_PREFIX + k.replace(/-/g, '_') + '_last_target' }
 
 export function isEnabled(key: BehaviorKey): boolean {
   return getMeta(enabledKey(key)) === '1'
@@ -79,29 +77,11 @@ export function isValidSetting(v: unknown): v is BehaviorSetting {
   return typeof v === 'string' && (VALID_SETTINGS as string[]).includes(v)
 }
 
-// Last-fired metadata — lets the Behaviors view show "X minutes ago"
-// and link to the matching row in Swarm. Recorded immediately after a
-// successful spawn; stored as ISO timestamp + a "repo#num" target
-// string for cross-referencing the agent-interface log.
-export interface LastFired { at: string; target: string }
-
-export function getLastFired(key: BehaviorKey): LastFired | null {
-  const at = getMeta(lastFiredAtKey(key))
-  const target = getMeta(lastFiredTargetKey(key))
-  if (!at || !target) return null
-  return { at, target }
-}
-
-function recordLastFired(key: BehaviorKey, target: string) {
-  setMeta(lastFiredAtKey(key), new Date().toISOString())
-  setMeta(lastFiredTargetKey(key), target)
-}
-
-export function getLastFiredMap(): Record<BehaviorKey, LastFired | null> {
-  const out: Record<BehaviorKey, LastFired | null> = {} as any
-  for (const k of BEHAVIOR_KEYS) out[k] = getLastFired(k)
-  return out
-}
+// Last-fired info is intentionally NOT persisted here — agent-interface
+// already records every pr_review / pr_approve run in its calls log,
+// and that's the single source of truth. The /api/behaviors GET
+// derives `lastTriggered` from `agent-interface --logs` directly. See
+// the comment in cache-plugin.ts where the derivation happens.
 
 // ── Dedupe ledger ──────────────────────────────────────────────────────
 // Lives in SQLite (db.behavior_seen) instead of process memory so the
@@ -191,7 +171,6 @@ async function tickReviewNewPrs(): Promise<void> {
       if (!claimSeen('review-new-prs', key)) continue
       try {
         await fireReview(pr, setting)
-        recordLastFired('review-new-prs', key)
         console.log(`[behaviors] review-new-prs fired for ${key} (p=${setting})`)
       } catch (err) {
         console.error(`[behaviors] fireReview failed for ${key}:`, err)
@@ -274,9 +253,6 @@ async function tickApprovePrs(): Promise<void> {
         const seenTarget = `${pr.repo}#${pr.number}@${check.latest_request_at}`
         if (!claimSeen('approve-prs', seenTarget)) continue
         await fireApprove(pr)
-        // Last-triggered uses the bare repo#num so the link from the
-        // Behaviors view still routes to Swarm correctly.
-        recordLastFired('approve-prs', `${pr.repo}#${pr.number}`)
         console.log(`[behaviors] approve-prs fired for ${pr.repo}#${pr.number}`)
       } catch (err) {
         console.error(`[behaviors] approve-prs check/fire failed for ${pr.repo}#${pr.number}:`, err)
@@ -338,8 +314,11 @@ async function tickResolveUnblocking(): Promise<void> {
         const result = await resolveNonblockingIfReady(pr.repo, pr.number)
         if (result.resolved_count > 0) {
           const key = `${pr.repo}#${pr.number}`
-          recordLastFired('resolve-unblocking', key)
           console.log(`[behaviors] resolve-unblocking cleared ${result.resolved_count} convo(s) on ${key}`)
+          // No persistence here — github-interface doesn't write a log
+          // row for this call, so until that interface gap is filled,
+          // the Behaviors view's "Last triggered" cell stays "—" for
+          // this behavior. See cache-plugin.ts /api/behaviors.
         }
       } catch (err) {
         console.error(`[behaviors] resolve-unblocking failed for ${pr.repo}#${pr.number}:`, err)
