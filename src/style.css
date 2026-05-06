@@ -1941,7 +1941,18 @@ body:has(#settings-panel.open) #top-nav {
   word-wrap: break-word;
   /* Full width — the action strip lives at the bottom-right, so we
      don't sacrifice any horizontal space here for icons that are
-     hidden 99% of the time anyway. */
+     hidden 99% of the time anyway.
+
+     Cap visible content at 2 lines: 1 if the text only takes 1, 2
+     if it takes 2 or more (truncated with an ellipsis). The card
+     itself shrinks to fit when content is short. -webkit-line-clamp
+     is the universal short-hand for this — supported by every
+     evergreen browser. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* .card-delete and .card-review-btn now style themselves through the
@@ -1996,18 +2007,14 @@ body:has(#settings-panel.open) #top-nav {
   outline-offset: 2px;
 }
 
+/* Live cards (Issue / PR) just override the typography on top of the
+   base .card-text rule above — the 2-line clamp is inherited. */
 .card-link .card-text {
   font-weight: 500;
   font-size: 0.8125rem;
   line-height: 1.45;
   color: var(--n6);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: normal;
-  word-wrap: break-word;
+  white-space: normal;        /* GitHub titles are single-line */
 }
 
 .card-meta {
