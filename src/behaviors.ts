@@ -5,20 +5,24 @@
 // reliably (browser tabs close, reload, get backgrounded). This
 // module is just labels + an HTTP client for the toggle.
 
-export type BehaviorKey = 'review-new-prs' | 'approve-prs'
+export type BehaviorKey = 'review-new-prs' | 'approve-prs' | 'resolve-unblocking'
 
 export interface BehaviorMeta {
   key: BehaviorKey
   label: string
   // Whether this behavior exposes a priority-ceiling setting (p0..p4).
-  // approve-prs has no setting — the Behaviors view renders an em dash
-  // in the Setting cell when this is false.
+  // The Behaviors view renders an em dash in the Setting cell when
+  // this is false.
   hasSetting: boolean
 }
 
+// The trilogy: initial review → follow-up review/approval → final
+// gate-clearing so a human can merge. Order matters for display since
+// the view renders rows in the listed sequence.
 export const BEHAVIORS: BehaviorMeta[] = [
-  { key: 'review-new-prs', label: 'Review New Pull Requests', hasSetting: true  },
-  { key: 'approve-prs',    label: 'Approve Pull Requests',    hasSetting: false },
+  { key: 'review-new-prs',     label: 'Review New Pull Requests',      hasSetting: true  },
+  { key: 'approve-prs',        label: 'Approve Pull Requests',         hasSetting: false },
+  { key: 'resolve-unblocking', label: 'Resolve Unblocking Conversations', hasSetting: false },
 ]
 
 export type BehaviorSetting = 'p0' | 'p1' | 'p2' | 'p3' | 'p4'

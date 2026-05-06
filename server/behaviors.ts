@@ -34,8 +34,8 @@ function agentInterfaceCwd(): string {
     || join(homedir(), 'dev', 'caller', 'agent_interface')
 }
 
-export type BehaviorKey = 'review-new-prs' | 'approve-prs'
-export const BEHAVIOR_KEYS: BehaviorKey[] = ['review-new-prs', 'approve-prs']
+export type BehaviorKey = 'review-new-prs' | 'approve-prs' | 'resolve-unblocking'
+export const BEHAVIOR_KEYS: BehaviorKey[] = ['review-new-prs', 'approve-prs', 'resolve-unblocking']
 
 // ── Persistence ─────────────────────────────────────────────────────────
 // Enabled flag survives dev-server restarts via the meta table in
@@ -284,6 +284,69 @@ async function tickApprovePrs(): Promise<void> {
   }
 }
 
+// ── resolve-unblocking implementation ──────────────────────────────────
+//
+// For each open PR by the configured user, ask github-interface to
+// resolve any non-blocking review conversations IF the PR is otherwise
+// green (approved + checks passing). This is the third in the trilogy
+// — review-new-prs does the initial review, approve-prs handles the
+// follow-up after the user addresses feedback, and this clears the
+// "all conversations must be resolved" branch-protection gate so a
+// human can step in and merge.
+//
+// Different shape from the first two:
+//  * github-interface does the work directly — no agent-interface, no
+//    spawn, no detached process. Synchronous CLI call per PR.
+//  * The CLI is idempotent: when there's nothing to resolve it returns
+//    resolved_count: 0 and changes nothing, so we don't need claimSeen
+//    to gate fires. We simply call it every tick for every open PR
+//    and record `last_fired` only when resolved_count > 0.
+
+interface ResolveResult {
+  ready_except_conversations: boolean
+  resolved_count: number
+  unresolved_count: number
+}
+
+async function resolveNonblockingIfReady(repo: string, number: number): Promise<ResolveResult> {
+  const [owner, name] = repo.split('/', 2)
+  const cwd = join(GH_INTERFACE_CWD_ROOT, owner, name)
+  await mkdir(cwd, { recursive: true })
+  const { stdout } = await execFileP(
+    GH_INTERFACE,
+    ['--resolve-nonblocking-conversations-if-ready', `#${number}`],
+    { cwd, maxBuffer: 4 * 1024 * 1024 },
+  )
+  const data = JSON.parse(stdout.trim() || '{}')
+  return {
+    ready_except_conversations: !!data.ready_except_conversations,
+    resolved_count: Number(data.resolved_count || 0),
+    unresolved_count: Number(data.unresolved_count || 0),
+  }
+}
+
+async function tickResolveUnblocking(): Promise<void> {
+  const author = getMeta('me') || ''
+  if (!author) return
+  try {
+    const prs = await listOpenPrsByAuthor(author)
+    for (const pr of prs) {
+      try {
+        const result = await resolveNonblockingIfReady(pr.repo, pr.number)
+        if (result.resolved_count > 0) {
+          const key = `${pr.repo}#${pr.number}`
+          recordLastFired('resolve-unblocking', key)
+          console.log(`[behaviors] resolve-unblocking cleared ${result.resolved_count} convo(s) on ${key}`)
+        }
+      } catch (err) {
+        console.error(`[behaviors] resolve-unblocking failed for ${pr.repo}#${pr.number}:`, err)
+      }
+    }
+  } catch (err) {
+    console.error('[behaviors] resolve-unblocking tick failed:', err)
+  }
+}
+
 // ── Public API ──────────────────────────────────────────────────────────
 
 export async function setEnabled(key: BehaviorKey, enabled: boolean): Promise<void> {
@@ -304,6 +367,8 @@ export async function setEnabled(key: BehaviorKey, enabled: boolean): Promise<vo
     // round of changes.
     if (!enabled) clearSeen(key)
   }
+  // resolve-unblocking has no seen ledger — github-interface is
+  // idempotent so the tick handler can safely fire every minute.
 }
 
 export function setSetting(key: BehaviorKey, setting: BehaviorSetting): void {
@@ -323,8 +388,9 @@ function scheduleNextTick() {
   const nextBoundary = Math.ceil((now + 1) / TICK_MS) * TICK_MS
   tickTimer = setTimeout(async () => {
     try {
-      if (isEnabled('review-new-prs')) await tickReviewNewPrs()
-      if (isEnabled('approve-prs'))    await tickApprovePrs()
+      if (isEnabled('review-new-prs'))     await tickReviewNewPrs()
+      if (isEnabled('approve-prs'))        await tickApprovePrs()
+      if (isEnabled('resolve-unblocking')) await tickResolveUnblocking()
     } catch (err) {
       console.error('[behaviors] tick handler error:', err)
     }

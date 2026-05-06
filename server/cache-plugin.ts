@@ -111,6 +111,14 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
               setting: null,
               lastTriggered: lastFired['approve-prs'],
             },
+            // resolve-unblocking calls github-interface directly (no
+            // agent), so no priority setting either.
+            'resolve-unblocking': {
+              owner: opts.reviewAgentUsername || null,
+              enabled: enabled['resolve-unblocking'],
+              setting: null,
+              lastTriggered: lastFired['resolve-unblocking'],
+            },
           })
         }
 
