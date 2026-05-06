@@ -196,8 +196,13 @@ async function tickReviewNewPrs(): Promise<void> {
 
 interface ChangesAddressedResult {
   has_change_request: boolean
-  status: boolean
   latest_request_at: string
+  // Strictly-increasing counter of author commits since the most
+  // recent reviewer review; resets to 0 whenever the reviewer posts
+  // another review (latest_request_at advances). This is the version
+  // the dedupe ledger keys off — every new push by the author bumps
+  // it, every bumps means "look at this again".
+  author_commits_after_request: number
 }
 
 async function checkChangesAddressed(repo: string, number: number, reviewer: string): Promise<ChangesAddressedResult> {
@@ -212,8 +217,8 @@ async function checkChangesAddressed(repo: string, number: number, reviewer: str
   const data = JSON.parse(stdout.trim() || '{}')
   return {
     has_change_request: !!data.has_change_request,
-    status: !!data.status,
     latest_request_at: String(data.latest_request_at || ''),
+    author_commits_after_request: Number(data.author_commits_after_request || 0),
   }
 }
 
@@ -245,15 +250,22 @@ async function tickApprovePrs(): Promise<void> {
     for (const pr of prs) {
       try {
         const check = await checkChangesAddressed(pr.repo, pr.number, reviewer)
-        if (!check.has_change_request) continue   // nothing pending from reviewer
-        if (!check.status)              continue   // pending but not addressed yet
-        // Encode the request timestamp into the seen target so a new
-        // round of change-requests (which moves latest_request_at)
-        // re-arms approval — we want to re-evaluate, not stay quiet.
-        const seenTarget = `${pr.repo}#${pr.number}@${check.latest_request_at}`
+        // Trigger: reviewer has at least one CHANGES_REQUESTED review
+        // on the PR, AND the author has pushed at least one commit
+        // since that review. Each subsequent author commit re-arms
+        // the trigger — the dedupe key includes the commit count.
+        // The reviewer's subsequent comments / re-reviews are
+        // irrelevant to the trigger; if they DO post another review
+        // (advancing latest_request_at), the count resets to 0 and a
+        // fresh round begins on the next author commit. The agent
+        // run itself decides each round whether to approve or leave
+        // new feedback — Poise just fires; the agent decides.
+        if (!check.has_change_request)             continue
+        if (check.author_commits_after_request < 1) continue
+        const seenTarget = `${pr.repo}#${pr.number}@req=${check.latest_request_at}/c=${check.author_commits_after_request}`
         if (!claimSeen('approve-prs', seenTarget)) continue
         await fireApprove(pr)
-        console.log(`[behaviors] approve-prs fired for ${pr.repo}#${pr.number}`)
+        console.log(`[behaviors] approve-prs fired for ${pr.repo}#${pr.number} (req=${check.latest_request_at}, c=${check.author_commits_after_request})`)
       } catch (err) {
         console.error(`[behaviors] approve-prs check/fire failed for ${pr.repo}#${pr.number}:`, err)
       }
