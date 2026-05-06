@@ -19,7 +19,9 @@ interface LogEntry {
   model: string
   behavior: string | null   // agent-interface behavior name (pr-review, mergeable, etc.)
   prompt: string
-  started_at: string        // ISO-ish "YYYY-MM-DDTHH:MM:SS" — UTC implied by upstream
+  started_at: string        // ISO-ish "YYYY-MM-DDTHH:MM:SS" — naive LOCAL time
+                            // (agent-interface uses datetime.fromtimestamp().isoformat()
+                            // which emits the system-local datetime without an offset).
   time_elapsed: string
   status: string
   response: string        // 8-char hash; pass to /api/agent-response/<hash> to fetch body
@@ -31,10 +33,14 @@ interface LogEntry {
 // the same vocabulary (s / m / h / d / mo / y).
 function startedRel(iso: string): string {
   if (!iso) return '—'
-  // agent-interface emits a naive ISO without a Z or offset; treat as
-  // UTC so the relative diff is correct regardless of the user's TZ.
-  const normalized = /[Zz]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + 'Z'
-  const t = new Date(normalized).getTime()
+  // agent-interface emits a naive ISO in LOCAL time (no Z, no offset)
+  // because datetime.fromtimestamp(ts).isoformat() does — see
+  // agent_interface/__init__.py. JavaScript's Date constructor parses
+  // naive ISO as local, which matches. The previous version of this
+  // function appended "Z" and parsed as UTC, which on UTC+N pushed the
+  // start time N hours into the future and Math.max clamped the diff
+  // to 0 — every fresh row read "0s" until N hours had passed.
+  const t = new Date(iso).getTime()
   if (!isFinite(t)) return '—'
   const secs = Math.max(0, Math.floor((Date.now() - t) / 1000))
   if (secs < 60) return `${secs}s`
