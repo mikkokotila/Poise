@@ -40,6 +40,19 @@ db.exec(`
     updated_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_current_cards_lane ON current_cards(lane, position);
+
+  -- Per-behavior dedupe ledger. Each row is "behavior <key> has already
+  -- claimed <target> at <seen_at>". Used by the server-side behavior
+  -- runtime (server/behaviors.ts) so concurrent runtimes — multiple
+  -- vite processes, accidental tick re-entry, datastore returning a
+  -- duplicate row, etc. — can't fire the same review twice. claimSeen
+  -- below is the only writer; INSERT OR IGNORE makes the claim atomic.
+  CREATE TABLE IF NOT EXISTS behavior_seen (
+    key TEXT NOT NULL,
+    target TEXT NOT NULL,
+    seen_at TEXT NOT NULL,
+    PRIMARY KEY (key, target)
+  );
 `)
 
 // One-time migrations: the kanban table has been renamed twice.
@@ -89,4 +102,48 @@ export function getMeta(key: string): string | null {
 
 export function setMeta(key: string, value: string): void {
   db.prepare('INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value)
+}
+
+// ── Behavior dedupe (atomic across runtimes) ──────────────────────────
+// All four functions are tiny wrappers around behavior_seen so any
+// server module that needs the ledger can use them without re-deriving
+// the schema or the locking semantics.
+
+// Atomically claim a (key, target) pair. Returns true if this caller
+// inserted a new row (i.e. nobody had claimed it yet — caller should
+// proceed with the side effect). Returns false if the row already
+// existed (caller must skip). Race-safe: SQLite serializes concurrent
+// INSERT OR IGNORE statements, so out of N callers exactly ONE gets
+// `true` for any given (key, target).
+export function claimSeen(key: string, target: string): boolean {
+  const info = db.prepare(
+    'INSERT OR IGNORE INTO behavior_seen(key, target, seen_at) VALUES(?, ?, ?)'
+  ).run(key, target, new Date().toISOString())
+  return info.changes === 1
+}
+
+// Mark a target as seen WITHOUT signalling "newly claimed" — used by
+// the snapshot path where we just want to populate the ledger with
+// current state so subsequent ticks don't fire on existing items.
+export function recordSeen(key: string, target: string): void {
+  db.prepare(
+    'INSERT OR IGNORE INTO behavior_seen(key, target, seen_at) VALUES(?, ?, ?)'
+  ).run(key, target, new Date().toISOString())
+}
+
+// Whether any rows exist for this behavior — proxy for "snapshot has
+// been taken at least once". Used to differentiate a fresh enable
+// (no rows yet → take snapshot, don't fire on first tick) from a
+// running behavior (rows exist → fire on net-new targets).
+export function hasSeenAny(key: string): boolean {
+  const row = db.prepare(
+    'SELECT 1 AS x FROM behavior_seen WHERE key = ? LIMIT 1'
+  ).get(key) as { x: number } | undefined
+  return !!row
+}
+
+// Wipe the ledger for a key — used when the user disables the
+// behavior. Re-enabling will trigger a fresh snapshot.
+export function clearSeen(key: string): void {
+  db.prepare('DELETE FROM behavior_seen WHERE key = ?').run(key)
 }

@@ -19,7 +19,7 @@ import { promisify } from 'node:util'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { mkdir } from 'node:fs/promises'
-import { getMeta, setMeta } from './db'
+import { getMeta, setMeta, claimSeen, recordSeen, hasSeenAny, clearSeen } from './db'
 
 const execFileP = promisify(execFile)
 const DATASTORE = 'github-datastore'
@@ -103,10 +103,13 @@ export function getLastFiredMap(): Record<BehaviorKey, LastFired | null> {
   return out
 }
 
-// ── Seen-sets (in-memory only) ──────────────────────────────────────────
-const seenSets: Record<BehaviorKey, Set<string> | null> = {
-  'review-new-prs': null,
-}
+// ── Dedupe ledger ──────────────────────────────────────────────────────
+// Lives in SQLite (db.behavior_seen) instead of process memory so the
+// claim is atomic across whatever runs the runtime: multiple vite dev
+// servers, accidental tick re-entry inside one process, or even a
+// datastore query that hands the same PR back twice. INSERT OR IGNORE
+// on a (key,target) primary key makes "claim if new" a single atomic
+// statement — exactly one caller wins, the rest skip.
 
 // ── review-new-prs implementation ───────────────────────────────────────
 
@@ -162,7 +165,9 @@ async function snapshotReviewNewPrs(): Promise<void> {
   if (!author) return
   try {
     const prs = await listOpenPrsByAuthor(author)
-    seenSets['review-new-prs'] = new Set(prs.map((p) => `${p.repo}#${p.number}`))
+    for (const p of prs) {
+      recordSeen('review-new-prs', `${p.repo}#${p.number}`)
+    }
   } catch (err) {
     console.error('[behaviors] snapshot failed:', err)
   }
@@ -172,18 +177,18 @@ async function tickReviewNewPrs(): Promise<void> {
   const author = getMeta('me') || ''
   if (!author) return
   // First tick after boot/enable with no snapshot — take one and bail.
-  if (!seenSets['review-new-prs']) {
+  if (!hasSeenAny('review-new-prs')) {
     await snapshotReviewNewPrs()
     return
   }
   const setting = getSetting('review-new-prs')
   try {
     const prs = await listOpenPrsByAuthor(author)
-    const seen = seenSets['review-new-prs']!
     for (const pr of prs) {
       const key = `${pr.repo}#${pr.number}`
-      if (seen.has(key)) continue
-      seen.add(key)
+      // Atomic claim: exactly one caller succeeds for any given key
+      // across all concurrent runtimes. Losers skip silently.
+      if (!claimSeen('review-new-prs', key)) continue
       try {
         await fireReview(pr, setting)
         recordLastFired('review-new-prs', key)
@@ -206,7 +211,9 @@ export async function setEnabled(key: BehaviorKey, enabled: boolean): Promise<vo
       // Snapshot on enable so existing PRs don't all flood the agent.
       await snapshotReviewNewPrs()
     } else {
-      seenSets[key] = null
+      // Wipe the ledger so a future re-enable starts from a fresh
+      // snapshot, matching the previous in-memory behavior.
+      clearSeen(key)
     }
   }
 }
