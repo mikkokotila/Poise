@@ -102,6 +102,15 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
               setting: settings['review-new-prs'],
               lastTriggered: lastFired['review-new-prs'],
             },
+            // approve-prs has no priority setting — `setting: null` so
+            // the Behaviors view can render an em dash instead of a
+            // dropdown for that row.
+            'approve-prs': {
+              owner: opts.reviewAgentUsername || null,
+              enabled: enabled['approve-prs'],
+              setting: null,
+              lastTriggered: lastFired['approve-prs'],
+            },
           })
         }
 

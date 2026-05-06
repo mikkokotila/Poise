@@ -34,8 +34,8 @@ function agentInterfaceCwd(): string {
     || join(homedir(), 'dev', 'caller', 'agent_interface')
 }
 
-export type BehaviorKey = 'review-new-prs'
-export const BEHAVIOR_KEYS: BehaviorKey[] = ['review-new-prs']
+export type BehaviorKey = 'review-new-prs' | 'approve-prs'
+export const BEHAVIOR_KEYS: BehaviorKey[] = ['review-new-prs', 'approve-prs']
 
 // ── Persistence ─────────────────────────────────────────────────────────
 // Enabled flag survives dev-server restarts via the meta table in
@@ -202,6 +202,88 @@ async function tickReviewNewPrs(): Promise<void> {
   }
 }
 
+// ── approve-prs implementation ──────────────────────────────────────────
+//
+// For each open PR by the configured user, ask github-interface whether
+// the review-agent's request-for-changes has been addressed since it was
+// left. If yes, kick off `agent-interface --pr-approve` so the agent
+// re-evaluates and (if happy) actually approves on GitHub.
+//
+// Dedupe target is `${repo}#${num}@${latest_request_at}` — the agent
+// can leave a fresh round of change requests at any time, which bumps
+// the timestamp and re-arms the behavior. We do NOT take a snapshot on
+// enable: the user explicitly wants approval to fire for any
+// already-addressed PR right away. claimSeen prevents repeats.
+
+interface ChangesAddressedResult {
+  has_change_request: boolean
+  status: boolean
+  latest_request_at: string
+}
+
+async function checkChangesAddressed(repo: string, number: number, reviewer: string): Promise<ChangesAddressedResult> {
+  const [owner, name] = repo.split('/', 2)
+  const cwd = join(GH_INTERFACE_CWD_ROOT, owner, name)
+  await mkdir(cwd, { recursive: true })
+  const { stdout } = await execFileP(
+    GH_INTERFACE,
+    ['--requested-changes-addressed', `#${number}`, '--username', reviewer],
+    { cwd, maxBuffer: 4 * 1024 * 1024 },
+  )
+  const data = JSON.parse(stdout.trim() || '{}')
+  return {
+    has_change_request: !!data.has_change_request,
+    status: !!data.status,
+    latest_request_at: String(data.latest_request_at || ''),
+  }
+}
+
+async function fireApprove(pr: DatastorePr): Promise<void> {
+  const m = pr.url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
+  if (!m) throw new Error('not a github PR url: ' + pr.url)
+  const [, owner, repo, num] = m
+  const pwd = await localCheckoutPath(owner, repo)
+  await mkdir(join(GH_INTERFACE_CWD_ROOT, owner, repo), { recursive: true })
+  const child = spawn(AGENT_INTERFACE, ['--pr-approve', `#${num}`, '--pwd', pwd], {
+    cwd: agentInterfaceCwd(),
+    detached: true,
+    stdio: 'ignore',
+  })
+  child.unref()
+}
+
+async function tickApprovePrs(): Promise<void> {
+  const author = getMeta('me') || ''
+  // The reviewer is whoever left the change-requests we're checking
+  // against — that's the bot identity surfaced as REVIEW_AGENT_USERNAME.
+  const reviewer = process.env.REVIEW_AGENT_USERNAME || ''
+  if (!author || !reviewer) return
+  try {
+    const prs = await listOpenPrsByAuthor(author)
+    for (const pr of prs) {
+      try {
+        const check = await checkChangesAddressed(pr.repo, pr.number, reviewer)
+        if (!check.has_change_request) continue   // nothing pending from reviewer
+        if (!check.status)              continue   // pending but not addressed yet
+        // Encode the request timestamp into the seen target so a new
+        // round of change-requests (which moves latest_request_at)
+        // re-arms approval — we want to re-evaluate, not stay quiet.
+        const seenTarget = `${pr.repo}#${pr.number}@${check.latest_request_at}`
+        if (!claimSeen('approve-prs', seenTarget)) continue
+        await fireApprove(pr)
+        // Last-triggered uses the bare repo#num so the link from the
+        // Behaviors view still routes to Swarm correctly.
+        recordLastFired('approve-prs', `${pr.repo}#${pr.number}`)
+        console.log(`[behaviors] approve-prs fired for ${pr.repo}#${pr.number}`)
+      } catch (err) {
+        console.error(`[behaviors] approve-prs check/fire failed for ${pr.repo}#${pr.number}:`, err)
+      }
+    }
+  } catch (err) {
+    console.error('[behaviors] approve-prs tick failed:', err)
+  }
+}
+
 // ── Public API ──────────────────────────────────────────────────────────
 
 export async function setEnabled(key: BehaviorKey, enabled: boolean): Promise<void> {
@@ -215,6 +297,12 @@ export async function setEnabled(key: BehaviorKey, enabled: boolean): Promise<vo
       // snapshot, matching the previous in-memory behavior.
       clearSeen(key)
     }
+  } else if (key === 'approve-prs') {
+    // No snapshot on enable — the user wants approval to fire for
+    // already-addressed PRs immediately. On disable, wipe the seen
+    // ledger so a re-enable doesn't think it's already approved this
+    // round of changes.
+    if (!enabled) clearSeen(key)
   }
 }
 
@@ -236,6 +324,7 @@ function scheduleNextTick() {
   tickTimer = setTimeout(async () => {
     try {
       if (isEnabled('review-new-prs')) await tickReviewNewPrs()
+      if (isEnabled('approve-prs'))    await tickApprovePrs()
     } catch (err) {
       console.error('[behaviors] tick handler error:', err)
     }

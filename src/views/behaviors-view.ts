@@ -92,13 +92,17 @@ function lastTriggeredCell(key: BehaviorKey): string {
   return `<a class="behavior-last-link" href="#" data-target="${escapeHtml(last.target)}" title="${escapeHtml(last.target)} · ${escapeHtml(last.at)}">${escapeHtml(relTime(last.at))}</a>`
 }
 
-function settingCell(key: BehaviorKey): string {
-  const current = getSetting(key)
+function settingCell(meta: typeof BEHAVIORS[number]): string {
+  // Behaviors that don't take a priority ceiling render a dash so the
+  // column still aligns visually but doesn't offer a control the
+  // server would ignore anyway.
+  if (!meta.hasSetting) return '<span class="last-dash">—</span>'
+  const current = getSetting(meta.key)
   const opts = SETTING_OPTIONS.map((o) =>
     `<option value="${o.value}"${o.value === current ? ' selected' : ''}>${escapeHtml(o.label)}</option>`
   ).join('')
   return `
-    <select class="behavior-setting" data-behavior="${escapeHtml(key)}" aria-label="Setting for ${escapeHtml(key)}">
+    <select class="behavior-setting" data-behavior="${escapeHtml(meta.key)}" aria-label="Setting for ${escapeHtml(meta.key)}">
       ${opts}
     </select>
   `
@@ -133,7 +137,7 @@ function renderRow(meta: typeof BEHAVIORS[number]): HTMLTableRowElement {
   tr.innerHTML = `
     <td class="title-cell"><span class="behavior-name">${escapeHtml(meta.label)}</span></td>
     <td>${ownerCell(owner)}</td>
-    <td class="behavior-setting-cell">${settingCell(meta.key)}</td>
+    <td class="behavior-setting-cell">${settingCell(meta)}</td>
     <td class="behavior-last-cell">${lastTriggeredCell(meta.key)}</td>
     <td class="behavior-active-cell">${toggleCell(meta.key)}</td>
   `

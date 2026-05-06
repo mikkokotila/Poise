@@ -5,15 +5,20 @@
 // reliably (browser tabs close, reload, get backgrounded). This
 // module is just labels + an HTTP client for the toggle.
 
-export type BehaviorKey = 'review-new-prs'
+export type BehaviorKey = 'review-new-prs' | 'approve-prs'
 
 export interface BehaviorMeta {
   key: BehaviorKey
   label: string
+  // Whether this behavior exposes a priority-ceiling setting (p0..p4).
+  // approve-prs has no setting — the Behaviors view renders an em dash
+  // in the Setting cell when this is false.
+  hasSetting: boolean
 }
 
 export const BEHAVIORS: BehaviorMeta[] = [
-  { key: 'review-new-prs', label: 'Review New Pull Requests' },
+  { key: 'review-new-prs', label: 'Review New Pull Requests', hasSetting: true  },
+  { key: 'approve-prs',    label: 'Approve Pull Requests',    hasSetting: false },
 ]
 
 export type BehaviorSetting = 'p0' | 'p1' | 'p2' | 'p3' | 'p4'
