@@ -252,16 +252,97 @@ function renderShell(): string {
   `
 }
 
-// Small chat-bubble glyph — appears top-right on every card across all
-// five lanes. Click → opens the card's chat pane; click again on an
-// already-open pane closes it. Session ids are deterministic per card
-// so re-opening picks up the same conversation history. The `draft`
-// field carries the card's content so the pane can pre-fill the
-// composer for a fresh chat (no auto-send — user always confirms).
+// ── Card chrome strategy ──────────────────────────────────────────────
+// All interactive icons live in a single hover-revealed strip anchored
+// bottom-right. Content (title/body) gets the full card width — the
+// strip overlaps the meta row instead, which fades out on hover so
+// icons aren't sitting on top of visible text.
+//
+//   ┌──────────────── card ──────────────────┐
+//   │  card content (FULL WIDTH — no inset)  │
+//   │  …                                     │
+//   │  meta row (repo · time)                │   meta fades on hover
+//   │                          [copy][chat][×] │ ← single bottom-right
+//   └────────────────────────────────────────┘    strip; grows leftward
+//
+// Order is `[tools …][primary]` — destructive/active singletons (×
+// delete on manual cards, ▶ review on PRs) anchor as the rightmost
+// member. Adding a 4th/5th icon later is just another <button> child
+// of .card-actions before the primary slot — no layout reasoning
+// needed.
+
 const CHAT_ICON_SVG = '<svg width="11" height="11" viewBox="0 0 14 14" fill="none"><path d="M2.5 3h9a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H7l-2.5 2v-2H2.5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linejoin="round"/></svg>'
+// Two-rectangles "duplicate" mark — most universal copy glyph, reads
+// as "copy" without the verbosity of a clipboard.
+const COPY_ICON_SVG = '<svg width="11" height="11" viewBox="0 0 14 14" fill="none"><rect x="3" y="3" width="7" height="8" rx="1" stroke="currentColor" stroke-width="1.2"/><path d="M5.5 3V2a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-1" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>'
+// Checkmark shown for ~1.2s after a successful copy as visual feedback.
+const CHECK_ICON_SVG = '<svg width="11" height="11" viewBox="0 0 14 14" fill="none"><path d="M3 7.5l3 3 5-6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
 
 function chatButton(sessionId: string, label: string, draft: string): string {
-  return `<button class="card-chat-btn" data-session="${escapeHtml(sessionId)}" data-label="${escapeHtml(label)}" data-draft="${escapeHtml(draft)}" title="Chat about this card" aria-label="Chat">${CHAT_ICON_SVG}</button>`
+  return `<button class="card-action-btn card-chat-btn" data-session="${escapeHtml(sessionId)}" data-label="${escapeHtml(label)}" data-draft="${escapeHtml(draft)}" title="Chat about this card" aria-label="Chat">${CHAT_ICON_SVG}</button>`
+}
+
+function copyButton(text: string): string {
+  return `<button class="card-action-btn card-copy-btn" data-clip="${escapeHtml(text)}" title="Copy" aria-label="Copy">${COPY_ICON_SVG}</button>`
+}
+
+function deleteButton(): string {
+  return `<button class="card-action-btn card-delete" title="Delete card" aria-label="Delete card">×</button>`
+}
+
+function reviewButton(): string {
+  return `<button class="card-action-btn card-review-btn" title="Run PR review" aria-label="Run PR review">${PR_REVIEW_PLAY_SVG}</button>`
+}
+
+// Bottom-right action strip — single horizontal cluster holding all
+// of a card's icons. Order is `[tools …][primary]`: copy + chat (and
+// any future tool) on the left, the per-card-type primary action
+// (delete on manual cards, review on PRs) anchored as the rightmost
+// member. `primary` may be empty (issue cards have no primary).
+function cardActions(opts: {
+  sessionId: string,
+  label: string,
+  copyText: string,
+  primary?: string,
+}): string {
+  return `<div class="card-actions">${copyButton(opts.copyText)}${chatButton(opts.sessionId, opts.label, opts.copyText)}${opts.primary || ''}</div>`
+}
+
+// Copy `text` to the clipboard and briefly swap the button's icon
+// for a check mark as visual confirmation. Falls back to a stale
+// `document.execCommand('copy')` path for the rare browser/context
+// without `navigator.clipboard` (insecure context, old WebView, etc.).
+async function copyTextWithFeedback(btn: HTMLButtonElement, text: string): Promise<void> {
+  let ok = false
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text)
+      ok = true
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      ok = document.execCommand('copy')
+      ta.remove()
+    }
+  } catch (err) {
+    console.error('[copy] failed:', err)
+  }
+  if (!ok) return
+  // Swap icon → check, mark .is-copied so CSS can settle the colour
+  // to a quiet success tone, then revert after ~1.2s. Using two
+  // rAFs ensures the icon swap actually paints before any CSS
+  // transition piggy-backs.
+  const original = btn.innerHTML
+  btn.innerHTML = CHECK_ICON_SVG
+  btn.classList.add('is-copied')
+  window.setTimeout(() => {
+    btn.classList.remove('is-copied')
+    btn.innerHTML = original
+  }, 1200)
 }
 
 function manualSessionId(card: ManualCard): string {
@@ -279,8 +360,9 @@ function renderManualCard(card: ManualCard): HTMLElement {
   el.dataset.id = String(card.id)
   el.dataset.lane = card.lane
   // Meta row mirrors the PR/Issue card shape — repo (if linked) on the
-  // left, timestamp at the end. Bottom-right hosts the delete action,
-  // top-right the chat icon — matching live cards' chrome layout.
+  // left, timestamp at the end. Bottom-right hosts the delete action;
+  // the top-right strip hosts the non-destructive tool icons (chat,
+  // copy, …) — see the chrome strategy comment near cardActions().
   const repoTag = card.repo
     ? `<span class="card-repo">${escapeHtml(shortRepo(card.repo))}</span>`
     : ''
@@ -290,8 +372,12 @@ function renderManualCard(card: ManualCard): HTMLElement {
       ${repoTag}
       <span class="card-time">${relativeTime(card.updated_at)}</span>
     </div>
-    ${chatButton(manualSessionId(card), card.text.slice(0, 60), card.text)}
-    <button class="card-delete" title="Delete card" aria-label="Delete card">×</button>
+    ${cardActions({
+      sessionId: manualSessionId(card),
+      label: card.text.slice(0, 60),
+      copyText: card.text,
+      primary: deleteButton(),
+    })}
   `
   return el
 }
@@ -311,12 +397,10 @@ function renderLiveItem(item: LiveItem): HTMLElement {
   el.dataset.id = prKey(item)        // stable id across refreshes for the FLIP
   const st = liveStateLabel(item)
   const stateBadge = st ? `<span class="state ${st.cls}">${st.text}</span>` : ''
-  // PR cards get a tiny review icon; clicking it triggers
-  // `agent-interface --pr-review` for that PR. The icon is a sibling
-  // of the <a class="card-link"> so its click doesn't navigate.
-  const reviewBtn = item.is_pr === 1
-    ? `<button class="card-review-btn" title="Run PR review" aria-label="Run PR review">${PR_REVIEW_PLAY_SVG}</button>`
-    : ''
+  // PR cards get a tiny review icon as the rightmost member of the
+  // action strip; issue cards have no primary action — only the
+  // tools row.
+  const primary = item.is_pr === 1 ? reviewButton() : ''
   el.innerHTML = `
     <a class="card-link" href="${item.url}" target="_blank" rel="noopener">
       <div class="card-text">${escapeHtml(item.title)}</div>
@@ -327,8 +411,12 @@ function renderLiveItem(item: LiveItem): HTMLElement {
         <span class="card-time">${relativeTime(item.updated_at)}</span>
       </div>
     </a>
-    ${chatButton(liveSessionId(item), `${shortRepo(item.repo)}#${item.number}`, `${item.title}\n${item.url}`)}
-    ${reviewBtn}
+    ${cardActions({
+      sessionId: liveSessionId(item),
+      label: `${shortRepo(item.repo)}#${item.number}`,
+      copyText: `${item.title}\n${item.url}`,
+      primary,
+    })}
   `
   return el
 }
@@ -1041,10 +1129,26 @@ function attachCardClickHandlers() {
   kanban.addEventListener('click', async (e) => {
     const target = e.target as HTMLElement
 
+    // Top-right action strip — both chat and copy live here. We match
+    // each in turn before the per-card-type primary action below
+    // (review/delete) so a click on a tool icon is never ambiguous
+    // with the card-link navigation.
+
+    // Copy icon — copies the card's content to the clipboard and
+    // briefly swaps the icon for a checkmark as visual feedback.
+    const copyBtn = target.closest<HTMLButtonElement>('.card-copy-btn')
+    if (copyBtn) {
+      e.preventDefault()
+      e.stopPropagation()
+      const text = copyBtn.dataset.clip || ''
+      if (!text) return
+      void copyTextWithFeedback(copyBtn, text)
+      return
+    }
+
     // Chat icon — opens (or toggles) the per-card chat pane on the
     // left. Sibling of card-link / card-text so it doesn't propagate
-    // into navigation or edit. Always handled before review-btn /
-    // delete / edit so a click on the chat icon is unambiguous.
+    // into navigation or edit.
     const chatBtn = target.closest<HTMLButtonElement>('.card-chat-btn')
     if (chatBtn) {
       e.preventDefault()

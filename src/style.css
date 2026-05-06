@@ -1939,37 +1939,16 @@ body:has(#settings-panel.open) #top-nav {
 .card-text {
   white-space: pre-wrap;
   word-wrap: break-word;
-  /* Reserve a right inset on every card's title/body text so the
-     hover-revealed chat icon at top:6/right:6 doesn't sit on top of
-     the text. 22px = icon-width + small gap. */
-  padding-right: 22px;
+  /* Full width — the action strip lives at the bottom-right, so we
+     don't sacrifice any horizontal space here for icons that are
+     hidden 99% of the time anyway. */
 }
 
-.card-delete {
-  position: absolute;
-  bottom: 6px;
-  right: 6px;
-  width: 22px;
-  height: 22px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: transparent;
-  color: var(--n4);
-  cursor: pointer;
-  font-size: 16px;
-  line-height: 1;
-  border-radius: var(--r-sm);            /* r-sm */
-  opacity: 0;
-  transition: opacity var(--t-quick) ease, color var(--t-quick) ease, background var(--t-quick) ease;
-  padding: 0;
-  z-index: 1;
-}
-
-.card:hover .card-delete { opacity: 0.7; }
-.card-delete:hover { opacity: 1; color: var(--a5); background: var(--border); }
-.card.editing .card-delete { display: none; }
+/* .card-delete and .card-review-btn now style themselves through the
+   shared .card-action-btn rule above (they live inside .card-actions
+   as siblings of .card-copy-btn / .card-chat-btn). The class names
+   are kept as click-handler hooks and per-icon accent overrides
+   — the standalone absolute-positioning blocks are gone. */
 
 /* ── Live card (Issue / PR feed) ──────────────────────────────────────
    A card whose contents come from the cache, not the user. No drag, no
@@ -1987,34 +1966,10 @@ body:has(#settings-panel.open) #top-nav {
   border-color: var(--n4);
 }
 
-/* PR-card review icon — kicks off `agent-interface --pr-review` for
-   the card's PR. Hover-revealed in the top-right corner; doesn't
-   intrude on the card's primary content. Same play-icon vocabulary as
-   Archive's consensus-review button so the action reads consistently
-   across the app. */
-.card-review-btn {
-  position: absolute;
-  bottom: 6px;
-  right: 6px;
-  width: 22px;
-  height: 22px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: transparent;
-  color: var(--text-tertiary);
-  cursor: pointer;
-  border-radius: var(--r-sm);
-  opacity: 0;
-  transition: opacity var(--t-quick) ease, background var(--t-quick) ease, color var(--t-quick) ease;
-  z-index: 1;
-}
-.card.card-live:hover .card-review-btn { opacity: 0.7; }
-.card-review-btn:hover { opacity: 1; color: var(--text); background: var(--border); }
-.card-review-btn.running { opacity: 1; color: var(--a1); }
-.card-review-btn.done    { opacity: 1; color: var(--a3); }
-.card-review-btn:disabled { cursor: default; }
+/* PR-card review icon kicks off agent-interface --pr-review for
+   the card's PR. Now a member of .card-actions — layout/hover/colour
+   come from the shared .card-action-btn rule plus the .running /
+   .done accents above. */
 
 .card-link {
   display: block;
@@ -3043,14 +2998,33 @@ tr:hover .expand-btn { opacity: 1; }
 .chat-send:disabled { opacity: 0.35; cursor: not-allowed; }
 .chat-send svg { width: 13px; height: 13px; display: block; }
 
-/* Card chat icon — top-right of every card. Hover-revealed in the
-   same opacity rhythm as card-delete and card-review-btn so the four
-   chrome elements (chat top-right, delete bottom-right, review
-   bottom-right, breathing accent right edge) follow one rule. */
-.card-chat-btn {
+/* Bottom-right action strip — single horizontal cluster holding ALL
+   icons for the card (tools + per-card primary). See cardActions()
+   in current-view.ts for the strategy: content uses full card width;
+   the strip overlays the right end of the meta row (which fades out
+   on hover so icons never sit on visible text). Adding more icons
+   later is just another <button> child — the cluster grows leftward,
+   the per-card primary action (delete or review) stays as the
+   rightmost anchor. */
+.card-actions {
   position: absolute;
-  top: 6px;
-  right: 6px;
+  bottom: 4px;
+  right: 4px;
+  display: inline-flex;
+  gap: 0;
+  opacity: 0;
+  transition: opacity var(--t-quick) ease;
+  z-index: 1;
+}
+.card:hover .card-actions { opacity: 0.7; }
+
+/* Shared icon button used by every member of .card-actions —
+   chat, copy, delete, review, and any future tool icon all pick
+   up size, color, hover treatment, and corner radius from here.
+   Per-icon classes (.card-delete, .card-review-btn, .card-copy-btn,
+   .card-chat-btn) are kept solely as click-handler hooks plus
+   per-icon accent overrides; they no longer carry layout. */
+.card-action-btn {
   width: 22px;
   height: 22px;
   display: inline-flex;
@@ -3061,9 +3035,31 @@ tr:hover .expand-btn { opacity: 1; }
   color: var(--text-tertiary);
   cursor: pointer;
   border-radius: var(--r-sm);
-  opacity: 0;
-  transition: opacity var(--t-quick) ease, background var(--t-quick) ease, color var(--t-quick) ease;
-  z-index: 1;
+  padding: 0;
+  font-family: inherit;
+  font-size: 13px;     /* sized for the × glyph; SVGs ignore */
+  line-height: 1;
+  transition: background var(--t-quick) ease, color var(--t-quick) ease;
 }
-.card:hover .card-chat-btn { opacity: 0.7; }
-.card-chat-btn:hover { opacity: 1; color: var(--text); background: var(--border); }
+.card-action-btn:hover {
+  color: var(--text);
+  background: var(--border);
+}
+.card-action-btn:disabled { cursor: default; }
+
+/* Per-icon accents on direct hover. Delete tints to the destructive
+   red; review keeps neutral hover but uses A1/A3 to signal in-flight
+   / done state (set programmatically). Copy lands a quiet green
+   while the checkmark feedback is showing. */
+.card-action-btn.card-delete:hover    { color: var(--a5); }
+.card-action-btn.card-review-btn.running { opacity: 1; color: var(--a1); }
+.card-action-btn.card-review-btn.done    { opacity: 1; color: var(--a3); }
+.card-action-btn.is-copied            { color: var(--a3); }
+.card.editing .card-delete            { display: none; }
+
+/* Hide the meta row's right-side time when the card is hovered so
+   the action strip overlay doesn't sit on visible text. The repo
+   tag, number, and state stay visible on the left side of the meta
+   row — they're never under the strip. */
+.card-time { transition: opacity var(--t-quick) ease; }
+.card:hover .card-time { opacity: 0; }
