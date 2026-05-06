@@ -811,24 +811,45 @@ function openManualComposer(lane: 'idea' | 'concept' | 'plan') {
   ta.focus()
 }
 
-function openIssueComposer() {
+// `prefill` lets a drag-promote (manual card → Issue lane) reuse this
+// composer with the card's content pre-loaded. The user just needs to
+// type the title; if the card already had a repo linked, it's
+// pre-selected too. On successful submit, the source manual card is
+// deleted so the conversion is final. If the user cancels, the card
+// stays put.
+interface IssueComposerPrefill {
+  body?: string
+  repo?: string | null
+  sourceCardId?: number
+}
+
+function openIssueComposer(prefill?: IssueComposerPrefill) {
   const laneNode = laneEl('issue')
   const existing = laneNode.querySelector('.composer')
   if (existing) {
-    (existing.querySelector('input') as HTMLInputElement | null)?.focus()
-    return
+    if (!prefill) {
+      // Plain "+ Add an issue" click while one is already open — just focus.
+      ;(existing.querySelector('input') as HTMLInputElement | null)?.focus()
+      return
+    }
+    // Drop with new prefill: replace what's there so the dropped card
+    // wins. Whatever the user had typed in the existing composer is
+    // discarded — that's the price of doing two things at once.
+    existing.remove()
   }
   const addBtn = laneNode.querySelector<HTMLButtonElement>('.lane-add')!
   addBtn.hidden = true
 
   // Show short names in the dropdown but submit the full owner/name as the
   // value so the API call doesn't have to reassemble it. Sources from
-  // /api/repos (every Vaquum repo); falls back to the involvement set
-  // only if that hasn't loaded yet.
+  // /api/repos (every org repo); falls back to the involvement set only
+  // if that hasn't loaded yet. If the dropped card carries a repo, we
+  // pre-select it; the user can still change it before submitting.
   const repos = allRepos.length > 0 ? allRepos : distinctRepos()
+  const wantRepo = prefill?.repo || ''
   const repoOptions = repos.length === 0
     ? '<option value="">(no repos available)</option>'
-    : repos.map((r) => `<option value="${escapeHtml(r)}">${escapeHtml(shortRepo(r))}</option>`).join('')
+    : repos.map((r) => `<option value="${escapeHtml(r)}"${r === wantRepo ? ' selected' : ''}>${escapeHtml(shortRepo(r))}</option>`).join('')
 
   const composer = document.createElement('div')
   composer.className = 'composer composer-issue'
@@ -850,6 +871,9 @@ function openIssueComposer() {
   const addB = composer.querySelector<HTMLButtonElement>('.composer-add')!
   const cancelB = composer.querySelector<HTMLButtonElement>('.composer-cancel')!
   const errEl = composer.querySelector<HTMLElement>('.composer-error')!
+
+  // Prefilled body lands as the issue's body; user provides the title.
+  if (prefill?.body) bodyTa.value = prefill.body
 
   const close = () => { composer.remove(); addBtn.hidden = false }
   const showError = (msg: string) => {
@@ -905,6 +929,14 @@ function openIssueComposer() {
           })
         }
       } catch { /* fall through — fetchLive on its own may still surface it */ }
+      // Drag-promote: the source manual card is deleted only after the
+      // issue is confirmed created. If we got here, the POST returned
+      // 200 — safe to remove. We swallow delete errors so a later DB
+      // hiccup doesn't undo the promotion the user just confirmed.
+      if (prefill?.sourceCardId !== undefined) {
+        try { await deleteManualCard(prefill.sourceCardId) }
+        catch (err) { console.error('[promote] delete source card failed:', err) }
+      }
       close()
       await fetchLive()
       renderLiveOnly({ animate: true })
@@ -1120,6 +1152,38 @@ function attachDragHandlers() {
       }
     })
   }
+
+  // Issue lane is a special drop target: dragging a manual card here
+  // doesn't reorder anything — it converts the card into a draft
+  // GitHub issue. The drop opens the issue composer pre-populated
+  // with the card's text (as the body) and repo (if linked), focuses
+  // the title field, and only deletes the source card after the
+  // issue is successfully created on GitHub. No insertion indicator,
+  // no position math.
+  const issueLane = laneEl('issue')
+  issueLane.addEventListener('dragover', (e) => {
+    if (dragId === null) return
+    e.preventDefault()
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'   // semantic hint: this is "convert", not "move"
+    issueLane.classList.add('lane-drag-over')
+  })
+  issueLane.addEventListener('dragleave', (e) => {
+    const related = e.relatedTarget as Node | null
+    if (related && issueLane.contains(related)) return
+    issueLane.classList.remove('lane-drag-over')
+  })
+  issueLane.addEventListener('drop', (e) => {
+    e.preventDefault()
+    issueLane.classList.remove('lane-drag-over')
+    if (dragId === null) return
+    const moving = manualCards.find((c) => c.id === dragId)
+    if (!moving) return
+    openIssueComposer({
+      body: moving.text,
+      repo: moving.repo,
+      sourceCardId: moving.id,
+    })
+  })
 }
 
 // ── Card-level click delegation ──────────────────────────────────────────────
