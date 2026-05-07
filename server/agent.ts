@@ -89,3 +89,38 @@ export async function triggerPrReview(prUrl: string): Promise<{ ok: true }> {
   child.unref()
   return { ok: true }
 }
+
+// Replay an existing agent-interface job — used by the Swarm view's
+// Replay column. The frontend sends the row's `behavior` + `repo` +
+// `pr_id`; we map behavior → CLI flag and re-spawn the same command
+// with the repo's local checkout as --pwd. A new row will appear in
+// `agent-interface --logs` for the new run; the existing row is
+// untouched. Only pr_review and pr_approve are replayable through
+// this path — other behaviors aren't exposed as standalone CLI
+// invocations today.
+export async function replayAgentJob(input: {
+  behavior?: string,
+  repo?: string,
+  pr_id?: string | number,
+}): Promise<{ ok: true }> {
+  const behavior = String(input.behavior || '')
+  const repo = String(input.repo || '')
+  const prId = String(input.pr_id || '')
+  if (!repo.includes('/'))   throw new Error('repo must be owner/name')
+  if (!/^\d+$/.test(prId))   throw new Error('pr_id must be a positive integer')
+
+  let flag: string
+  if (behavior === 'pr_review')       flag = '--pr-review'
+  else if (behavior === 'pr_approve') flag = '--pr-approve'
+  else throw new Error(`behavior "${behavior}" is not replayable`)
+
+  const [owner, repoName] = repo.split('/', 2)
+  const pwd = await localCheckoutPath(owner, repoName)
+  const child = spawn(CLI, [flag, `#${prId}`, '--pwd', pwd], {
+    cwd: agentCwd(),
+    detached: true,
+    stdio: 'ignore',
+  })
+  child.unref()
+  return { ok: true }
+}

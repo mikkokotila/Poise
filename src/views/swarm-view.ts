@@ -120,6 +120,24 @@ function targetCell(e: LogEntry): string {
 // right when collapsed, rotates 90° (down) when the row is expanded
 // via .open class.
 const CHEV_SVG = '<svg class="chev" width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4 2.5l4 3.5-4 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+// Replay — circular arrow with a notch, classic "re-run" icon. Clicking
+// it spawns a fresh agent-interface call with the same args; the new
+// run shows up as a new row on the next poll.
+const REPLAY_SVG = '<svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M9.5 3.5A4 4 0 1 0 10.4 7.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><polyline points="9.5 1 9.5 3.5 7 3.5" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/></svg>'
+
+// Whether a row is replayable through agent-interface today —
+// pr_review and pr_approve have standalone CLI invocations; chat is a
+// continuous session (replay doesn't fit the semantic); other behaviors
+// aren't first-class CLI entry points.
+function isReplayable(e: LogEntry): boolean {
+  return (e.behavior === 'pr_review' || e.behavior === 'pr_approve')
+      && !!e.repo && !!e.pr_id
+}
+
+function replayCell(e: LogEntry): string {
+  if (!isReplayable(e)) return '<span class="agent-dash">—</span>'
+  return `<button class="replay-btn" title="Replay this run" aria-label="Replay this run">${REPLAY_SVG}</button>`
+}
 
 function matchesSearch(e: LogEntry): boolean {
   if (!searchQuery) return true
@@ -153,6 +171,7 @@ function renderShell() {
             <th class="col-status">Status</th>
             <th class="col-started">Started</th>
             <th class="col-elapsed">Elapsed</th>
+            <th class="col-replay">Replay</th>
             <th class="col-action"></th>
           </tr>
         </thead>
@@ -196,6 +215,7 @@ function buildMainRow(e: LogEntry): HTMLTableRowElement {
     <td>${statusCell(e.status)}</td>
     <td class="started-cell"><span class="date">${escapeHtml(startedRel(e.started_at))}</span></td>
     <td><span class="date">${escapeHtml(e.time_elapsed || '—')}</span></td>
+    <td class="replay-cell">${replayCell(e)}</td>
     <td class="action-cell">${btn}</td>
   `
   return tr
@@ -208,7 +228,7 @@ function setExpandContent(tr: HTMLTableRowElement, id: string) {
     : (state.body
         ? `<pre class="agent-response-body">${escapeHtml(state.body)}</pre>`
         : '<div class="agent-response-empty">No response body.</div>')
-  tr.innerHTML = `<td colspan="7">${inner}</td>`
+  tr.innerHTML = `<td colspan="8">${inner}</td>`
 }
 
 function buildExpandRow(e: LogEntry): HTMLTableRowElement {
@@ -371,10 +391,52 @@ async function loadResponse(id: string, hash: string) {
 }
 
 function attachClicks() {
-  bodyEl.addEventListener('click', (ev) => {
-    const btn = (ev.target as HTMLElement).closest<HTMLButtonElement>('.expand-btn')
-    if (!btn) return
-    const tr = btn.closest<HTMLTableRowElement>('tr')!
+  bodyEl.addEventListener('click', async (ev) => {
+    const target = ev.target as HTMLElement
+
+    // Replay — re-spawns the same agent-interface CLI invocation with
+    // the row's behavior/repo/pr_id. The new run lands as a fresh row;
+    // the original row stays unchanged. Quick poll right after so the
+    // user sees the new row land without waiting for the next 15s tick.
+    const replayBtn = target.closest<HTMLButtonElement>('.replay-btn')
+    if (replayBtn) {
+      const tr = replayBtn.closest<HTMLTableRowElement>('tr')!
+      const id = tr.dataset.id || ''
+      const entry = entries.find((e) => e.id === id)
+      if (!entry) return
+      replayBtn.classList.add('spinning')
+      replayBtn.disabled = true
+      try {
+        const res = await fetch('/api/agent-replay', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            behavior: entry.behavior,
+            repo: entry.repo,
+            pr_id: entry.pr_id,
+          }),
+        })
+        if (!res.ok) {
+          const text = await res.text().catch(() => '')
+          throw new Error(`HTTP ${res.status}: ${text.slice(0, 160)}`)
+        }
+        // Pull the log right away so the new running row shows up
+        // without the user waiting for the 15s poll.
+        window.setTimeout(() => { void pollOnce() }, 800)
+      } catch (err) {
+        console.error('[swarm] replay failed:', err)
+        alert(`Replay failed: ${(err as Error).message}`)
+      } finally {
+        replayBtn.classList.remove('spinning')
+        replayBtn.disabled = false
+      }
+      return
+    }
+
+    // Expand chevron — toggles the response body row.
+    const expandBtn = target.closest<HTMLButtonElement>('.expand-btn')
+    if (!expandBtn) return
+    const tr = expandBtn.closest<HTMLTableRowElement>('tr')!
     const id = tr.dataset.id || ''
     const hash = tr.dataset.hash || ''
     if (!id || !hash) return
@@ -383,9 +445,9 @@ function attachClicks() {
       expanded.delete(id)
       const expandRow = bodyEl.querySelector<HTMLTableRowElement>(`.agent-expand-row[data-expand-for="${id}"]`)
       expandRow?.remove()
-      btn.classList.remove('open')
+      expandBtn.classList.remove('open')
     } else {
-      btn.classList.add('open')
+      expandBtn.classList.add('open')
       loadResponse(id, hash)
     }
   })

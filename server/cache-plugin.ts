@@ -2,7 +2,7 @@ import type { Plugin, Connect } from 'vite'
 import { getSettings, setSettings } from './settings'
 import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, type Lane } from './current'
 import { handleGhBody, listOrgRepos } from './gh'
-import { fetchAgentLogs, fetchAgentResponse, triggerPrReview } from './agent'
+import { fetchAgentLogs, fetchAgentResponse, triggerPrReview, replayAgentJob } from './agent'
 import { listChatHistory, sendChat, saveAttachment } from './chat'
 import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, getEnabledMap, getSettingMap, isValidSetting, startBehaviorsRuntime, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
 
@@ -257,6 +257,24 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
             const stderr = err?.stderr?.toString?.() || ''
             const msg = stderr || err?.message || String(err)
             return json(res, 502, { error: 'pr-review trigger failed: ' + msg })
+          }
+        }
+
+        // ── /api/agent-replay — re-run an existing agent-interface job ─
+        // Body: { behavior, repo, pr_id }. Server maps behavior to the
+        // CLI flag (--pr-review / --pr-approve) and re-spawns. A new
+        // row appears in `agent-interface --logs`; the original row is
+        // untouched. Used by the Swarm view's Replay column.
+        if (url === '/api/agent-replay' && req.method === 'POST') {
+          try {
+            const raw = await readBody(req)
+            const body = raw ? JSON.parse(raw) : {}
+            const result = await replayAgentJob(body)
+            return json(res, 200, result)
+          } catch (err: any) {
+            const stderr = err?.stderr?.toString?.() || ''
+            const msg = stderr || err?.message || String(err)
+            return json(res, 400, { error: 'agent-replay failed: ' + msg })
           }
         }
 

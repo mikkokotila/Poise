@@ -2375,10 +2375,13 @@ body:has(#settings-panel.open) #top-nav {
 .col-status,
 .col-started,
 .col-elapsed {
-  width: calc((100% - 32px) / 6);
+  /* 6 even-width data columns, plus a fixed-width Replay column and
+     the action chevron column on the right. */
+  width: calc((100% - 64px - 56px) / 6);
 }
-.col-started { text-align: right; }
-.col-elapsed { text-align: right; }
+.col-started  { text-align: right; }
+.col-elapsed  { text-align: right; }
+.col-replay   { width: 56px; text-align: center; }
 /* The text-align on the .col-* classes only hits the THs. The TDs need
    their own pin so the values right-align under their headers. Elapsed
    is the table's nth-last-child(2) and gets right-align from the
@@ -2424,8 +2427,11 @@ a.agent-target:hover {
 .state.flat { color: var(--text-tertiary); }
 
 /* Expand toggle — sits in the .action-cell column, same icon-button
-   rhythm as .review-btn. Chevron rotates when the row is expanded. */
-.expand-btn {
+   rhythm as .review-btn. Chevron rotates when the row is expanded.
+   The Replay button shares the same vocabulary; both classes pick up
+   the same hover/transform behavior. */
+.expand-btn,
+.replay-btn {
   width: 24px;
   height: 24px;
   border: none;
@@ -2440,9 +2446,18 @@ a.agent-target:hover {
   padding: 0;
   transition: color var(--t-base) ease, background var(--t-base) ease, transform var(--t-quick) ease;
 }
-tr:hover .expand-btn { opacity: 1; }
-.expand-btn:hover { color: var(--text); background: var(--hover); }
-.expand-btn:active { transform: scale(0.92); }
+tr:hover .expand-btn,
+tr:hover .replay-btn { opacity: 1; }
+.expand-btn:hover,
+.replay-btn:hover { color: var(--text); background: var(--hover); }
+.expand-btn:active,
+.replay-btn:active { transform: scale(0.92); }
+.replay-btn:disabled { cursor: not-allowed; opacity: 0.4; }
+.replay-btn.spinning svg { animation: replay-spin 0.7s linear infinite; }
+@keyframes replay-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
 .expand-btn .chev {
   transition: transform var(--t-base) ease;
 }
