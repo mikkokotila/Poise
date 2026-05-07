@@ -1085,7 +1085,13 @@ function attachDragHandlers() {
     dragId = Number(cardEl.dataset.id)
     cardEl.classList.add('dragging')
     e.dataTransfer?.setData('text/plain', String(dragId))
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
+    // 'copyMove' so both kinds of drop targets are valid:
+    //  * Manual lanes set dropEffect='move' (reorder).
+    //  * Issue lane sets dropEffect='copy' (convert to a GH issue).
+    // If effectAllowed doesn't cover the lane's dropEffect, Chrome
+    // silently refuses the drop — that's the bug that broke
+    // drag-to-issue on real drags.
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'copyMove'
   })
 
   kanban.addEventListener('dragend', (e) => {
