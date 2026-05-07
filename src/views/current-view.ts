@@ -1160,9 +1160,17 @@ function attachDragHandlers() {
   // the title field, and only deletes the source card after the
   // issue is successfully created on GitHub. No insertion indicator,
   // no position math.
+  //
+  // The dragover handler MUST call preventDefault unconditionally —
+  // gating it on dragId fails subtly when HMR replaces the module
+  // (the OLD module's dragstart sets its own dragId, the NEW module's
+  // dragover reads its own — different cell). Without preventDefault
+  // on dragover the browser doesn't treat the lane as a drop target
+  // and never fires `drop`. The drop handler is the right place to
+  // sanity-check that we have a manual card to convert; if not, it
+  // just no-ops.
   const issueLane = laneEl('issue')
   issueLane.addEventListener('dragover', (e) => {
-    if (dragId === null) return
     e.preventDefault()
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'   // semantic hint: this is "convert", not "move"
     issueLane.classList.add('lane-drag-over')
@@ -1175,8 +1183,13 @@ function attachDragHandlers() {
   issueLane.addEventListener('drop', (e) => {
     e.preventDefault()
     issueLane.classList.remove('lane-drag-over')
-    if (dragId === null) return
-    const moving = manualCards.find((c) => c.id === dragId)
+    // The card id rides on dataTransfer (set by the kanban dragstart
+    // handler) so we can recover it even if the module-level dragId
+    // got separated by HMR.
+    const idStr = e.dataTransfer?.getData('text/plain') || ''
+    const id = Number(idStr) || dragId
+    if (!id) return
+    const moving = manualCards.find((c) => c.id === id)
     if (!moving) return
     openIssueComposer({
       body: moving.text,
