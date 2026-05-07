@@ -214,7 +214,7 @@ function buildMainRow(e: LogEntry): HTMLTableRowElement {
     <td>${targetCell(e)}</td>
     <td>${statusCell(e.status)}</td>
     <td class="started-cell"><span class="date">${escapeHtml(startedRel(e.started_at))}</span></td>
-    <td><span class="date">${escapeHtml(e.time_elapsed || '—')}</span></td>
+    <td class="elapsed-cell"><span class="date">${escapeHtml(e.time_elapsed || '—')}</span></td>
     <td class="replay-cell">${replayCell(e)}</td>
     <td class="action-cell">${btn}</td>
   `

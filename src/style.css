@@ -2375,18 +2375,23 @@ body:has(#settings-panel.open) #top-nav {
 .col-status,
 .col-started,
 .col-elapsed {
-  /* 6 even-width data columns, plus a fixed-width Replay column and
-     the action chevron column on the right. */
-  width: calc((100% - 64px - 56px) / 6);
+  /* Six evenly-sized data columns share whatever's left after the two
+     fixed-width columns on the right (Replay 56px + action chevron
+     32px). */
+  width: calc((100% - 56px - 32px) / 6);
 }
 .col-started  { text-align: right; }
 .col-elapsed  { text-align: right; }
 .col-replay   { width: 56px; text-align: center; }
 /* The text-align on the .col-* classes only hits the THs. The TDs need
-   their own pin so the values right-align under their headers. Elapsed
-   is the table's nth-last-child(2) and gets right-align from the
-   universal td rule for free; Started needs an explicit cell class. */
+   their own pin so the values right-align under their headers. Started
+   and Elapsed get explicit classes; Replay is centered (overrides the
+   universal `td:nth-last-child(2) { text-align: right }` rule that
+   used to free-give Elapsed its alignment back when Elapsed was the
+   2nd-last column — Replay sits there now). */
 #view-swarm tbody td.started-cell { text-align: right; }
+#view-swarm tbody td.elapsed-cell { text-align: right; }
+#view-swarm tbody td.replay-cell  { text-align: center; }
 
 /* Distinct cell flavors */
 .agent-model {
