@@ -17,6 +17,11 @@ let initialized = false
 // values come from env vars (REVIEW_AGENT_USERNAME, etc.) — these are
 // the actual GitHub usernames the automations act as.
 let behaviorOwners: Partial<Record<BehaviorKey, string | null>> = {}
+// Tick listener — installed on view init, removed on view leave by
+// stopBehaviorsRefresh(). Single shared clock, same pattern as the
+// three other views. See startRefreshTicker() in src/config.ts.
+const onTick = () => { void tickRefresh() }
+let tickListening = false
 
 // Attribute-safe HTML escape. textContent → innerHTML only escapes &,
 // <, >; we also need to escape " and ' so attribute interpolations
@@ -205,6 +210,28 @@ function attachHandlers() {
   })
 }
 
+// In-place cell refresh — pulls fresh state from /api/behaviors and
+// updates only the time-sensitive cells (last-triggered) without
+// wiping the table. Toggle / setting / owner cells are user-driven
+// (poise:behaviors-changed handles those) so they don't need to
+// repaint on every tick. Same calm rhythm as Current's FLIP — no
+// flicker, no rebuild.
+async function tickRefresh() {
+  await refreshState()
+  for (const meta of BEHAVIORS) {
+    const tr = viewEl.querySelector<HTMLTableRowElement>(`tr[data-behavior="${meta.key}"]`)
+    if (!tr) continue
+    const cell = tr.querySelector<HTMLElement>('.behavior-last-cell')
+    if (cell) cell.innerHTML = lastTriggeredCell(meta.key)
+  }
+}
+
+export function stopBehaviorsRefresh() {
+  if (!tickListening) return
+  window.removeEventListener('poise:refresh-tick', onTick)
+  tickListening = false
+}
+
 export async function initBehaviorsView() {
   viewEl = document.getElementById('view-behaviors')!
   if (!initialized) {
@@ -219,4 +246,11 @@ export async function initBehaviorsView() {
   // shows the right username/avatar instead of a flash of "—".
   await fetchBehaviorOwners()
   renderRows()
+  // Subscribe to the wall-clock-aligned ticker so the relative-time
+  // strings ("2h", "5m") stay accurate and any newly-fired behavior
+  // shows up without a manual reload.
+  if (!tickListening) {
+    window.addEventListener('poise:refresh-tick', onTick)
+    tickListening = true
+  }
 }

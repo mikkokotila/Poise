@@ -5,7 +5,7 @@ import { initMenu } from './menu'
 import { initMainView, refreshMainView, stopMainRefresh } from './views/main-view'
 import { initCurrentView, stopCurrentPolling } from './views/current-view'
 import { initSwarmView, stopSwarmRefresh, focusRow as focusSwarmRow } from './views/swarm-view'
-import { initBehaviorsView } from './views/behaviors-view'
+import { initBehaviorsView, stopBehaviorsRefresh } from './views/behaviors-view'
 import { toggle as toggleChat } from './views/chat-pane'
 import { loadSettings, startRefreshTicker, applyTheme, getTheme } from './config'
 
@@ -25,9 +25,10 @@ function showView(v: ViewSlug) {
     :                     viewBehaviorsEl
 
   // Stop background polling when leaving the views that own them
-  if (v !== 'swarm')   stopSwarmRefresh()
-  if (v !== 'current') stopCurrentPolling()
-  if (v !== 'main')    stopMainRefresh()
+  if (v !== 'swarm')     stopSwarmRefresh()
+  if (v !== 'current')   stopCurrentPolling()
+  if (v !== 'main')      stopMainRefresh()
+  if (v !== 'behaviors') stopBehaviorsRefresh()
 
   // Initialize the target first so content exists before the animation starts
   if (v === 'main')           initMainView()
