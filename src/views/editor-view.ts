@@ -30,10 +30,12 @@ let initialized = false
 let docs: DocSummary[] = []
 let currentSlug: string | null = null
 let textareaEl: HTMLTextAreaElement | null = null
+let mirrorEl: HTMLElement | null = null
 let triggerEl: HTMLButtonElement | null = null
 let triggerTitleEl: HTMLElement | null = null
 let menuEl: HTMLElement | null = null
 let metaEl: HTMLElement | null = null
+let copyBtnEl: HTMLButtonElement | null = null
 let saveTimer: ReturnType<typeof setTimeout> | null = null
 let saveInFlight = false
 
@@ -77,6 +79,15 @@ function groupBucket(iso: string): string {
 
 const ICON_PLUS  = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 2v10M2 7h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
 const ICON_TRASH = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 4h8M5.5 4V3a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1M4.5 4l.5 7a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1l.5-7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+// Two-rectangles "duplicate" mark — the same copy glyph used by the
+// card chrome, so the meaning carries over.
+const ICON_COPY  = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="3" y="3" width="7" height="8" rx="1" stroke="currentColor" stroke-width="1.2"/><path d="M5.5 3V2a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-1" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>'
+const ICON_CHECK = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 7.5l3 3 5-6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+// Arrows-to-corners pair for the writer-mode toggle: "expand to fill"
+// when entering, "contract back" when exiting. Universal fullscreen
+// vocabulary, reads as a mode toggle without a label.
+const ICON_FOCUS_ENTER = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 5V2h3M9 2h3v3M2 9v3h3M9 12h3V9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+const ICON_FOCUS_EXIT  = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M5 2v3H2M9 5h3V2M5 12V9H2M9 9v3h3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>'
 
 function renderShell(): string {
   // .view-header carries the standard cross-view alignment (vertical
@@ -87,8 +98,10 @@ function renderShell(): string {
   return `
     <header class="view-header editor-bar">
       <div class="editor-bar-left">
+        <button type="button" class="editor-bar-btn editor-focus-btn"  title="Writer mode" aria-label="Toggle writer mode" aria-pressed="false">${ICON_FOCUS_ENTER}</button>
         <button type="button" class="editor-bar-btn editor-new-btn"    title="New (⌘N)" aria-label="New">${ICON_PLUS}</button>
-        <button type="button" class="editor-bar-btn editor-delete-btn" title="Delete"   aria-label="Delete">${ICON_TRASH}</button>
+        <button type="button" class="editor-bar-btn editor-copy-btn"   title="Copy document" aria-label="Copy document">${ICON_COPY}</button>
+        <button type="button" class="editor-bar-btn editor-delete-btn" title="Delete" aria-label="Delete">${ICON_TRASH}</button>
       </div>
       <div class="editor-bar-right">
         <span class="editor-meta" id="editor-meta"></span>
@@ -103,10 +116,40 @@ function renderShell(): string {
     </header>
     <main class="editor-main">
       <div class="editor-page">
+        <!-- The mirror sits behind the textarea, rendering the same
+             content with per-line styling for # / ## headings. The
+             textarea above has color: transparent + a visible caret;
+             they share font, padding and line-height so the cursor
+             lands on the rendered text. -->
+        <div class="editor-mirror" id="editor-mirror" aria-hidden="true"></div>
         <textarea class="editor-textarea" id="editor-textarea" spellcheck="true" placeholder="Start writing…"></textarea>
       </div>
     </main>
   `
+}
+
+// Build the mirror's HTML from the textarea's plain-text source.
+// Lines starting with `# ` become H1; `## ` become H2. Empty lines
+// emit a zero-width space so they retain row height. The marker
+// (`#` / `##`) is wrapped in a faded span so the syntax visually
+// recedes; widths still match the source character-for-character so
+// the textarea cursor lines up with the rendered text.
+function buildMirror(text: string): string {
+  return text.split('\n').map((line) => {
+    const m = line.match(/^(#{1,2})( .*)?$/)
+    if (m) {
+      const level = m[1].length          // 1 or 2
+      const rest = m[2] || ''            // includes leading space if present
+      return `<div class="m-h${level}"><span class="m-marker">${m[1]}</span>${escapeHtml(rest)}</div>`
+    }
+    if (line === '') return '<div class="m-line">​</div>'    // ZWSP keeps row height
+    return `<div class="m-line">${escapeHtml(line)}</div>`
+  }).join('')
+}
+
+function syncMirror() {
+  if (!textareaEl || !mirrorEl) return
+  mirrorEl.innerHTML = buildMirror(textareaEl.value)
 }
 
 function setMeta(text: string) {
@@ -217,6 +260,9 @@ async function fetchDocs() {
 
 // Match the textarea's height to its content so the page reads as a
 // scroll of prose, not a fixed-height frame with an inner scrollbar.
+// The mirror tracks the textarea's height implicitly — both share the
+// same .editor-page container and font metrics, so identical input
+// produces identical wrapping.
 function autosize() {
   if (!textareaEl) return
   textareaEl.style.height = 'auto'
@@ -235,6 +281,7 @@ async function loadDoc(slug: string) {
     try { localStorage.setItem(LAST_OPEN_KEY, currentSlug) } catch { /* ignore */ }
     setTriggerTitle()
     setMetaForCurrent()
+    syncMirror()
     autosize()
     textareaEl.focus()
     const len = textareaEl.value.length
@@ -257,6 +304,43 @@ async function newDoc() {
   } catch (err) {
     console.error('[editor] newDoc failed:', err)
   }
+}
+
+// Copy the entire document (raw markdown) to the clipboard, with a
+// brief icon swap to a checkmark for visual confirmation. Falls back
+// to the textarea + execCommand path on contexts where
+// navigator.clipboard isn't available (insecure origin, some
+// embedded webviews).
+async function copyDoc() {
+  if (!textareaEl || !copyBtnEl) return
+  const text = textareaEl.value
+  let ok = false
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text)
+      ok = true
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      ok = document.execCommand('copy')
+      ta.remove()
+    }
+  } catch (err) {
+    console.error('[editor] copy failed:', err)
+  }
+  if (!ok) return
+  const original = copyBtnEl.innerHTML
+  copyBtnEl.innerHTML = ICON_CHECK
+  copyBtnEl.classList.add('is-copied')
+  window.setTimeout(() => {
+    if (!copyBtnEl) return
+    copyBtnEl.classList.remove('is-copied')
+    copyBtnEl.innerHTML = original
+  }, 1200)
 }
 
 async function deleteCurrent() {
@@ -341,8 +425,23 @@ function attachHandlers() {
     .addEventListener('click', () => { void newDoc() })
   viewEl.querySelector<HTMLButtonElement>('.editor-delete-btn')!
     .addEventListener('click', () => { void deleteCurrent() })
+  copyBtnEl = viewEl.querySelector<HTMLButtonElement>('.editor-copy-btn')!
+  copyBtnEl.addEventListener('click', () => { void copyDoc() })
 
-  textareaEl!.addEventListener('input', () => { autosize(); scheduleSave() })
+  const focusBtn = viewEl.querySelector<HTMLButtonElement>('.editor-focus-btn')!
+  focusBtn.addEventListener('click', () => {
+    // Writer mode = body class + icon swap. The CSS hides everything
+    // outside the writing surface (top nav, burger, the rest of the
+    // bar), leaving just the page and this one icon.
+    const on = document.body.classList.toggle('editor-writer-mode')
+    focusBtn.setAttribute('aria-pressed', on ? 'true' : 'false')
+    focusBtn.innerHTML = on ? ICON_FOCUS_EXIT : ICON_FOCUS_ENTER
+    // Make sure the textarea has focus when the user enters writer
+    // mode — they came here to type, not to look at chrome.
+    if (on) textareaEl?.focus()
+  })
+
+  textareaEl!.addEventListener('input', () => { syncMirror(); autosize(); scheduleSave() })
   textareaEl!.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 's') {
       e.preventDefault()
@@ -374,6 +473,7 @@ export async function initEditorView() {
     initialized = true
     viewEl.innerHTML = renderShell()
     textareaEl     = viewEl.querySelector<HTMLTextAreaElement>('.editor-textarea')
+    mirrorEl       = viewEl.querySelector<HTMLElement>('#editor-mirror')
     triggerEl      = viewEl.querySelector<HTMLButtonElement>('.editor-doc-trigger')
     triggerTitleEl = viewEl.querySelector<HTMLElement>('.editor-doc-trigger-title')
     menuEl         = viewEl.querySelector<HTMLElement>('#editor-doc-menu')
@@ -400,4 +500,8 @@ export function stopEditorRefresh() {
     void flushSave()
   }
   closeMenu()
+  // Strip the writer-mode body class on view leave — otherwise the
+  // hidden top nav stays hidden once you come back from another view
+  // and the user is stuck.
+  document.body.classList.remove('editor-writer-mode')
 }

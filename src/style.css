@@ -3262,40 +3262,123 @@ tr:hover .replay-btn { opacity: 1; }
   padding: var(--sp-3) var(--sp-2);
 }
 
-/* ── Writing area ── */
-.editor-main {
-  /* No extra padding — the page below centers itself within the
-     standard #app gutters. */
-}
+/* ── Writing area ──
+   The page is a positioned container holding two perfectly overlaid
+   layers: a styled mirror at the back (renders #/## as H1/H2), and a
+   transparent textarea on top (carries selection, caret and the real
+   text). Both share font, padding, line-height and width — identical
+   wrapping is what keeps the caret on the rendered glyphs. */
 .editor-page {
+  position: relative;
   max-width: 680px;
   margin: 0 auto;
-  padding: var(--sp-5) 0 var(--sp-7);
 }
+
+/* Shared typography between mirror and textarea — both use this so
+   wrap points match character-for-character. The constant
+   line-height across body / H1 / H2 is load-bearing: H1 and H2 grow
+   in font-size only, never in vertical row count, so a 4-line body
+   paragraph and a 4-line wrapped H1 both occupy 4 rows. The body
+   font-size (19px) drives the wrap; H1/H2 are visually larger but
+   don't widen because we keep their weight bold and font-size only
+   modestly above body to avoid heading-line rewrap. */
+.editor-mirror,
 .editor-textarea {
   width: 100%;
-  min-height: calc(100vh - 200px);
+  font-family: 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif;
+  font-size: 19px;
+  line-height: 1.7;
+  padding: var(--sp-5) 0 var(--sp-7);
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'liga' 1, 'kern' 1;
+  box-sizing: border-box;
+}
+
+.editor-mirror {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  color: var(--text);
+}
+
+/* Per-line styling — line-height stays the body row height so
+   wrapping coincides between the two layers. Heading distinction is
+   carried by font-size + weight; for headings that DO wrap (rare),
+   the caret may drift on subsequent rows but the first row still
+   lands cleanly. */
+.editor-mirror .m-line {
+  font-size: 19px;
+  line-height: 1.7;
+}
+.editor-mirror .m-h1 {
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.16;       /* 32.3 / 28 — matches body row height */
+}
+.editor-mirror .m-h2 {
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.47;       /* 32.3 / 22 */
+}
+/* The `#` / `##` syntax marker fades into the page so the eye reads
+   the heading text first, but its width is preserved so the caret
+   stays aligned with the source. */
+.editor-mirror .m-marker {
+  opacity: 0.25;
+  font-weight: normal;
+}
+
+.editor-textarea {
+  position: relative;
+  z-index: 1;
   border: none;
   outline: none;
   background: transparent;
   resize: none;
   display: block;
-  overflow: hidden;          /* JS autosizes height to content */
-  /* Iowan Old Style → Palatino → Georgia: a system-font book-serif
-     stack that gives a Medium-grade reading rhythm without webfont
-     load cost. */
-  font-family: 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif;
-  font-size: 19px;
-  line-height: 1.7;
-  color: var(--text);
-  padding: 0;
-  margin: 0;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  font-feature-settings: 'liga' 1, 'kern' 1;
+  min-height: calc(100vh - 200px);
+  overflow: hidden;        /* JS autosizes height to content */
+  /* Hide the actual text, keep the caret visible. Selection
+     highlight still paints on the (invisible) selected runs, which
+     overlays the mirror text — exactly what you want. */
+  color: transparent;
+  caret-color: var(--text);
 }
 .editor-textarea::placeholder {
   color: var(--text-tertiary);
   font-style: italic;
 }
 .editor-textarea:focus { outline: none; }
+
+/* Copy-button success tint while the checkmark is showing.
+   --a3 is the green accent in the DS palette. */
+.editor-bar-btn.is-copied { color: var(--a3); }
+
+/* ── Writer mode ──
+   Click the focus icon and everything outside the page disappears:
+   the inline top-nav, the burger, and the rest of the editor bar.
+   The page (and only the page) is left with the focus toggle alone
+   in the corner so the writer can come back. */
+body.editor-writer-mode #top-nav,
+body.editor-writer-mode #menu-toggle {
+  display: none;
+}
+/* Hide every bar control except the focus toggle. The right side
+   (meta + doc-picker) goes too. */
+body.editor-writer-mode .editor-bar-right { display: none; }
+body.editor-writer-mode .editor-bar-left > .editor-bar-btn:not(.editor-focus-btn) {
+  display: none;
+}
+/* Drop the bar's bottom margin so the page rises to where the bar
+   used to be — less wasted space at the top. */
+body.editor-writer-mode .editor-bar { margin-bottom: 0; }
+/* The toggle itself stays subtle: same ghost styling, but a touch
+   more visible so the user can find their way out of writer mode
+   without hunting for it. */
+body.editor-writer-mode .editor-focus-btn { color: var(--text-tertiary); }
+body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
