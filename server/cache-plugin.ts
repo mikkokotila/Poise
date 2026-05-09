@@ -4,7 +4,7 @@ import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, 
 import { handleGhBody, listOrgRepos } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, triggerPrReview, replayAgentJob } from './agent'
 import { listChatHistory, sendChat, saveAttachment, startAuthorContent, authorContentStatus, contentSlugForCallId } from './chat'
-import { listDocs, readDoc, writeDoc, deleteDoc, newSlug } from './editor'
+import { listDocs, readDoc, writeDoc, deleteDoc, newSlug, readAnnotations, writeAnnotations } from './editor'
 import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, getEnabledMap, getSettingMap, isValidSetting, startBehaviorsRuntime, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
 
 function json(res: any, status: number, body: unknown) {
@@ -388,6 +388,30 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
             return json(res, 200, result)
           } catch (err: any) {
             return json(res, 500, { error: err.message || String(err) })
+          }
+        }
+
+        // ── /api/editor/doc/:slug/annotations — side-car notes per doc ──
+        // GET returns the full list; PUT replaces it. The front-end owns
+        // ids/snippets and decides when to add/remove; we just persist.
+        const editorAnnMatch = url.match(/^\/api\/editor\/doc\/([A-Za-z0-9._-]+)\/annotations$/)
+        if (editorAnnMatch && req.method === 'GET') {
+          try {
+            const result = await readAnnotations(editorAnnMatch[1])
+            return json(res, 200, result)
+          } catch (err: any) {
+            return json(res, 500, { error: err.message || String(err) })
+          }
+        }
+        if (editorAnnMatch && req.method === 'PUT') {
+          try {
+            const raw = await readBody(req)
+            const body = raw ? JSON.parse(raw) : {}
+            const annotations = Array.isArray(body.annotations) ? body.annotations : []
+            const result = await writeAnnotations(editorAnnMatch[1], { annotations })
+            return json(res, 200, result)
+          } catch (err: any) {
+            return json(res, 400, { error: err.message || String(err) })
           }
         }
 

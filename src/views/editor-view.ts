@@ -34,6 +34,28 @@ interface DocSummary {
   size: number
 }
 
+// Side-car annotations attached to ranges in the doc. The schema
+// mirrors server/editor.ts (Annotation). Ranges are line + char-offset
+// pairs; the snippet is the highlighted text at create time and
+// re-anchors the annotation if the user inserts/removes lines above
+// it. session_id is plumbing for Phase 2 (chat per annotation) and
+// equals the annotation id by default.
+interface AnnotationRange {
+  start_line: number
+  start_offset: number
+  end_line: number
+  end_offset: number
+}
+interface Annotation {
+  id: string
+  session_id: string
+  range: AnnotationRange
+  snippet: string
+  comment: string
+  created_at: string
+  updated_at: string
+}
+
 let viewEl: HTMLElement
 let initialized = false
 let docs: DocSummary[] = []
@@ -47,7 +69,23 @@ let copyBtnEl: HTMLButtonElement | null = null
 let saveTimer: ReturnType<typeof setTimeout> | null = null
 let saveInFlight = false
 
+// Annotation state. The list is the source of truth in memory; the
+// overlay layer below the editor renders one or more thin underline
+// rects per annotation, positioned with Range.getClientRects. The
+// floating Comment button appears when a non-collapsed selection
+// covers some text; clicking it creates a new annotation and opens
+// the panel for it. The panel is a single floating element shared
+// across annotations — only one is visible at a time.
+let annotations: Annotation[] = []
+let overlayEl: HTMLElement | null = null
+let commentBtnEl: HTMLButtonElement | null = null
+let panelEl: HTMLElement | null = null
+let panelForId: string | null = null
+let annotationsSaveTimer: ReturnType<typeof setTimeout> | null = null
+let annotationsSaveInFlight = false
+
 const SAVE_DEBOUNCE_MS = 500
+const ANNOTATIONS_SAVE_DEBOUNCE_MS = 400
 const LAST_OPEN_KEY = 'poise-editor-last'
 
 function escapeHtml(s: string): string {
@@ -129,7 +167,23 @@ function renderShell(): string {
              whose font-size/line-height come from CSS. The native
              caret tracks rendered text directly — no mirror layer. -->
         <div class="editor-doc" id="editor-doc" contenteditable="true" spellcheck="true" data-empty="true"></div>
+        <!-- Annotation overlay: absolutely-positioned underline rects
+             live here, one per Range.getClientRects() result per
+             annotation. Behind the editor in z-order so the caret
+             stays selectable; the rects themselves use pointer-events
+             so clicks open the comment panel. -->
+        <div class="editor-annotations" id="editor-annotations" aria-hidden="true"></div>
       </div>
+      <!-- Floating Comment button: shown only when a non-collapsed
+           selection covers some text in the editor. Click → create
+           annotation + open panel. -->
+      <button type="button" class="editor-comment-btn" id="editor-comment-btn" hidden aria-label="Add comment">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2.5 4a1.5 1.5 0 0 1 1.5-1.5h6A1.5 1.5 0 0 1 11.5 4v4a1.5 1.5 0 0 1-1.5 1.5H6.5L4 12V9.5a1.5 1.5 0 0 1-1.5-1.5V4z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+      </button>
+      <!-- Comment panel: floating, anchored near the clicked
+           annotation. Shared across annotations — only one is open
+           at a time. -->
+      <div class="editor-annotation-panel" id="editor-annotation-panel" hidden role="dialog" aria-label="Annotation"></div>
     </main>
   `
 }
@@ -1059,6 +1113,7 @@ function placeCaretAtEnd() {
 async function loadDoc(slug: string) {
   if (!docEl) return
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; await flushSave() }
+  closePanel()
   try {
     const res = await fetch(`/api/editor/doc/${encodeURIComponent(slug)}`)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -1070,6 +1125,10 @@ async function loadDoc(slug: string) {
     setMetaForCurrent()
     docEl.focus()
     placeCaretAtEnd()
+    // Annotations live alongside the doc — load and render in parallel
+    // with the markdown so the underlines appear when the doc does.
+    await fetchAnnotations(currentSlug)
+    renderAnnotationOverlay()
   } catch (err) {
     console.error('[editor] loadDoc failed:', err)
   }
@@ -1189,6 +1248,372 @@ function scheduleSave() {
   setMeta('Editing…')
   if (saveTimer) clearTimeout(saveTimer)
   saveTimer = setTimeout(() => { void flushSave() }, SAVE_DEBOUNCE_MS)
+}
+
+// ── Annotations ──────────────────────────────────────────────────────
+//
+// Annotations are highlight + comment pairs anchored to ranges in the
+// doc. The list is fetched alongside loadDoc and persisted via a
+// debounced PUT. Ranges are stored as line + char-offset pairs but
+// re-anchored by snippet match on every render — so an annotation
+// survives line shifts above it (the caller adds/removes paragraphs
+// earlier in the doc) as long as the snippet remains uniquely
+// findable. If the snippet vanishes, the annotation orphans (no
+// overlay rendered, but the row stays in storage so the user's
+// comment text isn't silently lost).
+
+async function fetchAnnotations(slug: string): Promise<void> {
+  annotations = []
+  try {
+    const res = await fetch(`/api/editor/doc/${encodeURIComponent(slug)}/annotations`)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json()
+    annotations = Array.isArray(data.annotations) ? (data.annotations as Annotation[]) : []
+  } catch (err) {
+    console.error('[editor] fetchAnnotations failed:', err)
+    annotations = []
+  }
+}
+
+async function flushAnnotationsSave(): Promise<void> {
+  if (!currentSlug || annotationsSaveInFlight) return
+  annotationsSaveInFlight = true
+  const slug = currentSlug
+  const body = JSON.stringify({ annotations })
+  try {
+    const res = await fetch(`/api/editor/doc/${encodeURIComponent(slug)}/annotations`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  } catch (err) {
+    console.error('[editor] save annotations failed:', err)
+  } finally {
+    annotationsSaveInFlight = false
+  }
+}
+
+function scheduleAnnotationsSave(): void {
+  if (!currentSlug) return
+  if (annotationsSaveTimer) clearTimeout(annotationsSaveTimer)
+  annotationsSaveTimer = setTimeout(() => { void flushAnnotationsSave() }, ANNOTATIONS_SAVE_DEBOUNCE_MS)
+}
+
+// Build a DOM Range from an annotation's stored line + char-offset
+// pair. Walks the editor-doc's children to the nominated line, then
+// counts text-content chars up to the offset (counting hidden marker
+// chars too — this matches the offset model annotations were stored
+// with). Returns null if the line index is out of bounds, which is
+// treated as orphaned at the caller.
+function rangeForAnnotation(a: Annotation): Range | null {
+  if (!docEl) return null
+  const lines = Array.from(docEl.children) as HTMLElement[]
+  const startLine = lines[a.range.start_line]
+  const endLine   = lines[a.range.end_line]
+  if (!startLine || !endLine) return null
+  const startNode = textNodeAtOffset(startLine, a.range.start_offset)
+  const endNode   = textNodeAtOffset(endLine,   a.range.end_offset)
+  if (!startNode || !endNode) return null
+  try {
+    const range = document.createRange()
+    range.setStart(startNode.node, startNode.offset)
+    range.setEnd(endNode.node, endNode.offset)
+    return range
+  } catch {
+    return null
+  }
+}
+
+// Walk text descendants of a line and find the (text-node, offset)
+// pair that corresponds to a given char offset within line.textContent.
+// Returns null if the offset is past the end of the line.
+function textNodeAtOffset(line: HTMLElement, offset: number): { node: Node, offset: number } | null {
+  const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT)
+  let acc = 0
+  let last: Node | null = null
+  let node: Node | null
+  while ((node = walker.nextNode())) {
+    const len = (node.textContent || '').length
+    if (acc + len >= offset) return { node, offset: offset - acc }
+    acc += len
+    last = node
+  }
+  // Past the end — pin to the end of the last text node so a Range
+  // can still be built (rather than refusing it) for end-of-line cases.
+  if (last) return { node: last, offset: (last.textContent || '').length }
+  return null
+}
+
+// Best-effort re-anchoring: returns the (start_line, start_offset,
+// end_line, end_offset) where the snippet currently lives, or null if
+// it can't be found. The recorded position is checked first; if the
+// text there matches, no change. Otherwise we walk the doc's lines for
+// the first occurrence of the snippet and take that. No occurrence ⇒
+// the annotation has orphaned.
+function reAnchorAnnotation(a: Annotation): AnnotationRange | null {
+  if (!docEl) return null
+  const lines = Array.from(docEl.children) as HTMLElement[]
+  const startLine = lines[a.range.start_line]
+  const endLine   = lines[a.range.end_line]
+  if (startLine && endLine && a.range.start_line === a.range.end_line) {
+    const text = startLine.textContent || ''
+    const slice = text.slice(a.range.start_offset, a.range.end_offset)
+    if (slice === a.snippet) return a.range          // fast path: still in place
+  }
+  // Snippet drifted — search the whole doc for a single-line match.
+  // We don't try to rebind multi-line snippets in this pass; those
+  // simply orphan if they shift, until the user re-annotates.
+  if (a.snippet.includes('\n')) return null
+  for (let i = 0; i < lines.length; i++) {
+    const text = lines[i].textContent || ''
+    const idx = text.indexOf(a.snippet)
+    if (idx >= 0) {
+      return { start_line: i, start_offset: idx, end_line: i, end_offset: idx + a.snippet.length }
+    }
+  }
+  return null
+}
+
+// Render the annotation underline overlay. Each annotation can occupy
+// multiple visual rectangles (multi-line ranges, or wrapped lines), so
+// we call Range.getClientRects() and emit a thin underline div for
+// each. The container is positioned relative to .editor-page; rects
+// are translated into editor-page-local coordinates so they stay
+// pinned even as the page scrolls. Re-rendered after every reclassify
+// (text edits) and on window resize.
+function renderAnnotationOverlay(): void {
+  if (!docEl || !overlayEl) return
+  overlayEl.innerHTML = ''
+  if (!annotations.length) return
+  const page = overlayEl.parentElement as HTMLElement
+  if (!page) return
+  const pageRect = page.getBoundingClientRect()
+
+  // Re-anchor each annotation. Three outcomes per annotation:
+  //   - found at recorded position: render as-is.
+  //   - found at a new position: update + persist + render at new pos.
+  //   - not found at all: orphan — don't render (the row stays in
+  //     storage so the user's comment isn't silently lost; if the
+  //     snippet reappears on a later edit, the underline returns).
+  let anyChanged = false
+  const orphans = new Set<string>()
+  for (const a of annotations) {
+    const fresh = reAnchorAnnotation(a)
+    if (!fresh) { orphans.add(a.id); continue }
+    if (fresh.start_line !== a.range.start_line
+        || fresh.start_offset !== a.range.start_offset
+        || fresh.end_line   !== a.range.end_line
+        || fresh.end_offset !== a.range.end_offset) {
+      a.range = fresh
+      a.updated_at = new Date().toISOString()
+      anyChanged = true
+    }
+  }
+  if (anyChanged) scheduleAnnotationsSave()
+
+  for (const a of annotations) {
+    if (orphans.has(a.id)) continue
+    const range = rangeForAnnotation(a)
+    if (!range) continue
+    const rects = Array.from(range.getClientRects())
+    for (const rect of rects) {
+      if (rect.width < 0.5) continue
+      const mark = document.createElement('div')
+      mark.className = 'annotation-mark'
+      mark.dataset.annId = a.id
+      mark.style.left   = (rect.left   - pageRect.left) + 'px'
+      mark.style.top    = (rect.top    - pageRect.top)  + 'px'
+      mark.style.width  = rect.width  + 'px'
+      mark.style.height = rect.height + 'px'
+      mark.title = a.comment ? a.comment.slice(0, 200) : 'Comment'
+      overlayEl.appendChild(mark)
+    }
+  }
+}
+
+// Compute (start_line, start_offset, end_line, end_offset) and the
+// text snippet for the current selection inside the editor. Returns
+// null if the selection is collapsed, doesn't span text, or escapes
+// the editor-doc element.
+function selectionAsAnnotationRange(): { range: AnnotationRange, snippet: string } | null {
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0) return null
+  const range = sel.getRangeAt(0)
+  if (range.collapsed) return null
+  if (!docEl) return null
+  if (!docEl.contains(range.commonAncestorContainer) && range.commonAncestorContainer !== docEl) return null
+
+  const lines = Array.from(docEl.children) as HTMLElement[]
+  function locate(node: Node, off: number): { line: number, offset: number } | null {
+    // Find the line div containing `node` (or `node` itself if it's a line)
+    let l: Node | null = node
+    while (l && l.parentNode !== docEl) l = l.parentNode
+    if (!l) return null
+    const lineIdx = lines.indexOf(l as HTMLElement)
+    if (lineIdx < 0) return null
+    return { line: lineIdx, offset: offsetInLineFor(l as HTMLElement, node, off) }
+  }
+  const s = locate(range.startContainer, range.startOffset)
+  const e = locate(range.endContainer,   range.endOffset)
+  if (!s || !e) return null
+  if (s.line > e.line || (s.line === e.line && s.offset >= e.offset)) return null
+
+  // Build the snippet from the lines' textContent so it captures the
+  // visible characters the user highlighted (markers included — they
+  // round-trip with the source).
+  let snippet: string
+  if (s.line === e.line) {
+    snippet = (lines[s.line].textContent || '').slice(s.offset, e.offset)
+  } else {
+    const parts: string[] = []
+    parts.push((lines[s.line].textContent || '').slice(s.offset))
+    for (let i = s.line + 1; i < e.line; i++) parts.push(lines[i].textContent || '')
+    parts.push((lines[e.line].textContent || '').slice(0, e.offset))
+    snippet = parts.join('\n')
+  }
+
+  return {
+    range: { start_line: s.line, start_offset: s.offset, end_line: e.line, end_offset: e.offset },
+    snippet,
+  }
+}
+
+// Show or hide the floating Comment button based on the current
+// selection. Anchored just above-right of the selection's end rect.
+function updateCommentButtonForSelection(): void {
+  if (!commentBtnEl || !docEl) return
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0 || sel.getRangeAt(0).collapsed) {
+    commentBtnEl.hidden = true
+    return
+  }
+  const range = sel.getRangeAt(0)
+  if (!docEl.contains(range.commonAncestorContainer) && range.commonAncestorContainer !== docEl) {
+    commentBtnEl.hidden = true
+    return
+  }
+  const rects = range.getClientRects()
+  if (rects.length === 0) { commentBtnEl.hidden = true; return }
+  const last = rects[rects.length - 1]
+  // Anchor just above the right end of the selection.
+  commentBtnEl.style.left = (last.right + window.scrollX + 4) + 'px'
+  commentBtnEl.style.top  = (last.top + window.scrollY - 28) + 'px'
+  commentBtnEl.hidden = false
+}
+
+// Create a new annotation from the current selection, append to the
+// list, persist, and immediately open the panel for it so the user
+// can type a comment.
+function createAnnotationFromSelection(): void {
+  if (!currentSlug) return
+  const got = selectionAsAnnotationRange()
+  if (!got) return
+  const id = 'ann-' + Math.random().toString(36).slice(2, 10)
+  const now = new Date().toISOString()
+  const a: Annotation = {
+    id,
+    session_id: id,
+    range: got.range,
+    snippet: got.snippet,
+    comment: '',
+    created_at: now,
+    updated_at: now,
+  }
+  annotations.push(a)
+  // Collapse the selection so the floating button hides naturally and
+  // the underline overlay can be drawn over the now-quiet selection.
+  window.getSelection()?.removeAllRanges()
+  if (commentBtnEl) commentBtnEl.hidden = true
+  scheduleAnnotationsSave()
+  renderAnnotationOverlay()
+  openPanelForAnnotation(id)
+}
+
+function deleteAnnotation(id: string): void {
+  annotations = annotations.filter((a) => a.id !== id)
+  scheduleAnnotationsSave()
+  renderAnnotationOverlay()
+  closePanel()
+}
+
+function updateAnnotationComment(id: string, comment: string): void {
+  const a = annotations.find((x) => x.id === id)
+  if (!a) return
+  if (a.comment === comment) return
+  a.comment = comment
+  a.updated_at = new Date().toISOString()
+  scheduleAnnotationsSave()
+}
+
+// Show the comment panel for the given annotation. Anchored below the
+// annotation's first rectangle (or above if there's no room below).
+function openPanelForAnnotation(id: string): void {
+  if (!panelEl) return
+  const a = annotations.find((x) => x.id === id)
+  if (!a) return
+  panelForId = id
+  panelEl.innerHTML = `
+    <textarea class="editor-annotation-text" placeholder="Add a comment…" rows="3"></textarea>
+    <div class="editor-annotation-row">
+      <span class="editor-annotation-snippet" title="${escapeHtml(a.snippet)}">${escapeHtml(a.snippet.slice(0, 80))}${a.snippet.length > 80 ? '…' : ''}</span>
+      <button type="button" class="editor-annotation-delete" aria-label="Delete">${ICON_TRASH}</button>
+    </div>
+  `
+  const ta = panelEl.querySelector<HTMLTextAreaElement>('.editor-annotation-text')!
+  ta.value = a.comment
+  ta.addEventListener('input', () => updateAnnotationComment(id, ta.value))
+  panelEl.querySelector<HTMLButtonElement>('.editor-annotation-delete')!
+    .addEventListener('click', () => deleteAnnotation(id))
+
+  // Position the panel near the annotation. Use the annotation's first
+  // rect for anchoring; if it would push off the bottom edge, flip
+  // above the annotation instead.
+  const range = rangeForAnnotation(a)
+  panelEl.hidden = false
+  if (range) {
+    const rect = range.getBoundingClientRect()
+    const margin = 8
+    const panelRect = panelEl.getBoundingClientRect()
+    const wouldOverflowBottom = rect.bottom + margin + panelRect.height > window.innerHeight
+    const top = wouldOverflowBottom
+      ? Math.max(margin, rect.top - margin - panelRect.height)
+      : rect.bottom + margin
+    panelEl.style.left = (rect.left + window.scrollX) + 'px'
+    panelEl.style.top  = (top + window.scrollY) + 'px'
+  }
+  ta.focus()
+  setTimeout(() => {
+    document.addEventListener('click', onPanelOutsideClick)
+    document.addEventListener('keydown', onPanelKeydown)
+  }, 0)
+}
+
+function closePanel(): void {
+  if (!panelEl) return
+  if (panelEl.hidden && !panelForId) return
+  panelEl.hidden = true
+  panelEl.innerHTML = ''
+  panelForId = null
+  document.removeEventListener('click', onPanelOutsideClick)
+  document.removeEventListener('keydown', onPanelKeydown)
+}
+
+function onPanelOutsideClick(e: MouseEvent): void {
+  if (!panelEl) return
+  const t = e.target as Node
+  if (panelEl.contains(t)) return
+  // Allow clicks on annotation marks to switch panels (handled by the
+  // overlay click delegate); other clicks close the panel.
+  if ((t as HTMLElement).classList?.contains('annotation-mark')) return
+  closePanel()
+}
+
+function onPanelKeydown(e: KeyboardEvent): void {
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    closePanel()
+  }
 }
 
 function attachHandlers() {
@@ -1347,7 +1772,50 @@ function attachHandlers() {
     reclassifyLines()
     updateEmptyState()
     scheduleSave()
+    // Re-render annotation overlay AFTER reclassifyLines: the line
+    // tree has been canonicalised, so DOM ranges and getClientRects
+    // produce the right pixel positions for the underlines.
+    renderAnnotationOverlay()
   })
+
+  // Show / hide the floating Comment button based on the live
+  // selection. selectionchange fires on every cursor move, so this
+  // also handles the case where the user starts a selection with
+  // shift+arrow and grows it.
+  document.addEventListener('selectionchange', () => {
+    // Only react when the editor is the focused element — avoids
+    // showing the button while the user has selected text in some
+    // other view.
+    if (document.activeElement !== docEl) {
+      if (commentBtnEl) commentBtnEl.hidden = true
+      return
+    }
+    updateCommentButtonForSelection()
+  })
+
+  commentBtnEl = viewEl.querySelector<HTMLButtonElement>('#editor-comment-btn')
+  commentBtnEl?.addEventListener('mousedown', (e) => {
+    // mousedown (not click) so the action fires before the editor
+    // sees the click event and collapses the selection itself.
+    e.preventDefault()
+    createAnnotationFromSelection()
+  })
+
+  overlayEl = viewEl.querySelector<HTMLElement>('#editor-annotations')
+  overlayEl?.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement
+    const id = target?.dataset?.annId
+    if (!id) return
+    e.stopPropagation()
+    openPanelForAnnotation(id)
+  })
+
+  panelEl = viewEl.querySelector<HTMLElement>('#editor-annotation-panel')
+
+  // Re-position annotation overlays on viewport changes. Resize and
+  // scroll both invalidate the cached rects; they're cheap to redraw
+  // (a few transient absolute divs), so we do it eagerly.
+  window.addEventListener('resize', renderAnnotationOverlay)
 
   docEl!.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 's') {

@@ -114,6 +114,12 @@ export async function deleteDoc(slug: string): Promise<{ ok: true }> {
   const path = fileFor(slug)
   try { await unlink(path) }
   catch (err: any) { if (err.code !== 'ENOENT') throw err }
+  // Take any side-car annotations with the doc. Both deletes are
+  // best-effort (ENOENT on the side-car is normal — most docs won't
+  // have annotations).
+  const annPath = annotationsFileFor(slug)
+  try { await unlink(annPath) }
+  catch (err: any) { if (err.code !== 'ENOENT') throw err }
   return { ok: true }
 }
 
@@ -123,4 +129,92 @@ export async function deleteDoc(slug: string): Promise<{ ok: true }> {
 export function newSlug(): string {
   const stamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)
   return `untitled-${stamp}`
+}
+
+// ── Annotations ───────────────────────────────────────────────────────
+//
+// Each editor doc can carry side-car annotations: range-anchored notes
+// the writer attaches to specific spans of text. Stored alongside the
+// .md file as `<slug>.annotations.json`. The markdown file stays
+// pristine (no inline metadata pollution) so it round-trips cleanly
+// through git/Dropbox/etc.
+//
+// Range anchoring: the annotation pins to a (line, char-offset) pair
+// at write time AND records a snippet of the highlighted text. On
+// load we first try the recorded coords; if the snippet there has
+// drifted (the user edited above and lines shifted), the front-end
+// searches for the snippet in the current doc and rebinds. Genuinely
+// orphaned annotations stay in storage but render as inert.
+//
+// Annotation ids and session_ids are caller-supplied (the front-end
+// mints them) — keeping them client-owned means we don't need a
+// generation endpoint round-trip to create one. A single session_id
+// per annotation lets each comment grow into a long-running chat
+// thread later (Phase 2) by passing it to agent-interface --chat.
+
+const MAX_ANNOTATIONS_BYTES = 1 * 1024 * 1024     // 1 MB / doc — many hundreds of comments
+
+export interface AnnotationRange {
+  start_line: number
+  start_offset: number
+  end_line: number
+  end_offset: number
+}
+
+export interface Annotation {
+  id: string
+  session_id: string
+  range: AnnotationRange
+  snippet: string         // the highlighted text at create time, used for re-anchoring
+  comment: string
+  created_at: string
+  updated_at: string
+}
+
+export interface AnnotationsFile {
+  annotations: Annotation[]
+}
+
+function annotationsFileFor(slug: string): string {
+  const safe = sanitizeSlug(slug)
+  if (!safe) throw new Error('invalid slug')
+  return join(EDITOR_DIR, safe + '.annotations.json')
+}
+
+export async function readAnnotations(slug: string): Promise<AnnotationsFile> {
+  await ensureDir()
+  const path = annotationsFileFor(slug)
+  try {
+    const raw = await readFile(path, 'utf-8')
+    const parsed = JSON.parse(raw) as Partial<AnnotationsFile>
+    const list = Array.isArray(parsed.annotations) ? parsed.annotations : []
+    return { annotations: list }
+  } catch (err: any) {
+    if (err.code === 'ENOENT') return { annotations: [] }
+    // Corrupt JSON or unreadable file: don't silently lose user data.
+    // The front-end can decide whether to overwrite on next save.
+    throw err
+  }
+}
+
+export async function writeAnnotations(slug: string, file: AnnotationsFile): Promise<{ ok: true }> {
+  if (!file || !Array.isArray(file.annotations)) throw new Error('annotations must be an array')
+  const body = JSON.stringify({ annotations: file.annotations }, null, 2)
+  if (Buffer.byteLength(body, 'utf-8') > MAX_ANNOTATIONS_BYTES) {
+    throw new Error(`annotations too large (max ${MAX_ANNOTATIONS_BYTES} bytes)`)
+  }
+  await ensureDir()
+  const path = annotationsFileFor(slug)
+  await writeFile(path, body, 'utf-8')
+  return { ok: true }
+}
+
+// Annotations follow the doc — when the doc is deleted, the side-car
+// goes with it. Best-effort: if the side-car is already gone we
+// don't surface that.
+export async function deleteAnnotations(slug: string): Promise<{ ok: true }> {
+  const path = annotationsFileFor(slug)
+  try { await unlink(path) }
+  catch (err: any) { if (err.code !== 'ENOENT') throw err }
+  return { ok: true }
 }

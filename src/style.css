@@ -3533,3 +3533,129 @@ body.editor-writer-mode .editor-bar { margin-bottom: 0; }
    without hunting for it. */
 body.editor-writer-mode .editor-focus-btn { color: var(--text-tertiary); }
 body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
+
+/* ── Annotations ──
+   Range-anchored notes that the writer attaches to spans of text in
+   the doc. Rendered as a thin underline overlay on top of the
+   contenteditable; clicking opens a small floating panel with the
+   editable comment. The overlay layer sits inside .editor-page (which
+   is position:relative) so its absolute children inherit page-local
+   coordinates and stay pinned during scroll. The marks are
+   pointer-events:auto so clicks open the panel — typing into the
+   highlighted text still works because contenteditable handles
+   keyboard input regardless of click target. */
+.editor-annotations {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  pointer-events: none;     /* let parent clicks fall through; marks override */
+  z-index: 2;
+}
+.annotation-mark {
+  position: absolute;
+  pointer-events: auto;
+  cursor: pointer;
+  /* The underline lives just below the text baseline of the marked
+     range. Background is transparent so the text underneath shows
+     through; only the bottom edge carries a thin colored stripe. The
+     subtle hover effect helps the reader notice clickable marks
+     without the prose itself feeling decorated. */
+  background: transparent;
+  border-bottom: 2px solid color-mix(in srgb, var(--a4, #c89b3c) 65%, transparent);
+}
+.annotation-mark:hover {
+  background: color-mix(in srgb, var(--a4, #c89b3c) 14%, transparent);
+}
+
+/* Floating Comment button — appears just above-right of the live
+   selection inside the editor. position:fixed because the JS sets
+   page-level coordinates from getBoundingClientRect; combined with
+   z-index we float over the editor content. */
+.editor-comment-btn {
+  position: fixed;
+  z-index: 50;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface, #fff);
+  color: var(--text-secondary);
+  border: 1px solid var(--border, rgba(0,0,0,0.12));
+  border-radius: 999px;
+  padding: 0;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  transition: color 0.12s ease, transform 0.12s ease;
+}
+.editor-comment-btn:hover {
+  color: var(--text);
+  transform: scale(1.08);
+}
+.editor-comment-btn[hidden] { display: none; }
+
+/* Comment panel — single, shared, anchored next to the clicked
+   annotation. Fixed so it stays put on scroll; the JS recomputes
+   anchor position when reopened. Hidden via the [hidden] attribute
+   so the same selector works whether the panel exists yet or not. */
+.editor-annotation-panel {
+  position: fixed;
+  z-index: 60;
+  width: 320px;
+  max-width: calc(100vw - 32px);
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, rgba(0,0,0,0.12));
+  border-radius: 8px;
+  padding: var(--sp-3);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+}
+.editor-annotation-panel[hidden] { display: none; }
+.editor-annotation-text {
+  width: 100%;
+  min-height: 60px;
+  border: 1px solid var(--border, rgba(0,0,0,0.12));
+  border-radius: 4px;
+  padding: 6px 8px;
+  font: inherit;
+  background: transparent;
+  color: var(--text);
+  resize: vertical;
+}
+.editor-annotation-text:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--a4, #c89b3c) 60%, var(--border));
+}
+.editor-annotation-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.editor-annotation-snippet {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.editor-annotation-delete {
+  background: transparent;
+  border: none;
+  padding: 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.editor-annotation-delete:hover {
+  color: var(--a5);
+  background: var(--hover);
+}
