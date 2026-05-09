@@ -1546,18 +1546,203 @@ function updateAnnotationComment(id: string, comment: string): void {
   scheduleAnnotationsSave()
 }
 
+// ── Annotation panel chat state ──
+//
+// Each annotation carries a session_id; opening the panel kicks off a
+// fetch + poll loop against /api/chat?session=<id>, mirroring what
+// chat-pane.ts does for the dedicated chat view but smaller and
+// scoped to the panel. The panel is single-instance — only one
+// annotation's chat is live at a time, so we don't need per-id state
+// dictionaries; the timer + caches reset on every open/close.
+interface PanelChatEntry {
+  id: string
+  session_id: string
+  prompt: string
+  started_at: string
+  status: string
+  response: string
+  error: string
+}
+let panelMessages: PanelChatEntry[] = []
+const panelReplies: Map<string, string> = new Map()
+let panelPollTimer: ReturnType<typeof setTimeout> | null = null
+let panelPollInflight = false
+
+const PANEL_FAST_POLL_MS = 1500    // matches chat-pane's running cadence
+const PANEL_SLOW_POLL_MS = 8000    // idle cadence
+
+async function fetchPanelReply(hash: string): Promise<string> {
+  const res = await fetch(`/api/agent-response/${encodeURIComponent(hash)}`)
+  if (!res.ok) throw new Error(`agent-response ${res.status}`)
+  const data = await res.json()
+  return String(data.body || '')
+}
+
+async function refreshPanelChat(sessionId: string): Promise<void> {
+  if (panelPollInflight) return
+  panelPollInflight = true
+  try {
+    const res = await fetch(`/api/chat?session=${encodeURIComponent(sessionId)}`)
+    if (!res.ok) return
+    const data = await res.json()
+    panelMessages = (data.messages || []) as PanelChatEntry[]
+    // Pull bodies for every newly-completed entry whose hash we
+    // haven't cached yet. Tiny payloads, fire in parallel.
+    const toFetch = panelMessages.filter((m) => m.status === 'completed' && m.response && !panelReplies.has(m.id))
+    await Promise.all(toFetch.map(async (m) => {
+      try { panelReplies.set(m.id, await fetchPanelReply(m.response)) } catch { /* leave missing */ }
+    }))
+    renderPanelChat()
+  } finally {
+    panelPollInflight = false
+  }
+}
+
+function schedulePanelPoll(sessionId: string): void {
+  if (panelPollTimer) clearTimeout(panelPollTimer)
+  if (!panelEl || panelEl.hidden || panelForId == null) return
+  const hasInflight = panelMessages.some((m) => m.status === 'running')
+  const delay = hasInflight ? PANEL_FAST_POLL_MS : PANEL_SLOW_POLL_MS
+  panelPollTimer = setTimeout(async () => {
+    await refreshPanelChat(sessionId)
+    schedulePanelPoll(sessionId)
+  }, delay)
+}
+
+function stopPanelPoll(): void {
+  if (panelPollTimer) { clearTimeout(panelPollTimer); panelPollTimer = null }
+}
+
+function renderPanelChat(): void {
+  if (!panelEl) return
+  const log = panelEl.querySelector<HTMLElement>('.editor-annotation-chat-log')
+  if (!log) return
+  if (panelMessages.length === 0) {
+    log.innerHTML = '<div class="editor-annotation-chat-empty">Ask the agent about this passage…</div>'
+    return
+  }
+  const parts: string[] = []
+  for (const m of panelMessages) {
+    parts.push(`
+      <div class="editor-annotation-chat-msg editor-annotation-chat-user">
+        <div class="editor-annotation-chat-body">${escapeHtml(m.prompt)}</div>
+      </div>
+    `)
+    const reply = panelReplies.get(m.id)
+    if (m.status === 'running') {
+      parts.push(`
+        <div class="editor-annotation-chat-msg editor-annotation-chat-agent">
+          <div class="chat-thinking"><span></span><span></span><span></span></div>
+        </div>
+      `)
+    } else if (m.status === 'failed') {
+      parts.push(`
+        <div class="editor-annotation-chat-msg editor-annotation-chat-agent editor-annotation-chat-error">
+          <div class="editor-annotation-chat-body">${escapeHtml(m.error || 'failed')}</div>
+        </div>
+      `)
+    } else if (reply !== undefined) {
+      parts.push(`
+        <div class="editor-annotation-chat-msg editor-annotation-chat-agent">
+          <pre class="editor-annotation-chat-body editor-annotation-chat-mono">${escapeHtml(reply)}</pre>
+        </div>
+      `)
+    } else if (m.response) {
+      parts.push(`
+        <div class="editor-annotation-chat-msg editor-annotation-chat-agent">
+          <div class="chat-thinking"><span></span><span></span><span></span></div>
+        </div>
+      `)
+    }
+  }
+  log.innerHTML = parts.join('')
+  log.scrollTop = log.scrollHeight
+}
+
+async function sendPanelChat(sessionId: string, snippet: string): Promise<void> {
+  if (!panelEl) return
+  const input = panelEl.querySelector<HTMLTextAreaElement>('.editor-annotation-chat-input')
+  const sendBtn = panelEl.querySelector<HTMLButtonElement>('.editor-annotation-chat-send')
+  if (!input || !sendBtn) return
+  const text = input.value.trim()
+  if (!text) return
+  sendBtn.disabled = true
+  input.disabled = true
+  // Prefix the message with the highlighted snippet so the agent has
+  // immediate context — the chat session might span weeks; the
+  // snippet is what the comment is "about". We only do this when
+  // there is no existing transcript for this session — once the
+  // conversation has started, the agent's session memory carries it.
+  const prefixed = panelMessages.length === 0
+    ? `(About: "${snippet.replace(/"/g, '\\"')}")\n\n${text}`
+    : text
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session: sessionId, message: prefixed }),
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    input.value = ''
+    autoResizePanelInput()
+    // Optimistic placeholder so the user's bubble lands immediately
+    // — the next refresh reconciles against the real row.
+    panelMessages.push({
+      id: '__optimistic-' + Date.now(),
+      session_id: sessionId,
+      prompt: prefixed,
+      started_at: new Date().toISOString(),
+      status: 'running',
+      response: '',
+      error: '',
+    })
+    renderPanelChat()
+    // Pull soon — agent-interface needs a moment to insert the row.
+    window.setTimeout(() => { void refreshPanelChat(sessionId).then(() => schedulePanelPoll(sessionId)) }, 800)
+  } catch (err) {
+    console.error('[editor] sendPanelChat failed:', err)
+  } finally {
+    sendBtn.disabled = false
+    input.disabled = false
+    input.focus()
+  }
+}
+
+function autoResizePanelInput(): void {
+  if (!panelEl) return
+  const input = panelEl.querySelector<HTMLTextAreaElement>('.editor-annotation-chat-input')
+  if (!input) return
+  input.style.height = 'auto'
+  input.style.height = Math.min(120, input.scrollHeight) + 'px'
+}
+
 // Show the comment panel for the given annotation. Anchored below the
 // annotation's first rectangle (or above if there's no room below).
+// Two stacked surfaces inside:
+//   - The user's editable comment (top): their thinking, autosaved.
+//   - A chat thread (bottom): a long-running session keyed on
+//     annotation.session_id, fetched + polled the same way as the
+//     dedicated chat pane. The first message gets the highlighted
+//     snippet prepended so the agent has context.
 function openPanelForAnnotation(id: string): void {
   if (!panelEl) return
   const a = annotations.find((x) => x.id === id)
   if (!a) return
   panelForId = id
+  panelMessages = []
+  panelReplies.clear()
   panelEl.innerHTML = `
-    <textarea class="editor-annotation-text" placeholder="Add a comment…" rows="3"></textarea>
     <div class="editor-annotation-row">
       <span class="editor-annotation-snippet" title="${escapeHtml(a.snippet)}">${escapeHtml(a.snippet.slice(0, 80))}${a.snippet.length > 80 ? '…' : ''}</span>
       <button type="button" class="editor-annotation-delete" aria-label="Delete">${ICON_TRASH}</button>
+    </div>
+    <textarea class="editor-annotation-text" placeholder="Add a comment…" rows="3"></textarea>
+    <div class="editor-annotation-chat-log" aria-live="polite"></div>
+    <div class="editor-annotation-chat-compose">
+      <textarea class="editor-annotation-chat-input" placeholder="Ask…" rows="1"></textarea>
+      <button type="button" class="editor-annotation-chat-send" aria-label="Send">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7l10-4-4 10-2-4-4-2z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+      </button>
     </div>
   `
   const ta = panelEl.querySelector<HTMLTextAreaElement>('.editor-annotation-text')!
@@ -1565,6 +1750,17 @@ function openPanelForAnnotation(id: string): void {
   ta.addEventListener('input', () => updateAnnotationComment(id, ta.value))
   panelEl.querySelector<HTMLButtonElement>('.editor-annotation-delete')!
     .addEventListener('click', () => deleteAnnotation(id))
+
+  const input = panelEl.querySelector<HTMLTextAreaElement>('.editor-annotation-chat-input')!
+  const sendBtn = panelEl.querySelector<HTMLButtonElement>('.editor-annotation-chat-send')!
+  input.addEventListener('input', autoResizePanelInput)
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      void sendPanelChat(a.session_id, a.snippet)
+    }
+  })
+  sendBtn.addEventListener('click', () => { void sendPanelChat(a.session_id, a.snippet) })
 
   // Position the panel near the annotation. Use the annotation's first
   // rect for anchoring; if it would push off the bottom edge, flip
@@ -1583,6 +1779,10 @@ function openPanelForAnnotation(id: string): void {
     panelEl.style.top  = (top + window.scrollY) + 'px'
   }
   ta.focus()
+
+  // Kick off chat fetch + polling for this session.
+  void refreshPanelChat(a.session_id).then(() => schedulePanelPoll(a.session_id))
+
   setTimeout(() => {
     document.addEventListener('click', onPanelOutsideClick)
     document.addEventListener('keydown', onPanelKeydown)
@@ -1595,6 +1795,9 @@ function closePanel(): void {
   panelEl.hidden = true
   panelEl.innerHTML = ''
   panelForId = null
+  panelMessages = []
+  panelReplies.clear()
+  stopPanelPoll()
   document.removeEventListener('click', onPanelOutsideClick)
   document.removeEventListener('keydown', onPanelKeydown)
 }

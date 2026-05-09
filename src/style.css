@@ -3596,12 +3596,16 @@ body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
 /* Comment panel — single, shared, anchored next to the clicked
    annotation. Fixed so it stays put on scroll; the JS recomputes
    anchor position when reopened. Hidden via the [hidden] attribute
-   so the same selector works whether the panel exists yet or not. */
+   so the same selector works whether the panel exists yet or not.
+   Stacks three surfaces vertically: snippet header, the writer's
+   own editable comment, then the chat thread (transcript + composer)
+   that's a long-running agent session keyed on the annotation's id. */
 .editor-annotation-panel {
   position: fixed;
   z-index: 60;
-  width: 320px;
+  width: 380px;
   max-width: calc(100vw - 32px);
+  max-height: 70vh;
   background: var(--surface, #fff);
   border: 1px solid var(--border, rgba(0,0,0,0.12));
   border-radius: 8px;
@@ -3612,6 +3616,7 @@ body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
   gap: var(--sp-2);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   font-size: 13px;
+  overflow: hidden;
 }
 .editor-annotation-panel[hidden] { display: none; }
 .editor-annotation-text {
@@ -3659,3 +3664,98 @@ body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
   color: var(--a5);
   background: var(--hover);
 }
+
+/* Chat transcript inside the annotation panel. Scrollable, capped
+   in height so a long thread doesn't push the composer out of
+   reach. Bubbles are styled like Confab's chat-pane but compacted
+   for the narrower panel. */
+.editor-annotation-chat-log {
+  flex: 1 1 auto;
+  min-height: 60px;
+  max-height: 240px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--border, rgba(0,0,0,0.08));
+  padding-top: var(--sp-2);
+}
+.editor-annotation-chat-empty {
+  color: var(--text-tertiary);
+  font-style: italic;
+  font-size: 12px;
+  text-align: center;
+  padding: var(--sp-2);
+}
+.editor-annotation-chat-msg {
+  display: flex;
+}
+.editor-annotation-chat-user { justify-content: flex-end; }
+.editor-annotation-chat-agent { justify-content: flex-start; }
+.editor-annotation-chat-body {
+  max-width: 85%;
+  padding: 6px 10px;
+  border-radius: 12px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.editor-annotation-chat-mono {
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  margin: 0;
+}
+.editor-annotation-chat-user .editor-annotation-chat-body {
+  background: color-mix(in srgb, var(--a4, #c89b3c) 16%, transparent);
+  color: var(--text);
+}
+.editor-annotation-chat-agent .editor-annotation-chat-body {
+  background: var(--hover, rgba(0,0,0,0.04));
+  color: var(--text);
+}
+.editor-annotation-chat-error .editor-annotation-chat-body {
+  background: color-mix(in srgb, var(--a5, #c0392b) 12%, transparent);
+  color: var(--a5, #c0392b);
+}
+
+/* Composer row — single-line autosizing textarea + send button. */
+.editor-annotation-chat-compose {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: flex-end;
+}
+.editor-annotation-chat-input {
+  flex: 1 1 auto;
+  resize: none;
+  border: 1px solid var(--border, rgba(0,0,0,0.12));
+  border-radius: 16px;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 13px;
+  background: transparent;
+  color: var(--text);
+  max-height: 120px;
+  line-height: 1.4;
+}
+.editor-annotation-chat-input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--a4, #c89b3c) 60%, var(--border));
+}
+.editor-annotation-chat-send {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--text);
+  color: var(--surface, #fff);
+  border: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+.editor-annotation-chat-send:hover { opacity: 0.85; }
+.editor-annotation-chat-send:disabled { opacity: 0.4; cursor: not-allowed; }
