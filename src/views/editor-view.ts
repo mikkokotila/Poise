@@ -145,16 +145,166 @@ function lineKindFor(text: string): 'h1' | 'h2' | 'body' {
   return 'body'
 }
 
-// Build a fresh line element. Empty lines need a <br> filler so they
-// retain row height in contenteditable; non-empty lines hold a single
-// text node so cursor offsets match string offsets one-to-one.
+// The visible-prefix length each kind hides. CSS sets the marker span
+// to `display: none`, so the user only sees the "rest" of the line.
+function markerLengthFor(kind: 'h1' | 'h2' | 'body'): number {
+  return kind === 'h1' ? 2 : kind === 'h2' ? 3 : 0
+}
+
+// Build a fresh line element. Lines whose markdown starts with `# ` /
+// `## ` get the marker wrapped in a hidden <span class="md-marker">
+// so the user sees only the heading text — the marker still lives in
+// textContent so save/copy round-trip the true markdown. Empty lines
+// (and empty headings, where the rest is "") get a <br> filler so
+// contenteditable gives them row height; non-empty rest content goes
+// in as a single text node so cursor offsets remain straightforward.
 function buildLineEl(text: string): HTMLDivElement {
   const div = document.createElement('div')
   div.className = 'editor-line'
-  div.dataset.kind = lineKindFor(text)
-  if (text === '') div.appendChild(document.createElement('br'))
-  else             div.textContent = text
+  const kind = lineKindFor(text)
+  div.dataset.kind = kind
+  const prefixLen = markerLengthFor(kind)
+  const prefix = text.slice(0, prefixLen)
+  const rest = text.slice(prefixLen)
+  if (prefix) {
+    const span = document.createElement('span')
+    span.className = 'md-marker'
+    span.textContent = prefix
+    div.appendChild(span)
+  }
+  if (rest === '') div.appendChild(document.createElement('br'))
+  else             div.appendChild(document.createTextNode(rest))
   return div
+}
+
+// Cursor-offset helpers — work in textContent character coordinates
+// (i.e. counting hidden marker chars too) so we can preserve cursor
+// position across line rebuilds. The marker span participates in the
+// offset count: if the cursor was at offset 2 in `# Hello`, that's
+// just-after the marker in DOM terms, which is offset 0 of the visible
+// "Hello" — the right place after a body→h1 transition.
+function getCursorOffsetInLine(line: HTMLElement): number | null {
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0 || !sel.anchorNode) return null
+  if (!line.contains(sel.anchorNode)) return null
+  let offset = 0
+  const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT)
+  let node: Node | null
+  while ((node = walker.nextNode())) {
+    if (node === sel.anchorNode) return offset + sel.anchorOffset
+    offset += (node.textContent || '').length
+  }
+  // Anchor was inside line but not in a text node (e.g. before a <br>).
+  return offset
+}
+
+function setCursorOffsetInLine(line: HTMLElement, offset: number) {
+  const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT)
+  let acc = 0
+  let node: Node | null
+  while ((node = walker.nextNode())) {
+    const len = (node.textContent || '').length
+    if (acc + len >= offset) {
+      const range = document.createRange()
+      range.setStart(node, offset - acc)
+      range.collapse(true)
+      const sel = window.getSelection()
+      if (sel) { sel.removeAllRanges(); sel.addRange(range) }
+      return
+    }
+    acc += len
+  }
+  // Fallback: place caret at end of line
+  const range = document.createRange()
+  range.selectNodeContents(line)
+  range.collapse(false)
+  const sel = window.getSelection()
+  if (sel) { sel.removeAllRanges(); sel.addRange(range) }
+}
+
+// Convert a (container, offset) anchor inside a line to a single
+// character offset within that line's textContent (which counts hidden
+// marker chars). Used by copy/cut to slice the visible selection out
+// of the markdown-bearing textContent.
+//   - text-node container: char-offset in that text node + sum of
+//     text lengths that come earlier in the line subtree.
+//   - element container: offset is a child index; sum lengths of
+//     children before that index, recursively.
+function offsetInLineFor(line: HTMLElement, container: Node, offset: number): number {
+  let acc = 0
+  let found = false
+  function visit(node: Node): void {
+    if (found) return
+    if (node === container) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        acc += offset
+      } else {
+        const kids = node.childNodes
+        for (let i = 0; i < offset && i < kids.length; i++) {
+          acc += (kids[i].textContent || '').length
+        }
+      }
+      found = true
+      return
+    }
+    if (node.nodeType === Node.TEXT_NODE) {
+      acc += (node.textContent || '').length
+      return
+    }
+    for (const c of Array.from(node.childNodes)) visit(c)
+  }
+  visit(line)
+  return acc
+}
+
+// Walk #editor-doc's children and emit, per line that intersects the
+// range, the visible slice of that line's textContent — with the
+// hidden marker added back ONLY when the selection covers the full
+// visible content of the line. Rationale:
+//   - User selects all of "Heading One" (visible) → expects `# Heading One`
+//     because that's the markdown form of what they selected.
+//   - User selects "ead" inside "Heading One" → expects just "ead" —
+//     they didn't select the whole heading, so emitting `# ead` would
+//     be surprising.
+// Concretely, for each touched line we compute clipped offsets in
+// textContent space; if the clip covers visualStart..visualEnd (i.e.
+// from the marker's end through the line's tail), we snap start back
+// to 0 to include the marker. Otherwise we snap start past the marker
+// so partial slices don't pick up hidden chars.
+function reconstructMarkdownFromRange(range: Range): string | null {
+  if (!docEl) return null
+  const out: string[] = []
+  for (const child of Array.from(docEl.children)) {
+    const line = child as HTMLElement
+    if (!line.classList.contains('editor-line')) continue
+    if (!range.intersectsNode(line)) continue
+
+    const lineText = line.textContent || ''
+    const markerLen = markerLengthFor((line.dataset.kind as 'h1' | 'h2' | 'body') || 'body')
+
+    let startOffset = 0
+    let endOffset = lineText.length
+    if (line.contains(range.startContainer) || line === range.startContainer) {
+      startOffset = offsetInLineFor(line, range.startContainer, range.startOffset)
+    }
+    if (line.contains(range.endContainer) || line === range.endContainer) {
+      endOffset = offsetInLineFor(line, range.endContainer, range.endOffset)
+    }
+
+    const coversWholeVisible = startOffset <= markerLen && endOffset >= lineText.length
+    const s = coversWholeVisible ? 0 : Math.max(startOffset, markerLen)
+    const e = endOffset
+    if (e <= s) {
+      // Selection touched this line but no visible content — keep the
+      // entry as an empty string so the line break is preserved when
+      // joining (selecting through a line break should produce a
+      // newline in the clipboard).
+      out.push('')
+    } else {
+      out.push(lineText.slice(s, e))
+    }
+  }
+  return out.join('\n')
 }
 
 // Replace every child of #editor-doc with one line div per `\n`-split
@@ -187,11 +337,60 @@ function updateEmptyState() {
   else             docEl.removeAttribute('data-empty')
 }
 
+// Test whether a line's current DOM structure matches what
+// buildLineEl(textContent) would produce — used to decide whether to
+// rebuild on input. Mismatch happens when:
+//   - kind changed (user typed/erased a `#` marker prefix)
+//   - the marker span content drifted from its kind's prefix (e.g.
+//     user typed inside the marker, or the marker is missing)
+//   - the rest got split across multiple text nodes from browser
+//     edit operations (so cursor offset accounting could go wrong)
+function lineMatchesModel(line: HTMLElement): boolean {
+  const txt = line.textContent || ''
+  const kind = lineKindFor(txt)
+  if (line.dataset.kind !== kind) return false
+  const expectedMarker = txt.slice(0, markerLengthFor(kind))
+  const markerEl = line.firstElementChild as HTMLElement | null
+  const hasMarker = !!markerEl && markerEl.classList.contains('md-marker')
+  if (expectedMarker === '') {
+    // Body line — must NOT have a marker span
+    return !hasMarker
+  }
+  if (!hasMarker) return false
+  if (markerEl!.textContent !== expectedMarker) return false
+  // After the marker, the only remaining child should be either a
+  // single text node (rest content) or a <br> filler (empty heading).
+  // Allowing exactly one node keeps cursor-offset arithmetic simple.
+  const after = Array.from(line.childNodes).slice(1)
+  if (after.length === 0) return false
+  if (after.length === 1) {
+    const n = after[0]
+    return n.nodeType === Node.TEXT_NODE || (n.nodeType === Node.ELEMENT_NODE && (n as HTMLElement).tagName === 'BR')
+  }
+  return false
+}
+
+// Rebuild a line in place from its current textContent, preserving
+// cursor offset (in textContent coordinates, including any hidden
+// marker characters). The marker span the rebuild produces is
+// display:none, so the visible line snaps to the new kind's typography
+// while save/copy still see the full markdown.
+function rebuildLineInPlace(line: HTMLElement) {
+  const txt = line.textContent || ''
+  const cursor = getCursorOffsetInLine(line)
+  const fresh = buildLineEl(txt)
+  // Replace content but keep the line div itself (so external refs hold).
+  line.dataset.kind = fresh.dataset.kind!
+  line.innerHTML = ''
+  while (fresh.firstChild) line.appendChild(fresh.firstChild)
+  if (cursor !== null) setCursorOffsetInLine(line, cursor)
+}
+
 // Re-classify every line and clean up structure. Runs on every input
-// event; cheap because (a) it touches data-kind only when it changed,
-// (b) the doc tree is shallow (one div per line), and (c) we never
-// rebuild text content — just the per-line kind attribute, which leaves
-// the cursor untouched.
+// event; the common case is "no structural change" and we touch
+// nothing. When the user types a marker character (`# `/`## `) or
+// breaks one (deleting through the marker), the affected line gets
+// rebuilt in place with cursor preserved at its textContent offset.
 function reclassifyLines() {
   if (!docEl) return
   // The browser sometimes promotes the contenteditable into containing
@@ -215,18 +414,18 @@ function reclassifyLines() {
       }
     }
   }
-  // Now every child is an .editor-line div. Update kinds + empty filler.
+  // Now every child is an .editor-line div. For each, compare its
+  // current shape to what its textContent should produce; rebuild only
+  // when they diverge — otherwise leave the cursor alone.
   for (const child of Array.from(docEl.children)) {
     const el = child as HTMLElement
-    const txt = el.textContent || ''
-    const kind = lineKindFor(txt)
-    if (el.dataset.kind !== kind) el.dataset.kind = kind
-    // Empty line needs a <br> filler so contenteditable gives it
-    // height and the caret can land on it. If text is non-empty but
-    // contains a stray <br>, leave it alone — browsers sometimes add
-    // <br> after the last character on a line and removing it eats a
-    // useful trailing space.
-    if (txt === '' && !el.querySelector('br')) {
+    if (!lineMatchesModel(el)) {
+      rebuildLineInPlace(el)
+    }
+    // Ensure empty lines have a <br> filler. lineMatchesModel rejects
+    // body lines with no children at all; this catches mid-edit states
+    // (e.g. user just deleted everything but the cursor is in this line).
+    if ((el.textContent || '') === '' && !el.querySelector('br')) {
       el.appendChild(document.createElement('br'))
     }
   }
@@ -586,6 +785,49 @@ function attachHandlers() {
     const text = e.dataTransfer?.getData('text/plain') || ''
     if (!text) return
     document.execCommand('insertText', false, text)
+  })
+
+  // Selection.toString() and the browser's default copy data both
+  // strip display:none content — but our `# `/`## ` markers are
+  // hidden that way. Intercept copy and rebuild the markdown from
+  // each line's textContent (which still includes the marker chars),
+  // sliced to the selection's bounds within each line, joined with
+  // newlines. The result is true markdown, exactly as it sits on
+  // disk — what the user sees in this editor is the rendering, what
+  // they paste elsewhere is the source.
+  docEl!.addEventListener('copy', (e: ClipboardEvent) => {
+    const sel = window.getSelection()
+    if (!sel || sel.rangeCount === 0) return
+    const range = sel.getRangeAt(0)
+    if (range.collapsed) return
+    if (!docEl!.contains(range.commonAncestorContainer)
+        && range.commonAncestorContainer !== docEl) return
+    const md = reconstructMarkdownFromRange(range)
+    if (md == null) return
+    e.preventDefault()
+    e.clipboardData?.setData('text/plain', md)
+  })
+
+  // Cut is copy + delete; same reconstruction so the clipboard sees
+  // markdown. The deletion itself is left to the browser's default
+  // (which acts on visible text); reclassify on the resulting input
+  // event will rebuild any line whose marker was disturbed.
+  docEl!.addEventListener('cut', (e: ClipboardEvent) => {
+    const sel = window.getSelection()
+    if (!sel || sel.rangeCount === 0) return
+    const range = sel.getRangeAt(0)
+    if (range.collapsed) return
+    if (!docEl!.contains(range.commonAncestorContainer)
+        && range.commonAncestorContainer !== docEl) return
+    const md = reconstructMarkdownFromRange(range)
+    if (md == null) return
+    e.clipboardData?.setData('text/plain', md)
+    // Don't preventDefault — we still want the browser to delete the
+    // visible selection. Setting clipboardData on a cut event without
+    // preventDefault overrides the default copy data while letting the
+    // delete proceed.
+    e.preventDefault()
+    document.execCommand('delete')
   })
 
   docEl!.addEventListener('input', () => {

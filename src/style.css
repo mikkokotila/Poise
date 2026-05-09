@@ -3438,6 +3438,18 @@ tr:hover .replay-btn { opacity: 1; }
    area down further than a body-first row. */
 .editor-line:first-child { margin-top: 0; }
 
+/* Hide the markdown markers (`# `, `## `) — the line is already
+   rendered as a heading via data-kind, so the prefix is redundant on
+   screen. The marker text still lives in the DOM (and so in
+   .textContent), so save and the copy-document button see the true
+   markdown. Browsers exclude display:none content from
+   Selection.toString() and the default copy clipboard data, so a
+   copy/cut handler in editor-view.ts reconstructs the markdown from
+   textContent for select+Cmd+C as well. */
+.md-marker {
+  display: none;
+}
+
 /* Copy-button success tint while the checkmark is showing.
    --a3 is the green accent in the DS palette. */
 .editor-bar-btn.is-copied { color: var(--a3); }
