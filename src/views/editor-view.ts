@@ -1,15 +1,17 @@
 // Editor — minimalist markdown writing surface.
 //
-// Two halves:
-//   * Sidebar: list of docs newest-first, plus a single "+ New" button.
-//   * Main:    a chromeless textarea, set in a generous serif at a
-//              comfortable measure, autosaving on a debounced timer.
+// Single horizontal control bar at the top:
 //
-// MVP scope is intentionally narrow — create, save, switch, no toolbar,
-// no formatting buttons, no menu bar. The differentiator is the
-// typography and the autosave: the writer types, the page just is. All
-// markdown live as plain .md files under ~/.poise/editor/ so they
-// roundtrip through whatever versioning / sync the user already has.
+//   [Doc title ▾]  +  ×                         12 words · saved
+//
+// where the doc-title button opens a dropdown popover listing all
+// docs grouped by recency, "+" mints a fresh blank doc, "×" deletes
+// the current doc (with confirmation). Below the bar: just the page —
+// a chromeless textarea, generous serif, comfortable measure.
+//
+// Storage: each doc is a plain UTF-8 .md file under ~/.poise/editor/.
+// Title comes from the first non-empty line at read time. Server-side
+// owns sanitization, layout, and the title-derivation rule.
 
 interface DocSummary {
   slug: string
@@ -23,19 +25,16 @@ let initialized = false
 let docs: DocSummary[] = []
 let currentSlug: string | null = null
 let textareaEl: HTMLTextAreaElement | null = null
-let docListEl: HTMLElement | null = null
+let triggerEl: HTMLButtonElement | null = null
+let triggerTitleEl: HTMLElement | null = null
+let menuEl: HTMLElement | null = null
 let metaEl: HTMLElement | null = null
 let saveTimer: ReturnType<typeof setTimeout> | null = null
 let saveInFlight = false
 
-// Debounce tuned for "I just stopped typing for half a second, save now."
-// Long enough to coalesce normal typing rhythm, short enough that the
-// "saved" feedback reads as live.
 const SAVE_DEBOUNCE_MS = 500
-
 const LAST_OPEN_KEY = 'poise-editor-last'
 
-// Attribute-safe HTML escape — same shape as the other views.
 function escapeHtml(s: string): string {
   return String(s).replace(/[&<>"']/g, (c) => (
     c === '&' ? '&amp;' :
@@ -61,8 +60,6 @@ function relTime(iso: string): string {
   return `${Math.floor(months / 12)}y`
 }
 
-// Sidebar entries grouped by relative recency so the most-active docs
-// surface near the top without dating every line.
 function groupBucket(iso: string): string {
   const t = new Date(iso).getTime()
   const days = (Date.now() - t) / 86_400_000
@@ -73,54 +70,33 @@ function groupBucket(iso: string): string {
   return 'Older'
 }
 
+const ICON_PLUS   = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 2v10M2 7h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
+const ICON_TRASH  = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 4h8M5.5 4V3a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1M4.5 4l.5 7a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1l.5-7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+
 function renderShell(): string {
   return `
     <div class="editor-shell">
-      <aside class="editor-sidebar">
-        <button class="editor-new-btn" type="button">+ New</button>
-        <div class="editor-doc-list" id="editor-doc-list"></div>
-      </aside>
+      <header class="editor-bar">
+        <div class="editor-bar-left">
+          <button type="button" class="editor-doc-trigger" aria-haspopup="menu" aria-expanded="false">
+            <span class="editor-doc-trigger-title">Untitled</span>
+            <span class="editor-doc-trigger-chevron" aria-hidden="true">▾</span>
+          </button>
+          <button type="button" class="editor-bar-btn editor-new-btn"   title="New (⌘N)"  aria-label="New">${ICON_PLUS}</button>
+          <button type="button" class="editor-bar-btn editor-delete-btn" title="Delete"   aria-label="Delete">${ICON_TRASH}</button>
+        </div>
+        <div class="editor-bar-right">
+          <span class="editor-meta" id="editor-meta"></span>
+        </div>
+        <div class="editor-doc-menu" id="editor-doc-menu" hidden role="menu"></div>
+      </header>
       <main class="editor-main">
         <div class="editor-page">
           <textarea class="editor-textarea" id="editor-textarea" spellcheck="true" placeholder="Start writing…"></textarea>
-          <div class="editor-meta" id="editor-meta"></div>
         </div>
       </main>
     </div>
   `
-}
-
-function renderDocList() {
-  if (!docListEl) return
-  if (!docs.length) {
-    docListEl.innerHTML = '<div class="editor-doc-empty">No notes yet.</div>'
-    return
-  }
-  // Group by recency bucket; preserve sorted-newest-first within each.
-  const buckets: { name: string, items: DocSummary[] }[] = []
-  let prev = ''
-  for (const d of docs) {
-    const b = groupBucket(d.updated_at)
-    if (b !== prev) { buckets.push({ name: b, items: [d] }); prev = b }
-    else            { buckets[buckets.length - 1].items.push(d) }
-  }
-  const parts: string[] = []
-  for (const b of buckets) {
-    parts.push(`<h3 class="editor-doc-bucket">${escapeHtml(b.name)}</h3>`)
-    for (const d of b.items) {
-      const isActive = d.slug === currentSlug
-      parts.push(`
-        <button type="button"
-                class="editor-doc-item${isActive ? ' is-active' : ''}"
-                data-slug="${escapeHtml(d.slug)}"
-                title="${escapeHtml(d.title)}">
-          <span class="editor-doc-title">${escapeHtml(d.title)}</span>
-          <span class="editor-doc-time">${escapeHtml(relTime(d.updated_at))}</span>
-        </button>
-      `)
-    }
-  }
-  docListEl.innerHTML = parts.join('')
 }
 
 function setMeta(text: string) {
@@ -137,6 +113,74 @@ function setMetaForCurrent() {
   setMeta(wc === 0 ? 'Empty · saved' : `${wc} word${wc === 1 ? '' : 's'} · saved`)
 }
 
+function currentDoc(): DocSummary | null {
+  if (!currentSlug) return null
+  return docs.find((d) => d.slug === currentSlug) || null
+}
+
+function setTriggerTitle() {
+  if (!triggerTitleEl) return
+  const d = currentDoc()
+  triggerTitleEl.textContent = d?.title || 'Untitled'
+}
+
+function renderDocMenu() {
+  if (!menuEl) return
+  if (!docs.length) {
+    menuEl.innerHTML = '<div class="editor-doc-empty">No notes yet.</div>'
+    return
+  }
+  const buckets: { name: string, items: DocSummary[] }[] = []
+  let prev = ''
+  for (const d of docs) {
+    const b = groupBucket(d.updated_at)
+    if (b !== prev) { buckets.push({ name: b, items: [d] }); prev = b }
+    else            { buckets[buckets.length - 1].items.push(d) }
+  }
+  const parts: string[] = []
+  for (const b of buckets) {
+    parts.push(`<h3 class="editor-doc-bucket">${escapeHtml(b.name)}</h3>`)
+    for (const d of b.items) {
+      const isActive = d.slug === currentSlug
+      parts.push(`
+        <button type="button"
+                class="editor-doc-item${isActive ? ' is-active' : ''}"
+                data-slug="${escapeHtml(d.slug)}"
+                role="menuitem"
+                title="${escapeHtml(d.title)}">
+          <span class="editor-doc-title">${escapeHtml(d.title)}</span>
+          <span class="editor-doc-time">${escapeHtml(relTime(d.updated_at))}</span>
+        </button>
+      `)
+    }
+  }
+  menuEl.innerHTML = parts.join('')
+}
+
+function openMenu() {
+  if (!menuEl || !triggerEl) return
+  renderDocMenu()
+  menuEl.hidden = false
+  triggerEl.setAttribute('aria-expanded', 'true')
+  // Defer the outside-click listener install so the click that
+  // opened the menu doesn't immediately close it.
+  setTimeout(() => document.addEventListener('click', onOutsideClick, { once: false }), 0)
+}
+
+function closeMenu() {
+  if (!menuEl || !triggerEl) return
+  menuEl.hidden = true
+  triggerEl.setAttribute('aria-expanded', 'false')
+  document.removeEventListener('click', onOutsideClick)
+}
+
+function onOutsideClick(e: MouseEvent) {
+  if (!menuEl || !triggerEl) return
+  const target = e.target as Node
+  if (menuEl.contains(target) || triggerEl.contains(target)) return
+  closeMenu()
+}
+
 async function fetchDocs() {
   try {
     const res = await fetch('/api/editor/docs')
@@ -151,8 +195,6 @@ async function fetchDocs() {
 
 async function loadDoc(slug: string) {
   if (!textareaEl) return
-  // Save anything pending on the OLD doc before swapping content,
-  // so a fast click-around doesn't lose recent keystrokes.
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; await flushSave() }
   try {
     const res = await fetch(`/api/editor/doc/${encodeURIComponent(slug)}`)
@@ -161,11 +203,9 @@ async function loadDoc(slug: string) {
     currentSlug = String(data.slug || slug)
     textareaEl.value = String(data.content || '')
     try { localStorage.setItem(LAST_OPEN_KEY, currentSlug) } catch { /* ignore */ }
+    setTriggerTitle()
     setMetaForCurrent()
-    renderDocList()
     textareaEl.focus()
-    // Caret at the end so cmd-tab back into the editor lands you
-    // where you left off, not at the very top.
     const len = textareaEl.value.length
     try { textareaEl.setSelectionRange(len, len) } catch { /* ignore */ }
   } catch (err) {
@@ -174,7 +214,6 @@ async function loadDoc(slug: string) {
 }
 
 async function newDoc() {
-  // Save anything outstanding on the doc we're leaving.
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; await flushSave() }
   try {
     const res = await fetch('/api/editor/docs', { method: 'POST' })
@@ -186,6 +225,35 @@ async function newDoc() {
     await loadDoc(slug)
   } catch (err) {
     console.error('[editor] newDoc failed:', err)
+  }
+}
+
+async function deleteCurrent() {
+  const d = currentDoc()
+  if (!d) return
+  // Plain window.confirm is the simplest path for MVP — easy to
+  // replace with an inline dialog later. Title comes from the doc
+  // summary so the user sees what they're about to lose.
+  const ok = window.confirm(`Delete "${d.title}"? This cannot be undone.`)
+  if (!ok) return
+  // Cancel any pending save on this doc; we're about to remove it.
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
+  try {
+    const res = await fetch(`/api/editor/doc/${encodeURIComponent(d.slug)}`, { method: 'DELETE' })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  } catch (err) {
+    console.error('[editor] delete failed:', err)
+    return
+  }
+  // Drop from local list, decide where to land next.
+  docs = docs.filter((x) => x.slug !== d.slug)
+  try { localStorage.removeItem(LAST_OPEN_KEY) } catch { /* ignore */ }
+  if (docs.length) {
+    await loadDoc(docs[0].slug)
+  } else {
+    // No docs left — mint a fresh blank one so the surface stays
+    // typeable instead of going dark.
+    await newDoc()
   }
 }
 
@@ -203,8 +271,6 @@ async function flushSave() {
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
-    // Update the local doc summary so the sidebar's title + ordering
-    // reflect what's on disk without a full re-fetch.
     const idx = docs.findIndex((d) => d.slug === slug)
     if (idx >= 0) {
       docs[idx] = {
@@ -213,11 +279,10 @@ async function flushSave() {
         updated_at: String(data.updated_at || new Date().toISOString()),
         size: Number(data.size || content.length),
       }
-      // Move to front (newest-first ordering).
       const [moved] = docs.splice(idx, 1)
       docs.unshift(moved)
     }
-    renderDocList()
+    setTriggerTitle()
     setMetaForCurrent()
   } catch (err) {
     console.error('[editor] save failed:', err)
@@ -235,36 +300,43 @@ function scheduleSave() {
 }
 
 function attachHandlers() {
-  const newBtn = viewEl.querySelector<HTMLButtonElement>('.editor-new-btn')!
-  newBtn.addEventListener('click', () => { void newDoc() })
-
-  docListEl!.addEventListener('click', (e) => {
+  triggerEl!.addEventListener('click', (e) => {
+    e.stopPropagation()
+    if (menuEl!.hidden) openMenu()
+    else                closeMenu()
+  })
+  menuEl!.addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('.editor-doc-item')
     if (!btn) return
     const slug = btn.dataset.slug || ''
+    closeMenu()
     if (!slug || slug === currentSlug) return
     void loadDoc(slug)
   })
+  viewEl.querySelector<HTMLButtonElement>('.editor-new-btn')!
+    .addEventListener('click', () => { void newDoc() })
+  viewEl.querySelector<HTMLButtonElement>('.editor-delete-btn')!
+    .addEventListener('click', () => { void deleteCurrent() })
 
   textareaEl!.addEventListener('input', () => scheduleSave())
-  // Cmd/Ctrl+S forces a save right now — for users with the muscle
-  // memory.
   textareaEl!.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 's') {
       e.preventDefault()
       if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
       void flushSave()
     }
-    // Cmd/Ctrl+N → new doc, matches the global "new" muscle.
     if ((e.metaKey || e.ctrlKey) && (e.key === 'n' || e.key === 'N')) {
       e.preventDefault()
       void newDoc()
     }
+    if (e.key === 'Escape' && menuEl && !menuEl.hidden) {
+      e.preventDefault()
+      closeMenu()
+    }
   })
 
-  // Best-effort flush on tab close / view leave so the very last
-  // keystroke isn't lost. The browser may swallow async fetches
-  // during pagehide; we use sendBeacon for that one path.
+  // Best-effort flush on tab close — sendBeacon keeps the very last
+  // keystroke from being lost when the page unloads mid-debounce.
   window.addEventListener('pagehide', () => {
     if (!textareaEl || !currentSlug) return
     if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
@@ -280,16 +352,14 @@ export async function initEditorView() {
   if (!initialized) {
     initialized = true
     viewEl.innerHTML = renderShell()
-    textareaEl = viewEl.querySelector<HTMLTextAreaElement>('.editor-textarea')
-    docListEl = viewEl.querySelector<HTMLElement>('#editor-doc-list')
-    metaEl = viewEl.querySelector<HTMLElement>('#editor-meta')
+    textareaEl     = viewEl.querySelector<HTMLTextAreaElement>('.editor-textarea')
+    triggerEl      = viewEl.querySelector<HTMLButtonElement>('.editor-doc-trigger')
+    triggerTitleEl = viewEl.querySelector<HTMLElement>('.editor-doc-trigger-title')
+    menuEl         = viewEl.querySelector<HTMLElement>('#editor-doc-menu')
+    metaEl         = viewEl.querySelector<HTMLElement>('#editor-meta')
     attachHandlers()
   }
   await fetchDocs()
-  renderDocList()
-  // Open the doc the user had last, or fall back to the most recent,
-  // or — if nothing exists — mint a fresh blank one so the user has
-  // something to type into immediately.
   let target: string | null = null
   try { target = localStorage.getItem(LAST_OPEN_KEY) } catch { /* ignore */ }
   if (!target || !docs.find((d) => d.slug === target)) {
@@ -302,13 +372,11 @@ export async function initEditorView() {
   }
 }
 
-// Symmetrical with the other views' stop functions, even though the
-// editor doesn't subscribe to the global tick — the shape lets main.ts
-// switch views uniformly. Save anything outstanding on the way out.
 export function stopEditorRefresh() {
   if (saveTimer) {
     clearTimeout(saveTimer)
     saveTimer = null
     void flushSave()
   }
+  closeMenu()
 }

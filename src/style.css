@@ -3092,10 +3092,11 @@ tr:hover .replay-btn { opacity: 1; }
 .card:hover .card-time { opacity: 0; }
 
 /* ─── Editor view ─────────────────────────────────────────────────────────
-   Minimalist markdown writing surface. Two halves: a quiet sidebar with
-   the doc list, and a chromeless writing area set in a generous serif at
-   a comfortable measure. Goal is to disappear — the writer should see
-   the page, not the chrome. */
+   Minimalist markdown writing surface. A single thin control bar at the
+   top (doc-dropdown · new · delete · meta on the right), then the page
+   below — chromeless textarea, generous serif, comfortable measure. The
+   chrome is engineered to disappear; the writer should see the page,
+   not the editor. */
 
 #view-editor {
   /* Override the universal .view padding — the editor manages its own
@@ -3104,47 +3105,122 @@ tr:hover .replay-btn { opacity: 1; }
 }
 
 .editor-shell {
-  display: grid;
-  grid-template-columns: 260px 1fr;
-  /* Fill the rest of the viewport below the top nav. The nav sits in
-     the top-right and doesn't reserve a band, so we just take the full
-     viewport height. */
+  display: flex;
+  flex-direction: column;
   height: calc(100vh - var(--sp-7));
   min-height: 480px;
 }
 
-/* ── Sidebar ── */
-.editor-sidebar {
-  background: var(--surface);
-  border-right: 1px solid var(--border);
-  padding: var(--sp-5) var(--sp-3) var(--sp-5);
-  overflow-y: auto;
+/* ── Top control bar ──
+   One quiet horizontal row: doc-title-trigger, +/× icons on the left;
+   meta (word count · saved) on the right. The dropdown popover hangs
+   off the trigger, anchored absolute. */
+.editor-bar {
+  flex-shrink: 0;
   display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-3) var(--sp-5);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  position: relative;        /* anchor for .editor-doc-menu */
+  /* Leave a small right inset so the meta cell doesn't crowd the
+     burger menu in the top-right of the page. */
+  padding-right: calc(var(--sp-7) + var(--sp-3));
 }
 
-.editor-new-btn {
-  align-self: stretch;
-  padding: var(--sp-2) var(--sp-3);
-  border: 1px dashed var(--border);
-  background: transparent;
-  color: var(--text-secondary);
-  border-radius: var(--r-md);
-  font-family: inherit;
-  font-size: 0.8125rem;
-  font-weight: 500;
-  cursor: pointer;
-  text-align: left;
-  transition: border-color var(--t-quick) ease, color var(--t-quick) ease, background var(--t-quick) ease;
+.editor-bar-left {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
 }
-.editor-new-btn:hover {
-  border-color: var(--text-tertiary);
+.editor-bar-right {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+/* Doc-title trigger — quiet, looks more like a label than a button
+   until hovered. The chevron disambiguates it as openable. */
+.editor-doc-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 360px;
+  padding: 4px var(--sp-2);
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background var(--t-quick) ease, color var(--t-quick) ease;
+}
+.editor-doc-trigger:hover { background: var(--hover); }
+.editor-doc-trigger[aria-expanded="true"] { background: var(--hover); }
+.editor-doc-trigger-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
+}
+.editor-doc-trigger-chevron {
+  font-size: 0.625rem;
+  color: var(--text-tertiary);
+  line-height: 1;
+}
+
+/* + and × icon buttons — same ghost rhythm as the chat-pane / card
+   icons so the editor's chrome reads as the same vocabulary as the
+   rest of the app. */
+.editor-bar-btn {
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-sm);
+  padding: 0;
+  transition: color var(--t-quick) ease, background var(--t-quick) ease;
+}
+.editor-bar-btn:hover {
   color: var(--text);
   background: var(--hover);
 }
+.editor-bar-btn.editor-delete-btn:hover { color: var(--a5); }
+.editor-bar-btn svg { display: block; }
 
-.editor-doc-list {
+/* Quiet save / word-count cell on the right of the bar. */
+.editor-meta {
+  font-size: 0.6875rem;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Doc dropdown popover — anchored to the trigger, slides down on open.
+   Grouped by recency just like the old sidebar so the user can find
+   anything fast without a search box (yet). */
+.editor-doc-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: var(--sp-5);
+  min-width: 260px;
+  max-width: 360px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--e-2);
+  padding: var(--sp-2);
+  z-index: 50;
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -3154,14 +3230,16 @@ tr:hover .replay-btn { opacity: 1; }
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-tertiary);
-  margin: var(--sp-4) var(--sp-2) var(--sp-1);
+  margin: var(--sp-3) var(--sp-2) var(--sp-1);
   font-weight: 500;
 }
-.editor-doc-bucket:first-child { margin-top: var(--sp-2); }
+.editor-doc-bucket:first-child { margin-top: var(--sp-1); }
 
 .editor-doc-item {
-  /* Looks like a passive row but is a button so keyboard works. */
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
   width: 100%;
   text-align: left;
   border: none;
@@ -3181,15 +3259,14 @@ tr:hover .replay-btn { opacity: 1; }
   color: var(--text);
 }
 .editor-doc-title {
-  display: block;
+  flex: 1;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   font-weight: 500;
 }
 .editor-doc-time {
-  display: block;
-  margin-top: 2px;
+  flex: 0 0 auto;
   font-size: 0.6875rem;
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
@@ -3201,14 +3278,12 @@ tr:hover .replay-btn { opacity: 1; }
 }
 
 /* ── Writing area ──
-   The whole point of the view. No toolbar, no chrome — just the page,
-   set in a generous serif at the kind of measure (~64ch) that
-   typographers reach for when prose is the product. */
+   The whole point of the view. Edge-to-edge horizontally, the page
+   centered with a comfortable max-width, set in a generous serif. */
 .editor-main {
+  flex: 1;
   overflow-y: auto;
   background: var(--bg);
-  /* Vertical breathing room top + bottom so the cursor doesn't sit
-     against the edge as the user scrolls. */
   padding: var(--sp-7) var(--sp-6) var(--sp-8);
 }
 
@@ -3225,18 +3300,15 @@ tr:hover .replay-btn { opacity: 1; }
   background: transparent;
   resize: none;
   display: block;
-  /* Iowan Old Style / Palatino / Georgia is the system-font book-serif
-     stack that gives us a Medium-grade reading rhythm without loading
-     a webfont. */
+  /* Iowan Old Style → Palatino → Georgia: a system-font book-serif
+     stack that gives a Medium-grade reading rhythm without webfont
+     load cost. */
   font-family: 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif;
   font-size: 19px;
   line-height: 1.7;
   color: var(--text);
   padding: 0;
   margin: 0;
-  /* Trust the OS for spell-check / autocorrect; turn off resize handles
-     and the autocomplete underlines that some browsers paint by
-     default — they're noisy in a writing surface. */
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-feature-settings: 'liga' 1, 'kern' 1;
@@ -3247,20 +3319,5 @@ tr:hover .replay-btn { opacity: 1; }
 }
 .editor-textarea:focus { outline: none; }
 
-/* Quiet save / word-count footer below the page. Visible but never
-   demanding. */
-.editor-meta {
-  margin-top: var(--sp-5);
-  padding-top: var(--sp-3);
-  border-top: 1px solid var(--border);
-  font-size: 0.6875rem;
-  letter-spacing: 0.04em;
-  color: var(--text-tertiary);
-  font-variant-numeric: tabular-nums;
-}
-
-/* On dark mode, the page tone shifts to a slightly raised surface so
-   the writing area still reads as a "page" against the surrounding
-   chrome. */
 html[data-theme="dark"] .editor-main { background: var(--bg); }
 html[data-theme="dark"] .editor-textarea { color: var(--text); }
