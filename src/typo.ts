@@ -149,9 +149,11 @@ function apply() {
   const arch = ARCHETYPES[config.archetype] || ARCHETYPES.engineer
 
   loadFont(arch.body)
+  loadFont(arch.heading)
 
   // Font
   root.style.setProperty('--typo-body', `'${arch.body}', sans-serif`)
+  root.style.setProperty('--typo-heading', `'${arch.heading}', sans-serif`)
   root.style.setProperty('--typo-size', `${config.baseFontSize}px`)
   root.style.setProperty('--typo-lh', `${config.lineHeight}`)
   root.style.setProperty('--typo-row-size', `${config.rowFontSize}rem`)
@@ -162,6 +164,29 @@ function apply() {
   root.style.setProperty('--typo-comment-lines', `${config.commentLines}`)
   root.style.setProperty('--typo-comment-size', `${config.commentFontSize}rem`)
   root.style.setProperty('--typo-comment-weight', `${config.commentFontWeight}`)
+
+  // Editor-specific derived sizes. The editor needs prose-friendly
+  // sizes that scale WITH the panel's base size — typography controls
+  // need to actually move the editor — but its size hierarchy is its
+  // own (body larger than dashboard text; H1/H2 in heading-typical
+  // proportions). We derive from baseFontSize via fixed +offsets so
+  // the relationships stay constant across the slider's range:
+  //   body = base + 4   (15→19, 12→16, 20→24)
+  //   h1   = base + 13  (15→28)
+  //   h2   = base + 7   (15→22)
+  // Line-heights stay pinned to whole pixels — fractional line-height
+  // breaks contenteditable cursor alignment when different lines
+  // have different font sizes (the wrap-and-baseline math diverges).
+  // We multiply by the panel's lineHeight ratio and floor.
+  const editorBody = config.baseFontSize + 4
+  const editorH1   = config.baseFontSize + 13
+  const editorH2   = config.baseFontSize + 7
+  root.style.setProperty('--editor-body-size', `${editorBody}px`)
+  root.style.setProperty('--editor-h1-size',   `${editorH1}px`)
+  root.style.setProperty('--editor-h2-size',   `${editorH2}px`)
+  root.style.setProperty('--editor-body-lh', `${Math.floor(editorBody * config.lineHeight)}px`)
+  root.style.setProperty('--editor-h1-lh',   `${Math.floor(editorH1   * config.lineHeight)}px`)
+  root.style.setProperty('--editor-h2-lh',   `${Math.floor(editorH2   * config.lineHeight)}px`)
 
   // Colors are governed by the DS / theme system (see [data-theme="dark"]
   // overrides in style.css). Setting them inline here would beat the

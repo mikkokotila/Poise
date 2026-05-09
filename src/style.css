@@ -3371,9 +3371,19 @@ tr:hover .replay-btn { opacity: 1; }
 
 .editor-doc {
   width: 100%;
-  font-family: 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif;
-  font-size: 19px;
-  line-height: 32px;
+  /* Body font follows the typography panel's archetype.body — the
+     editor stays in sync with whatever the writer picked from the
+     gear-menu Typography panel. The serif stack is a fallback for the
+     pre-init moment before typo.ts has set the var, so first paint is
+     never an unstyled flash. Sizes derive from --typo-size (base
+     slider) via offsets typo.ts publishes as --editor-*-size; line-
+     heights are pinned to whole pixels through --editor-*-lh because
+     fractional line-height breaks cursor alignment when lines have
+     different font sizes (different baselines diverge inside a shared
+     line box). */
+  font-family: var(--typo-body, 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif);
+  font-size: var(--editor-body-size, 19px);
+  line-height: var(--editor-body-lh, 32px);
   padding: var(--sp-5) 0 var(--sp-7);
   margin: 0;
   min-height: calc(100vh - 200px);
@@ -3411,23 +3421,32 @@ tr:hover .replay-btn { opacity: 1; }
    it renders at the heading's own size for visual consistency with
    the heading body. */
 .editor-line {
-  font-size: 19px;
-  line-height: 32px;
+  /* Body lines inherit the body font from .editor-doc; sizes / line-
+     heights mirror the same vars so the values are still consistent
+     when child line divs are reflowed during contenteditable edits. */
+  font-size: var(--editor-body-size, 19px);
+  line-height: var(--editor-body-lh, 32px);
   font-weight: normal;
   letter-spacing: 0;
   margin: 0;
 }
 .editor-line[data-kind="h1"] {
-  font-size: 28px;
-  line-height: 40px;
+  /* Heading lines pick up archetype.heading via --typo-heading. The
+     fallback is the body's serif stack so a freshly-loaded editor
+     before typo.ts has run still reads as serif rather than the
+     browser default. */
+  font-family: var(--typo-heading, 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif);
+  font-size: var(--editor-h1-size, 28px);
+  line-height: var(--editor-h1-lh, 40px);
   font-weight: 800;
   letter-spacing: -0.01em;
   margin-top: 0.5em;
   margin-bottom: 0.1em;
 }
 .editor-line[data-kind="h2"] {
-  font-size: 22px;
-  line-height: 34px;
+  font-family: var(--typo-heading, 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif);
+  font-size: var(--editor-h2-size, 22px);
+  line-height: var(--editor-h2-lh, 34px);
   font-weight: 700;
   letter-spacing: -0.005em;
   margin-top: 0.4em;
