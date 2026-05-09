@@ -3423,43 +3423,42 @@ tr:hover .replay-btn { opacity: 1; }
 .editor-line {
   /* Body lines inherit the body font from .editor-doc; sizes / line-
      heights mirror the same vars so the values are still consistent
-     when child line divs are reflowed during contenteditable edits.
-     Bottom margin defaults to 0 — paragraph-spacing only fires on the
-     LAST line of each markdown paragraph (rules below), not between
-     consecutive same-paragraph lines. */
+     when child line divs are reflowed during contenteditable edits. */
   font-size: var(--editor-body-size, 19px);
   line-height: var(--editor-body-lh, 32px);
   font-weight: normal;
   letter-spacing: 0;
   margin: 0;
 }
-/* Paragraph-spacing applies to EMPTY body lines, which are markdown's
-   canonical paragraph separator (a `\n` between paragraphs becomes an
-   empty line in the line model). Their natural line-height is the
-   minimum visible break; the slider adds extra below it. Targeting
-   the separator (not the last text-line of each paragraph) avoids
-   needing nested :has() — an empty body line is matched by
-   `:has(> br:only-child)`, which is supported as a single :has().
-   Consequence: a single body line at end-of-doc, or a body
-   immediately before a heading without an empty line between, won't
-   pick up the after-paragraph gap. The remedy in markdown is to
-   add the empty line — which is the writer's existing idiom. */
-.editor-line[data-kind="body"]:has(> br:only-child) {
+/* Paragraph-spacing fires on every non-empty body line. The writer's
+   model: pressing Enter at the end of a line ends the paragraph, and
+   the gap below that line is the slider amount — no need to type a
+   second blank line. Empty body lines (markdown's `\n\n` separator)
+   keep their natural line-height as additional whitespace; they don't
+   stack their own paragraph-spacing on top, because that would
+   double the gap any time the writer DID type a blank line. */
+.editor-line[data-kind="body"] {
   margin-bottom: var(--editor-paragraph-spacing, 0);
+}
+.editor-line[data-kind="body"]:has(> br:only-child) {
+  margin-bottom: 0;
 }
 .editor-line[data-kind="h1"] {
   /* Heading lines pick up archetype.heading via --typo-heading. The
      fallback is the body's serif stack so a freshly-loaded editor
      before typo.ts has run still reads as serif rather than the
-     browser default. Bottom margin is the typography panel's
-     "Heading spacing" so the writer can dial how much air sits
-     between a heading and the prose below it. */
+     browser default. Heading-spacing applies symmetrically to top
+     and bottom so the writer's slider can take the gap all the way
+     down to flush (0px each side) — far tighter than the previous
+     fixed `0.5em` margin-top would allow. The same value drives
+     both sides, keeping the panel a single control; if a writer
+     wants asymmetric heading spacing later, that's a follow-up. */
   font-family: var(--typo-heading, 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif);
   font-size: var(--editor-h1-size, 28px);
   line-height: var(--editor-h1-lh, 40px);
   font-weight: 800;
   letter-spacing: -0.01em;
-  margin-top: 0.5em;
+  margin-top: var(--editor-heading-spacing, 8px);
   margin-bottom: var(--editor-heading-spacing, 8px);
 }
 .editor-line[data-kind="h2"] {
@@ -3468,7 +3467,7 @@ tr:hover .replay-btn { opacity: 1; }
   line-height: var(--editor-h2-lh, 34px);
   font-weight: 700;
   letter-spacing: -0.005em;
-  margin-top: 0.4em;
+  margin-top: var(--editor-heading-spacing, 8px);
   margin-bottom: var(--editor-heading-spacing, 8px);
 }
 /* First line never carries a top margin — the bar sits right above
