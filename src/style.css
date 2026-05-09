@@ -505,7 +505,11 @@ td:first-child:has(.type-toggle) {
 td a {
   color: var(--text);
   text-decoration: none;
-  font-weight: var(--typo-title-weight, 600);
+  /* --typo-heading-weight is the unified weight from typography
+     panel's "Heading weight" slider — drives both editor h1/h2 and
+     these table title-link cells, so dialing up boldness gives a
+     coherent pass over both surfaces. */
+  font-weight: var(--typo-heading-weight, 600);
 }
 
 td a:hover {
@@ -3447,16 +3451,17 @@ tr:hover .replay-btn { opacity: 1; }
   /* Heading lines pick up archetype.heading via --typo-heading. The
      fallback is the body's serif stack so a freshly-loaded editor
      before typo.ts has run still reads as serif rather than the
-     browser default. Heading-spacing applies symmetrically to top
-     and bottom so the writer's slider can take the gap all the way
-     down to flush (0px each side) — far tighter than the previous
-     fixed `0.5em` margin-top would allow. The same value drives
-     both sides, keeping the panel a single control; if a writer
-     wants asymmetric heading spacing later, that's a follow-up. */
+     browser default. Size and weight come from the typography
+     panel's "Heading size" / "Heading weight" sliders; line-height
+     is the floor of size × line-height for whole-pixel alignment.
+     Heading-spacing applies symmetrically to top and bottom so the
+     slider can take the gap all the way down to flush (0px each
+     side) — far tighter than the previous fixed `0.5em` margin-top
+     would allow. */
   font-family: var(--typo-heading, 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif);
   font-size: var(--editor-h1-size, 28px);
   line-height: var(--editor-h1-lh, 40px);
-  font-weight: 800;
+  font-weight: var(--editor-h1-weight, 800);
   letter-spacing: -0.01em;
   margin-top: var(--editor-heading-spacing, 8px);
   margin-bottom: var(--editor-heading-spacing, 8px);
@@ -3465,7 +3470,7 @@ tr:hover .replay-btn { opacity: 1; }
   font-family: var(--typo-heading, 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif);
   font-size: var(--editor-h2-size, 22px);
   line-height: var(--editor-h2-lh, 34px);
-  font-weight: 700;
+  font-weight: var(--editor-h2-weight, 700);
   letter-spacing: -0.005em;
   margin-top: var(--editor-heading-spacing, 8px);
   margin-bottom: var(--editor-heading-spacing, 8px);
