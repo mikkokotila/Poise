@@ -12,13 +12,19 @@ interface TypoConfig {
   archetype: string
   baseFontSize: number      // html font-size (px) — scales everything
   lineHeight: number        // body line-height
-  // Editor — gap below paragraphs and headings in the writer view.
-  // Controls margin-bottom on .editor-line[data-kind="body"] and on
-  // h1/h2 respectively. Default paragraph spacing is 0 because the
-  // editor's natural paragraph break is an empty markdown line; users
-  // can dial it up if they want CSS-driven spacing without empty lines.
+  // Editor — gap below paragraphs and around headings in the writer
+  // view. Both can go negative (down to -16) so the writer can pull
+  // lines closer than the natural line-height alone permits — the
+  // CSS engine subtracts margin from the inter-line distance, so a
+  // negative paragraphSpacing produces tighter-than-leading rhythm.
   paragraphSpacing: number  // editor body line margin-bottom (px)
-  headingSpacing: number    // editor h1/h2 line margin-bottom (px)
+  headingSpacing: number    // editor h1/h2 margin-top + bottom (px)
+  // Heading line-height is independent of the global Type "Line
+  // height" — that one stays the body-line multiplier; this one
+  // multiplies just heading sizes. Default 1.5 matches what Type's
+  // line-height was producing for headings before this slider
+  // existed, so the visual is preserved on first open.
+  headingLineHeight: number // editor h1/h2 line-height multiplier
   rowFontSize: number       // td font-size (rem)
   rowPadding: number        // td vertical padding (px)
   headingWeight: number     // editor h1/h2 + kanban title-link weight
@@ -73,7 +79,8 @@ const DEFAULTS: TypoConfig = {
   baseFontSize: 15,
   lineHeight: 1.5,
   paragraphSpacing: 0,      // no extra gap by default (markdown-empty-line idiom)
-  headingSpacing: 8,         // mild after-heading breathing room
+  headingSpacing: 8,        // mild after-heading breathing room
+  headingLineHeight: 1.5,    // matches what Type's line-height produced before
   rowFontSize: 0.8125,
   rowPadding: 11,
   headingWeight: 700,       // 700 (bold) for editor h1; h2 derives as 700-100=600
@@ -134,13 +141,27 @@ const SLIDER_GROUPS: SliderGroup[] = [
   {
     label: 'Editor',
     sliders: [
-      { key: 'paragraphSpacing', label: 'Paragraph spacing', min: 0,   max: 32,  step: 1,   fmt: fPx },
-      { key: 'headingSpacing',   label: 'Heading spacing',   min: 0,   max: 32,  step: 1,   fmt: fPx },
+      // Spacing ranges allow negative values down to -16 so the writer
+      // can pull lines tighter than the natural leading. Negative
+      // margin subtracts from inter-line distance; with body
+      // line-height around 28-32px there's headroom to compress
+      // without overlap, and headings (with their own line-height +
+      // surrounding margins) can compress further.
+      { key: 'paragraphSpacing',  label: 'Paragraph spacing',   min: -16, max: 32,  step: 1,    fmt: fPx },
+      { key: 'headingSpacing',    label: 'Heading spacing',     min: -16, max: 32,  step: 1,    fmt: fPx },
+      // Heading line-height multiplier — independent of the global
+      // Type "Line height" (which now controls only body lines). At
+      // the default 1.5 the editor's headings render exactly as they
+      // did when the global slider drove them; tighten to 1.1-1.2 for
+      // dense display headings, loosen up to 2.0 for airy chapter
+      // openers. Values get floor-multiplied with headingSize for a
+      // whole-pixel line-height (cursor-alignment requirement).
+      { key: 'headingLineHeight', label: 'Heading line height', min: 1.0, max: 2.0, step: 0.05, fmt: f2 },
       // Heading size sets the editor's H1 in pixels; H2 derives as
       // H1 - 6 (matching the prior 28/22 default delta). Range 20–48
       // covers austere prose-headings through dramatic display sizes
       // without leaving the prose page.
-      { key: 'headingSize',      label: 'Heading size',      min: 20,  max: 48,  step: 1,   fmt: fPx },
+      { key: 'headingSize',       label: 'Heading size',        min: 20,  max: 48,  step: 1,    fmt: fPx },
       // Heading weight drives both editor H1 (= weight + 100, capped
       // at 900) and editor H2 (= weight). Range 400–800 step 100
       // covers the loaded weights from Google Fonts (400/500/600/700/
@@ -148,7 +169,7 @@ const SLIDER_GROUPS: SliderGroup[] = [
       // The same value also powers --typo-heading-weight which the
       // kanban title-link uses, so heading visual coherence holds
       // across the writer view and the dashboard.
-      { key: 'headingWeight',    label: 'Heading weight',    min: 400, max: 800, step: 100, fmt: f0 },
+      { key: 'headingWeight',     label: 'Heading weight',      min: 400, max: 800, step: 100,  fmt: f0 },
     ],
   },
   {
@@ -259,8 +280,13 @@ function apply() {
   root.style.setProperty('--editor-h1-size',   `${editorH1}px`)
   root.style.setProperty('--editor-h2-size',   `${editorH2}px`)
   root.style.setProperty('--editor-body-lh', `${Math.floor(editorBody * config.lineHeight)}px`)
-  root.style.setProperty('--editor-h1-lh',   `${Math.floor(editorH1   * config.lineHeight)}px`)
-  root.style.setProperty('--editor-h2-lh',   `${Math.floor(editorH2   * config.lineHeight)}px`)
+  // Heading line-heights use config.headingLineHeight (the Editor
+  // group's "Heading line height" slider), not the global lineHeight,
+  // so the writer can tighten leading on display text without
+  // affecting body rhythm. Whole-pixel floor preserves cursor
+  // alignment when lines of different sizes share the page.
+  root.style.setProperty('--editor-h1-lh', `${Math.floor(editorH1 * config.headingLineHeight)}px`)
+  root.style.setProperty('--editor-h2-lh', `${Math.floor(editorH2 * config.headingLineHeight)}px`)
   // Editor heading weights — H1 is one step heavier than the slider's
   // value (capped at 900); H2 is the slider value. The +100 keeps the
   // visual hierarchy without a second slider; the cap stops the math
