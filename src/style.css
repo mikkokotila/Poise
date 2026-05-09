@@ -3183,7 +3183,13 @@ tr:hover .replay-btn { opacity: 1; }
 
 /* Doc dropdown popover — anchored to the trigger wrapper's right
    edge so the menu opens DOWN-LEFT from the trigger and never falls
-   off the viewport on narrow widths. */
+   off the viewport on narrow widths.
+
+   The [hidden] override below is load-bearing: HTML's `hidden`
+   attribute works by setting `display: none` via the user-agent
+   stylesheet, which any explicit `display: …` author rule beats.
+   Without this, the menu is permanently visible (empty before open,
+   populated after) and the toggle never appears to do anything. */
 .editor-doc-menu {
   position: absolute;
   top: calc(100% + 6px);
@@ -3203,6 +3209,7 @@ tr:hover .replay-btn { opacity: 1; }
   flex-direction: column;
   gap: 1px;
 }
+.editor-doc-menu[hidden] { display: none; }
 .editor-doc-bucket {
   font-size: 0.625rem;
   letter-spacing: 0.08em;

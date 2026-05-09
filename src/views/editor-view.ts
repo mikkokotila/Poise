@@ -172,7 +172,13 @@ function openMenu() {
   renderDocMenu()
   menuEl.hidden = false
   triggerEl.setAttribute('aria-expanded', 'true')
-  setTimeout(() => document.addEventListener('click', onOutsideClick), 0)
+  // Defer install so the click that opened the menu doesn't
+  // immediately close it. Escape works from anywhere while the menu
+  // is open, not just when the textarea has focus.
+  setTimeout(() => {
+    document.addEventListener('click', onOutsideClick)
+    document.addEventListener('keydown', onMenuKeydown)
+  }, 0)
 }
 
 function closeMenu() {
@@ -180,6 +186,7 @@ function closeMenu() {
   menuEl.hidden = true
   triggerEl.setAttribute('aria-expanded', 'false')
   document.removeEventListener('click', onOutsideClick)
+  document.removeEventListener('keydown', onMenuKeydown)
 }
 
 function onOutsideClick(e: MouseEvent) {
@@ -187,6 +194,13 @@ function onOutsideClick(e: MouseEvent) {
   const target = e.target as Node
   if (menuEl.contains(target) || triggerEl.contains(target)) return
   closeMenu()
+}
+
+function onMenuKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    closeMenu()
+  }
 }
 
 async function fetchDocs() {
@@ -339,10 +353,9 @@ function attachHandlers() {
       e.preventDefault()
       void newDoc()
     }
-    if (e.key === 'Escape' && menuEl && !menuEl.hidden) {
-      e.preventDefault()
-      closeMenu()
-    }
+    // Escape while the menu is open is handled by onMenuKeydown
+    // (installed at openMenu, removed at closeMenu) so it works
+    // whether or not the textarea has focus.
   })
 
   window.addEventListener('pagehide', () => {
