@@ -134,21 +134,60 @@ function renderShell(): string {
   `
 }
 
+// Line-kind taxonomy. Block-level kinds the editor recognises:
+//   - h1 / h2 / body: classified per-line from the leading `#` / `##`.
+//   - code-fence-open / code-fence-close / code-content: triple-backtick
+//     fenced code block. The opening fence is a line whose text starts
+//     with ```` (optionally followed by a language tag); the closing
+//     fence is a line whose text equals exactly ```` (no language).
+//     Lines between are code-content. Detection requires looking at
+//     surrounding lines, not just one — see classifyAllLines.
+type LineKind = 'h1' | 'h2' | 'body' | 'code-fence-open' | 'code-fence-close' | 'code-content'
+
 // Classify a single line by its leading markdown token. Only `# ` and
 // `## ` produce headings — H3+ isn't supported (intentional: the
 // editor's spec is "minimal markup"). Lines that are bare `#` or `##`
 // without a trailing space stay as body until the user adds the space,
-// matching CommonMark/iA Writer behaviour.
+// matching CommonMark/iA Writer behaviour. Code-block kinds are NOT
+// computed here — they need cross-line state from classifyAllLines.
 function lineKindFor(text: string): 'h1' | 'h2' | 'body' {
   if (/^## /.test(text)) return 'h2'
   if (/^# /.test(text))  return 'h1'
   return 'body'
 }
 
+// Walk a list of line texts in order and produce one kind per line.
+// State machine: outside a code block, lines are h1/h2/body via
+// lineKindFor; encountering a line that starts with ```` opens a
+// block, lines between are code-content, and a line whose text is
+// exactly ```` closes the block. Unclosed openers run to end-of-doc
+// (everything past the open is code-content) — which is the same
+// behaviour CommonMark / iA Writer / Typora exhibit.
+function classifyAllLines(texts: string[]): LineKind[] {
+  const out: LineKind[] = []
+  let inBlock = false
+  for (const text of texts) {
+    if (inBlock) {
+      if (text === '```') { out.push('code-fence-close'); inBlock = false }
+      else                { out.push('code-content') }
+    } else {
+      if (/^```/.test(text)) { out.push('code-fence-open'); inBlock = true }
+      else                   { out.push(lineKindFor(text)) }
+    }
+  }
+  return out
+}
+
 // The visible-prefix length each kind hides. CSS sets the marker span
 // to `display: none`, so the user only sees the "rest" of the line.
-function markerLengthFor(kind: 'h1' | 'h2' | 'body'): number {
-  return kind === 'h1' ? 2 : kind === 'h2' ? 3 : 0
+// For code-fence kinds, the entire line is the marker — markerLengthFor
+// returns the length so callers (snap logic) treat the whole line as
+// a hidden prefix.
+function markerLengthFor(kind: LineKind, lineText: string = ''): number {
+  if (kind === 'h1') return 2
+  if (kind === 'h2') return 3
+  if (kind === 'code-fence-open' || kind === 'code-fence-close') return lineText.length
+  return 0
 }
 
 // Inline-segment model. A line's "rest" (everything after the optional
@@ -244,19 +283,44 @@ function buildInlineWrap(tag: 'strong' | 'code', marker: string, inner: string):
 function buildBoldEl(inner: string): HTMLElement { return buildInlineWrap('strong', '**', inner) }
 function buildCodeEl(inner: string): HTMLElement { return buildInlineWrap('code',  '`',  inner) }
 
-// Build a fresh line element. Lines whose markdown starts with `# ` /
-// `## ` get the marker wrapped in a hidden <span class="md-marker">
-// so the user sees only the heading text. The line's remaining content
-// is parsed for inline `**bold**` runs and split across <strong>
-// wrappers (each with its own hidden markers). All marker text still
-// lives in textContent so save and the copy-document button round-trip
-// the true markdown. Empty lines (and empty headings, where the rest
-// is "") get a <br> filler so contenteditable gives them row height.
-function buildLineEl(text: string): HTMLDivElement {
+// Build a fresh line element. Behaviour by kind:
+//   - h1 / h2: the `# ` / `## ` prefix is wrapped in a hidden marker
+//     span; the rest is parsed for inline bold/code and split into
+//     text nodes + <strong> / <code> wrappers. Lines ending in a
+//     wrapper get an empty-text sentinel for caret anchoring.
+//   - body: as h1/h2 but no leading marker.
+//   - code-fence-open / code-fence-close: the WHOLE textContent is
+//     the marker — wrapped in `<span class="md-marker">` so the
+//     fence text disappears visually. The line div itself is still
+//     in the DOM; CSS gives it min-height so it occupies a blank
+//     line of vertical space, framing the code block.
+//   - code-content: plain text in monospace, no inline parsing
+//     (asterisks/backticks inside code are literal).
+// All marker text stays in textContent so save and copy round-trip
+// the true markdown.
+function buildLineEl(text: string, kind: LineKind): HTMLDivElement {
   const div = document.createElement('div')
   div.className = 'editor-line'
-  const kind = lineKindFor(text)
   div.dataset.kind = kind
+
+  if (kind === 'code-fence-open' || kind === 'code-fence-close') {
+    if (text === '') {
+      div.appendChild(document.createElement('br'))
+    } else {
+      const span = document.createElement('span')
+      span.className = 'md-marker'
+      span.textContent = text
+      div.appendChild(span)
+    }
+    return div
+  }
+
+  if (kind === 'code-content') {
+    if (text === '') div.appendChild(document.createElement('br'))
+    else             div.appendChild(document.createTextNode(text))
+    return div
+  }
+
   const prefixLen = markerLengthFor(kind)
   const prefix = text.slice(0, prefixLen)
   const rest = text.slice(prefixLen)
@@ -575,8 +639,22 @@ function reconstructMarkdownFromRange(range: Range): string | null {
     if (!line.classList.contains('editor-line')) continue
     if (!range.intersectsNode(line)) continue
 
+    const kind = (line.dataset.kind as LineKind) || 'body'
     const lineText = line.textContent || ''
-    const markerLen = markerLengthFor((line.dataset.kind as 'h1' | 'h2' | 'body') || 'body')
+
+    // Code-fence lines are entirely hidden marker — there's no
+    // "visible content" to slice. If the range touches a fence line
+    // at all, emit the whole fence text. (The user might be selecting
+    // an empty-looking line; copying out the markdown is the right
+    // round-trip.) Code-content lines have only visible text and no
+    // hidden markers, so the standard slice produces the right text
+    // without any marker snap.
+    if (kind === 'code-fence-open' || kind === 'code-fence-close') {
+      out.push(lineText)
+      continue
+    }
+
+    const markerLen = markerLengthFor(kind, lineText)
 
     let startOffset = 0
     let endOffset = lineText.length
@@ -598,7 +676,8 @@ function reconstructMarkdownFromRange(range: Range): string | null {
     // expand outward to include the surrounding markers (`**` for
     // strong, `` ` `` for code). We use the original startOffset/
     // endOffset (visible bounds) for the comparison so the heading
-    // snap above doesn't double-count.
+    // snap above doesn't double-count. Code-content lines have no
+    // inline wrappers, so this loop is a no-op for them.
     for (const wrap of Array.from(line.querySelectorAll('strong, code'))) {
       const wrapStart = offsetOfNodeInLine(line, wrap)
       if (wrapStart < 0) continue
@@ -632,7 +711,10 @@ function loadIntoEditor(content: string) {
   if (!docEl) return
   docEl.innerHTML = ''
   const lines = content === '' ? [''] : content.split('\n')
-  for (const line of lines) docEl.appendChild(buildLineEl(line))
+  const kinds = classifyAllLines(lines)
+  for (let i = 0; i < lines.length; i++) {
+    docEl.appendChild(buildLineEl(lines[i], kinds[i]))
+  }
   updateEmptyState()
 }
 
@@ -656,25 +738,51 @@ function updateEmptyState() {
 }
 
 // Test whether a line's current DOM structure matches what
-// buildLineEl(textContent) would produce — used to decide whether to
-// rebuild on input. Mismatch happens when:
-//   - kind changed (user typed/erased a `#` marker prefix)
+// buildLineEl(textContent, kind) would produce — used to decide
+// whether to rebuild on input. Mismatch happens when:
+//   - kind changed (user typed/erased a `#` marker prefix, or a
+//     ``` fence appeared/disappeared somewhere up the doc)
 //   - the marker span content drifted from its kind's prefix
-//   - the inline-bold structure changed (user typed/closed a `**`
-//     pair, or broke one) so a <strong> wrapper needs to appear /
-//     disappear / move
+//   - the inline-bold/code structure changed (user typed/closed a
+//     `**` or `` ` `` pair, or broke one) so a wrapper needs to
+//     appear / disappear / move
 //   - any segment got split across multiple text nodes from browser
 //     edit operations (cursor offset accounting depends on each
 //     segment being a single text node).
-function lineMatchesModel(line: HTMLElement): boolean {
-  const txt = line.textContent || ''
-  const kind = lineKindFor(txt)
+// `kind` is supplied by the caller (classifyAllLines) because code-
+// block kinds depend on cross-line state and can't be derived from
+// the line's own text alone.
+function lineMatchesModel(line: HTMLElement, kind: LineKind): boolean {
   if (line.dataset.kind !== kind) return false
+  const txt = line.textContent || ''
+  const children = Array.from(line.childNodes)
+
+  if (kind === 'code-fence-open' || kind === 'code-fence-close') {
+    if (txt === '') {
+      return children.length === 1
+        && children[0].nodeType === Node.ELEMENT_NODE
+        && (children[0] as HTMLElement).tagName === 'BR'
+    }
+    return children.length === 1
+      && children[0].nodeType === Node.ELEMENT_NODE
+      && (children[0] as HTMLElement).classList.contains('md-marker')
+      && children[0].textContent === txt
+  }
+
+  if (kind === 'code-content') {
+    if (txt === '') {
+      return children.length === 1
+        && children[0].nodeType === Node.ELEMENT_NODE
+        && (children[0] as HTMLElement).tagName === 'BR'
+    }
+    return children.length === 1
+      && children[0].nodeType === Node.TEXT_NODE
+      && children[0].textContent === txt
+  }
 
   const prefixLen = markerLengthFor(kind)
   const expectedPrefix = txt.slice(0, prefixLen)
   const rest = txt.slice(prefixLen)
-  const children = Array.from(line.childNodes)
   let i = 0
 
   if (expectedPrefix !== '') {
@@ -738,16 +846,14 @@ function lineMatchesModel(line: HTMLElement): boolean {
   return true
 }
 
-// Rebuild a line in place from its current textContent, preserving
-// cursor offset (in textContent coordinates, including any hidden
-// marker characters). The marker span the rebuild produces is
-// display:none, so the visible line snaps to the new kind's typography
-// while save/copy still see the full markdown.
-function rebuildLineInPlace(line: HTMLElement) {
+// Rebuild a line in place at the given kind, preserving cursor offset
+// (in textContent coordinates, including any hidden marker characters).
+// Replacing only the line's children (not the line div itself) keeps
+// any external references to the div alive.
+function rebuildLineInPlace(line: HTMLElement, kind: LineKind) {
   const txt = line.textContent || ''
   const cursor = getCursorOffsetInLine(line)
-  const fresh = buildLineEl(txt)
-  // Replace content but keep the line div itself (so external refs hold).
+  const fresh = buildLineEl(txt, kind)
   line.dataset.kind = fresh.dataset.kind!
   line.innerHTML = ''
   while (fresh.firstChild) line.appendChild(fresh.firstChild)
@@ -756,43 +862,47 @@ function rebuildLineInPlace(line: HTMLElement) {
 
 // Re-classify every line and clean up structure. Runs on every input
 // event; the common case is "no structural change" and we touch
-// nothing. When the user types a marker character (`# `/`## `) or
-// breaks one (deleting through the marker), the affected line gets
-// rebuilt in place with cursor preserved at its textContent offset.
+// nothing. When the user types a marker character (`# `, `## `, ``` )
+// or breaks one (deleting through a marker), the affected line — and
+// in the case of code-block fences, every line that follows in the
+// block — gets rebuilt in place with cursor preserved at its
+// textContent offset.
 function reclassifyLines() {
   if (!docEl) return
   // The browser sometimes promotes the contenteditable into containing
   // bare text nodes (e.g. when typing into an empty doc) or stray <br>s
   // at the root. Wrap any of those in editor-line divs so the
-  // per-line model stays consistent.
+  // per-line model stays consistent. We don't yet know each new line's
+  // kind here — body is a safe placeholder; classifyAllLines below
+  // will produce the real kind and trigger a rebuild if needed.
   for (const node of Array.from(docEl.childNodes)) {
     if (node.nodeType === Node.TEXT_NODE) {
-      const wrap = buildLineEl(node.textContent || '')
+      const wrap = buildLineEl(node.textContent || '', 'body')
       docEl.replaceChild(wrap, node)
     } else if (node.nodeType === Node.ELEMENT_NODE) {
       const el = node as HTMLElement
       if (el.tagName === 'BR') {
-        const wrap = buildLineEl('')
+        const wrap = buildLineEl('', 'body')
         docEl.replaceChild(wrap, node)
       } else if (!el.classList.contains('editor-line')) {
         // Some other element snuck in (e.g. <p> from a paste). Re-wrap
         // it as a line and pull the text across.
-        const wrap = buildLineEl(el.textContent || '')
+        const wrap = buildLineEl(el.textContent || '', 'body')
         docEl.replaceChild(wrap, node)
       }
     }
   }
-  // Now every child is an .editor-line div. For each, compare its
-  // current shape to what its textContent should produce; rebuild only
-  // when they diverge — otherwise leave the cursor alone.
-  for (const child of Array.from(docEl.children)) {
-    const el = child as HTMLElement
-    if (!lineMatchesModel(el)) {
-      rebuildLineInPlace(el)
+  // Compute kinds doc-level (so code-block fences propagate) and
+  // rebuild any line whose DOM doesn't match its expected shape.
+  const lines = Array.from(docEl.children) as HTMLElement[]
+  const texts = lines.map((l) => l.textContent || '')
+  const kinds = classifyAllLines(texts)
+  for (let idx = 0; idx < lines.length; idx++) {
+    const el = lines[idx]
+    if (!lineMatchesModel(el, kinds[idx])) {
+      rebuildLineInPlace(el, kinds[idx])
     }
-    // Ensure empty lines have a <br> filler. lineMatchesModel rejects
-    // body lines with no children at all; this catches mid-edit states
-    // (e.g. user just deleted everything but the cursor is in this line).
+    // Ensure empty lines have a <br> filler.
     if ((el.textContent || '') === '' && !el.querySelector('br')) {
       el.appendChild(document.createElement('br'))
     }
@@ -800,7 +910,7 @@ function reclassifyLines() {
   // If the doc somehow got emptied entirely, restore one empty line
   // so the cursor has a place to live.
   if (docEl.children.length === 0) {
-    docEl.appendChild(buildLineEl(''))
+    docEl.appendChild(buildLineEl('', 'body'))
   }
 }
 

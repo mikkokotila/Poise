@@ -3477,6 +3477,35 @@ tr:hover .replay-btn { opacity: 1; }
   border-radius: 3px;
 }
 
+/* ── Fenced code block ──
+   Three line kinds form a contiguous region:
+     code-fence-open  — line whose content is ```... (open fence)
+     code-content     — line inside the block
+     code-fence-close — line whose content is ``` (close fence)
+   The fence lines' textContent is wrapped entirely in <span class="md-marker">
+   and CSS hides those markers, so the fence rows render as visually
+   blank — only their min-height holds the row open. Sharing the same
+   tinted background across all three kinds makes the whole block read
+   as one region; min-height matching the body line-height (32px)
+   prevents the fence rows from collapsing or reflowing oddly. */
+.editor-line[data-kind="code-fence-open"],
+.editor-line[data-kind="code-fence-close"],
+.editor-line[data-kind="code-content"] {
+  background: rgba(127, 127, 127, 0.08);
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.92em;
+  padding-left:  var(--sp-3);
+  padding-right: var(--sp-3);
+  margin-top: 0;
+  margin-bottom: 0;
+}
+.editor-line[data-kind="code-fence-open"],
+.editor-line[data-kind="code-fence-close"] {
+  /* Hold a row of vertical space for the (visually empty) fence so
+     the block boundary reads as a soft top/bottom edge. */
+  min-height: 32px;
+}
+
 /* Copy-button success tint while the checkmark is showing.
    --a3 is the green accent in the DS palette. */
 .editor-bar-btn.is-copied { color: var(--a3); }
