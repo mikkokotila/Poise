@@ -3090,3 +3090,177 @@ tr:hover .replay-btn { opacity: 1; }
    row — they're never under the strip. */
 .card-time { transition: opacity var(--t-quick) ease; }
 .card:hover .card-time { opacity: 0; }
+
+/* ─── Editor view ─────────────────────────────────────────────────────────
+   Minimalist markdown writing surface. Two halves: a quiet sidebar with
+   the doc list, and a chromeless writing area set in a generous serif at
+   a comfortable measure. Goal is to disappear — the writer should see
+   the page, not the chrome. */
+
+#view-editor {
+  /* Override the universal .view padding — the editor manages its own
+     edge-to-edge layout. */
+  padding: 0;
+}
+
+.editor-shell {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  /* Fill the rest of the viewport below the top nav. The nav sits in
+     the top-right and doesn't reserve a band, so we just take the full
+     viewport height. */
+  height: calc(100vh - var(--sp-7));
+  min-height: 480px;
+}
+
+/* ── Sidebar ── */
+.editor-sidebar {
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  padding: var(--sp-5) var(--sp-3) var(--sp-5);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.editor-new-btn {
+  align-self: stretch;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px dashed var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: var(--r-md);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--t-quick) ease, color var(--t-quick) ease, background var(--t-quick) ease;
+}
+.editor-new-btn:hover {
+  border-color: var(--text-tertiary);
+  color: var(--text);
+  background: var(--hover);
+}
+
+.editor-doc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.editor-doc-bucket {
+  font-size: 0.625rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin: var(--sp-4) var(--sp-2) var(--sp-1);
+  font-weight: 500;
+}
+.editor-doc-bucket:first-child { margin-top: var(--sp-2); }
+
+.editor-doc-item {
+  /* Looks like a passive row but is a button so keyboard works. */
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  cursor: pointer;
+  transition: background var(--t-quick) ease;
+}
+.editor-doc-item:hover { background: var(--hover); }
+.editor-doc-item.is-active {
+  background: var(--tint-a1);
+  color: var(--text);
+}
+.editor-doc-title {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+.editor-doc-time {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.6875rem;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.editor-doc-empty {
+  color: var(--text-tertiary);
+  font-size: 0.8125rem;
+  padding: var(--sp-3) var(--sp-2);
+}
+
+/* ── Writing area ──
+   The whole point of the view. No toolbar, no chrome — just the page,
+   set in a generous serif at the kind of measure (~64ch) that
+   typographers reach for when prose is the product. */
+.editor-main {
+  overflow-y: auto;
+  background: var(--bg);
+  /* Vertical breathing room top + bottom so the cursor doesn't sit
+     against the edge as the user scrolls. */
+  padding: var(--sp-7) var(--sp-6) var(--sp-8);
+}
+
+.editor-page {
+  max-width: 680px;
+  margin: 0 auto;
+}
+
+.editor-textarea {
+  width: 100%;
+  min-height: calc(100vh - 240px);
+  border: none;
+  outline: none;
+  background: transparent;
+  resize: none;
+  display: block;
+  /* Iowan Old Style / Palatino / Georgia is the system-font book-serif
+     stack that gives us a Medium-grade reading rhythm without loading
+     a webfont. */
+  font-family: 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif;
+  font-size: 19px;
+  line-height: 1.7;
+  color: var(--text);
+  padding: 0;
+  margin: 0;
+  /* Trust the OS for spell-check / autocorrect; turn off resize handles
+     and the autocomplete underlines that some browsers paint by
+     default — they're noisy in a writing surface. */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'liga' 1, 'kern' 1;
+}
+.editor-textarea::placeholder {
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+.editor-textarea:focus { outline: none; }
+
+/* Quiet save / word-count footer below the page. Visible but never
+   demanding. */
+.editor-meta {
+  margin-top: var(--sp-5);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+  font-size: 0.6875rem;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* On dark mode, the page tone shifts to a slightly raised surface so
+   the writing area still reads as a "page" against the surrounding
+   chrome. */
+html[data-theme="dark"] .editor-main { background: var(--bg); }
+html[data-theme="dark"] .editor-textarea { color: var(--text); }

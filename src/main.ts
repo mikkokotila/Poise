@@ -6,6 +6,7 @@ import { initMainView, refreshMainView, stopMainRefresh } from './views/main-vie
 import { initCurrentView, stopCurrentPolling } from './views/current-view'
 import { initSwarmView, stopSwarmRefresh, focusRow as focusSwarmRow } from './views/swarm-view'
 import { initBehaviorsView, stopBehaviorsRefresh } from './views/behaviors-view'
+import { initEditorView, stopEditorRefresh } from './views/editor-view'
 import { toggle as toggleChat } from './views/chat-pane'
 import { loadSettings, startRefreshTicker, applyTheme, getTheme } from './config'
 
@@ -13,28 +14,32 @@ const viewMainEl = document.getElementById('view-main')!
 const viewCurrentEl = document.getElementById('view-current')!
 const viewSwarmEl = document.getElementById('view-swarm')!
 const viewBehaviorsEl = document.getElementById('view-behaviors')!
+const viewEditorEl = document.getElementById('view-editor')!
 
-type ViewSlug = 'main' | 'current' | 'swarm' | 'behaviors'
+type ViewSlug = 'main' | 'current' | 'swarm' | 'behaviors' | 'editor'
 
 function showView(v: ViewSlug) {
-  const all = [viewMainEl, viewCurrentEl, viewSwarmEl, viewBehaviorsEl]
+  const all = [viewMainEl, viewCurrentEl, viewSwarmEl, viewBehaviorsEl, viewEditorEl]
   const target =
       v === 'main'      ? viewMainEl
     : v === 'current'   ? viewCurrentEl
     : v === 'swarm'     ? viewSwarmEl
-    :                     viewBehaviorsEl
+    : v === 'behaviors' ? viewBehaviorsEl
+    :                     viewEditorEl
 
   // Stop background polling when leaving the views that own them
   if (v !== 'swarm')     stopSwarmRefresh()
   if (v !== 'current')   stopCurrentPolling()
   if (v !== 'main')      stopMainRefresh()
   if (v !== 'behaviors') stopBehaviorsRefresh()
+  if (v !== 'editor')    stopEditorRefresh()
 
   // Initialize the target first so content exists before the animation starts
   if (v === 'main')           initMainView()
   else if (v === 'current')   initCurrentView()
   else if (v === 'swarm')     initSwarmView()
-  else                        initBehaviorsView()
+  else if (v === 'behaviors') initBehaviorsView()
+  else                        initEditorView()
 
   for (const el of all) {
     if (el === target) {

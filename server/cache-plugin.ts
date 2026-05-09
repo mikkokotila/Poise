@@ -4,6 +4,7 @@ import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, 
 import { handleGhBody, listOrgRepos } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, triggerPrReview, replayAgentJob } from './agent'
 import { listChatHistory, sendChat, saveAttachment } from './chat'
+import { listDocs, readDoc, writeDoc, deleteDoc, newSlug } from './editor'
 import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, getEnabledMap, getSettingMap, isValidSetting, startBehaviorsRuntime, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
 
 function json(res: any, status: number, body: unknown) {
@@ -275,6 +276,56 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
             const stderr = err?.stderr?.toString?.() || ''
             const msg = stderr || err?.message || String(err)
             return json(res, 400, { error: 'agent-replay failed: ' + msg })
+          }
+        }
+
+        // ── /api/editor — markdown editor docs ──
+        // Each doc is a plain .md file under ~/.poise/editor/ (or
+        // $POISE_EDITOR_DIR). server/editor.ts owns sanitization and
+        // the on-disk layout; this just bridges HTTP to those calls.
+        if (url === '/api/editor/docs' && req.method === 'GET') {
+          try {
+            const docs = await listDocs()
+            return json(res, 200, { docs })
+          } catch (err: any) {
+            return json(res, 500, { error: err.message || String(err) })
+          }
+        }
+        if (url === '/api/editor/docs' && req.method === 'POST') {
+          // Create a new blank doc with a server-minted slug.
+          try {
+            const result = await writeDoc(newSlug(), '')
+            return json(res, 200, result)
+          } catch (err: any) {
+            return json(res, 500, { error: err.message || String(err) })
+          }
+        }
+        const editorDocMatch = url.match(/^\/api\/editor\/doc\/([A-Za-z0-9._-]+)$/)
+        if (editorDocMatch && req.method === 'GET') {
+          try {
+            const result = await readDoc(editorDocMatch[1])
+            return json(res, 200, result)
+          } catch (err: any) {
+            if (err.code === 'ENOENT') return json(res, 404, { error: 'not found' })
+            return json(res, 500, { error: err.message || String(err) })
+          }
+        }
+        if (editorDocMatch && req.method === 'PUT') {
+          try {
+            const raw = await readBody(req)
+            const body = raw ? JSON.parse(raw) : {}
+            const result = await writeDoc(editorDocMatch[1], String(body.content || ''))
+            return json(res, 200, result)
+          } catch (err: any) {
+            return json(res, 400, { error: err.message || String(err) })
+          }
+        }
+        if (editorDocMatch && req.method === 'DELETE') {
+          try {
+            const result = await deleteDoc(editorDocMatch[1])
+            return json(res, 200, result)
+          } catch (err: any) {
+            return json(res, 500, { error: err.message || String(err) })
           }
         }
 
