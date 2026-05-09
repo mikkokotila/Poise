@@ -115,3 +115,16 @@ window.addEventListener('poise:goto-swarm-row', (ev) => {
     focusSwarmRow(detail.repo, detail.pr_id)
   })
 })
+
+// Chat /content → editor article. The chat pane dispatches
+// `poise:open-editor-doc` after agent-interface --author-content
+// completes; we switch to the editor view and re-dispatch a
+// `poise:editor-load-doc` event the editor view listens for.
+window.addEventListener('poise:open-editor-doc', (ev) => {
+  const detail = (ev as CustomEvent<{ slug: string }>).detail
+  if (!detail?.slug) return
+  menu.switchTo('editor')
+  window.requestAnimationFrame(() => {
+    window.dispatchEvent(new CustomEvent('poise:editor-load-doc', { detail }))
+  })
+})

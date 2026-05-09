@@ -44,12 +44,24 @@ let attachBtn: HTMLButtonElement | null = null
 let fileInputEl: HTMLInputElement | null = null
 let modelSelectEl: HTMLSelectElement | null = null
 let chipsEl: HTMLElement | null = null
+let modeChipEl: HTMLElement | null = null
+let inputWrapEl: HTMLElement | null = null
 let initialized = false
 
 let currentSession: string | null = null
 let messages: ChatLogEntry[] = []
 let attachments: Attachment[] = []
 let selectedModel: ModelKey = DEFAULT_MODEL
+// Slash-command mode lock. When the user types `/<token> ` at the
+// end of an empty-trimmed input, the composer "locks" into that mode
+// — visual chip in the input wrap, and on send we route to the mode's
+// dedicated path (currently only `/content` → agent-interface
+// --author-content). Same rhythm as Confab's mode-lock pattern.
+interface ModeToken { token: string; mode: 'content' }
+const MODE_TOKENS: ModeToken[] = [
+  { token: '/content', mode: 'content' },
+]
+let activeMode: ModeToken | null = null
 // Cache of fetched reply bodies, keyed by call id, so we don't refetch.
 const repliesById: Map<string, string> = new Map()
 // Polling — fast while there's an in-flight (running) message, idle otherwise.
@@ -107,6 +119,7 @@ function renderShell() {
         <textarea class="chat-input" rows="1" placeholder="Message…" spellcheck="true"></textarea>
         <div class="chat-controls">
           <button class="chat-attach" type="button" aria-label="Attach file" title="Attach file">${ICON_PLUS}</button>
+          <span class="chat-mode-chip" id="chat-mode-chip" aria-live="polite" hidden></span>
           <div class="chat-model">
             <select class="chat-model-select" aria-label="Model">${modelOptions}</select>
             <span class="chat-model-chevron" aria-hidden="true">▾</span>
@@ -128,6 +141,8 @@ function renderShell() {
   fileInputEl = panelEl.querySelector('.chat-file-input') as HTMLInputElement
   modelSelectEl = panelEl.querySelector('.chat-model-select') as HTMLSelectElement
   chipsEl = panelEl.querySelector('.chat-attachments') as HTMLElement
+  modeChipEl = panelEl.querySelector('.chat-mode-chip') as HTMLElement
+  inputWrapEl = panelEl.querySelector('.chat-input-wrap') as HTMLElement
 
   panelEl.querySelector('.chat-close')!.addEventListener('click', close)
   panelEl.querySelector('.chat-composer')!.addEventListener('submit', (e) => {
@@ -136,6 +151,12 @@ function renderShell() {
   })
   inputEl.addEventListener('input', () => autoResize())
   inputEl.addEventListener('keydown', (e) => {
+    // Mode-lock detection — Confab parity. Space at end-of-input,
+    // no modifiers, no selection, current value matches a known
+    // /<token>: lock in, clear input, show chip.
+    if (tryEnterMode(e)) return
+    // Backspace at position 0 or Cmd/Ctrl+X while locked: exit mode.
+    if (tryExitMode(e)) return
     // Enter sends; Shift+Enter inserts a newline (standard chat
     // convention). Cmd/Ctrl+Enter also sends — kept for muscle-memory
     // from the previous build.
@@ -179,6 +200,64 @@ function autoResize() {
   const next = Math.min(inputEl.scrollHeight, MAX_INPUT_PX)
   inputEl.style.height = `${next}px`
   inputEl.style.overflowY = inputEl.scrollHeight > MAX_INPUT_PX ? 'auto' : 'hidden'
+}
+
+// ── Mode-lock helpers (Confab parity) ─────────────────────────────────
+
+function findModeForText(text: string): ModeToken | null {
+  const t = text.trim().toLowerCase()
+  for (const m of MODE_TOKENS) if (t === m.token) return m
+  return null
+}
+
+function applyMode(mode: ModeToken | null) {
+  activeMode = mode
+  if (!modeChipEl || !inputWrapEl) return
+  if (!mode) {
+    modeChipEl.hidden = true
+    modeChipEl.textContent = ''
+    inputWrapEl.classList.remove('mode-locked')
+    return
+  }
+  modeChipEl.textContent = mode.token
+  modeChipEl.dataset.mode = mode.mode
+  modeChipEl.hidden = false
+  inputWrapEl.classList.add('mode-locked')
+}
+
+// Space at end-of-input, no modifiers, current text matches a known
+// token. We match Confab's exact precondition set: no selection,
+// caret at value.length, space key with no Cmd/Ctrl/Alt.
+function tryEnterMode(e: KeyboardEvent): boolean {
+  if (activeMode || e.key !== ' ' || e.metaKey || e.ctrlKey || e.altKey) return false
+  if (!inputEl) return false
+  if (inputEl.selectionStart !== inputEl.selectionEnd) return false
+  if (inputEl.selectionStart !== inputEl.value.length) return false
+  const match = findModeForText(inputEl.value)
+  if (!match) return false
+  e.preventDefault()
+  inputEl.value = ''
+  autoResize()
+  applyMode(match)
+  return true
+}
+
+// Backspace/Delete at position 0, OR Cmd/Ctrl+X anywhere, while
+// locked: exit the mode.
+function tryExitMode(e: KeyboardEvent): boolean {
+  if (!activeMode || !inputEl) return false
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'x' || e.key === 'X')) {
+    applyMode(null)
+    return true
+  }
+  if ((e.key === 'Backspace' || e.key === 'Delete')
+      && inputEl.selectionStart === 0
+      && inputEl.selectionEnd === 0) {
+    e.preventDefault()
+    applyMode(null)
+    return true
+  }
+  return false
 }
 
 function renderChips() {
@@ -318,6 +397,14 @@ async function send() {
   if (!currentSession || !inputEl || !sendBtn) return
   const text = inputEl.value.trim()
   if (!text) return
+  // /content takes a different path — calls agent-interface
+  // --author-content (no --pwd; the behavior isn't pinned to a
+  // repo). The result becomes a new editor article and the user is
+  // navigated there.
+  if (activeMode?.mode === 'content') {
+    void sendContent(text)
+    return
+  }
   sendBtn.disabled = true
   inputEl.disabled = true
   try {
@@ -365,6 +452,78 @@ async function send() {
   }
 }
 
+// /content takes a topic and asks agent-interface --author-content to
+// produce an article. The article becomes a new editor doc and the
+// user is navigated to the editor on it. The chat itself doesn't
+// gain a transcript turn (yet) — that needs agent-interface to
+// accept --session for --author-content so we can attribute the
+// call to this chat session. Until then the article is tracked in
+// the editor only; the chat history shows nothing for it.
+async function sendContent(topic: string) {
+  if (!currentSession || !inputEl || !sendBtn) return
+  sendBtn.disabled = true
+  inputEl.disabled = true
+  // Briefly indicate we're authoring; the editor view will take over
+  // once the response is ready.
+  const prevPlaceholder = inputEl.placeholder
+  inputEl.placeholder = 'Authoring…'
+  try {
+    const res = await fetch('/api/chat-content', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session: currentSession, topic }),
+    })
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      throw new Error(`HTTP ${res.status}: ${text.slice(0, 160)}`)
+    }
+    const data = await res.json()
+    const callId = String(data.call_id || '')
+    if (!callId) throw new Error('server did not return a call_id')
+    // Poll for completion; on completion the server creates an editor
+    // article and returns its slug. We then navigate the user there.
+    const slug = await pollContentUntilDone(callId)
+    if (!slug) throw new Error('author-content finished without a slug')
+    // Reset the composer state.
+    inputEl.value = ''
+    autoResize()
+    applyMode(null)
+    // Hand off to the editor view: switch view + load the new doc.
+    window.dispatchEvent(new CustomEvent('poise:open-editor-doc', { detail: { slug } }))
+  } catch (err) {
+    console.error('[chat] /content failed:', err)
+    alert(`Couldn't author content: ${(err as Error).message}`)
+  } finally {
+    if (inputEl) {
+      inputEl.placeholder = prevPlaceholder
+      inputEl.disabled = false
+      inputEl.focus()
+    }
+    if (sendBtn) sendBtn.disabled = false
+  }
+}
+
+async function pollContentUntilDone(callId: string): Promise<string | null> {
+  // Author-content is a long-running Opus call; polling every 2s
+  // until completed (or failed) is plenty.
+  const start = Date.now()
+  const TIMEOUT_MS = 10 * 60_000
+  while (Date.now() - start < TIMEOUT_MS) {
+    await new Promise((r) => setTimeout(r, 2000))
+    try {
+      const res = await fetch(`/api/chat-content/status?call_id=${encodeURIComponent(callId)}`)
+      if (!res.ok) continue
+      const data = await res.json()
+      if (data.status === 'completed') return String(data.slug || '')
+      if (data.status === 'failed') throw new Error(String(data.error || 'agent failed'))
+    } catch (err) {
+      // Network blip — retry.
+      console.error('[chat] /content status poll failed:', err)
+    }
+  }
+  throw new Error('author-content timed out')
+}
+
 function isOpen(): boolean {
   return !!panelEl && panelEl.classList.contains('open')
 }
@@ -391,6 +550,7 @@ export async function open(sessionId: string, label: string, draft?: string) {
     repliesById.clear()
     attachments = []
     renderChips()
+    applyMode(null)
     if (titleEl) titleEl.textContent = label
     if (bodyEl) bodyEl.innerHTML = '<div class="chat-empty">Loading…</div>'
     if (inputEl) {

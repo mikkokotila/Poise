@@ -2891,6 +2891,36 @@ tr:hover .replay-btn { opacity: 1; }
    left, the spacer fills the gap. */
 .chat-controls-spacer { flex: 1; }
 
+/* Slash-command mode-lock chip — appears in the controls row right
+   after the attach button when the composer is locked into a mode
+   (currently only /content). Same vocabulary as Confab's mode-lock
+   treatment, scaled for our tighter pane. The chip is decorative
+   (pointer-events: none) — exiting the mode happens via Backspace
+   at the start of the textarea or Cmd/Ctrl+X. */
+.chat-mode-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--r-pill);
+  background: var(--tint-a1);
+  border: 1px solid var(--tint-a1);
+  color: var(--text);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  user-select: none;
+  pointer-events: none;
+}
+.chat-mode-chip[hidden] { display: none; }
+/* Subtle accent on the input wrap when locked, so the whole composer
+   reads as "in a mode". The border tightens to the same A1 tint as
+   the chip so they read as one piece. */
+.chat-input-wrap.mode-locked {
+  border-color: rgba(58, 114, 176, 0.35);
+}
+
 /* Attach (+) — quiet ghost icon on the left of the controls row.
    Same hover rhythm as the close X so the four chrome glyphs (close,
    plus, model chevron, send) feel related. */

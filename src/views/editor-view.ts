@@ -467,6 +467,27 @@ function attachHandlers() {
   })
 }
 
+// External slug-load: any code anywhere in the app can fire
+// `poise:editor-load-doc` with { slug } to open a specific document.
+// main.ts uses this when /content in the chat pane finishes
+// authoring — chat dispatches poise:open-editor-doc, main.ts
+// switches the view + re-dispatches the load event for us. We need
+// to refresh the doc list first (the new article won't be in our
+// in-memory `docs` array yet).
+window.addEventListener('poise:editor-load-doc', (ev) => {
+  const slug = (ev as CustomEvent<{ slug: string }>).detail?.slug
+  if (!slug) return
+  void (async () => {
+    if (!initialized) {
+      // initEditorView hasn't run yet — main.ts switchTo('editor')
+      // triggers it. Wait one tick.
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    await fetchDocs()
+    await loadDoc(slug)
+  })()
+})
+
 export async function initEditorView() {
   viewEl = document.getElementById('view-editor')!
   if (!initialized) {

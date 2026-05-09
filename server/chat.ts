@@ -137,3 +137,63 @@ export async function saveAttachment(
   await writeFile(join(pwd, name), body)
   return { ok: true, name, size: body.byteLength }
 }
+
+// ── /content slash-command bridge ─────────────────────────────────────
+// Spawns `agent-interface --author-content TOPIC` (no --pwd; the
+// behavior isn't pinned to a repo). Because the spawn is detached
+// fire-and-forget, we briefly poll --logs immediately after to find
+// the freshly-minted call row and grab its id; the front-end then
+// polls /api/chat-content/status?call_id=… for completion.
+//
+// The author_content row in agent-interface's calls log doesn't carry
+// a session_id today (the CLI doesn't accept --session for that
+// behavior). Until that lands, the chat history can't surface a turn
+// for it; the article exists in the editor only and is the user's
+// reference. See the comment in cache-plugin.ts /api/chat-content.
+
+export async function startAuthorContent(topic: string): Promise<{ call_id: string, started_at: string }> {
+  const trimmed = String(topic || '').trim()
+  if (!trimmed) throw new Error('topic is required')
+  // Sentinel: latest call's id BEFORE we spawn. After the spawn we
+  // poll --logs for a NEW author_content row whose id differs from
+  // the sentinel. Avoids returning a stale call from a previous run.
+  const before = (await fetchAgentLogs())
+    .find((e: any) => e.behavior === 'author_content')?.id || ''
+
+  const child = spawn(
+    AGENT_INTERFACE,
+    ['--author-content', trimmed],
+    { cwd: agentInterfaceCwd(), detached: true, stdio: 'ignore' },
+  )
+  child.unref()
+
+  // Wait up to ~3s for the new row to register. agent-interface's
+  // track() runs synchronously at the very top of the call so this
+  // usually completes in under a second.
+  const deadline = Date.now() + 3000
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 200))
+    const fresh = (await fetchAgentLogs())
+      .find((e: any) => e.behavior === 'author_content')
+    if (fresh && fresh.id !== before) {
+      return { call_id: String(fresh.id), started_at: String(fresh.started_at || '') }
+    }
+  }
+  throw new Error('agent-interface --author-content did not register a new call within 3s')
+}
+
+export async function authorContentStatus(callId: string): Promise<{
+  status: string,
+  response_hash?: string,
+  body?: string,
+  error?: string,
+}> {
+  const all = await fetchAgentLogs()
+  const row = all.find((e: any) => e.id === callId)
+  if (!row) return { status: 'unknown' }
+  return {
+    status: String(row.status || ''),
+    response_hash: row.response ? String(row.response) : undefined,
+    error: row.error ? String(row.error) : undefined,
+  }
+}
