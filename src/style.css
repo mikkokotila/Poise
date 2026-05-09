@@ -3305,19 +3305,20 @@ tr:hover .replay-btn { opacity: 1; }
 }
 
 /* Shared typography between mirror and textarea — both use this so
-   wrap points match character-for-character. The constant
-   line-height across body / H1 / H2 is load-bearing: H1 and H2 grow
-   in font-size only, never in vertical row count, so a 4-line body
-   paragraph and a 4-line wrapped H1 both occupy 4 rows. The body
-   font-size (19px) drives the wrap; H1/H2 are visually larger but
-   don't widen because we keep their weight bold and font-size only
-   modestly above body to avoid heading-line rewrap. */
+   wrap points match character-for-character AND each row has the
+   same pixel height. Line-height is pinned to 32px (a clean
+   integer) instead of the unitless 1.7 value: textareas and divs
+   compute unitless line-heights subtly differently (textareas use
+   the inherited font-size to derive the box, while spans inside
+   divs use their own), and that 0.2-pixel gap accumulates into a
+   visible drift after a dozen lines. Anchoring every layer to the
+   same `32px` removes the wobble. */
 .editor-mirror,
 .editor-textarea {
   width: 100%;
   font-family: 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif;
   font-size: 19px;
-  line-height: 1.7;
+  line-height: 32px;
   padding: var(--sp-5) 0 var(--sp-7);
   margin: 0;
   -webkit-font-smoothing: antialiased;
@@ -3336,24 +3337,25 @@ tr:hover .replay-btn { opacity: 1; }
   color: var(--text);
 }
 
-/* Per-line styling — line-height stays the body row height so
-   wrapping coincides between the two layers. Heading distinction is
-   carried by font-size + weight; for headings that DO wrap (rare),
-   the caret may drift on subsequent rows but the first row still
-   lands cleanly. */
+/* Per-line styling — every variant pins line-height to the body's
+   row height (32px) so all rows in the mirror occupy exactly the
+   same vertical space the textarea allocates per row. Heading
+   distinction is carried by font-size + weight; H1/H2 are sized
+   modestly so they fit cleanly inside the 32px row without their
+   ascenders/descenders clipping. */
 .editor-mirror .m-line {
   font-size: 19px;
-  line-height: 1.7;
+  line-height: 32px;
 }
 .editor-mirror .m-h1 {
-  font-size: 28px;
+  font-size: 24px;
   font-weight: 700;
-  line-height: 1.16;       /* 32.3 / 28 — matches body row height */
+  line-height: 32px;
 }
 .editor-mirror .m-h2 {
-  font-size: 22px;
+  font-size: 21px;
   font-weight: 600;
-  line-height: 1.47;       /* 32.3 / 22 */
+  line-height: 32px;
 }
 /* The `#` / `##` syntax marker fades into the page so the eye reads
    the heading text first, but its width is preserved so the caret
@@ -3379,6 +3381,14 @@ tr:hover .replay-btn { opacity: 1; }
   color: transparent;
   caret-color: var(--text);
 }
+/* During selection, browsers force the textarea text to be readable
+   (it ignores the transparent color so users can see what they're
+   highlighting) — which would visually double up against the mirror
+   text underneath. Pinning ::selection color to transparent keeps
+   only the highlight rectangle visible; the text the user sees in
+   the selection still comes from the mirror layer. */
+.editor-textarea::selection      { color: transparent; }
+.editor-textarea::-moz-selection { color: transparent; }
 .editor-textarea::placeholder {
   color: var(--text-tertiary);
   font-style: italic;
