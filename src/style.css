@@ -3423,25 +3423,44 @@ tr:hover .replay-btn { opacity: 1; }
 .editor-line {
   /* Body lines inherit the body font from .editor-doc; sizes / line-
      heights mirror the same vars so the values are still consistent
-     when child line divs are reflowed during contenteditable edits. */
+     when child line divs are reflowed during contenteditable edits.
+     Bottom margin defaults to 0 — paragraph-spacing only fires on the
+     LAST line of each markdown paragraph (rules below), not between
+     consecutive same-paragraph lines. */
   font-size: var(--editor-body-size, 19px);
   line-height: var(--editor-body-lh, 32px);
   font-weight: normal;
   letter-spacing: 0;
   margin: 0;
 }
+/* Paragraph-spacing applies to EMPTY body lines, which are markdown's
+   canonical paragraph separator (a `\n` between paragraphs becomes an
+   empty line in the line model). Their natural line-height is the
+   minimum visible break; the slider adds extra below it. Targeting
+   the separator (not the last text-line of each paragraph) avoids
+   needing nested :has() — an empty body line is matched by
+   `:has(> br:only-child)`, which is supported as a single :has().
+   Consequence: a single body line at end-of-doc, or a body
+   immediately before a heading without an empty line between, won't
+   pick up the after-paragraph gap. The remedy in markdown is to
+   add the empty line — which is the writer's existing idiom. */
+.editor-line[data-kind="body"]:has(> br:only-child) {
+  margin-bottom: var(--editor-paragraph-spacing, 0);
+}
 .editor-line[data-kind="h1"] {
   /* Heading lines pick up archetype.heading via --typo-heading. The
      fallback is the body's serif stack so a freshly-loaded editor
      before typo.ts has run still reads as serif rather than the
-     browser default. */
+     browser default. Bottom margin is the typography panel's
+     "Heading spacing" so the writer can dial how much air sits
+     between a heading and the prose below it. */
   font-family: var(--typo-heading, 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif);
   font-size: var(--editor-h1-size, 28px);
   line-height: var(--editor-h1-lh, 40px);
   font-weight: 800;
   letter-spacing: -0.01em;
   margin-top: 0.5em;
-  margin-bottom: 0.1em;
+  margin-bottom: var(--editor-heading-spacing, 8px);
 }
 .editor-line[data-kind="h2"] {
   font-family: var(--typo-heading, 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif);
@@ -3450,7 +3469,7 @@ tr:hover .replay-btn { opacity: 1; }
   font-weight: 700;
   letter-spacing: -0.005em;
   margin-top: 0.4em;
-  margin-bottom: 0.1em;
+  margin-bottom: var(--editor-heading-spacing, 8px);
 }
 /* First line never carries a top margin — the bar sits right above
    it and we don't want a heading-line first row to push the writing

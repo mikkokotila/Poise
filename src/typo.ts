@@ -8,6 +8,13 @@ interface TypoConfig {
   archetype: string
   baseFontSize: number      // html font-size (px) — scales everything
   lineHeight: number        // body line-height
+  // Editor — gap below paragraphs and headings in the writer view.
+  // Controls margin-bottom on .editor-line[data-kind="body"] and on
+  // h1/h2 respectively. Default paragraph spacing is 0 because the
+  // editor's natural paragraph break is an empty markdown line; users
+  // can dial it up if they want CSS-driven spacing without empty lines.
+  paragraphSpacing: number  // editor body line margin-bottom (px)
+  headingSpacing: number    // editor h1/h2 line margin-bottom (px)
   rowFontSize: number       // td font-size (rem)
   rowPadding: number        // td vertical padding (px)
   titleWeight: number       // title link font-weight
@@ -43,6 +50,8 @@ const DEFAULTS: TypoConfig = {
   archetype: 'engineer',
   baseFontSize: 15,
   lineHeight: 1.5,
+  paragraphSpacing: 0,      // no extra gap by default (markdown-empty-line idiom)
+  headingSpacing: 8,         // mild after-heading breathing room
   rowFontSize: 0.8125,
   rowPadding: 11,
   titleWeight: 600,         // sans-semibold per DS (400 and 600 only)
@@ -81,18 +90,51 @@ const fRem = (v: number) => {
   return `${px}px`
 }
 
-const SLIDERS: SliderDef[] = [
-  { key: 'baseFontSize',  label: 'Base font size',  min: 12,     max: 20,    step: 1,      fmt: fPx },
-  { key: 'lineHeight',    label: 'Line height',     min: 1.2,    max: 2.0,   step: 0.05,   fmt: f2 },
-  { key: 'rowFontSize',   label: 'Row text size',   min: 0.6875, max: 1.0,   step: 0.0625, fmt: fRem },
-  { key: 'rowPadding',    label: 'Row density',     min: 6,      max: 18,    step: 1,      fmt: fPx },
-  /* DS sans allows 400 and 600 only — step 200 keeps the slider snapped to those */
-  { key: 'titleWeight',   label: 'Title weight',    min: 400,    max: 600,   step: 200,    fmt: f0 },
-  { key: 'headerSize',    label: 'Header size',     min: 0.5625, max: 0.875, step: 0.0625, fmt: fRem },
-  { key: 'contentWidth',  label: 'Content width',   min: 600,    max: 1400,  step: 20,     fmt: fPx },
-  { key: 'commentLines',     label: 'Comment lines',     min: 1,      max: 10,    step: 1,      fmt: f0 },
-  { key: 'commentFontSize',  label: 'Comment size',      min: 0.625,  max: 0.9375, step: 0.0625, fmt: fRem },
-  { key: 'commentFontWeight',label: 'Comment weight',    min: 300,    max: 600,   step: 100,    fmt: f0 },
+interface SliderGroup {
+  label: string
+  sliders: SliderDef[]
+}
+
+// Sliders are organised into named groups so the panel reads as four
+// separate concerns rather than a flat ladder of unrelated knobs.
+// Order matters — the panel renders groups top-down. Type controls
+// the global feel; Editor is writer-view-only; Tables covers the
+// kanban / archive list density; Comments tunes the inline-comment
+// snippets on cards.
+const SLIDER_GROUPS: SliderGroup[] = [
+  {
+    label: 'Type',
+    sliders: [
+      { key: 'baseFontSize', label: 'Base font size', min: 12,  max: 20,  step: 1,    fmt: fPx },
+      { key: 'lineHeight',   label: 'Line height',    min: 1.2, max: 2.0, step: 0.05, fmt: f2 },
+    ],
+  },
+  {
+    label: 'Editor',
+    sliders: [
+      { key: 'paragraphSpacing', label: 'Paragraph spacing', min: 0, max: 32, step: 1, fmt: fPx },
+      { key: 'headingSpacing',   label: 'Heading spacing',   min: 0, max: 32, step: 1, fmt: fPx },
+    ],
+  },
+  {
+    label: 'Tables',
+    sliders: [
+      { key: 'contentWidth', label: 'Content width', min: 600,    max: 1400,  step: 20,     fmt: fPx },
+      { key: 'rowFontSize',  label: 'Row text size', min: 0.6875, max: 1.0,   step: 0.0625, fmt: fRem },
+      { key: 'rowPadding',   label: 'Row density',   min: 6,      max: 18,    step: 1,      fmt: fPx },
+      /* DS sans allows 400 and 600 only — step 200 keeps the slider snapped to those */
+      { key: 'titleWeight',  label: 'Title weight',  min: 400,    max: 600,   step: 200,    fmt: f0 },
+      { key: 'headerSize',   label: 'Header size',   min: 0.5625, max: 0.875, step: 0.0625, fmt: fRem },
+    ],
+  },
+  {
+    label: 'Comments',
+    sliders: [
+      { key: 'commentLines',      label: 'Comment lines',  min: 1,     max: 10,     step: 1,      fmt: f0 },
+      { key: 'commentFontSize',   label: 'Comment size',   min: 0.625, max: 0.9375, step: 0.0625, fmt: fRem },
+      { key: 'commentFontWeight', label: 'Comment weight', min: 300,   max: 600,    step: 100,    fmt: f0 },
+    ],
+  },
 ]
 
 interface ColorDef {
@@ -188,6 +230,15 @@ function apply() {
   root.style.setProperty('--editor-h1-lh',   `${Math.floor(editorH1   * config.lineHeight)}px`)
   root.style.setProperty('--editor-h2-lh',   `${Math.floor(editorH2   * config.lineHeight)}px`)
 
+  // After-paragraph and after-heading spacing — applied as
+  // margin-bottom on the matching line kinds in the editor. These
+  // are deliberately separate from line-height: line-height is
+  // intra-paragraph leading, the spacing below is the inter-block
+  // gap that decides how the document breathes between paragraphs
+  // and headings.
+  root.style.setProperty('--editor-paragraph-spacing', `${config.paragraphSpacing}px`)
+  root.style.setProperty('--editor-heading-spacing',   `${config.headingSpacing}px`)
+
   // Colors are governed by the DS / theme system (see [data-theme="dark"]
   // overrides in style.css). Setting them inline here would beat the
   // theme cascade because inline-style specificity is (1,0,0,0). The
@@ -232,10 +283,8 @@ function buildPanel(): HTMLElement {
     body.appendChild(lbl)
   }
 
-  addLabel('Layout')
-
-  // Sliders
-  for (const def of SLIDERS) {
+  // Helper: render a single slider section.
+  const addSlider = (def: SliderDef) => {
     const section = document.createElement('div')
     section.className = 'tp-section'
     const val = config[def.key] as number
@@ -253,6 +302,12 @@ function buildPanel(): HTMLElement {
       apply()
     })
     body.appendChild(section)
+  }
+
+  // Render each slider group with its label.
+  for (const group of SLIDER_GROUPS) {
+    addLabel(group.label)
+    for (const def of group.sliders) addSlider(def)
   }
 
   addLabel('Colors')
