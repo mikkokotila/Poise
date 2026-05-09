@@ -3337,24 +3337,30 @@ tr:hover .replay-btn { opacity: 1; }
   color: var(--text);
 }
 
-/* Per-line styling — every variant pins line-height to the body's
-   row height (32px) so all rows in the mirror occupy exactly the
-   same vertical space the textarea allocates per row. Heading
-   distinction is carried by font-size + weight; H1/H2 are sized
-   modestly so they fit cleanly inside the 32px row without their
-   ascenders/descenders clipping. */
+/* Per-line styling — every variant pins BOTH font-size AND
+   line-height to the body's values (19px / 32px) so the line box AND
+   the baseline within it match the textarea exactly. The earlier
+   approach of using larger H1/H2 font-sizes within the same
+   line-height kept boxes the same height but shifted text baselines
+   inside them — a 24px-font baseline lands at a different y than a
+   19px-font baseline in a 32px line box, which the user perceives
+   as cursor drift on heading lines.
+   Heading distinction is now carried by font-weight (and the faded
+   `#` / `##` marker rendered separately) so the writer reads the
+   line as a heading without losing baseline alignment. */
 .editor-mirror .m-line {
   font-size: 19px;
   line-height: 32px;
 }
 .editor-mirror .m-h1 {
-  font-size: 24px;
-  font-weight: 700;
+  font-size: 19px;
+  font-weight: 800;
   line-height: 32px;
+  letter-spacing: -0.005em;
 }
 .editor-mirror .m-h2 {
-  font-size: 21px;
-  font-weight: 600;
+  font-size: 19px;
+  font-weight: 700;
   line-height: 32px;
 }
 /* The `#` / `##` syntax marker fades into the page so the eye reads
