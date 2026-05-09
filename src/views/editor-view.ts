@@ -151,13 +151,72 @@ function markerLengthFor(kind: 'h1' | 'h2' | 'body'): number {
   return kind === 'h1' ? 2 : kind === 'h2' ? 3 : 0
 }
 
+// Inline-segment model. A line's "rest" (everything after the optional
+// block marker) is parsed into a flat sequence of plain text and bold
+// runs. We support `**bold**` only — single-asterisk italic isn't in
+// the spec, which removes the parser's need to disambiguate `*` vs
+// `**`. Pairs are matched greedy left-to-right; an unmatched `**` and
+// `****` (empty inner) both stay as plain text.
+type InlineSegment = { kind: 'text', text: string } | { kind: 'bold', text: string }
+
+function parseInline(text: string): InlineSegment[] {
+  const out: InlineSegment[] = []
+  let i = 0
+  while (i < text.length) {
+    const open = text.indexOf('**', i)
+    if (open === -1) { out.push({ kind: 'text', text: text.slice(i) }); break }
+    if (open > i) out.push({ kind: 'text', text: text.slice(i, open) })
+    const close = text.indexOf('**', open + 2)
+    if (close === -1) { out.push({ kind: 'text', text: text.slice(open) }); break }
+    const inner = text.slice(open + 2, close)
+    if (inner === '') {
+      // `****` (no inner) stays as plain text — there's nothing to
+      // bold. Reflects how iA Writer / Typora handle empty pairs.
+      out.push({ kind: 'text', text: text.slice(open, close + 2) })
+    } else {
+      out.push({ kind: 'bold', text: inner })
+    }
+    i = close + 2
+  }
+  // Coalesce consecutive plain-text runs so the DOM stays minimal —
+  // adjacent text nodes confuse cursor accounting and offer no benefit.
+  const merged: InlineSegment[] = []
+  for (const seg of out) {
+    const last = merged[merged.length - 1]
+    if (seg.kind === 'text' && last && last.kind === 'text') {
+      last.text += seg.text
+    } else {
+      merged.push(seg)
+    }
+  }
+  return merged
+}
+
+// Build a <strong> wrapping a bold run, with the leading + trailing
+// `**` markers in hidden spans flanking the visible inner text.
+function buildBoldEl(inner: string): HTMLElement {
+  const strong = document.createElement('strong')
+  const open = document.createElement('span')
+  open.className = 'md-marker'
+  open.textContent = '**'
+  const text = document.createTextNode(inner)
+  const close = document.createElement('span')
+  close.className = 'md-marker'
+  close.textContent = '**'
+  strong.appendChild(open)
+  strong.appendChild(text)
+  strong.appendChild(close)
+  return strong
+}
+
 // Build a fresh line element. Lines whose markdown starts with `# ` /
 // `## ` get the marker wrapped in a hidden <span class="md-marker">
-// so the user sees only the heading text — the marker still lives in
-// textContent so save/copy round-trip the true markdown. Empty lines
-// (and empty headings, where the rest is "") get a <br> filler so
-// contenteditable gives them row height; non-empty rest content goes
-// in as a single text node so cursor offsets remain straightforward.
+// so the user sees only the heading text. The line's remaining content
+// is parsed for inline `**bold**` runs and split across <strong>
+// wrappers (each with its own hidden markers). All marker text still
+// lives in textContent so save and the copy-document button round-trip
+// the true markdown. Empty lines (and empty headings, where the rest
+// is "") get a <br> filler so contenteditable gives them row height.
 function buildLineEl(text: string): HTMLDivElement {
   const div = document.createElement('div')
   div.className = 'editor-line'
@@ -172,8 +231,25 @@ function buildLineEl(text: string): HTMLDivElement {
     span.textContent = prefix
     div.appendChild(span)
   }
-  if (rest === '') div.appendChild(document.createElement('br'))
-  else             div.appendChild(document.createTextNode(rest))
+  if (rest === '') {
+    div.appendChild(document.createElement('br'))
+    return div
+  }
+  const segs = parseInline(rest)
+  for (const seg of segs) {
+    if (seg.kind === 'text') div.appendChild(document.createTextNode(seg.text))
+    else                     div.appendChild(buildBoldEl(seg.text))
+  }
+  // Sentinel: when the line ends in a <strong>, append an empty text
+  // node so the caret has a non-strong anchor at end-of-line. Without
+  // this, Chrome treats a line-level caret position immediately after
+  // a <strong> as "inside the previous element" for typing purposes
+  // and routes characters back into the bold's inner text — silently
+  // extending the bold word. The empty text node is invisible,
+  // contributes zero to textContent, and is allowed by lineMatchesModel.
+  if (segs.length > 0 && segs[segs.length - 1].kind === 'bold') {
+    div.appendChild(document.createTextNode(''))
+  }
   return div
 }
 
@@ -202,13 +278,48 @@ function setCursorOffsetInLine(line: HTMLElement, offset: number) {
   const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT)
   let acc = 0
   let node: Node | null
+  const sel = window.getSelection()
   while ((node = walker.nextNode())) {
     const len = (node.textContent || '').length
     if (acc + len >= offset) {
+      const localOffset = offset - acc
       const range = document.createRange()
-      range.setStart(node, offset - acc)
+
+      // Edge: when the cursor is exactly at the end of the trailing
+      // marker of a <strong>, placing it inside that marker means the
+      // user's next keystroke extends the bold (the marker grows by
+      // one char, the parser still sees `**…X` and re-parses with X
+      // inside the bold). We want the opposite: typing after `**bold**`
+      // should produce plain text. Prefer the trailing empty-text
+      // sentinel buildLineEl appends after a bold-ending line — that's
+      // a real text-node anchor outside the strong. Failing that
+      // (sentinel was stripped, or strong has a non-text next sibling),
+      // place at line-level after the strong; the sentinel will be
+      // re-added on the next reclassify.
+      if (localOffset === len && node.parentNode) {
+        const markerSpan = node.parentNode as HTMLElement
+        if (markerSpan.classList && markerSpan.classList.contains('md-marker')) {
+          const strong = markerSpan.parentNode as HTMLElement | null
+          if (strong && strong.tagName === 'STRONG' && markerSpan === strong.lastElementChild) {
+            const sentinel = strong.nextSibling
+            if (sentinel && sentinel.nodeType === Node.TEXT_NODE) {
+              range.setStart(sentinel, 0)
+              range.collapse(true)
+              if (sel) { sel.removeAllRanges(); sel.addRange(range) }
+              return
+            }
+            const lineLevel = strong.parentNode!
+            const idx = Array.from(lineLevel.childNodes).indexOf(strong) + 1
+            range.setStart(lineLevel, idx)
+            range.collapse(true)
+            if (sel) { sel.removeAllRanges(); sel.addRange(range) }
+            return
+          }
+        }
+      }
+
+      range.setStart(node, localOffset)
       range.collapse(true)
-      const sel = window.getSelection()
       if (sel) { sel.removeAllRanges(); sel.addRange(range) }
       return
     }
@@ -218,7 +329,6 @@ function setCursorOffsetInLine(line: HTMLElement, offset: number) {
   const range = document.createRange()
   range.selectNodeContents(line)
   range.collapse(false)
-  const sel = window.getSelection()
   if (sel) { sel.removeAllRanges(); sel.addRange(range) }
 }
 
@@ -257,20 +367,158 @@ function offsetInLineFor(line: HTMLElement, container: Node, offset: number): nu
   return acc
 }
 
+// Walk up from a node looking for an ancestor `<strong>` inside the
+// editor. Used by Cmd+B to detect whether the selection sits inside
+// an existing bold run (toggle off) or not (toggle on).
+function strongAncestorOf(node: Node | null): HTMLElement | null {
+  let n: Node | null = node
+  while (n) {
+    if (n === docEl) return null
+    if (n.nodeType === Node.ELEMENT_NODE && (n as HTMLElement).tagName === 'STRONG') return n as HTMLElement
+    n = n.parentNode
+  }
+  return null
+}
+
+// Detect a caret position whose next typed character will, by default,
+// land inside the trailing marker of a <strong> and visually extend
+// the bold. Three equivalent positions trigger this:
+//   1. Caret at the end of the trailing marker's text node (inside
+//      the marker span).
+//   2. Caret at line-level immediately after a <strong> with no
+//      following text node.
+//   3. Caret in the post-strong sentinel (empty text node sibling
+//      buildLineEl appends after a bold-ending line). The sentinel
+//      is a real text-node anchor, but Chrome still routes typed
+//      characters into the previous element when the sentinel is
+//      empty — so we treat this as "caret at strong's edge" and
+//      redirect the insertion to a fresh text sibling.
+// In all three cases we redirect the insertion to a sibling text
+// node after the strong, so typing produces plain text.
+function strongAtCaretEdge(range: Range): HTMLElement | null {
+  const node = range.startContainer
+  if (node.nodeType === Node.TEXT_NODE) {
+    const parent = node.parentNode as HTMLElement | null
+    if (!parent) return null
+    // Case 1: inside trailing marker, at end of marker text.
+    if (parent.classList.contains('md-marker')) {
+      const strong = parent.parentNode as HTMLElement | null
+      if (!strong || strong.tagName !== 'STRONG') return null
+      if (parent !== strong.lastElementChild) return null
+      if (range.startOffset !== (node.textContent || '').length) return null
+      return strong
+    }
+    // Case 3: in the empty sentinel sibling of a strong.
+    if (node.textContent === '' && parent.classList.contains('editor-line')
+        && node.previousSibling
+        && node.previousSibling.nodeType === Node.ELEMENT_NODE
+        && (node.previousSibling as HTMLElement).tagName === 'STRONG') {
+      return node.previousSibling as HTMLElement
+    }
+    return null
+  }
+  if (node.nodeType === Node.ELEMENT_NODE) {
+    const el = node as HTMLElement
+    if (!el.classList.contains('editor-line')) return null
+    // Case 2: line-level position immediately after a <strong>.
+    const prev = el.childNodes[range.startOffset - 1]
+    if (!prev || prev.nodeType !== Node.ELEMENT_NODE) return null
+    if ((prev as HTMLElement).tagName !== 'STRONG') return null
+    return prev as HTMLElement
+  }
+  return null
+}
+
+// Cmd+B handler. Three behaviours:
+//   - Selection inside an existing <strong>: unbold (replace the
+//     whole strong with its inner text node — markers fall away with
+//     it). Uses direct DOM replacement; execCommand('insertText')
+//     silently no-ops for selections that span an element boundary
+//     in some Chromium versions.
+//   - Non-empty selection elsewhere: wrap the visible selected text
+//     with `**…**` via insertText. The next reclassify rebuilds the
+//     line and the new markers fold into a <strong>.
+//   - Collapsed selection: insert `****` and park the caret between
+//     the two pairs, so the user can type the bold word and the line
+//     reclassifies into a <strong> on the next input.
+function toggleBoldAtSelection() {
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0) return
+  const range = sel.getRangeAt(0)
+  if (!docEl) return
+  if (!docEl.contains(range.commonAncestorContainer) && range.commonAncestorContainer !== docEl) return
+
+  const strong = strongAncestorOf(range.commonAncestorContainer)
+  if (strong) {
+    // Toggle off — direct DOM replacement, then run the post-edit
+    // pipeline ourselves since no input event fires.
+    const inner = strong.childNodes[1]
+    const innerText = (inner && inner.nodeType === Node.TEXT_NODE) ? (inner.textContent || '') : ''
+    const textNode = document.createTextNode(innerText)
+    strong.parentNode!.replaceChild(textNode, strong)
+    const r = document.createRange()
+    r.setStart(textNode, innerText.length)
+    r.collapse(true)
+    sel.removeAllRanges()
+    sel.addRange(r)
+    reclassifyLines()
+    updateEmptyState()
+    scheduleSave()
+    return
+  }
+
+  if (range.collapsed) {
+    document.execCommand('insertText', false, '****')
+    // Move caret back 2 visible chars so the user lands between the
+    // two `**` pairs. modify() is non-standard but supported in all
+    // contemporary browsers; we wrap in try so a missing impl
+    // degrades to "caret stays at end" rather than throwing.
+    try {
+      sel.modify('move', 'backward', 'character')
+      sel.modify('move', 'backward', 'character')
+    } catch { /* ignore — caret stays after **** */ }
+    return
+  }
+
+  const visible = sel.toString()
+  document.execCommand('insertText', false, '**' + visible + '**')
+}
+
+// Find the textContent offset where a given descendant node's content
+// starts within the line. Used by the inline marker-snap logic to
+// locate <strong> wrappers in line-relative coordinates.
+function offsetOfNodeInLine(line: HTMLElement, node: Node): number {
+  let acc = 0
+  let found = false
+  function visit(n: Node): void {
+    if (found) return
+    if (n === node) { found = true; return }
+    if (n.nodeType === Node.TEXT_NODE) acc += (n.textContent || '').length
+    else if (n.nodeType === Node.ELEMENT_NODE) {
+      for (const c of Array.from(n.childNodes)) visit(c)
+    }
+  }
+  visit(line)
+  return found ? acc : -1
+}
+
 // Walk #editor-doc's children and emit, per line that intersects the
 // range, the visible slice of that line's textContent — with the
 // hidden marker added back ONLY when the selection covers the full
-// visible content of the line. Rationale:
+// visible content of the line OR of an inline run. Rationale:
 //   - User selects all of "Heading One" (visible) → expects `# Heading One`
 //     because that's the markdown form of what they selected.
 //   - User selects "ead" inside "Heading One" → expects just "ead" —
-//     they didn't select the whole heading, so emitting `# ead` would
-//     be surprising.
+//     they didn't select the whole heading.
+//   - User selects whole "bold" inside `**bold**` → expects `**bold**`
+//     because they selected the whole bold run.
+//   - User selects "ol" inside `**bold**` → expects just "ol".
 // Concretely, for each touched line we compute clipped offsets in
-// textContent space; if the clip covers visualStart..visualEnd (i.e.
-// from the marker's end through the line's tail), we snap start back
-// to 0 to include the marker. Otherwise we snap start past the marker
-// so partial slices don't pick up hidden chars.
+// textContent space; for the block heading prefix we snap start to 0
+// when the slice covers visualStart..visualEnd; for each <strong> we
+// expand the slice outward when it covers the strong's full visible
+// inner content. Otherwise we snap past hidden marker chars so partial
+// slices don't pick them up.
 function reconstructMarkdownFromRange(range: Range): string | null {
   if (!docEl) return null
   const out: string[] = []
@@ -291,9 +539,29 @@ function reconstructMarkdownFromRange(range: Range): string | null {
       endOffset = offsetInLineFor(line, range.endContainer, range.endOffset)
     }
 
+    // Block-level snap: include the heading marker only if the slice
+    // covers the line's full visible content.
     const coversWholeVisible = startOffset <= markerLen && endOffset >= lineText.length
-    const s = coversWholeVisible ? 0 : Math.max(startOffset, markerLen)
-    const e = endOffset
+    let s = coversWholeVisible ? 0 : Math.max(startOffset, markerLen)
+    let e = endOffset
+
+    // Inline snap: for each <strong> in the line, if the slice covers
+    // its full visible inner text, expand outward to include the
+    // surrounding `**` markers. We use the original startOffset/
+    // endOffset (visible bounds) for the comparison so the heading
+    // snap above doesn't double-count.
+    for (const strong of Array.from(line.querySelectorAll('strong'))) {
+      const strongStart = offsetOfNodeInLine(line, strong)
+      if (strongStart < 0) continue
+      const strongEnd = strongStart + (strong.textContent || '').length
+      const innerStart = strongStart + 2     // skip leading `**`
+      const innerEnd   = strongEnd - 2       // skip trailing `**`
+      if (startOffset <= innerStart && endOffset >= innerEnd) {
+        if (strongStart < s) s = strongStart
+        if (strongEnd   > e) e = strongEnd
+      }
+    }
+
     if (e <= s) {
       // Selection touched this line but no visible content — keep the
       // entry as an empty string so the line break is preserved when
@@ -341,33 +609,77 @@ function updateEmptyState() {
 // buildLineEl(textContent) would produce — used to decide whether to
 // rebuild on input. Mismatch happens when:
 //   - kind changed (user typed/erased a `#` marker prefix)
-//   - the marker span content drifted from its kind's prefix (e.g.
-//     user typed inside the marker, or the marker is missing)
-//   - the rest got split across multiple text nodes from browser
-//     edit operations (so cursor offset accounting could go wrong)
+//   - the marker span content drifted from its kind's prefix
+//   - the inline-bold structure changed (user typed/closed a `**`
+//     pair, or broke one) so a <strong> wrapper needs to appear /
+//     disappear / move
+//   - any segment got split across multiple text nodes from browser
+//     edit operations (cursor offset accounting depends on each
+//     segment being a single text node).
 function lineMatchesModel(line: HTMLElement): boolean {
   const txt = line.textContent || ''
   const kind = lineKindFor(txt)
   if (line.dataset.kind !== kind) return false
-  const expectedMarker = txt.slice(0, markerLengthFor(kind))
-  const markerEl = line.firstElementChild as HTMLElement | null
-  const hasMarker = !!markerEl && markerEl.classList.contains('md-marker')
-  if (expectedMarker === '') {
-    // Body line — must NOT have a marker span
-    return !hasMarker
+
+  const prefixLen = markerLengthFor(kind)
+  const expectedPrefix = txt.slice(0, prefixLen)
+  const rest = txt.slice(prefixLen)
+  const children = Array.from(line.childNodes)
+  let i = 0
+
+  if (expectedPrefix !== '') {
+    const first = children[i]
+    if (!first || first.nodeType !== Node.ELEMENT_NODE) return false
+    const fe = first as HTMLElement
+    if (!fe.classList.contains('md-marker')) return false
+    if (fe.textContent !== expectedPrefix) return false
+    i++
   }
-  if (!hasMarker) return false
-  if (markerEl!.textContent !== expectedMarker) return false
-  // After the marker, the only remaining child should be either a
-  // single text node (rest content) or a <br> filler (empty heading).
-  // Allowing exactly one node keeps cursor-offset arithmetic simple.
-  const after = Array.from(line.childNodes).slice(1)
-  if (after.length === 0) return false
-  if (after.length === 1) {
-    const n = after[0]
-    return n.nodeType === Node.TEXT_NODE || (n.nodeType === Node.ELEMENT_NODE && (n as HTMLElement).tagName === 'BR')
+
+  if (rest === '') {
+    // Empty rest: exactly one <br> filler.
+    if (children.length !== i + 1) return false
+    const br = children[i]
+    return br.nodeType === Node.ELEMENT_NODE && (br as HTMLElement).tagName === 'BR'
   }
-  return false
+
+  const segs = parseInline(rest)
+  // Lines that end in bold carry a trailing empty-text sentinel (see
+  // buildLineEl) so the caret has a non-strong anchor at end-of-line.
+  // Accept either segment-count OR segment-count+1 children remaining.
+  const remaining = children.length - i
+  const endsInBold = segs.length > 0 && segs[segs.length - 1].kind === 'bold'
+  if (remaining !== segs.length && !(endsInBold && remaining === segs.length + 1)) return false
+
+  for (const seg of segs) {
+    const node = children[i++]
+    if (seg.kind === 'text') {
+      // Plain segment: a single text node with the exact text.
+      if (node.nodeType !== Node.TEXT_NODE) return false
+      if (node.textContent !== seg.text) return false
+    } else {
+      // Bold segment: <strong> with three children — open marker
+      // (`**`), inner text, close marker (`**`).
+      if (node.nodeType !== Node.ELEMENT_NODE) return false
+      const el = node as HTMLElement
+      if (el.tagName !== 'STRONG') return false
+      if (el.childNodes.length !== 3) return false
+      const open = el.childNodes[0]
+      const inner = el.childNodes[1]
+      const close = el.childNodes[2]
+      if (open.nodeType !== Node.ELEMENT_NODE || !(open as HTMLElement).classList.contains('md-marker') || open.textContent !== '**') return false
+      if (close.nodeType !== Node.ELEMENT_NODE || !(close as HTMLElement).classList.contains('md-marker') || close.textContent !== '**') return false
+      if (inner.nodeType !== Node.TEXT_NODE || inner.textContent !== seg.text) return false
+    }
+  }
+
+  // Sentinel check: when present, must be an empty text node.
+  if (i < children.length) {
+    const sentinel = children[i]
+    if (sentinel.nodeType !== Node.TEXT_NODE || sentinel.textContent !== '') return false
+  }
+
+  return true
 }
 
 // Rebuild a line in place from its current textContent, preserving
@@ -759,12 +1071,47 @@ function attachHandlers() {
   // selection in <b>/<i>/<u> tags which serialize back to plain text
   // (good) but render as visually rich for the session (confusing in a
   // markdown editor — the user expects to type **bold** for bold).
+  // Cmd+B is handled at keydown to insert markdown markers instead.
+  //
+  // Also fix a Chrome quirk: when the caret sits at "line-level, just
+  // after a <strong>" (no text-node anchor), Chrome routes typed
+  // characters into the trailing marker text node — which extends the
+  // bold span. We intercept text insertion in that position and create
+  // a real sibling text node ourselves, then place the caret in it.
+  // The reclassify pass picks the new text node up and parseInline
+  // produces the correct (bold + plain) split.
   docEl!.addEventListener('beforeinput', (e: InputEvent) => {
     const t = e.inputType
     if (t === 'formatBold' || t === 'formatItalic' || t === 'formatUnderline'
         || t === 'formatStrikeThrough' || t === 'formatSuperscript'
         || t === 'formatSubscript') {
       e.preventDefault()
+      return
+    }
+
+    if ((t === 'insertText' || t === 'insertCompositionText') && typeof e.data === 'string') {
+      const sel = window.getSelection()
+      if (!sel || sel.rangeCount === 0) return
+      const range = sel.getRangeAt(0)
+      if (!range.collapsed) return
+      const strong = strongAtCaretEdge(range)
+      if (!strong) return
+      e.preventDefault()
+      const lineLevel = strong.parentNode!
+      const after = strong.nextSibling
+      const newText = document.createTextNode(e.data)
+      if (after) lineLevel.insertBefore(newText, after)
+      else       lineLevel.appendChild(newText)
+      const r = document.createRange()
+      r.setStart(newText, newText.textContent!.length)
+      r.collapse(true)
+      sel.removeAllRanges()
+      sel.addRange(r)
+      // The browser won't fire 'input' for a prevented insertion, so
+      // run the post-edit pipeline ourselves to reclassify and save.
+      reclassifyLines()
+      updateEmptyState()
+      scheduleSave()
     }
   })
 
@@ -845,6 +1192,44 @@ function attachHandlers() {
     if ((e.metaKey || e.ctrlKey) && (e.key === 'n' || e.key === 'N')) {
       e.preventDefault()
       void newDoc()
+    }
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'b' || e.key === 'B') && !e.shiftKey && !e.altKey) {
+      e.preventDefault()
+      toggleBoldAtSelection()
+    }
+    // Right-arrow / End from the end of a bold's inner text: Chrome
+    // won't navigate the caret past hidden markers, so the user gets
+    // stuck inside the <strong> and subsequent typing extends the
+    // bold. We intercept and jump to the sentinel text node after the
+    // strong, so one keypress is enough to exit and start typing
+    // plain text. The opposite (entering bold from outside) doesn't
+    // need a fix — Chrome navigates into strong inner text cleanly.
+    if ((e.key === 'ArrowRight' || e.key === 'End') && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      const sel = window.getSelection()
+      if (sel && sel.rangeCount > 0) {
+        const range = sel.getRangeAt(0)
+        if (range.collapsed) {
+          const node = range.startContainer
+          if (node.nodeType === Node.TEXT_NODE) {
+            const parent = node.parentNode as HTMLElement | null
+            if (parent && parent.tagName === 'STRONG'
+                && range.startOffset === (node.textContent || '').length
+                && node.nextSibling
+                && node.nextSibling.nodeType === Node.ELEMENT_NODE
+                && (node.nextSibling as HTMLElement).classList.contains('md-marker')) {
+              const sentinel = parent.nextSibling
+              if (sentinel && sentinel.nodeType === Node.TEXT_NODE) {
+                e.preventDefault()
+                const r = document.createRange()
+                r.setStart(sentinel, 0)
+                r.collapse(true)
+                sel.removeAllRanges()
+                sel.addRange(r)
+              }
+            }
+          }
+        }
+      }
     }
     // Escape while the menu is open is handled by onMenuKeydown
     // (installed at openMenu, removed at closeMenu) so it works

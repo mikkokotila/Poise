@@ -3438,16 +3438,27 @@ tr:hover .replay-btn { opacity: 1; }
    area down further than a body-first row. */
 .editor-line:first-child { margin-top: 0; }
 
-/* Hide the markdown markers (`# `, `## `) — the line is already
-   rendered as a heading via data-kind, so the prefix is redundant on
-   screen. The marker text still lives in the DOM (and so in
-   .textContent), so save and the copy-document button see the true
-   markdown. Browsers exclude display:none content from
-   Selection.toString() and the default copy clipboard data, so a
-   copy/cut handler in editor-view.ts reconstructs the markdown from
-   textContent for select+Cmd+C as well. */
+/* Hide the markdown markers (`# `, `## `, `**…**`) — the line / run
+   is already rendered (heading via data-kind, bold via <strong>), so
+   the marker chars are redundant on screen. The marker text still
+   lives in the DOM (and so in .textContent), so save and the
+   copy-document button see the true markdown. Browsers exclude
+   display:none content from Selection.toString() and the default copy
+   clipboard data, so a copy/cut handler in editor-view.ts
+   reconstructs the markdown from textContent for select+Cmd+C as
+   well. */
 .md-marker {
   display: none;
+}
+
+/* Inline bold — the parser wraps `**…**` runs in <strong>. Pin the
+   weight to 700 so it reads as bold against the line's normal weight
+   (400) without leaning on user-agent defaults. Inside an H1 line
+   the line itself is already 800; we keep <strong> at 700 there too
+   so the bold-within-heading looks intentional rather than flatly
+   identical to its surroundings. */
+.editor-line strong {
+  font-weight: 700;
 }
 
 /* Copy-button success tint while the checkmark is showing.
