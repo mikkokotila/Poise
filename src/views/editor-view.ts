@@ -171,10 +171,20 @@ function currentDoc(): DocSummary | null {
   return docs.find((d) => d.slug === currentSlug) || null
 }
 
+// Trigger label is space-constrained — the bar lives at 680px max
+// and shares the row with three icons + meta. Truncate to 20 chars
+// with an ellipsis so long titles don't push the trigger off the
+// bar. The full title still shows in the dropdown menu items.
+function truncateTitleForTrigger(s: string): string {
+  return s.length > 20 ? s.slice(0, 19).trimEnd() + '…' : s
+}
+
 function setTriggerTitle() {
   if (!triggerTitleEl) return
   const d = currentDoc()
-  triggerTitleEl.textContent = d?.title || 'Untitled'
+  const full = d?.title || 'Untitled'
+  triggerTitleEl.textContent = truncateTitleForTrigger(full)
+  triggerTitleEl.title = full     // hover-tooltip shows the full title
 }
 
 function renderDocMenu() {
