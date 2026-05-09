@@ -2826,6 +2826,56 @@ tr:hover .replay-btn { opacity: 1; }
   40%           { opacity: 1;   transform: scale(1);   }
 }
 
+/* /content slash-command turn — instead of a reply bubble, the
+   "agent" side of an author_content call shows a link card pointing
+   to the editor article that was authored. The user can tap it to
+   open the editor on that doc. The article is the durable surface;
+   the chat just records the authoring happened. */
+.chat-content-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px dashed var(--border);
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--t-quick) ease, background var(--t-quick) ease, color var(--t-quick) ease;
+}
+.chat-content-link:hover {
+  border-color: var(--text-tertiary);
+  background: var(--hover);
+}
+.chat-content-link-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+.chat-content-link-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Small "/content" tag prepended to the user-bubble of an
+   author_content turn so the user knows at a glance which mode the
+   message went through. */
+.chat-msg-mode-tag {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: rgba(58, 114, 176, 0.18);
+  color: var(--text);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  vertical-align: 1px;
+}
+
 /* Composer — single bordered "wrap" with the textarea borderless
    inside it and the send button absolute-positioned bottom-right.
    The wrap is what owns the focus ring (focus-within), which makes
@@ -3128,13 +3178,22 @@ tr:hover .replay-btn { opacity: 1; }
    doesn't shift when the user switches views. Inside the bar, two
    halves: icons on the left, meta + doc-picker on the right. */
 
-/* The bar piggybacks on .view-header for outer alignment. We only
-   override the inner layout (split into left/right halves). */
+/* The bar piggybacks on .view-header for outer alignment. We
+   override the inner layout (split into left/right halves) AND clamp
+   the bar's width to the same max as the writing area below
+   (680px) so the chrome and the page sit in one column. The
+   .view-header's padding-right (which other views use to clear the
+   inline top-nav) isn't needed here — the centered 680px stays well
+   clear of the burger. */
 .editor-bar {
   justify-content: space-between;
   /* Drop the .view-header bottom margin — the writing area handles
      its own breathing room. */
   margin-bottom: var(--sp-4);
+  max-width: 680px;
+  margin-left: auto;
+  margin-right: auto;
+  padding-right: 0;
 }
 .editor-bar-left,
 .editor-bar-right {

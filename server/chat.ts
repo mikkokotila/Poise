@@ -19,6 +19,7 @@ import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { fetchAgentLogs } from './agent'
+import { readDoc } from './editor'
 
 const AGENT_INTERFACE = 'agent-interface'
 
@@ -65,13 +66,28 @@ export interface ChatLogEntry {
   error: string
 }
 
+// Slug used for editor articles produced by /content in chat. The
+// short hash derives from the agent-interface call's id, so the
+// mapping "this chat turn → this article" is purely positional —
+// no extra ledger needed.
+export function contentSlugForCallId(callId: string): string {
+  return 'content-' + String(callId).slice(0, 8)
+}
+
 export async function listChatHistory(sessionId: string): Promise<ChatLogEntry[]> {
   if (!sessionId) return []
   const all = await fetchAgentLogs()
   // The proxy's fetchAgentLogs already returns newest-first; flip back
   // for chat (oldest-first reads top-to-bottom like a transcript).
+  // We include both `chat` and `author_content` behaviors — author_content
+  // calls now carry session_id (agent-interface --author-content
+  // --session-id ID) so they belong in the transcript too. The chat
+  // pane renders them differently: instead of the response body, a
+  // link to the editor article that was authored.
   const rows = all
-    .filter((e: any) => e.behavior === 'chat' && e.session_id === sessionId)
+    .filter((e: any) =>
+      (e.behavior === 'chat' || e.behavior === 'author_content')
+      && e.session_id === sessionId)
     .reverse() as ChatLogEntry[]
   return rows
 }
@@ -101,6 +117,21 @@ export async function sendChat(
   if (attachments.length) {
     const names = attachments.map(safeAttachmentName)
     prompt += `\n\n[Attached files in cwd: ${names.join(', ')}]`
+  }
+
+  // If this session has prior /content invocations, inject the
+  // CURRENT body of each authored article as context. The user might
+  // have edited the article in the editor since it was authored —
+  // agent-interface --chat resumes the model's session but won't
+  // know about edits. Injection here makes "the article in its
+  // current form is in the context of the chat when it is continued
+  // later, as if it was in the chat window itself" actually true.
+  const articles = await readArticlesForSession(sessionId)
+  if (articles.length) {
+    const blocks = articles.map(({ title, content }, i) => (
+      `[Article ${i + 1} authored in this chat — current contents${title ? ` (titled "${title}")` : ''}:]\n${content}`
+    ))
+    prompt = `${blocks.join('\n\n')}\n\n[User's message:]\n${prompt}`
   }
 
   const child = spawn(
@@ -151,31 +182,33 @@ export async function saveAttachment(
 // for it; the article exists in the editor only and is the user's
 // reference. See the comment in cache-plugin.ts /api/chat-content.
 
-export async function startAuthorContent(topic: string): Promise<{ call_id: string, started_at: string }> {
+export async function startAuthorContent(topic: string, sessionId: string): Promise<{ call_id: string, started_at: string }> {
   const trimmed = String(topic || '').trim()
   if (!trimmed) throw new Error('topic is required')
-  // Sentinel: latest call's id BEFORE we spawn. After the spawn we
-  // poll --logs for a NEW author_content row whose id differs from
-  // the sentinel. Avoids returning a stale call from a previous run.
-  const before = (await fetchAgentLogs())
-    .find((e: any) => e.behavior === 'author_content')?.id || ''
+  if (!sessionId) throw new Error('session is required')
+  // Sentinel: latest author_content call's id BEFORE we spawn,
+  // scoped to THIS session so a parallel /content in some other
+  // session doesn't get attributed here. After the spawn we poll
+  // --logs for a NEW row in this session.
+  const beforeForSession = (await fetchAgentLogs())
+    .find((e: any) => e.behavior === 'author_content' && e.session_id === sessionId)?.id || ''
 
+  // --session-id ties this call to the chat session, so the chat
+  // history can include this turn (listChatHistory filters by
+  // session_id across both behaviors).
   const child = spawn(
     AGENT_INTERFACE,
-    ['--author-content', trimmed],
+    ['--author-content', trimmed, '--session-id', sessionId],
     { cwd: agentInterfaceCwd(), detached: true, stdio: 'ignore' },
   )
   child.unref()
 
-  // Wait up to ~3s for the new row to register. agent-interface's
-  // track() runs synchronously at the very top of the call so this
-  // usually completes in under a second.
   const deadline = Date.now() + 3000
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 200))
     const fresh = (await fetchAgentLogs())
-      .find((e: any) => e.behavior === 'author_content')
-    if (fresh && fresh.id !== before) {
+      .find((e: any) => e.behavior === 'author_content' && e.session_id === sessionId)
+    if (fresh && fresh.id !== beforeForSession) {
       return { call_id: String(fresh.id), started_at: String(fresh.started_at || '') }
     }
   }
@@ -196,4 +229,32 @@ export async function authorContentStatus(callId: string): Promise<{
     response_hash: row.response ? String(row.response) : undefined,
     error: row.error ? String(row.error) : undefined,
   }
+}
+
+// Find every author_content call attributed to this chat session, in
+// chronological order, and read the CURRENT body of each one's
+// editor article. Used by sendChat to inject article context into
+// chat continuations — see the comment there. Articles the user has
+// since deleted are skipped silently; non-existent files don't bring
+// the chat down.
+async function readArticlesForSession(sessionId: string): Promise<{ slug: string, title: string, content: string }[]> {
+  if (!sessionId) return []
+  const all = await fetchAgentLogs()
+  // fetchAgentLogs is newest-first; reverse for chronological injection.
+  const rows = all
+    .filter((e: any) =>
+      e.behavior === 'author_content'
+      && e.session_id === sessionId
+      && e.status === 'completed')
+    .reverse()
+  const out: { slug: string, title: string, content: string }[] = []
+  for (const r of rows) {
+    const slug = contentSlugForCallId(String(r.id))
+    try {
+      const doc = await readDoc(slug)
+      const title = (doc.content || '').split('\n').find((l) => l.trim().length > 0)?.replace(/^#+\s*/, '').trim() || ''
+      out.push({ slug, title, content: doc.content })
+    } catch { /* article missing — user may have deleted it */ }
+  }
+  return out
 }

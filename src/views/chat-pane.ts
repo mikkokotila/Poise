@@ -20,6 +20,14 @@ interface ChatLogEntry {
   status: string
   response: string        // 8-char hash → fetch body via /api/agent-response/<hash>
   error: string
+  behavior?: string       // 'chat' | 'author_content' — drives rendering
+}
+
+// Slug derivation for editor articles produced by /content. Mirrors
+// contentSlugForCallId in server/chat.ts — the slug is a pure
+// function of the call id, no mapping ledger needed.
+function contentSlugForCallId(callId: string): string {
+  return 'content-' + String(callId).slice(0, 8)
 }
 
 interface Attachment {
@@ -148,6 +156,15 @@ function renderShell() {
   panelEl.querySelector('.chat-composer')!.addEventListener('submit', (e) => {
     e.preventDefault()
     void send()
+  })
+  // Click delegation for the chat-history link cards (currently
+  // just /content → open the article in editor).
+  bodyEl!.addEventListener('click', (e) => {
+    const link = (e.target as HTMLElement).closest<HTMLButtonElement>('.chat-content-link')
+    if (!link) return
+    const slug = link.dataset.slug || ''
+    if (!slug) return
+    window.dispatchEvent(new CustomEvent('poise:open-editor-doc', { detail: { slug } }))
   })
   inputEl.addEventListener('input', () => autoResize())
   inputEl.addEventListener('keydown', (e) => {
@@ -309,14 +326,49 @@ function renderMessages() {
   // Each entry is a user prompt + an agent reply. User → bubble pill
   // on the right; agent → flat prose on the left (no bubble bg) so
   // long replies read like a document, matching Confab.
+  // For behavior='author_content' rows, the reply is NOT inlined —
+  // instead the user sees a link card that opens the editor on the
+  // article that was authored. The article is the durable surface;
+  // the chat just records that the authoring happened.
   const parts: string[] = []
   for (const m of messages) {
+    const isAuthored = m.behavior === 'author_content'
     if (m.prompt) {
+      const userBody = isAuthored
+        ? `<span class="chat-msg-mode-tag">/content</span> ${escapeHtml(m.prompt)}`
+        : escapeHtml(m.prompt)
       parts.push(`
         <div class="chat-msg chat-msg-user">
-          <div class="chat-msg-body">${escapeHtml(m.prompt)}</div>
+          <div class="chat-msg-body">${userBody}</div>
         </div>
       `)
+    }
+    if (isAuthored) {
+      // Link card pointing to the editor doc derived from this call.
+      if (m.status === 'running') {
+        parts.push(`
+          <div class="chat-msg chat-msg-agent">
+            <div class="chat-thinking"><span></span><span></span><span></span></div>
+          </div>
+        `)
+      } else if (m.status === 'failed') {
+        parts.push(`
+          <div class="chat-msg chat-msg-agent chat-msg-error">
+            <div class="chat-msg-body">${escapeHtml(m.error || 'failed')}</div>
+          </div>
+        `)
+      } else if (m.status === 'completed') {
+        const slug = contentSlugForCallId(m.id)
+        parts.push(`
+          <div class="chat-msg chat-msg-agent">
+            <button type="button" class="chat-content-link" data-slug="${escapeHtml(slug)}">
+              <span class="chat-content-link-icon" aria-hidden="true">📝</span>
+              <span class="chat-content-link-text">Open article in Editor</span>
+            </button>
+          </div>
+        `)
+      }
+      continue
     }
     const reply = repliesById.get(m.id)
     if (m.status === 'running') {
@@ -368,7 +420,9 @@ async function refresh() {
     // Resolve replies for every completed entry whose body we don't
     // have cached yet. Fire in parallel — tiny payloads, server-side
     // already cached the read.
-    const toFetch = messages.filter((m) => m.status === 'completed' && m.response && !repliesById.has(m.id))
+    // Skip author_content rows — their "response" is the editor
+    // article (linked-to in the chat), not a chat-bubble payload.
+    const toFetch = messages.filter((m) => m.behavior !== 'author_content' && m.status === 'completed' && m.response && !repliesById.has(m.id))
     await Promise.all(
       toFetch.map(async (m) => {
         try { repliesById.set(m.id, await fetchReply(m.response)) } catch { /* leave missing */ }
@@ -480,15 +534,20 @@ async function sendContent(topic: string) {
     const data = await res.json()
     const callId = String(data.call_id || '')
     if (!callId) throw new Error('server did not return a call_id')
+    // Reset the composer state and refresh the chat history so the
+    // running author_content row appears immediately (the user sees
+    // a "thinking…" indicator instead of waiting for the next poll).
+    inputEl.value = ''
+    autoResize()
+    applyMode(null)
+    window.setTimeout(() => { void refresh().then(schedulePoll) }, 800)
     // Poll for completion; on completion the server creates an editor
     // article and returns its slug. We then navigate the user there.
     const slug = await pollContentUntilDone(callId)
     if (!slug) throw new Error('author-content finished without a slug')
-    // Reset the composer state.
-    inputEl.value = ''
-    autoResize()
-    applyMode(null)
-    // Hand off to the editor view: switch view + load the new doc.
+    // Refresh once more so the running row flips to completed (with
+    // its link card) before we hand off to the editor.
+    void refresh().then(schedulePoll)
     window.dispatchEvent(new CustomEvent('poise:open-editor-doc', { detail: { slug } }))
   } catch (err) {
     console.error('[chat] /content failed:', err)

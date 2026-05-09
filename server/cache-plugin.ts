@@ -3,7 +3,7 @@ import { getSettings, setSettings } from './settings'
 import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, type Lane } from './current'
 import { handleGhBody, listOrgRepos } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, triggerPrReview, replayAgentJob } from './agent'
-import { listChatHistory, sendChat, saveAttachment, startAuthorContent, authorContentStatus } from './chat'
+import { listChatHistory, sendChat, saveAttachment, startAuthorContent, authorContentStatus, contentSlugForCallId } from './chat'
 import { listDocs, readDoc, writeDoc, deleteDoc, newSlug } from './editor'
 import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, getEnabledMap, getSettingMap, isValidSetting, startBehaviorsRuntime, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
 
@@ -40,15 +40,15 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
       // process.env is unreliable inside Vite plugins.
       startBehaviorsRuntime({ reviewAgentUsername: opts.reviewAgentUsername })
 
-      // /content slash-command finalize cache — call_id → slug.
-      // Held in process memory; survives nothing. The article itself
-      // is on disk under ~/.poise/editor/, so a server restart that
-      // empties this map just means the next /api/chat-content/status
-      // poll for an in-flight call would re-create the article from
-      // the same response body (deduped via newSlug() being
-      // timestamp-based — duplicates only matter if they happen
-      // within the same second, which a server restart doesn't.).
-      const contentSlugByCallId = new Map<string, string>()
+      // /content finalization marker — set of call_ids we've already
+      // written articles for, so repeated status polls don't re-write
+      // the same file. The slug is derived from the call_id (see
+      // contentSlugForCallId in chat.ts) so no mapping is stored —
+      // this is purely a "have we already done it" guard. Server
+      // restart clears it; the next poll just safely re-writes the
+      // file at the same slug (idempotent overwrite of identical
+      // content).
+      const contentFinalizedCalls = new Set<string>()
       const mw: Connect.NextHandleFunction = async (req, res, next) => {
         const url = req.url || ''
 
@@ -256,25 +256,23 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
         }
 
         // ── /api/chat-content — /content slash command bridge ──
-        // POST starts agent-interface --author-content (no --pwd)
-        // and returns the freshly-minted call_id once the row shows
-        // up in --logs. GET /api/chat-content/status?call_id=… polls
-        // for completion; when the call lands, the server fetches
-        // the response body, creates a new editor article from it,
-        // and returns the slug. The slug → call_id mapping is held
-        // in process memory only — repeated polls of the same
-        // call_id return the same slug without re-creating the
-        // article. (A persistent mapping waits on agent-interface
-        // accepting --session for --author-content; that lets us
-        // attribute the call to a chat session and surface a turn
-        // for it in the chat history. Until then the editor article
-        // is the user's only handle on the result.)
+        // POST starts agent-interface --author-content --session-id
+        // <session> and returns the freshly-minted call_id once the
+        // row shows up in --logs. GET /api/chat-content/status?call_id=…
+        // polls for completion; when the call lands, the server
+        // fetches the response body and writes a new editor article
+        // at slug `content-<8charCallId>`. Because the slug derives
+        // from the call_id, NO mapping ledger is needed: the chat
+        // history (filtered to behavior='author_content' for this
+        // session) tells us which call_ids exist, and the slug is a
+        // pure function of each.
         if (url === '/api/chat-content' && req.method === 'POST') {
           try {
             const raw = await readBody(req)
             const body = raw ? JSON.parse(raw) : {}
-            const topic = String(body.topic || '')
-            const result = await startAuthorContent(topic)
+            const topic   = String(body.topic   || '')
+            const session = String(body.session || '')
+            const result = await startAuthorContent(topic, session)
             return json(res, 200, result)
           } catch (err: any) {
             return json(res, 502, { error: '/content trigger failed: ' + (err.message || String(err)) })
@@ -285,16 +283,17 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
             const qs = new URLSearchParams(url.split('?')[1] || '')
             const callId = qs.get('call_id') || ''
             if (!callId) return json(res, 400, { error: 'call_id is required' })
-            // Cached slug? Return it without re-fetching.
-            const cached = contentSlugByCallId.get(callId)
-            if (cached) return json(res, 200, { status: 'completed', slug: cached })
+            const slug = contentSlugForCallId(callId)
+            // Already written? Return without re-fetching.
+            if (contentFinalizedCalls.has(callId)) {
+              return json(res, 200, { status: 'completed', slug })
+            }
             const status = await authorContentStatus(callId)
             if (status.status === 'completed' && status.response_hash) {
               try {
                 const { body: contentBody } = await fetchAgentResponse(status.response_hash)
-                const slugBase = newSlug()             // timestamped, unique per call
-                const written = await writeDoc(slugBase, String(contentBody || ''))
-                contentSlugByCallId.set(callId, written.slug)
+                const written = await writeDoc(slug, String(contentBody || ''))
+                contentFinalizedCalls.add(callId)
                 return json(res, 200, { status: 'completed', slug: written.slug })
               } catch (err: any) {
                 return json(res, 500, { error: 'finalize failed: ' + (err.message || String(err)) })
