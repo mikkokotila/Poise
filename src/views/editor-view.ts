@@ -17,6 +17,15 @@
 // Storage: each doc is a plain UTF-8 .md file under ~/.poise/editor/.
 // Title comes from the first non-empty line at read time. server/editor.ts
 // owns sanitization and on-disk layout.
+//
+// Surface: the writing area is a single `<div contenteditable>` whose
+// children are per-line `<div class="editor-line" data-kind=...>`
+// blocks. Each line's data-kind (h1 / h2 / body) is recomputed on every
+// `input` from its leading `#` / `##` token, and CSS sizes the line
+// accordingly — H1 28px, H2 22px, body 19px, each with its own
+// line-height. The native caret rides the rendered text because there's
+// no mirror to drift against; this replaces an earlier textarea+mirror
+// approach where different per-line font-sizes broke cursor alignment.
 
 interface DocSummary {
   slug: string
@@ -29,8 +38,7 @@ let viewEl: HTMLElement
 let initialized = false
 let docs: DocSummary[] = []
 let currentSlug: string | null = null
-let textareaEl: HTMLTextAreaElement | null = null
-let mirrorEl: HTMLElement | null = null
+let docEl: HTMLElement | null = null
 let triggerEl: HTMLButtonElement | null = null
 let triggerTitleEl: HTMLElement | null = null
 let menuEl: HTMLElement | null = null
@@ -116,40 +124,117 @@ function renderShell(): string {
     </header>
     <main class="editor-main">
       <div class="editor-page">
-        <!-- The mirror sits behind the textarea, rendering the same
-             content with per-line styling for # / ## headings. The
-             textarea above has color: transparent + a visible caret;
-             they share font, padding and line-height so the cursor
-             lands on the rendered text. -->
-        <div class="editor-mirror" id="editor-mirror" aria-hidden="true"></div>
-        <textarea class="editor-textarea" id="editor-textarea" spellcheck="true" placeholder="Start writing…"></textarea>
+        <!-- Single contenteditable surface. Children are per-line
+             <div class="editor-line" data-kind="h1|h2|body"> blocks
+             whose font-size/line-height come from CSS. The native
+             caret tracks rendered text directly — no mirror layer. -->
+        <div class="editor-doc" id="editor-doc" contenteditable="true" spellcheck="true" data-empty="true"></div>
       </div>
     </main>
   `
 }
 
-// Build the mirror's HTML from the textarea's plain-text source.
-// Lines starting with `# ` become H1; `## ` become H2. Empty lines
-// emit a zero-width space so they retain row height. The marker
-// (`#` / `##`) is wrapped in a faded span so the syntax visually
-// recedes; widths still match the source character-for-character so
-// the textarea cursor lines up with the rendered text.
-function buildMirror(text: string): string {
-  return text.split('\n').map((line) => {
-    const m = line.match(/^(#{1,2})( .*)?$/)
-    if (m) {
-      const level = m[1].length          // 1 or 2
-      const rest = m[2] || ''            // includes leading space if present
-      return `<div class="m-h${level}"><span class="m-marker">${m[1]}</span>${escapeHtml(rest)}</div>`
-    }
-    if (line === '') return '<div class="m-line">​</div>'    // ZWSP keeps row height
-    return `<div class="m-line">${escapeHtml(line)}</div>`
-  }).join('')
+// Classify a single line by its leading markdown token. Only `# ` and
+// `## ` produce headings — H3+ isn't supported (intentional: the
+// editor's spec is "minimal markup"). Lines that are bare `#` or `##`
+// without a trailing space stay as body until the user adds the space,
+// matching CommonMark/iA Writer behaviour.
+function lineKindFor(text: string): 'h1' | 'h2' | 'body' {
+  if (/^## /.test(text)) return 'h2'
+  if (/^# /.test(text))  return 'h1'
+  return 'body'
 }
 
-function syncMirror() {
-  if (!textareaEl || !mirrorEl) return
-  mirrorEl.innerHTML = buildMirror(textareaEl.value)
+// Build a fresh line element. Empty lines need a <br> filler so they
+// retain row height in contenteditable; non-empty lines hold a single
+// text node so cursor offsets match string offsets one-to-one.
+function buildLineEl(text: string): HTMLDivElement {
+  const div = document.createElement('div')
+  div.className = 'editor-line'
+  div.dataset.kind = lineKindFor(text)
+  if (text === '') div.appendChild(document.createElement('br'))
+  else             div.textContent = text
+  return div
+}
+
+// Replace every child of #editor-doc with one line div per `\n`-split
+// row of the source markdown. Preserves the round-trip — what comes out
+// of serializeDoc(load(x)) is exactly x for any well-formed document.
+function loadIntoEditor(content: string) {
+  if (!docEl) return
+  docEl.innerHTML = ''
+  const lines = content === '' ? [''] : content.split('\n')
+  for (const line of lines) docEl.appendChild(buildLineEl(line))
+  updateEmptyState()
+}
+
+// Walk the per-line divs, take each one's plain text, join with `\n`.
+// textContent transparently strips the <br> filler from empty lines,
+// so empty rows serialize back to '' and rejoin into the right string.
+function serializeDoc(): string {
+  if (!docEl) return ''
+  const lines: string[] = []
+  for (const child of Array.from(docEl.children)) {
+    lines.push((child as HTMLElement).textContent || '')
+  }
+  return lines.join('\n')
+}
+
+function updateEmptyState() {
+  if (!docEl) return
+  const text = serializeDoc()
+  if (text === '') docEl.dataset.empty = 'true'
+  else             docEl.removeAttribute('data-empty')
+}
+
+// Re-classify every line and clean up structure. Runs on every input
+// event; cheap because (a) it touches data-kind only when it changed,
+// (b) the doc tree is shallow (one div per line), and (c) we never
+// rebuild text content — just the per-line kind attribute, which leaves
+// the cursor untouched.
+function reclassifyLines() {
+  if (!docEl) return
+  // The browser sometimes promotes the contenteditable into containing
+  // bare text nodes (e.g. when typing into an empty doc) or stray <br>s
+  // at the root. Wrap any of those in editor-line divs so the
+  // per-line model stays consistent.
+  for (const node of Array.from(docEl.childNodes)) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const wrap = buildLineEl(node.textContent || '')
+      docEl.replaceChild(wrap, node)
+    } else if (node.nodeType === Node.ELEMENT_NODE) {
+      const el = node as HTMLElement
+      if (el.tagName === 'BR') {
+        const wrap = buildLineEl('')
+        docEl.replaceChild(wrap, node)
+      } else if (!el.classList.contains('editor-line')) {
+        // Some other element snuck in (e.g. <p> from a paste). Re-wrap
+        // it as a line and pull the text across.
+        const wrap = buildLineEl(el.textContent || '')
+        docEl.replaceChild(wrap, node)
+      }
+    }
+  }
+  // Now every child is an .editor-line div. Update kinds + empty filler.
+  for (const child of Array.from(docEl.children)) {
+    const el = child as HTMLElement
+    const txt = el.textContent || ''
+    const kind = lineKindFor(txt)
+    if (el.dataset.kind !== kind) el.dataset.kind = kind
+    // Empty line needs a <br> filler so contenteditable gives it
+    // height and the caret can land on it. If text is non-empty but
+    // contains a stray <br>, leave it alone — browsers sometimes add
+    // <br> after the last character on a line and removing it eats a
+    // useful trailing space.
+    if (txt === '' && !el.querySelector('br')) {
+      el.appendChild(document.createElement('br'))
+    }
+  }
+  // If the doc somehow got emptied entirely, restore one empty line
+  // so the cursor has a place to live.
+  if (docEl.children.length === 0) {
+    docEl.appendChild(buildLineEl(''))
+  }
 }
 
 function setMeta(text: string) {
@@ -161,8 +246,7 @@ function wordCount(s: string): number {
 }
 
 function setMetaForCurrent() {
-  if (!textareaEl) return
-  const wc = wordCount(textareaEl.value)
+  const wc = wordCount(serializeDoc())
   setMeta(wc === 0 ? 'Empty · saved' : `${wc} word${wc === 1 ? '' : 's'} · saved`)
 }
 
@@ -268,34 +352,47 @@ async function fetchDocs() {
   }
 }
 
-// Match the textarea's height to its content so the page reads as a
-// scroll of prose, not a fixed-height frame with an inner scrollbar.
-// The mirror tracks the textarea's height implicitly — both share the
-// same .editor-page container and font metrics, so identical input
-// produces identical wrapping.
-function autosize() {
-  if (!textareaEl) return
-  textareaEl.style.height = 'auto'
-  textareaEl.style.height = textareaEl.scrollHeight + 'px'
+// Place the caret at the end of the editor (e.g. after loading a doc).
+// Used so a freshly-loaded article doesn't pin the cursor at offset 0
+// inside the first heading — natural to land where the writer left off.
+function placeCaretAtEnd() {
+  if (!docEl) return
+  const last = docEl.lastElementChild as HTMLElement | null
+  if (!last) return
+  const range = document.createRange()
+  // Walk to the deepest text node so the caret lands inside text rather
+  // than after a <br> filler — those produce a "phantom row" caret.
+  let target: Node = last
+  while (target.lastChild && target.lastChild.nodeType !== Node.TEXT_NODE && target.lastChild.nodeName !== 'BR') {
+    target = target.lastChild
+  }
+  if (target.lastChild && target.lastChild.nodeType === Node.TEXT_NODE) {
+    target = target.lastChild
+    range.setStart(target, (target.textContent || '').length)
+  } else {
+    range.selectNodeContents(target)
+    range.collapse(false)
+  }
+  const sel = window.getSelection()
+  if (!sel) return
+  sel.removeAllRanges()
+  sel.addRange(range)
 }
 
 async function loadDoc(slug: string) {
-  if (!textareaEl) return
+  if (!docEl) return
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; await flushSave() }
   try {
     const res = await fetch(`/api/editor/doc/${encodeURIComponent(slug)}`)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
     currentSlug = String(data.slug || slug)
-    textareaEl.value = String(data.content || '')
+    loadIntoEditor(String(data.content || ''))
     try { localStorage.setItem(LAST_OPEN_KEY, currentSlug) } catch { /* ignore */ }
     setTriggerTitle()
     setMetaForCurrent()
-    syncMirror()
-    autosize()
-    textareaEl.focus()
-    const len = textareaEl.value.length
-    try { textareaEl.setSelectionRange(len, len) } catch { /* ignore */ }
+    docEl.focus()
+    placeCaretAtEnd()
   } catch (err) {
     console.error('[editor] loadDoc failed:', err)
   }
@@ -322,8 +419,8 @@ async function newDoc() {
 // navigator.clipboard isn't available (insecure origin, some
 // embedded webviews).
 async function copyDoc() {
-  if (!textareaEl || !copyBtnEl) return
-  const text = textareaEl.value
+  if (!docEl || !copyBtnEl) return
+  const text = serializeDoc()
   let ok = false
   try {
     if (navigator.clipboard && window.isSecureContext) {
@@ -376,11 +473,11 @@ async function deleteCurrent() {
 }
 
 async function flushSave() {
-  if (!textareaEl || !currentSlug || saveInFlight) return
+  if (!docEl || !currentSlug || saveInFlight) return
   saveInFlight = true
   setMeta('Saving…')
   const slug = currentSlug
-  const content = textareaEl.value
+  const content = serializeDoc()
   try {
     const res = await fetch(`/api/editor/doc/${encodeURIComponent(slug)}`, {
       method: 'PUT',
@@ -411,7 +508,7 @@ async function flushSave() {
 }
 
 function scheduleSave() {
-  if (!textareaEl || !currentSlug) return
+  if (!docEl || !currentSlug) return
   setMeta('Editing…')
   if (saveTimer) clearTimeout(saveTimer)
   saveTimer = setTimeout(() => { void flushSave() }, SAVE_DEBOUNCE_MS)
@@ -446,13 +543,58 @@ function attachHandlers() {
     const on = document.body.classList.toggle('editor-writer-mode')
     focusBtn.setAttribute('aria-pressed', on ? 'true' : 'false')
     focusBtn.innerHTML = on ? ICON_FOCUS_EXIT : ICON_FOCUS_ENTER
-    // Make sure the textarea has focus when the user enters writer
-    // mode — they came here to type, not to look at chrome.
-    if (on) textareaEl?.focus()
+    // Make sure the editor has focus when the user enters writer mode
+    // — they came here to type, not to look at chrome.
+    if (on) docEl?.focus()
   })
 
-  textareaEl!.addEventListener('input', () => { syncMirror(); autosize(); scheduleSave() })
-  textareaEl!.addEventListener('keydown', (e) => {
+  // Force browser to use <div> (not <p> or <br>) for paragraph splits
+  // on Enter, so our line model stays consistent across browsers. Set
+  // once at handler attach; some browsers ignore it but Chrome/Safari
+  // honour it. Firefox uses <br> by default; reclassifyLines wraps
+  // anything we don't recognize into editor-line divs so the model
+  // doesn't drift.
+  try { document.execCommand('defaultParagraphSeparator', false, 'div') } catch { /* ignore */ }
+
+  // Block native rich-text shortcuts (Cmd+B, Cmd+I, Cmd+U) — those wrap
+  // selection in <b>/<i>/<u> tags which serialize back to plain text
+  // (good) but render as visually rich for the session (confusing in a
+  // markdown editor — the user expects to type **bold** for bold).
+  docEl!.addEventListener('beforeinput', (e: InputEvent) => {
+    const t = e.inputType
+    if (t === 'formatBold' || t === 'formatItalic' || t === 'formatUnderline'
+        || t === 'formatStrikeThrough' || t === 'formatSuperscript'
+        || t === 'formatSubscript') {
+      e.preventDefault()
+    }
+  })
+
+  // Force plain-text paste — markdown editor: any HTML/styled content
+  // would inject inline styles and tags we'd then have to scrub.
+  docEl!.addEventListener('paste', (e: ClipboardEvent) => {
+    e.preventDefault()
+    const text = e.clipboardData?.getData('text/plain') || ''
+    // insertText respects the line model: newlines split into new
+    // editor-line divs via the browser's normal Enter handling.
+    document.execCommand('insertText', false, text)
+  })
+
+  // Drag-and-drop also tries to inject HTML; force plain-text the same
+  // way as paste.
+  docEl!.addEventListener('drop', (e: DragEvent) => {
+    e.preventDefault()
+    const text = e.dataTransfer?.getData('text/plain') || ''
+    if (!text) return
+    document.execCommand('insertText', false, text)
+  })
+
+  docEl!.addEventListener('input', () => {
+    reclassifyLines()
+    updateEmptyState()
+    scheduleSave()
+  })
+
+  docEl!.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 's') {
       e.preventDefault()
       if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
@@ -464,14 +606,14 @@ function attachHandlers() {
     }
     // Escape while the menu is open is handled by onMenuKeydown
     // (installed at openMenu, removed at closeMenu) so it works
-    // whether or not the textarea has focus.
+    // whether or not the editor has focus.
   })
 
   window.addEventListener('pagehide', () => {
-    if (!textareaEl || !currentSlug) return
+    if (!docEl || !currentSlug) return
     if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
     try {
-      const blob = new Blob([JSON.stringify({ content: textareaEl.value })], { type: 'application/json' })
+      const blob = new Blob([JSON.stringify({ content: serializeDoc() })], { type: 'application/json' })
       navigator.sendBeacon(`/api/editor/doc/${encodeURIComponent(currentSlug)}`, blob)
     } catch { /* best-effort */ }
   })
@@ -503,8 +645,7 @@ export async function initEditorView() {
   if (!initialized) {
     initialized = true
     viewEl.innerHTML = renderShell()
-    textareaEl     = viewEl.querySelector<HTMLTextAreaElement>('.editor-textarea')
-    mirrorEl       = viewEl.querySelector<HTMLElement>('#editor-mirror')
+    docEl          = viewEl.querySelector<HTMLElement>('#editor-doc')
     triggerEl      = viewEl.querySelector<HTMLButtonElement>('.editor-doc-trigger')
     triggerTitleEl = viewEl.querySelector<HTMLElement>('.editor-doc-trigger-title')
     menuEl         = viewEl.querySelector<HTMLElement>('#editor-doc-menu')

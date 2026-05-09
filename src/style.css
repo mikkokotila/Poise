@@ -3352,113 +3352,91 @@ tr:hover .replay-btn { opacity: 1; }
 }
 
 /* ── Writing area ──
-   The page is a positioned container holding two perfectly overlaid
-   layers: a styled mirror at the back (renders #/## as H1/H2), and a
-   transparent textarea on top (carries selection, caret and the real
-   text). Both share font, padding, line-height and width — identical
-   wrapping is what keeps the caret on the rendered glyphs. */
+   The writing surface is a single `<div contenteditable>` whose direct
+   children are per-line `<div class="editor-line" data-kind="...">`
+   blocks — one per logical line of the markdown source. Each line
+   carries its own font-size and line-height (H1 28/40, H2 22/34, body
+   19/32), so the native caret rides the rendered glyphs directly.
+   This replaces an earlier textarea+mirror approach where different
+   per-line font-sizes broke caret alignment: the textarea computed
+   cursor x/y from a single font, while the mirror painted heading
+   text at a larger font, so the caret drifted by ~one character on
+   heading rows. Going contenteditable removes the dual-layer entirely
+   and lets each line size itself naturally. */
 .editor-page {
   position: relative;
   max-width: 680px;
   margin: 0 auto;
 }
 
-/* Shared typography between mirror and textarea — both use this so
-   wrap points match character-for-character AND each row has the
-   same pixel height. Line-height is pinned to 32px (a clean
-   integer) instead of the unitless 1.7 value: textareas and divs
-   compute unitless line-heights subtly differently (textareas use
-   the inherited font-size to derive the box, while spans inside
-   divs use their own), and that 0.2-pixel gap accumulates into a
-   visible drift after a dozen lines. Anchoring every layer to the
-   same `32px` removes the wobble. */
-.editor-mirror,
-.editor-textarea {
+.editor-doc {
   width: 100%;
   font-family: 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif;
   font-size: 19px;
   line-height: 32px;
   padding: var(--sp-5) 0 var(--sp-7);
   margin: 0;
+  min-height: calc(100vh - 200px);
+  color: var(--text);
+  caret-color: var(--text);
+  border: none;
+  outline: none;
+  background: transparent;
+  white-space: pre-wrap;
+  word-wrap: break-word;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-feature-settings: 'liga' 1, 'kern' 1;
   box-sizing: border-box;
 }
+.editor-doc:focus { outline: none; }
 
-.editor-mirror {
-  position: absolute;
-  top: 0;
-  left: 0;
-  pointer-events: none;
-  white-space: pre-wrap;
-  word-wrap: break-word;
-  color: var(--text);
-}
-
-/* Per-line styling — every variant pins BOTH font-size AND
-   line-height to the body's values (19px / 32px) so the line box AND
-   the baseline within it match the textarea exactly. The earlier
-   approach of using larger H1/H2 font-sizes within the same
-   line-height kept boxes the same height but shifted text baselines
-   inside them — a 24px-font baseline lands at a different y than a
-   19px-font baseline in a 32px line box, which the user perceives
-   as cursor drift on heading lines.
-   Heading distinction is now carried by font-weight (and the faded
-   `#` / `##` marker rendered separately) so the writer reads the
-   line as a heading without losing baseline alignment. */
-.editor-mirror .m-line {
-  font-size: 19px;
-  line-height: 32px;
-}
-.editor-mirror .m-h1 {
-  font-size: 19px;
-  font-weight: 800;
-  line-height: 32px;
-  letter-spacing: -0.005em;
-}
-.editor-mirror .m-h2 {
-  font-size: 19px;
-  font-weight: 700;
-  line-height: 32px;
-}
-/* The `#` / `##` syntax marker fades into the page so the eye reads
-   the heading text first, but its width is preserved so the caret
-   stays aligned with the source. */
-.editor-mirror .m-marker {
-  opacity: 0.25;
-  font-weight: normal;
-}
-
-.editor-textarea {
-  position: relative;
-  z-index: 1;
-  border: none;
-  outline: none;
-  background: transparent;
-  resize: none;
-  display: block;
-  min-height: calc(100vh - 200px);
-  overflow: hidden;        /* JS autosizes height to content */
-  /* Hide the actual text, keep the caret visible. Selection
-     highlight still paints on the (invisible) selected runs, which
-     overlays the mirror text — exactly what you want. */
-  color: transparent;
-  caret-color: var(--text);
-}
-/* During selection, browsers force the textarea text to be readable
-   (it ignores the transparent color so users can see what they're
-   highlighting) — which would visually double up against the mirror
-   text underneath. Pinning ::selection color to transparent keeps
-   only the highlight rectangle visible; the text the user sees in
-   the selection still comes from the mirror layer. */
-.editor-textarea::selection      { color: transparent; }
-.editor-textarea::-moz-selection { color: transparent; }
-.editor-textarea::placeholder {
+/* Placeholder for an empty doc — JS toggles data-empty on the root.
+   We use ::before instead of CSS :empty because the root always has
+   one editor-line (with a <br> filler) even when "empty", to give
+   contenteditable a place for the caret. */
+.editor-doc[data-empty="true"]::before {
+  content: 'Start writing…';
   color: var(--text-tertiary);
   font-style: italic;
+  pointer-events: none;
+  position: absolute;
 }
-.editor-textarea:focus { outline: none; }
+
+/* Per-line styling — each line gets its own font metrics. H1/H2 use
+   real heading sizes (the original spec); the contenteditable
+   architecture makes this safe because the caret is native — no
+   mirror to drift against. The leading `# ` / `## ` syntax stays in
+   the line's text content (so cursor offsets equal string offsets);
+   it renders at the heading's own size for visual consistency with
+   the heading body. */
+.editor-line {
+  font-size: 19px;
+  line-height: 32px;
+  font-weight: normal;
+  letter-spacing: 0;
+  margin: 0;
+}
+.editor-line[data-kind="h1"] {
+  font-size: 28px;
+  line-height: 40px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  margin-top: 0.5em;
+  margin-bottom: 0.1em;
+}
+.editor-line[data-kind="h2"] {
+  font-size: 22px;
+  line-height: 34px;
+  font-weight: 700;
+  letter-spacing: -0.005em;
+  margin-top: 0.4em;
+  margin-bottom: 0.1em;
+}
+/* First line never carries a top margin — the bar sits right above
+   it and we don't want a heading-line first row to push the writing
+   area down further than a body-first row. */
+.editor-line:first-child { margin-top: 0; }
 
 /* Copy-button success tint while the checkmark is showing.
    --a3 is the green accent in the DS palette. */
