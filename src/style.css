@@ -3461,6 +3461,22 @@ tr:hover .replay-btn { opacity: 1; }
   font-weight: 700;
 }
 
+/* Inline code — the parser wraps `` `…` `` runs in <code>. Switch
+   to a UI-monospace stack so the run reads as code at-a-glance, drop
+   to 0.92em so the monospace x-height roughly matches the serif
+   body, and tint the background so the run is visually framed
+   without needing visible markers. The ~0.3em horizontal padding
+   gives the framing room to breathe; the small radius keeps it from
+   reading as a button. Hover-readable in both light and dark themes
+   via a translucent neutral. */
+.editor-line code {
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.92em;
+  background: rgba(127, 127, 127, 0.12);
+  padding: 0 0.3em;
+  border-radius: 3px;
+}
+
 /* Copy-button success tint while the checkmark is showing.
    --a3 is the green accent in the DS palette. */
 .editor-bar-btn.is-copied { color: var(--a3); }

@@ -152,31 +152,59 @@ function markerLengthFor(kind: 'h1' | 'h2' | 'body'): number {
 }
 
 // Inline-segment model. A line's "rest" (everything after the optional
-// block marker) is parsed into a flat sequence of plain text and bold
-// runs. We support `**bold**` only — single-asterisk italic isn't in
-// the spec, which removes the parser's need to disambiguate `*` vs
-// `**`. Pairs are matched greedy left-to-right; an unmatched `**` and
-// `****` (empty inner) both stay as plain text.
-type InlineSegment = { kind: 'text', text: string } | { kind: 'bold', text: string }
+// block marker) is parsed into a flat sequence of plain text, bold
+// (`**…**`) and code (`` `…` ``) runs. Italic isn't in the spec,
+// which removes the parser's need to disambiguate `*` vs `**`. Code
+// and bold can't nest — whichever delimiter opens first wins, and
+// the other delimiter inside that run stays as literal text. Pairs
+// are matched greedy left-to-right; unmatched delimiters and empty
+// pairs (`****`, ` `` `) stay as plain text.
+type InlineSegment =
+  | { kind: 'text', text: string }
+  | { kind: 'bold', text: string }
+  | { kind: 'code', text: string }
 
 function parseInline(text: string): InlineSegment[] {
   const out: InlineSegment[] = []
   let i = 0
   while (i < text.length) {
-    const open = text.indexOf('**', i)
-    if (open === -1) { out.push({ kind: 'text', text: text.slice(i) }); break }
-    if (open > i) out.push({ kind: 'text', text: text.slice(i, open) })
-    const close = text.indexOf('**', open + 2)
-    if (close === -1) { out.push({ kind: 'text', text: text.slice(open) }); break }
-    const inner = text.slice(open + 2, close)
-    if (inner === '') {
-      // `****` (no inner) stays as plain text — there's nothing to
-      // bold. Reflects how iA Writer / Typora handle empty pairs.
-      out.push({ kind: 'text', text: text.slice(open, close + 2) })
-    } else {
-      out.push({ kind: 'bold', text: inner })
+    // Pick the nearest opener. Bold (`**`) and code (`` ` ``) compete
+    // by position; ties prefer bold (rare since `**` is two chars).
+    const boldOpen = text.indexOf('**', i)
+    const codeOpen = text.indexOf('`', i)
+    let openType: 'bold' | 'code' | null = null
+    let openAt = -1
+    if (boldOpen !== -1 && (codeOpen === -1 || boldOpen <= codeOpen)) {
+      openType = 'bold'
+      openAt = boldOpen
+    } else if (codeOpen !== -1) {
+      openType = 'code'
+      openAt = codeOpen
     }
-    i = close + 2
+    if (openType === null) { out.push({ kind: 'text', text: text.slice(i) }); break }
+    if (openAt > i) out.push({ kind: 'text', text: text.slice(i, openAt) })
+
+    if (openType === 'bold') {
+      const close = text.indexOf('**', openAt + 2)
+      if (close === -1) { out.push({ kind: 'text', text: text.slice(openAt) }); break }
+      const inner = text.slice(openAt + 2, close)
+      if (inner === '') {
+        out.push({ kind: 'text', text: text.slice(openAt, close + 2) })
+      } else {
+        out.push({ kind: 'bold', text: inner })
+      }
+      i = close + 2
+    } else {
+      const close = text.indexOf('`', openAt + 1)
+      if (close === -1) { out.push({ kind: 'text', text: text.slice(openAt) }); break }
+      const inner = text.slice(openAt + 1, close)
+      if (inner === '') {
+        out.push({ kind: 'text', text: text.slice(openAt, close + 1) })
+      } else {
+        out.push({ kind: 'code', text: inner })
+      }
+      i = close + 1
+    }
   }
   // Coalesce consecutive plain-text runs so the DOM stays minimal —
   // adjacent text nodes confuse cursor accounting and offer no benefit.
@@ -192,22 +220,29 @@ function parseInline(text: string): InlineSegment[] {
   return merged
 }
 
-// Build a <strong> wrapping a bold run, with the leading + trailing
-// `**` markers in hidden spans flanking the visible inner text.
-function buildBoldEl(inner: string): HTMLElement {
-  const strong = document.createElement('strong')
+// Build an inline wrapper element (<strong> or <code>) with the
+// leading + trailing markers in hidden spans flanking the visible
+// inner text. The marker text differs (`**` for bold, `` ` `` for
+// code) but the structure is the same — three children, marker /
+// text / marker — so the rest of the editor can treat them as one
+// shape via `wrap.tagName === 'STRONG' || wrap.tagName === 'CODE'`.
+function buildInlineWrap(tag: 'strong' | 'code', marker: string, inner: string): HTMLElement {
+  const wrap = document.createElement(tag)
   const open = document.createElement('span')
   open.className = 'md-marker'
-  open.textContent = '**'
+  open.textContent = marker
   const text = document.createTextNode(inner)
   const close = document.createElement('span')
   close.className = 'md-marker'
-  close.textContent = '**'
-  strong.appendChild(open)
-  strong.appendChild(text)
-  strong.appendChild(close)
-  return strong
+  close.textContent = marker
+  wrap.appendChild(open)
+  wrap.appendChild(text)
+  wrap.appendChild(close)
+  return wrap
 }
+
+function buildBoldEl(inner: string): HTMLElement { return buildInlineWrap('strong', '**', inner) }
+function buildCodeEl(inner: string): HTMLElement { return buildInlineWrap('code',  '`',  inner) }
 
 // Build a fresh line element. Lines whose markdown starts with `# ` /
 // `## ` get the marker wrapped in a hidden <span class="md-marker">
@@ -237,17 +272,20 @@ function buildLineEl(text: string): HTMLDivElement {
   }
   const segs = parseInline(rest)
   for (const seg of segs) {
-    if (seg.kind === 'text') div.appendChild(document.createTextNode(seg.text))
-    else                     div.appendChild(buildBoldEl(seg.text))
+    if      (seg.kind === 'text') div.appendChild(document.createTextNode(seg.text))
+    else if (seg.kind === 'bold') div.appendChild(buildBoldEl(seg.text))
+    else                          div.appendChild(buildCodeEl(seg.text))
   }
-  // Sentinel: when the line ends in a <strong>, append an empty text
-  // node so the caret has a non-strong anchor at end-of-line. Without
-  // this, Chrome treats a line-level caret position immediately after
-  // a <strong> as "inside the previous element" for typing purposes
-  // and routes characters back into the bold's inner text — silently
-  // extending the bold word. The empty text node is invisible,
-  // contributes zero to textContent, and is allowed by lineMatchesModel.
-  if (segs.length > 0 && segs[segs.length - 1].kind === 'bold') {
+  // Sentinel: when the line ends in a <strong> or <code>, append an
+  // empty text node so the caret has a non-wrapper anchor at
+  // end-of-line. Without this, Chrome treats a line-level caret
+  // position immediately after a <strong>/<code> as "inside the
+  // previous element" for typing purposes and routes characters back
+  // into the wrapper's inner text — silently extending the bold/code
+  // run. The empty text node is invisible, contributes zero to
+  // textContent, and is allowed by lineMatchesModel.
+  const last = segs[segs.length - 1]
+  if (last && (last.kind === 'bold' || last.kind === 'code')) {
     div.appendChild(document.createTextNode(''))
   }
   return div
@@ -286,30 +324,30 @@ function setCursorOffsetInLine(line: HTMLElement, offset: number) {
       const range = document.createRange()
 
       // Edge: when the cursor is exactly at the end of the trailing
-      // marker of a <strong>, placing it inside that marker means the
-      // user's next keystroke extends the bold (the marker grows by
-      // one char, the parser still sees `**…X` and re-parses with X
-      // inside the bold). We want the opposite: typing after `**bold**`
-      // should produce plain text. Prefer the trailing empty-text
-      // sentinel buildLineEl appends after a bold-ending line — that's
-      // a real text-node anchor outside the strong. Failing that
-      // (sentinel was stripped, or strong has a non-text next sibling),
-      // place at line-level after the strong; the sentinel will be
-      // re-added on the next reclassify.
+      // marker of a <strong>/<code>, placing it inside that marker
+      // means the user's next keystroke extends the wrapper (the
+      // marker grows by one char, the parser still sees `**…X` /
+      // `` `…X `` and re-parses with X inside). We want the opposite:
+      // typing after a bold or code run should produce plain text.
+      // Prefer the trailing empty-text sentinel buildLineEl appends
+      // after a wrapped-ending line — that's a real text-node anchor
+      // outside the wrapper. Failing that, place at line-level after
+      // the wrapper; the sentinel will be re-added on the next
+      // reclassify.
       if (localOffset === len && node.parentNode) {
         const markerSpan = node.parentNode as HTMLElement
         if (markerSpan.classList && markerSpan.classList.contains('md-marker')) {
-          const strong = markerSpan.parentNode as HTMLElement | null
-          if (strong && strong.tagName === 'STRONG' && markerSpan === strong.lastElementChild) {
-            const sentinel = strong.nextSibling
+          const wrap = markerSpan.parentNode as HTMLElement | null
+          if (wrap && (wrap.tagName === 'STRONG' || wrap.tagName === 'CODE') && markerSpan === wrap.lastElementChild) {
+            const sentinel = wrap.nextSibling
             if (sentinel && sentinel.nodeType === Node.TEXT_NODE) {
               range.setStart(sentinel, 0)
               range.collapse(true)
               if (sel) { sel.removeAllRanges(); sel.addRange(range) }
               return
             }
-            const lineLevel = strong.parentNode!
-            const idx = Array.from(lineLevel.childNodes).indexOf(strong) + 1
+            const lineLevel = wrap.parentNode!
+            const idx = Array.from(lineLevel.childNodes).indexOf(wrap) + 1
             range.setStart(lineLevel, idx)
             range.collapse(true)
             if (sel) { sel.removeAllRanges(); sel.addRange(range) }
@@ -367,63 +405,73 @@ function offsetInLineFor(line: HTMLElement, container: Node, offset: number): nu
   return acc
 }
 
-// Walk up from a node looking for an ancestor `<strong>` inside the
-// editor. Used by Cmd+B to detect whether the selection sits inside
-// an existing bold run (toggle off) or not (toggle on).
-function strongAncestorOf(node: Node | null): HTMLElement | null {
+// Walk up from a node looking for an ancestor inline wrapper inside
+// the editor. The shape (<strong> for bold, <code> for inline code)
+// determines which marker the toggle-off path strips.
+function inlineWrapAncestorOf(node: Node | null): HTMLElement | null {
   let n: Node | null = node
   while (n) {
     if (n === docEl) return null
-    if (n.nodeType === Node.ELEMENT_NODE && (n as HTMLElement).tagName === 'STRONG') return n as HTMLElement
+    if (n.nodeType === Node.ELEMENT_NODE) {
+      const tag = (n as HTMLElement).tagName
+      if (tag === 'STRONG' || tag === 'CODE') return n as HTMLElement
+    }
     n = n.parentNode
   }
   return null
 }
 
+// Cmd+B is bold-only: toggle off only when the wrapper is <strong>.
+function strongAncestorOf(node: Node | null): HTMLElement | null {
+  const wrap = inlineWrapAncestorOf(node)
+  return wrap && wrap.tagName === 'STRONG' ? wrap : null
+}
+
 // Detect a caret position whose next typed character will, by default,
-// land inside the trailing marker of a <strong> and visually extend
-// the bold. Three equivalent positions trigger this:
+// land inside the trailing marker of a <strong>/<code> and visually
+// extend the wrapper. Three equivalent positions trigger this:
 //   1. Caret at the end of the trailing marker's text node (inside
 //      the marker span).
-//   2. Caret at line-level immediately after a <strong> with no
-//      following text node.
-//   3. Caret in the post-strong sentinel (empty text node sibling
-//      buildLineEl appends after a bold-ending line). The sentinel
+//   2. Caret at line-level immediately after a <strong>/<code> with
+//      no following text node.
+//   3. Caret in the post-wrapper sentinel (empty text node sibling
+//      buildLineEl appends after a wrapped-ending line). The sentinel
 //      is a real text-node anchor, but Chrome still routes typed
 //      characters into the previous element when the sentinel is
-//      empty — so we treat this as "caret at strong's edge" and
+//      empty — so we treat this as "caret at wrapper's edge" and
 //      redirect the insertion to a fresh text sibling.
 // In all three cases we redirect the insertion to a sibling text
-// node after the strong, so typing produces plain text.
-function strongAtCaretEdge(range: Range): HTMLElement | null {
+// node after the wrapper, so typing produces plain text.
+function inlineWrapAtCaretEdge(range: Range): HTMLElement | null {
   const node = range.startContainer
   if (node.nodeType === Node.TEXT_NODE) {
     const parent = node.parentNode as HTMLElement | null
     if (!parent) return null
     // Case 1: inside trailing marker, at end of marker text.
     if (parent.classList.contains('md-marker')) {
-      const strong = parent.parentNode as HTMLElement | null
-      if (!strong || strong.tagName !== 'STRONG') return null
-      if (parent !== strong.lastElementChild) return null
+      const wrap = parent.parentNode as HTMLElement | null
+      if (!wrap || (wrap.tagName !== 'STRONG' && wrap.tagName !== 'CODE')) return null
+      if (parent !== wrap.lastElementChild) return null
       if (range.startOffset !== (node.textContent || '').length) return null
-      return strong
+      return wrap
     }
-    // Case 3: in the empty sentinel sibling of a strong.
+    // Case 3: in the empty sentinel sibling of a wrapper.
     if (node.textContent === '' && parent.classList.contains('editor-line')
         && node.previousSibling
-        && node.previousSibling.nodeType === Node.ELEMENT_NODE
-        && (node.previousSibling as HTMLElement).tagName === 'STRONG') {
-      return node.previousSibling as HTMLElement
+        && node.previousSibling.nodeType === Node.ELEMENT_NODE) {
+      const prev = node.previousSibling as HTMLElement
+      if (prev.tagName === 'STRONG' || prev.tagName === 'CODE') return prev
     }
     return null
   }
   if (node.nodeType === Node.ELEMENT_NODE) {
     const el = node as HTMLElement
     if (!el.classList.contains('editor-line')) return null
-    // Case 2: line-level position immediately after a <strong>.
+    // Case 2: line-level position immediately after a wrapper.
     const prev = el.childNodes[range.startOffset - 1]
     if (!prev || prev.nodeType !== Node.ELEMENT_NODE) return null
-    if ((prev as HTMLElement).tagName !== 'STRONG') return null
+    const tag = (prev as HTMLElement).tagName
+    if (tag !== 'STRONG' && tag !== 'CODE') return null
     return prev as HTMLElement
   }
   return null
@@ -545,20 +593,22 @@ function reconstructMarkdownFromRange(range: Range): string | null {
     let s = coversWholeVisible ? 0 : Math.max(startOffset, markerLen)
     let e = endOffset
 
-    // Inline snap: for each <strong> in the line, if the slice covers
-    // its full visible inner text, expand outward to include the
-    // surrounding `**` markers. We use the original startOffset/
+    // Inline snap: for each inline wrapper (<strong> or <code>) in
+    // the line, if the slice covers its full visible inner text,
+    // expand outward to include the surrounding markers (`**` for
+    // strong, `` ` `` for code). We use the original startOffset/
     // endOffset (visible bounds) for the comparison so the heading
     // snap above doesn't double-count.
-    for (const strong of Array.from(line.querySelectorAll('strong'))) {
-      const strongStart = offsetOfNodeInLine(line, strong)
-      if (strongStart < 0) continue
-      const strongEnd = strongStart + (strong.textContent || '').length
-      const innerStart = strongStart + 2     // skip leading `**`
-      const innerEnd   = strongEnd - 2       // skip trailing `**`
+    for (const wrap of Array.from(line.querySelectorAll('strong, code'))) {
+      const wrapStart = offsetOfNodeInLine(line, wrap)
+      if (wrapStart < 0) continue
+      const wrapEnd = wrapStart + (wrap.textContent || '').length
+      const m = wrap.tagName === 'CODE' ? 1 : 2   // marker length
+      const innerStart = wrapStart + m
+      const innerEnd   = wrapEnd - m
       if (startOffset <= innerStart && endOffset >= innerEnd) {
-        if (strongStart < s) s = strongStart
-        if (strongEnd   > e) e = strongEnd
+        if (wrapStart < s) s = wrapStart
+        if (wrapEnd   > e) e = wrapEnd
       }
     }
 
@@ -644,12 +694,14 @@ function lineMatchesModel(line: HTMLElement): boolean {
   }
 
   const segs = parseInline(rest)
-  // Lines that end in bold carry a trailing empty-text sentinel (see
-  // buildLineEl) so the caret has a non-strong anchor at end-of-line.
-  // Accept either segment-count OR segment-count+1 children remaining.
+  // Lines that end in bold or code carry a trailing empty-text
+  // sentinel (see buildLineEl) so the caret has a non-wrapper anchor
+  // at end-of-line. Accept either segment-count OR segment-count+1
+  // children remaining.
   const remaining = children.length - i
-  const endsInBold = segs.length > 0 && segs[segs.length - 1].kind === 'bold'
-  if (remaining !== segs.length && !(endsInBold && remaining === segs.length + 1)) return false
+  const lastSeg = segs[segs.length - 1]
+  const endsInWrap = !!lastSeg && (lastSeg.kind === 'bold' || lastSeg.kind === 'code')
+  if (remaining !== segs.length && !(endsInWrap && remaining === segs.length + 1)) return false
 
   for (const seg of segs) {
     const node = children[i++]
@@ -658,17 +710,21 @@ function lineMatchesModel(line: HTMLElement): boolean {
       if (node.nodeType !== Node.TEXT_NODE) return false
       if (node.textContent !== seg.text) return false
     } else {
-      // Bold segment: <strong> with three children — open marker
-      // (`**`), inner text, close marker (`**`).
+      // Inline wrapper segment: <strong> for bold or <code> for code,
+      // each with three children — open marker, inner text, close
+      // marker. The marker character differs (`**` vs `` ` ``), but
+      // the structure is identical.
       if (node.nodeType !== Node.ELEMENT_NODE) return false
       const el = node as HTMLElement
-      if (el.tagName !== 'STRONG') return false
+      const expectedTag = seg.kind === 'bold' ? 'STRONG' : 'CODE'
+      const expectedMarker = seg.kind === 'bold' ? '**' : '`'
+      if (el.tagName !== expectedTag) return false
       if (el.childNodes.length !== 3) return false
       const open = el.childNodes[0]
       const inner = el.childNodes[1]
       const close = el.childNodes[2]
-      if (open.nodeType !== Node.ELEMENT_NODE || !(open as HTMLElement).classList.contains('md-marker') || open.textContent !== '**') return false
-      if (close.nodeType !== Node.ELEMENT_NODE || !(close as HTMLElement).classList.contains('md-marker') || close.textContent !== '**') return false
+      if (open.nodeType !== Node.ELEMENT_NODE || !(open as HTMLElement).classList.contains('md-marker') || open.textContent !== expectedMarker) return false
+      if (close.nodeType !== Node.ELEMENT_NODE || !(close as HTMLElement).classList.contains('md-marker') || close.textContent !== expectedMarker) return false
       if (inner.nodeType !== Node.TEXT_NODE || inner.textContent !== seg.text) return false
     }
   }
@@ -1094,11 +1150,11 @@ function attachHandlers() {
       if (!sel || sel.rangeCount === 0) return
       const range = sel.getRangeAt(0)
       if (!range.collapsed) return
-      const strong = strongAtCaretEdge(range)
-      if (!strong) return
+      const wrap = inlineWrapAtCaretEdge(range)
+      if (!wrap) return
       e.preventDefault()
-      const lineLevel = strong.parentNode!
-      const after = strong.nextSibling
+      const lineLevel = wrap.parentNode!
+      const after = wrap.nextSibling
       const newText = document.createTextNode(e.data)
       if (after) lineLevel.insertBefore(newText, after)
       else       lineLevel.appendChild(newText)
@@ -1197,13 +1253,14 @@ function attachHandlers() {
       e.preventDefault()
       toggleBoldAtSelection()
     }
-    // Right-arrow / End from the end of a bold's inner text: Chrome
-    // won't navigate the caret past hidden markers, so the user gets
-    // stuck inside the <strong> and subsequent typing extends the
-    // bold. We intercept and jump to the sentinel text node after the
-    // strong, so one keypress is enough to exit and start typing
-    // plain text. The opposite (entering bold from outside) doesn't
-    // need a fix — Chrome navigates into strong inner text cleanly.
+    // Right-arrow / End from the end of a bold's or code's inner
+    // text: Chrome won't navigate the caret past hidden markers, so
+    // the user gets stuck inside the wrapper and subsequent typing
+    // extends the bold/code. We intercept and jump to the sentinel
+    // text node after the wrapper, so one keypress is enough to exit
+    // and start typing plain text. The opposite (entering the
+    // wrapper from outside) doesn't need a fix — Chrome navigates
+    // into wrapper inner text cleanly.
     if ((e.key === 'ArrowRight' || e.key === 'End') && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
       const sel = window.getSelection()
       if (sel && sel.rangeCount > 0) {
@@ -1212,7 +1269,8 @@ function attachHandlers() {
           const node = range.startContainer
           if (node.nodeType === Node.TEXT_NODE) {
             const parent = node.parentNode as HTMLElement | null
-            if (parent && parent.tagName === 'STRONG'
+            if (parent
+                && (parent.tagName === 'STRONG' || parent.tagName === 'CODE')
                 && range.startOffset === (node.textContent || '').length
                 && node.nextSibling
                 && node.nextSibling.nodeType === Node.ELEMENT_NODE
