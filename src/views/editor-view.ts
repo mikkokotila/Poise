@@ -1,17 +1,22 @@
 // Editor — minimalist markdown writing surface.
 //
-// Single horizontal control bar at the top:
+// Single horizontal control bar at the top, sharing the exact alignment
+// of every other view's header (same .view-header rule, same indent,
+// same height, same right-pad to clear the top-right burger). Inside
+// the header, two halves: icons on the left, meta + doc-picker on the
+// right.
 //
-//   [Doc title ▾]  +  ×                         12 words · saved
-//
-// where the doc-title button opens a dropdown popover listing all
-// docs grouped by recency, "+" mints a fresh blank doc, "×" deletes
-// the current doc (with confirmation). Below the bar: just the page —
-// a chromeless textarea, generous serif, comfortable measure.
+//   ┌─────────────────────────────────────────────────────────────┐
+//   │  +  ×                       25 words · saved   [doc title ▾]│
+//   ├─────────────────────────────────────────────────────────────┤
+//   │                                                             │
+//   │             chromeless writing area, centered page          │
+//   │                                                             │
+//   └─────────────────────────────────────────────────────────────┘
 //
 // Storage: each doc is a plain UTF-8 .md file under ~/.poise/editor/.
-// Title comes from the first non-empty line at read time. Server-side
-// owns sanitization, layout, and the title-derivation rule.
+// Title comes from the first non-empty line at read time. server/editor.ts
+// owns sanitization and on-disk layout.
 
 interface DocSummary {
   slug: string
@@ -70,32 +75,37 @@ function groupBucket(iso: string): string {
   return 'Older'
 }
 
-const ICON_PLUS   = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 2v10M2 7h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
-const ICON_TRASH  = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 4h8M5.5 4V3a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1M4.5 4l.5 7a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1l.5-7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+const ICON_PLUS  = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 2v10M2 7h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
+const ICON_TRASH = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 4h8M5.5 4V3a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1M4.5 4l.5 7a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1l.5-7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>'
 
 function renderShell(): string {
+  // .view-header carries the standard cross-view alignment (vertical
+  // position, side indent, right-pad to clear the burger). The
+  // editor-specific behaviour piggybacks on it via the .editor-bar
+  // modifier — we only override what's specific (justify-content
+  // space-between to split left/right halves).
   return `
-    <div class="editor-shell">
-      <header class="editor-bar">
-        <div class="editor-bar-left">
+    <header class="view-header editor-bar">
+      <div class="editor-bar-left">
+        <button type="button" class="editor-bar-btn editor-new-btn"    title="New (⌘N)" aria-label="New">${ICON_PLUS}</button>
+        <button type="button" class="editor-bar-btn editor-delete-btn" title="Delete"   aria-label="Delete">${ICON_TRASH}</button>
+      </div>
+      <div class="editor-bar-right">
+        <span class="editor-meta" id="editor-meta"></span>
+        <div class="editor-doc-wrap">
           <button type="button" class="editor-doc-trigger" aria-haspopup="menu" aria-expanded="false">
             <span class="editor-doc-trigger-title">Untitled</span>
             <span class="editor-doc-trigger-chevron" aria-hidden="true">▾</span>
           </button>
-          <button type="button" class="editor-bar-btn editor-new-btn"   title="New (⌘N)"  aria-label="New">${ICON_PLUS}</button>
-          <button type="button" class="editor-bar-btn editor-delete-btn" title="Delete"   aria-label="Delete">${ICON_TRASH}</button>
+          <div class="editor-doc-menu" id="editor-doc-menu" hidden role="menu"></div>
         </div>
-        <div class="editor-bar-right">
-          <span class="editor-meta" id="editor-meta"></span>
-        </div>
-        <div class="editor-doc-menu" id="editor-doc-menu" hidden role="menu"></div>
-      </header>
-      <main class="editor-main">
-        <div class="editor-page">
-          <textarea class="editor-textarea" id="editor-textarea" spellcheck="true" placeholder="Start writing…"></textarea>
-        </div>
-      </main>
-    </div>
+      </div>
+    </header>
+    <main class="editor-main">
+      <div class="editor-page">
+        <textarea class="editor-textarea" id="editor-textarea" spellcheck="true" placeholder="Start writing…"></textarea>
+      </div>
+    </main>
   `
 }
 
@@ -162,9 +172,7 @@ function openMenu() {
   renderDocMenu()
   menuEl.hidden = false
   triggerEl.setAttribute('aria-expanded', 'true')
-  // Defer the outside-click listener install so the click that
-  // opened the menu doesn't immediately close it.
-  setTimeout(() => document.addEventListener('click', onOutsideClick, { once: false }), 0)
+  setTimeout(() => document.addEventListener('click', onOutsideClick), 0)
 }
 
 function closeMenu() {
@@ -193,6 +201,14 @@ async function fetchDocs() {
   }
 }
 
+// Match the textarea's height to its content so the page reads as a
+// scroll of prose, not a fixed-height frame with an inner scrollbar.
+function autosize() {
+  if (!textareaEl) return
+  textareaEl.style.height = 'auto'
+  textareaEl.style.height = textareaEl.scrollHeight + 'px'
+}
+
 async function loadDoc(slug: string) {
   if (!textareaEl) return
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; await flushSave() }
@@ -205,6 +221,7 @@ async function loadDoc(slug: string) {
     try { localStorage.setItem(LAST_OPEN_KEY, currentSlug) } catch { /* ignore */ }
     setTriggerTitle()
     setMetaForCurrent()
+    autosize()
     textareaEl.focus()
     const len = textareaEl.value.length
     try { textareaEl.setSelectionRange(len, len) } catch { /* ignore */ }
@@ -231,12 +248,8 @@ async function newDoc() {
 async function deleteCurrent() {
   const d = currentDoc()
   if (!d) return
-  // Plain window.confirm is the simplest path for MVP — easy to
-  // replace with an inline dialog later. Title comes from the doc
-  // summary so the user sees what they're about to lose.
   const ok = window.confirm(`Delete "${d.title}"? This cannot be undone.`)
   if (!ok) return
-  // Cancel any pending save on this doc; we're about to remove it.
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
   try {
     const res = await fetch(`/api/editor/doc/${encodeURIComponent(d.slug)}`, { method: 'DELETE' })
@@ -245,14 +258,11 @@ async function deleteCurrent() {
     console.error('[editor] delete failed:', err)
     return
   }
-  // Drop from local list, decide where to land next.
   docs = docs.filter((x) => x.slug !== d.slug)
   try { localStorage.removeItem(LAST_OPEN_KEY) } catch { /* ignore */ }
   if (docs.length) {
     await loadDoc(docs[0].slug)
   } else {
-    // No docs left — mint a fresh blank one so the surface stays
-    // typeable instead of going dark.
     await newDoc()
   }
 }
@@ -318,7 +328,7 @@ function attachHandlers() {
   viewEl.querySelector<HTMLButtonElement>('.editor-delete-btn')!
     .addEventListener('click', () => { void deleteCurrent() })
 
-  textareaEl!.addEventListener('input', () => scheduleSave())
+  textareaEl!.addEventListener('input', () => { autosize(); scheduleSave() })
   textareaEl!.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 's') {
       e.preventDefault()
@@ -335,8 +345,6 @@ function attachHandlers() {
     }
   })
 
-  // Best-effort flush on tab close — sendBeacon keeps the very last
-  // keystroke from being lost when the page unloads mid-debounce.
   window.addEventListener('pagehide', () => {
     if (!textareaEl || !currentSlug) return
     if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
