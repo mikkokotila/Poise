@@ -3463,8 +3463,12 @@ tr:hover .replay-btn { opacity: 1; }
   line-height: var(--editor-h1-lh, 40px);
   font-weight: var(--editor-h1-weight, 800);
   letter-spacing: -0.01em;
-  margin-top: var(--editor-heading-spacing, 8px);
-  margin-bottom: var(--editor-heading-spacing, 8px);
+  /* em-based via --editor-heading-spacing — resolves against each
+     heading's own font-size so H1's gap and H2's gap scale together
+     in proportion to their sizes. Pixel fallback is em-equivalent at
+     default 28px H1 (0.3em = ~8.4px). */
+  margin-top:    var(--editor-heading-spacing, 0.3em);
+  margin-bottom: var(--editor-heading-spacing, 0.3em);
 }
 .editor-line[data-kind="h2"] {
   font-family: var(--typo-heading, 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif);
@@ -3472,8 +3476,12 @@ tr:hover .replay-btn { opacity: 1; }
   line-height: var(--editor-h2-lh, 34px);
   font-weight: var(--editor-h2-weight, 700);
   letter-spacing: -0.005em;
-  margin-top: var(--editor-heading-spacing, 8px);
-  margin-bottom: var(--editor-heading-spacing, 8px);
+  /* em-based via --editor-heading-spacing — resolves against each
+     heading's own font-size so H1's gap and H2's gap scale together
+     in proportion to their sizes. Pixel fallback is em-equivalent at
+     default 28px H1 (0.3em = ~8.4px). */
+  margin-top:    var(--editor-heading-spacing, 0.3em);
+  margin-bottom: var(--editor-heading-spacing, 0.3em);
 }
 /* First line never carries a top margin — the bar sits right above
    it and we don't want a heading-line first row to push the writing

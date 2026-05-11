@@ -2,23 +2,31 @@ const TYPO_KEY = 'poise-typo'
 /* Bump this when DEFAULTS shifts in a way old saved prefs should be wiped.
    ds-v1 = bound the defaults to Design System v1 neutrals/accents. */
 const TYPO_VERSION_KEY = 'poise-typo-version'
-/* ds-v2 = renamed headerSize → headingSize (rem→px), titleWeight →
-   headingWeight (range 400-600→400-800), added Writer archetype.
-   Version bump wipes prefs once so the new unit / range / archetype
-   defaults take effect without unit-mismatched stored values. */
-const TYPO_VERSION = 'ds-v2'
+/* ds-v3 = headingSpacing semantics shifted from px to em — the slider
+   value is now a multiplier of each heading's own font-size, so H1
+   and H2 always read as one harmonious pair at any slider position
+   (the gap ratio tracks the size ratio rather than diverging like a
+   fixed pixel value did). Range and default both change with the
+   units, so stale stored values would mismatch — bump wipes once. */
+const TYPO_VERSION = 'ds-v3'
 
 interface TypoConfig {
   archetype: string
   baseFontSize: number      // html font-size (px) — scales everything
   lineHeight: number        // body line-height
   // Editor — gap below paragraphs and around headings in the writer
-  // view. Both can go negative (down to -16) so the writer can pull
-  // lines closer than the natural line-height alone permits — the
-  // CSS engine subtracts margin from the inter-line distance, so a
-  // negative paragraphSpacing produces tighter-than-leading rhythm.
+  // view. paragraphSpacing is a pixel offset (body has one size; px
+  // and em would behave identically), can go negative to pull lines
+  // tighter than the natural leading.
   paragraphSpacing: number  // editor body line margin-bottom (px)
-  headingSpacing: number    // editor h1/h2 margin-top + bottom (px)
+  // headingSpacing is an em multiplier so H1 and H2 scale together.
+  // At slider 0.3 each heading gets margin-top + margin-bottom of
+  // 0.3 × its own font-size — the gap ratio always tracks the size
+  // ratio, so any pair-up of H1 and H2 reads as one harmonious set
+  // regardless of where the slider sits. Pixel-based heading spacing
+  // would never give that property: the same px gap is visually
+  // small around a big heading and visually large around a small one.
+  headingSpacing: number    // editor h1/h2 margin-top + bottom (em)
   // Heading line-height is independent of the global Type "Line
   // height" — that one stays the body-line multiplier; this one
   // multiplies just heading sizes. Default 1.5 matches what Type's
@@ -79,7 +87,7 @@ const DEFAULTS: TypoConfig = {
   baseFontSize: 15,
   lineHeight: 1.5,
   paragraphSpacing: 0,      // no extra gap by default (markdown-empty-line idiom)
-  headingSpacing: 8,        // mild after-heading breathing room
+  headingSpacing: 0.3,       // 0.3 × size — H1 (28px) gets ~8.4px, H2 (22px) ~6.6px
   headingLineHeight: 1.5,    // matches what Type's line-height produced before
   rowFontSize: 0.8125,
   rowPadding: 11,
@@ -112,6 +120,7 @@ interface SliderDef {
 const f0 = (v: number) => String(Math.round(v))
 const f2 = (v: number) => v.toFixed(2)
 const fPx = (v: number) => `${Math.round(v)}px`
+const fEm = (v: number) => `${v.toFixed(2)}em`
 // Show rem rounded + effective px (assumes base = config.baseFontSize)
 const fRem = (v: number) => {
   const base = config.baseFontSize
@@ -141,14 +150,18 @@ const SLIDER_GROUPS: SliderGroup[] = [
   {
     label: 'Editor',
     sliders: [
-      // Spacing ranges allow negative values down to -16 so the writer
-      // can pull lines tighter than the natural leading. Negative
-      // margin subtracts from inter-line distance; with body
-      // line-height around 28-32px there's headroom to compress
-      // without overlap, and headings (with their own line-height +
-      // surrounding margins) can compress further.
-      { key: 'paragraphSpacing',  label: 'Paragraph spacing',   min: -16, max: 32,  step: 1,    fmt: fPx },
-      { key: 'headingSpacing',    label: 'Heading spacing',     min: -16, max: 32,  step: 1,    fmt: fPx },
+      // Paragraph spacing is a pixel offset (body has one size, so
+      // px is fine). Goes negative for compression below the natural
+      // leading.
+      { key: 'paragraphSpacing',  label: 'Paragraph spacing',   min: -16,  max: 32,  step: 1,    fmt: fPx },
+      // Heading spacing is an em multiplier — the slider value is
+      // applied as `Nem` to both margin-top and margin-bottom on
+      // H1/H2. Because em resolves against each element's own
+      // font-size, the H1 gap and H2 gap grow / shrink in proportion
+      // to their sizes; at any slider position both headings look
+      // like one harmonious pair. Range goes negative for compression
+      // (overlap is possible but visually intentional at extremes).
+      { key: 'headingSpacing',    label: 'Heading spacing',     min: -0.5, max: 1.5, step: 0.05, fmt: fEm },
       // Heading line-height multiplier — independent of the global
       // Type "Line height" (which now controls only body lines). At
       // the default 1.5 the editor's headings render exactly as they
@@ -295,14 +308,16 @@ function apply() {
   root.style.setProperty('--editor-h1-weight', `${Math.min(900, config.headingWeight + 100)}`)
   root.style.setProperty('--editor-h2-weight', `${config.headingWeight}`)
 
-  // After-paragraph and after-heading spacing — applied as
-  // margin-bottom on the matching line kinds in the editor. These
-  // are deliberately separate from line-height: line-height is
-  // intra-paragraph leading, the spacing below is the inter-block
-  // gap that decides how the document breathes between paragraphs
-  // and headings.
+  // After-paragraph and around-heading spacing — applied as margin
+  // on the matching line kinds in the editor. Different units by
+  // design:
+  //   - paragraph-spacing is px (body has one size; px and em behave
+  //     the same here, px keeps the slider readable in absolute terms).
+  //   - heading-spacing is em (resolves against each heading's own
+  //     font-size at render time), so H1 and H2 gaps scale together
+  //     and the pair always reads harmoniously.
   root.style.setProperty('--editor-paragraph-spacing', `${config.paragraphSpacing}px`)
-  root.style.setProperty('--editor-heading-spacing',   `${config.headingSpacing}px`)
+  root.style.setProperty('--editor-heading-spacing',   `${config.headingSpacing}em`)
 
   // Colors are governed by the DS / theme system (see [data-theme="dark"]
   // overrides in style.css). Setting them inline here would beat the
