@@ -3488,6 +3488,55 @@ tr:hover .replay-btn { opacity: 1; }
    area down further than a body-first row. */
 .editor-line:first-child { margin-top: 0; }
 
+/* ── List items ──
+   A line whose markdown starts with `- ` (hyphen + space) becomes a
+   styled list item. The `- ` marker stays in textContent (hidden by
+   the universal .md-marker rule) so save / copy round-trip the
+   markdown; a CSS pseudo-element ::before draws a designed bullet
+   in its place. The line gets left-padding so the bullet sits at
+   the page margin and the prose reads as visually nested.
+
+   Spacing logic: between consecutive list-items the margin-bottom
+   is --editor-list-spacing — a saturating non-linear function of
+   --editor-paragraph-spacing (computed in typo.ts) that always
+   keeps list-spacing tighter than paragraph-spacing. The last item
+   in a run (whose next sibling is not another list-item) reverts
+   to paragraph-spacing so the list "ends" with normal prose
+   breathing room before the next paragraph. */
+.editor-line[data-kind="list-item"] {
+  position: relative;
+  padding-left: 1.5em;
+  margin-bottom: var(--editor-list-spacing, 4px);
+}
+.editor-line[data-kind="list-item"]::before {
+  /* The designed bullet. •  is large enough to feel present without
+     fighting the prose; the tertiary-text colour keeps it as a
+     navigational hint, not a heavyweight glyph. Vertical alignment
+     uses the body line-height so the bullet sits beside the first
+     line of multi-line items. */
+  content: "•";
+  position: absolute;
+  left: 0.4em;
+  top: 0;
+  color: var(--text-tertiary);
+  line-height: var(--editor-body-lh, 32px);
+  /* Slightly smaller than body so the bullet doesn't dominate. */
+  font-size: 0.95em;
+  /* The bullet is decoration only — keyboard navigation and
+     selection should ignore it (cursor / Cmd+A don't touch it). */
+  pointer-events: none;
+  user-select: none;
+}
+/* Last item in a list (next sibling isn't another list-item, or
+   it's the last line of the doc): use the wider paragraph-spacing
+   for the transition out into prose. The bare :last-child case
+   already gets paragraph-spacing because the :has() selector
+   fails-open to the base list-spacing rule, but adding it
+   explicitly keeps the intent visible. */
+.editor-line[data-kind="list-item"]:not(:has(+ .editor-line[data-kind="list-item"])) {
+  margin-bottom: var(--editor-paragraph-spacing, 0);
+}
+
 /* Hide the markdown markers (`# `, `## `, `**…**`) — the line / run
    is already rendered (heading via data-kind, bold via <strong>), so
    the marker chars are redundant on screen. The marker text still

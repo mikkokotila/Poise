@@ -318,6 +318,20 @@ function apply() {
   //     and the pair always reads harmoniously.
   root.style.setProperty('--editor-paragraph-spacing', `${config.paragraphSpacing}px`)
   root.style.setProperty('--editor-heading-spacing',   `${config.headingSpacing}em`)
+  // List-spacing derives non-linearly from paragraph-spacing.
+  // A list always reads tighter than the surrounding prose — the
+  // items belong together as one block, not as a sequence of
+  // independent paragraphs — but the *amount* of tightening scales
+  // with the writer's paragraph rhythm. At small paragraph gaps the
+  // delta is small ("just a bit" tighter); at large paragraph gaps
+  // the delta grows but list-spacing saturates around ~12px, so
+  // very airy prose never produces equally airy lists. Formula:
+  //   positive P: list = P × 12 / (12 + P) − 1   (saturating, asymptotes at 11)
+  //   negative P: list = P − 1                    (linear: always 1px tighter)
+  // Continuous at P=0 (both branches give −1).
+  const P = config.paragraphSpacing
+  const listSpacing = P < 0 ? P - 1 : P * 12 / (12 + P) - 1
+  root.style.setProperty('--editor-list-spacing', `${listSpacing.toFixed(2)}px`)
 
   // Colors are governed by the DS / theme system (see [data-theme="dark"]
   // overrides in style.css). Setting them inline here would beat the

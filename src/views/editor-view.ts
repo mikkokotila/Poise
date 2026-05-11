@@ -190,23 +190,30 @@ function renderShell(): string {
 
 // Line-kind taxonomy. Block-level kinds the editor recognises:
 //   - h1 / h2 / body: classified per-line from the leading `#` / `##`.
+//   - list-item: a line whose text starts with `- ` (hyphen + space).
+//     The `- ` marker is hidden (same .md-marker rule as headings) and
+//     a styled bullet renders via ::before; CSS gives the line a
+//     leading indent so the bullet sits at the left margin and the
+//     content reads as visually nested.
 //   - code-fence-open / code-fence-close / code-content: triple-backtick
 //     fenced code block. The opening fence is a line whose text starts
 //     with ```` (optionally followed by a language tag); the closing
 //     fence is a line whose text equals exactly ```` (no language).
 //     Lines between are code-content. Detection requires looking at
 //     surrounding lines, not just one — see classifyAllLines.
-type LineKind = 'h1' | 'h2' | 'body' | 'code-fence-open' | 'code-fence-close' | 'code-content'
+type LineKind = 'h1' | 'h2' | 'body' | 'list-item' | 'code-fence-open' | 'code-fence-close' | 'code-content'
 
 // Classify a single line by its leading markdown token. Only `# ` and
 // `## ` produce headings — H3+ isn't supported (intentional: the
-// editor's spec is "minimal markup"). Lines that are bare `#` or `##`
-// without a trailing space stay as body until the user adds the space,
-// matching CommonMark/iA Writer behaviour. Code-block kinds are NOT
-// computed here — they need cross-line state from classifyAllLines.
-function lineKindFor(text: string): 'h1' | 'h2' | 'body' {
+// editor's spec is "minimal markup"). `- ` produces a list item.
+// Bare `#`, `##`, or `-` without a trailing space stay as body until
+// the user adds the space, matching CommonMark / iA Writer behaviour.
+// Code-block kinds are NOT computed here — they need cross-line state
+// from classifyAllLines.
+function lineKindFor(text: string): 'h1' | 'h2' | 'body' | 'list-item' {
   if (/^## /.test(text)) return 'h2'
   if (/^# /.test(text))  return 'h1'
+  if (/^- /.test(text))  return 'list-item'
   return 'body'
 }
 
@@ -240,6 +247,7 @@ function classifyAllLines(texts: string[]): LineKind[] {
 function markerLengthFor(kind: LineKind, lineText: string = ''): number {
   if (kind === 'h1') return 2
   if (kind === 'h2') return 3
+  if (kind === 'list-item') return 2     // `- ` prefix
   if (kind === 'code-fence-open' || kind === 'code-fence-close') return lineText.length
   return 0
 }
@@ -338,11 +346,12 @@ function buildBoldEl(inner: string): HTMLElement { return buildInlineWrap('stron
 function buildCodeEl(inner: string): HTMLElement { return buildInlineWrap('code',  '`',  inner) }
 
 // Build a fresh line element. Behaviour by kind:
-//   - h1 / h2: the `# ` / `## ` prefix is wrapped in a hidden marker
-//     span; the rest is parsed for inline bold/code and split into
-//     text nodes + <strong> / <code> wrappers. Lines ending in a
-//     wrapper get an empty-text sentinel for caret anchoring.
-//   - body: as h1/h2 but no leading marker.
+//   - h1 / h2 / list-item: the leading `# ` / `## ` / `- ` prefix is
+//     wrapped in a hidden marker span; the rest is parsed for inline
+//     bold/code and split into text nodes + <strong> / <code>
+//     wrappers. Lines ending in a wrapper get an empty-text sentinel
+//     for caret anchoring.
+//   - body: as h1/h2/list-item but no leading marker.
 //   - code-fence-open / code-fence-close: the WHOLE textContent is
 //     the marker — wrapped in `<span class="md-marker">` so the
 //     fence text disappears visually. The line div itself is still
