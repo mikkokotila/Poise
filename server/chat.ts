@@ -17,7 +17,7 @@
 import { spawn } from 'node:child_process'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, writeFile, readdir, rename, rmdir, stat } from 'node:fs/promises'
 import { fetchAgentLogs } from './agent'
 import { readDoc } from './editor'
 
@@ -40,10 +40,55 @@ function agentInterfaceCwd(): string {
 // --pwd is omitted, but we set it explicitly so the conversation is
 // rooted in a stable, predictable directory we own. Attachments land
 // inside this dir so the agent can read them via cwd.
+//
+// Lives under ~/.poise/chat-attachments/<sessionId>/ — durable across
+// reboots, syncs alongside the rest of ~/.poise/ if the user puts it
+// in Dropbox/iCloud/git. Was previously under $TMPDIR/poise-chat/...
+// which macOS purges aperiodically; that meant a chat session
+// continued days later would find its attachments gone even though
+// the transcript referenced them. Path can be overridden with
+// POISE_CHAT_ATTACHMENTS_DIR for tests or alt-home setups.
+const CHAT_ATTACHMENTS_DIR = process.env.POISE_CHAT_ATTACHMENTS_DIR
+  || join(homedir(), '.poise', 'chat-attachments')
 function chatPwd(sessionId: string): string {
   const safe = sessionId.replace(/[^A-Za-z0-9._-]/g, '_')
-  return join(tmpdir(), 'poise-chat', safe)
+  return join(CHAT_ATTACHMENTS_DIR, safe)
 }
+
+// One-time migration: move any attachments left in the previous
+// $TMPDIR/poise-chat/<session>/ tree to the new durable
+// ~/.poise/chat-attachments/<session>/ location. Runs at module load,
+// best-effort, swallows errors. Existing files in the new location
+// are never overwritten — the migration favours not losing newer
+// state if a session somehow has both. Empty source dirs are simply
+// removed. After every session is migrated (or already migrated),
+// the empty $TMPDIR/poise-chat parent is removed too.
+async function migrateLegacyChatTmpdir(): Promise<void> {
+  const oldRoot = join(tmpdir(), 'poise-chat')
+  let sessions: string[]
+  try { sessions = await readdir(oldRoot) } catch { return }     // nothing to do
+  for (const session of sessions) {
+    const oldDir = join(oldRoot, session)
+    const newDir = join(CHAT_ATTACHMENTS_DIR, session)
+    try {
+      const files = await readdir(oldDir)
+      if (files.length === 0) {
+        try { await rmdir(oldDir) } catch { /* ok */ }
+        continue
+      }
+      await mkdir(newDir, { recursive: true })
+      for (const f of files) {
+        const target = join(newDir, f)
+        // Don't clobber a file already in the new location.
+        try { await stat(target); continue } catch { /* doesn't exist — safe to move */ }
+        try { await rename(join(oldDir, f), target) } catch { /* skip this file */ }
+      }
+      try { await rmdir(oldDir) } catch { /* may have files we couldn't move */ }
+    } catch { /* ok */ }
+  }
+  try { await rmdir(oldRoot) } catch { /* may still have non-empty subdirs */ }
+}
+void migrateLegacyChatTmpdir()
 
 // Filename sanitization for attachment uploads — strip path
 // separators, leading dots, and anything weird so a malicious filename

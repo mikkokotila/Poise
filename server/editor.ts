@@ -10,11 +10,54 @@
 // versioning / sync / backup they already have (git, Dropbox, iCloud,
 // etc.). No lock-in.
 
-import { mkdir, readFile, writeFile, unlink, readdir, stat } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, unlink, readdir, rename, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
 const EDITOR_DIR = process.env.POISE_EDITOR_DIR || join(homedir(), '.poise', 'editor')
+
+// All writes go through writeAtomic: write to a sibling .tmp file,
+// then rename to the target path. POSIX rename is atomic — readers
+// either see the old file or the new one, never a half-written file.
+// If the write fails mid-way (disk full, process crash, etc.) the
+// original target is untouched. The .tmp filename includes pid + a
+// monotonic counter so concurrent writes from re-entrant code or
+// multiple vite processes don't collide on the same temp path.
+let tmpCounter = 0
+async function writeAtomic(target: string, content: string): Promise<void> {
+  const tmpPath = `${target}.tmp.${process.pid}.${Date.now()}.${++tmpCounter}`
+  try {
+    await writeFile(tmpPath, content, 'utf-8')
+    await rename(tmpPath, target)
+  } catch (err) {
+    // Mid-write failure: leave the original target alone and try
+    // to remove the abandoned tmp file. Swallow unlink errors —
+    // tmp cleanup happens at startup too (cleanStaleTmpFiles).
+    try { await unlink(tmpPath) } catch { /* best-effort */ }
+    throw err
+  }
+}
+
+// On startup, sweep stale .tmp.* files left behind by a previous
+// crash or a kill during writeAtomic. Tmp files in the editor dir
+// are never user-visible (no slug looks like `*.tmp.<pid>.<...>`),
+// so deleting them is safe. Idempotent: rerun any time.
+async function cleanStaleTmpFiles(): Promise<void> {
+  await ensureDir()
+  let names: string[] = []
+  try { names = await readdir(EDITOR_DIR) } catch { return }
+  for (const f of names) {
+    // Match the writeAtomic pattern: <anything>.tmp.<pid>.<ms>[.<counter>]
+    if (/\.tmp\.\d+\.\d+(?:\.\d+)?$/.test(f)) {
+      try { await unlink(join(EDITOR_DIR, f)) } catch { /* best-effort */ }
+    }
+  }
+}
+// Fire-and-forget at module load. Any caller using readDoc/writeDoc
+// gets a tidy directory by the time their first call lands; if the
+// sweep is still running, it doesn't interfere (we're only deleting
+// tmp files, never .md or .annotations.json).
+void cleanStaleTmpFiles()
 
 // Cap per-doc size so a runaway paste or a corrupt sync doesn't
 // blow out memory on read. 5 MB is well past any prose document.
@@ -100,7 +143,7 @@ export async function writeDoc(slug: string, content: string): Promise<DocSummar
   }
   await ensureDir()
   const path = fileFor(slug)
-  await writeFile(path, content, 'utf-8')
+  await writeAtomic(path, content)
   const st = await stat(path)
   return {
     slug: sanitizeSlug(slug),
@@ -205,7 +248,7 @@ export async function writeAnnotations(slug: string, file: AnnotationsFile): Pro
   }
   await ensureDir()
   const path = annotationsFileFor(slug)
-  await writeFile(path, body, 'utf-8')
+  await writeAtomic(path, body)
   return { ok: true }
 }
 
