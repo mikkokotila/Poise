@@ -3505,24 +3505,36 @@ tr:hover .replay-btn { opacity: 1; }
    breathing room before the next paragraph. */
 .editor-line[data-kind="list-item"] {
   position: relative;
-  padding-left: 1.5em;
+  /* Wide enough gutter for typical numbered markers up to "999." or
+     "999)" — markers right-align inside a 1.7em column inside this
+     padding, with breathing room between the marker and the prose. */
+  padding-left: 2.2em;
   margin-bottom: var(--editor-list-spacing, 4px);
 }
 .editor-line[data-kind="list-item"]::before {
-  /* The designed bullet. •  is large enough to feel present without
-     fighting the prose; the tertiary-text colour keeps it as a
-     navigational hint, not a heavyweight glyph. Vertical alignment
-     uses the body line-height so the bullet sits beside the first
-     line of multi-line items. */
-  content: "•";
+  /* The designed marker — `•` for bullet lists, the literal number
+     and the writer's chosen delimiter (`1.` or `1)`) for numbered
+     lists. buildLineEl writes the display string into
+     data-list-marker; attr() pulls it in here so a single CSS rule
+     covers both list flavours. Right-aligning the marker in a
+     fixed-width box at the line's left edge keeps every marker —
+     bullet, single-digit, multi-digit — anchored to the same right
+     edge, so prose always sits the same distance from the marker's
+     end. white-space:nowrap stops a multi-digit marker like "100."
+     from breaking across lines if it happens to exceed the box. */
+  content: attr(data-list-marker);
   position: absolute;
-  left: 0.4em;
+  left: 0;
   top: 0;
+  width: 1.7em;
+  text-align: right;
+  white-space: nowrap;
   color: var(--text-tertiary);
   line-height: var(--editor-body-lh, 32px);
-  /* Slightly smaller than body so the bullet doesn't dominate. */
+  /* Slightly smaller than body so the marker doesn't dominate the
+     prose; numbers especially benefit from the lighter weight. */
   font-size: 0.95em;
-  /* The bullet is decoration only — keyboard navigation and
+  /* The marker is decoration only — keyboard navigation and
      selection should ignore it (cursor / Cmd+A don't touch it). */
   pointer-events: none;
   user-select: none;

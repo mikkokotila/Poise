@@ -205,15 +205,18 @@ type LineKind = 'h1' | 'h2' | 'body' | 'list-item' | 'code-fence-open' | 'code-f
 
 // Classify a single line by its leading markdown token. Only `# ` and
 // `## ` produce headings — H3+ isn't supported (intentional: the
-// editor's spec is "minimal markup"). `- ` produces a list item.
-// Bare `#`, `##`, or `-` without a trailing space stay as body until
-// the user adds the space, matching CommonMark / iA Writer behaviour.
-// Code-block kinds are NOT computed here — they need cross-line state
-// from classifyAllLines.
+// editor's spec is "minimal markup"). List items come in two flavours:
+//   `- ` (bullet) and `N. ` / `N) ` (numbered). For numbered lists the
+// writer's choice of `.` vs `)` is preserved as the visual delimiter.
+// Bare `#`, `##`, `-`, or `1.` without a trailing space stay as body
+// until the user adds the space, matching CommonMark / iA Writer
+// behaviour. Code-block kinds are NOT computed here — they need
+// cross-line state from classifyAllLines.
 function lineKindFor(text: string): 'h1' | 'h2' | 'body' | 'list-item' {
-  if (/^## /.test(text)) return 'h2'
-  if (/^# /.test(text))  return 'h1'
-  if (/^- /.test(text))  return 'list-item'
+  if (/^## /.test(text))          return 'h2'
+  if (/^# /.test(text))           return 'h1'
+  if (/^- /.test(text))           return 'list-item'
+  if (/^\d+[.)] /.test(text))     return 'list-item'
   return 'body'
 }
 
@@ -247,7 +250,15 @@ function classifyAllLines(texts: string[]): LineKind[] {
 function markerLengthFor(kind: LineKind, lineText: string = ''): number {
   if (kind === 'h1') return 2
   if (kind === 'h2') return 3
-  if (kind === 'list-item') return 2     // `- ` prefix
+  if (kind === 'list-item') {
+    // List markers vary in length. `- ` is 2 chars; numbered markers
+    // are 3 + digit_count chars for `N. ` / `N) ` (e.g. `1. ` = 3,
+    // `12. ` = 4, `99) ` = 4). Match against the actual line text so
+    // each list-item line reports its own marker length; callers
+    // should always pass lineText for list-item to get this right.
+    const m = lineText.match(/^(?:- |\d+[.)] )/)
+    return m ? m[0].length : 2
+  }
   if (kind === 'code-fence-open' || kind === 'code-fence-close') return lineText.length
   return 0
 }
@@ -384,7 +395,7 @@ function buildLineEl(text: string, kind: LineKind): HTMLDivElement {
     return div
   }
 
-  const prefixLen = markerLengthFor(kind)
+  const prefixLen = markerLengthFor(kind, text)
   const prefix = text.slice(0, prefixLen)
   const rest = text.slice(prefixLen)
   if (prefix) {
@@ -392,6 +403,20 @@ function buildLineEl(text: string, kind: LineKind): HTMLDivElement {
     span.className = 'md-marker'
     span.textContent = prefix
     div.appendChild(span)
+  }
+  // For list-item lines, publish the visual marker the ::before
+  // pseudo-element should display. Bullet lines (`- `) render as a
+  // designed `•` glyph; numbered lines preserve the writer's
+  // delimiter choice (`1.` vs `1)`), which preserves the typographic
+  // distinction those two punctuations make.
+  if (kind === 'list-item') {
+    if (prefix.startsWith('-')) {
+      div.dataset.listMarker = '•'
+    } else {
+      // Numbered: prefix is like "1. " or "42) " — strip the trailing
+      // space and use the number + its delimiter as-is.
+      div.dataset.listMarker = prefix.trimEnd()
+    }
   }
   if (rest === '') {
     div.appendChild(document.createElement('br'))
@@ -820,6 +845,17 @@ function lineMatchesModel(line: HTMLElement, kind: LineKind): boolean {
   const txt = line.textContent || ''
   const children = Array.from(line.childNodes)
 
+  // For list-item lines, the visual marker shown by ::before is
+  // carried in data-list-marker. If the writer edited the number
+  // ("1." → "2."), the textContent prefix changes but the cached
+  // attribute would stay stale unless we force a rebuild. Validate
+  // the attribute matches what buildLineEl would emit for this text.
+  if (kind === 'list-item') {
+    const prefix = txt.slice(0, markerLengthFor(kind, txt))
+    const expectedMarker = prefix.startsWith('-') ? '•' : prefix.trimEnd()
+    if (line.dataset.listMarker !== expectedMarker) return false
+  }
+
   if (kind === 'code-fence-open' || kind === 'code-fence-close') {
     if (txt === '') {
       return children.length === 1
@@ -843,7 +879,7 @@ function lineMatchesModel(line: HTMLElement, kind: LineKind): boolean {
       && children[0].textContent === txt
   }
 
-  const prefixLen = markerLengthFor(kind)
+  const prefixLen = markerLengthFor(kind, txt)
   const expectedPrefix = txt.slice(0, prefixLen)
   const rest = txt.slice(prefixLen)
   let i = 0
@@ -918,6 +954,15 @@ function rebuildLineInPlace(line: HTMLElement, kind: LineKind) {
   const cursor = getCursorOffsetInLine(line)
   const fresh = buildLineEl(txt, kind)
   line.dataset.kind = fresh.dataset.kind!
+  // Mirror list-item's data-list-marker attribute from the fresh
+  // element. When a line transitions out of list-item (back to body,
+  // or up to a heading), delete the stale attribute so CSS doesn't
+  // render a ghost bullet via ::before.
+  if (fresh.dataset.listMarker !== undefined) {
+    line.dataset.listMarker = fresh.dataset.listMarker
+  } else {
+    delete line.dataset.listMarker
+  }
   line.innerHTML = ''
   while (fresh.firstChild) line.appendChild(fresh.firstChild)
   if (cursor !== null) setCursorOffsetInLine(line, cursor)
