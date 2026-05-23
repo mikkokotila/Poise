@@ -1,23 +1,55 @@
 import './style.css'
 import { initTypography, toggleTypographyPanel } from './typo'
-import { initSettings, toggleSettingsPanel, openSettingsPanel, isTokenConfigured } from './settings'
+import { initSettings, toggleSettingsPanel, openSettingsPanel, isFullyConfigured } from './settings'
 import { initMenu } from './menu'
 import { initMainView, refreshMainView } from './views/main-view'
-import { initFlowView } from './views/flow-view'
-import { initTrustView } from './views/trust-view'
+import { initCurrentView } from './views/current-view'
+import { initSwarmView, focusRow as focusSwarmRow } from './views/swarm-view'
+import { initBehaviorsView } from './views/behaviors-view'
+import { initEditorView, stopEditorRefresh } from './views/editor-view'
+import { toggle as toggleChat } from './views/chat-pane'
+import { loadSettings, startRefreshTicker, applyTheme, getTheme } from './config'
 
 const viewMainEl = document.getElementById('view-main')!
-const viewFlowEl = document.getElementById('view-flow')!
-const viewTrustEl = document.getElementById('view-trust')!
+const viewCurrentEl = document.getElementById('view-current')!
+const viewSwarmEl = document.getElementById('view-swarm')!
+const viewBehaviorsEl = document.getElementById('view-behaviors')!
+const viewEditorEl = document.getElementById('view-editor')!
 
-function showView(v: 'main' | 'flow' | 'trust') {
-  const all = [viewMainEl, viewFlowEl, viewTrustEl]
-  const target = v === 'main' ? viewMainEl : v === 'flow' ? viewFlowEl : viewTrustEl
+type ViewSlug = 'main' | 'current' | 'swarm' | 'behaviors' | 'editor'
+
+function showView(v: ViewSlug) {
+  const all = [viewMainEl, viewCurrentEl, viewSwarmEl, viewBehaviorsEl, viewEditorEl]
+  const target =
+      v === 'main'      ? viewMainEl
+    : v === 'current'   ? viewCurrentEl
+    : v === 'swarm'     ? viewSwarmEl
+    : v === 'behaviors' ? viewBehaviorsEl
+    :                     viewEditorEl
+
+  // Polling stays attached across view changes — every view that has
+  // been visited at least once keeps fetching on every `poise:refresh-
+  // tick`, so a row whose status flips from running → completed (or
+  // whose time-elapsed advances) reflects on its next tick whether or
+  // not its view is the one currently on screen. Returning to a view
+  // therefore shows fresh data instantly rather than waiting for an
+  // entry-fetch to land. The init functions are idempotent — each
+  // guards its tick-listener with a boolean so re-entering doesn't
+  // attach duplicates.
+  //
+  // Editor leave-cleanup is the one exception: stopEditorRefresh isn't
+  // a polling-stop (the editor has no tick listener) — it flushes the
+  // pending autosave, closes the doc-picker menu, and strips the
+  // writer-mode body class so the chrome reappears in other views.
+  // All of those are essential on leaving the editor; keep the call.
+  if (v !== 'editor')    stopEditorRefresh()
 
   // Initialize the target first so content exists before the animation starts
-  if (v === 'main') initMainView()
-  else if (v === 'flow') initFlowView()
-  else initTrustView()
+  if (v === 'main')           initMainView()
+  else if (v === 'current')   initCurrentView()
+  else if (v === 'swarm')     initSwarmView()
+  else if (v === 'behaviors') initBehaviorsView()
+  else                        initEditorView()
 
   for (const el of all) {
     if (el === target) {
@@ -33,6 +65,10 @@ function showView(v: 'main' | 'flow' | 'trust') {
   window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior })
 }
 
+// Apply the saved theme as early as possible so the first paint matches
+// the user's preference (no light → dark flash on dark-mode boots).
+applyTheme(getTheme())
+
 // Init order: typography → settings → menu → initial view
 initTypography()
 initSettings()
@@ -43,50 +79,82 @@ const menu = initMenu({
   onOpenSettings: () => toggleSettingsPanel(),
 })
 
-// Initial view
-showView(menu.currentView())
-
-// On load: check token status. If missing, open settings panel with prompt. Otherwise sync.
+// On load: pull settings first so views render with the correct org/me/timezone,
+// then show the initial view. The user's external service keeps the data
+// fresh; Poise only reads.
 ;(async () => {
-  const hasToken = await isTokenConfigured()
-  if (!hasToken) {
-    openSettingsPanel()
-    return
-  }
+  await loadSettings()
+  showView(menu.currentView())
+  // Single shared refresh clock — every view listens for poise:refresh-tick
+  // and refreshes on it. Wall-clock-aligned so switching views never causes
+  // an off-cycle re-fetch. (Behaviors run server-side on their own
+  // wall-clock ticker — see server/behaviors.ts.)
+  startRefreshTicker()
 
-  try {
-    const res = await fetch('/api/cache/sync', { method: 'POST' })
-    if (!res.ok) {
-      if (res.status === 401) openSettingsPanel()
-      return
-    }
-    const result = await res.json()
-    console.log('[poise] sync:', result)
-    if ((result.added > 0 || result.updated > 0) && menu.currentView() === 'main') {
-      refreshMainView()
-    }
-  } catch (err) {
-    console.warn('[poise] sync failed:', err)
-  }
+  const ready = await isFullyConfigured()
+  if (!ready) openSettingsPanel()
 })()
 
-// When settings saves a token + triggers sync, refresh any open view
+// When settings saves and triggers a refresh, re-init the open view to
+// pull fresh data through whatever cache layer it uses.
 window.addEventListener('poise:synced', () => {
   if (menu.currentView() === 'main') refreshMainView()
-  else showView(menu.currentView()) // re-init flow/trust to pull fresh data
+  else showView(menu.currentView())
 })
 
-// Auto-refresh after 5 minutes idle
-const IDLE_MS = 5 * 60 * 1000
-let idleTimer: ReturnType<typeof setTimeout>
-function resetIdleTimer() {
-  clearTimeout(idleTimer)
-  idleTimer = setTimeout(async () => {
-    try { await fetch('/api/cache/sync', { method: 'POST' }) } catch { /* ignore */ }
-    if (menu.currentView() === 'main') refreshMainView()
-  }, IDLE_MS)
-}
-for (const evt of ['mousemove', 'keydown', 'scroll', 'click'] as const) {
-  document.addEventListener(evt, resetIdleTimer, { passive: true })
-}
-resetIdleTimer()
+// Card chat icon → toggle the chat pane bound to that card's session.
+// Clicking the same card's icon again closes the pane; switching to a
+// different card swaps the conversation in place. Hosts that want
+// JSON-edit-card rendering (currently: the editor's toolbar chat)
+// pass parseEdits=true in the event detail and may also supply hover
+// / accept / decline callbacks so the host can react to user gestures
+// on cards (highlight in surface, apply to surface, etc.); everyone
+// else leaves them unset and gets plain prose rendering.
+window.addEventListener('poise:open-chat', (ev) => {
+  const detail = (ev as CustomEvent<{
+    session: string,
+    label: string,
+    draft?: string,
+    parseEdits?: boolean,
+    onEditHover?: (edit: any) => void,
+    onEditLeave?: () => void,
+    onEditAccept?: (edit: any, key: string) => 'applied' | 'conflict',
+    onEditDecline?: (edit: any, key: string) => void,
+  }>).detail
+  if (!detail) return
+  toggleChat(detail.session, detail.label, detail.draft, {
+    parseEdits: detail.parseEdits,
+    onEditHover: detail.onEditHover,
+    onEditLeave: detail.onEditLeave,
+    onEditAccept: detail.onEditAccept,
+    onEditDecline: detail.onEditDecline,
+  })
+})
+
+// Behaviors view → Swarm row navigation. The "Last triggered" link
+// dispatches `poise:goto-swarm-row` with { repo, pr_id }; switch to
+// Swarm, wait for it to mount, then ask it to focus the matching log
+// entry (scroll + expand if completed).
+window.addEventListener('poise:goto-swarm-row', (ev) => {
+  const detail = (ev as CustomEvent<{ repo: string, pr_id: string }>).detail
+  if (!detail) return
+  menu.switchTo('swarm')
+  // Defer one frame so showView's animation classes have applied and
+  // initSwarmView() has run before we ask for a focus.
+  window.requestAnimationFrame(() => {
+    focusSwarmRow(detail.repo, detail.pr_id)
+  })
+})
+
+// Chat /content → editor article. The chat pane dispatches
+// `poise:open-editor-doc` after agent-interface --author-content
+// completes; we switch to the editor view and re-dispatch a
+// `poise:editor-load-doc` event the editor view listens for.
+window.addEventListener('poise:open-editor-doc', (ev) => {
+  const detail = (ev as CustomEvent<{ slug: string }>).detail
+  if (!detail?.slug) return
+  menu.switchTo('editor')
+  window.requestAnimationFrame(() => {
+    window.dispatchEvent(new CustomEvent('poise:editor-load-doc', { detail }))
+  })
+})

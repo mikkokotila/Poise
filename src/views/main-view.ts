@@ -1,6 +1,7 @@
-// Main table view — reads from SQLite cache (/api/cache/prs)
+// Main table view — reads through /api/gh from the unified /github API.
 
-const ME = 'mikkokotila'
+import { midnightInZone, startOfWeekInZone } from '../config'
+
 const STORAGE_KEY = 'poise-filters'
 const REVIEWED_KEY = 'poise-reviewed'
 const PAGE_SIZE = 20
@@ -14,30 +15,27 @@ const PLAY_SVG = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><p
 const SPIN_SVG = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" class="spin"><circle cx="7" cy="7" r="5.5" stroke="currentColor" stroke-width="1.5" stroke-dasharray="8 6" stroke-linecap="round"/></svg>'
 
 interface PrRow {
-  id: number
   repo: string
   number: number
   title: string
   html_url: string
   author: string
-  author_avatar: string | null
   is_pr: number
   state: string
-  created_at: string
+  owner_login: string | null
+  owner_avatar: string | null
   updated_at: string
-  closed_at: string | null
   merged_at: string | null
-  comments_count: number
-  last_commenter: string | null
-  last_commenter_avatar: string | null
-  last_comment_body: string | null
 }
 
 type TypeFilter = 'both' | 'issue' | 'pr'
 type StatusFilter = 'all' | 'open'
+type TimeFilter = 'all' | 'today' | 'yesterday' | 'week'
 
 let typeFilter: TypeFilter = 'both'
 let statusFilter: StatusFilter = 'all'
+let timeFilter: TimeFilter = 'all'
+let searchQuery = ''
 let items: PrRow[] = []
 let offset = 0
 let total = 0
@@ -45,17 +43,25 @@ let done = false
 let fetching = false
 let initialized = false
 let observer: IntersectionObserver | null = null
+let searchDebounce: ReturnType<typeof setTimeout> | null = null
+// Tick listener installed when the view is initialized; removed via
+// stopMainRefresh() when navigating away. Single shared clock — see
+// startRefreshTicker() in src/config.ts.
+const onTick = () => refreshMainSoft()
+let tickListening = false
 
 // DOM
 let tbody: HTMLTableSectionElement
 let loader: HTMLDivElement
 let empty: HTMLParagraphElement
 let table: HTMLTableElement
-let filtersEl: HTMLElement
+let clusterEl: HTMLElement
+let timePickerEl: HTMLElement
 let countEl: HTMLSpanElement
+let searchInput: HTMLInputElement
 let sentinel: HTMLDivElement
 
-function loadFilters(): { type: TypeFilter; status: StatusFilter } {
+function loadFilters(): { type: TypeFilter; status: StatusFilter; time: TimeFilter } {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
@@ -63,14 +69,28 @@ function loadFilters(): { type: TypeFilter; status: StatusFilter } {
       return {
         type: ['both', 'issue', 'pr'].includes(parsed.type) ? parsed.type : 'both',
         status: ['all', 'open'].includes(parsed.status) ? parsed.status : 'all',
+        time: ['all', 'today', 'yesterday', 'week'].includes(parsed.time) ? parsed.time : 'all',
       }
     }
   } catch { /* ignore */ }
-  return { type: 'both', status: 'all' }
+  return { type: 'both', status: 'all', time: 'all' }
 }
 
 function saveFilters() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ type: typeFilter, status: statusFilter }))
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ type: typeFilter, status: statusFilter, time: timeFilter }))
+}
+
+function timeWindow(): { since?: string; until?: string } {
+  if (timeFilter === 'today') {
+    return { since: midnightInZone(0).toISOString() }
+  }
+  if (timeFilter === 'yesterday') {
+    return { since: midnightInZone(-1).toISOString(), until: midnightInZone(0).toISOString() }
+  }
+  if (timeFilter === 'week') {
+    return { since: startOfWeekInZone().toISOString() }
+  }
+  return {}
 }
 
 function relativeDate(iso: string): string {
@@ -84,8 +104,17 @@ function relativeDate(iso: string): string {
   return `${Math.floor(months / 12)}y`
 }
 
+// Attribute-safe HTML escape. textContent → innerHTML only escapes &,
+// <, >; we also need to escape " and ' so attribute interpolations
+// like `title="${escapeHtml(text)}"` don't break on quoted content.
 function escapeHtml(s: string): string {
-  const d = document.createElement('div'); d.textContent = s; return d.innerHTML
+  return String(s).replace(/[&<>"']/g, (c) => (
+    c === '&' ? '&amp;' :
+    c === '<' ? '&lt;' :
+    c === '>' ? '&gt;' :
+    c === '"' ? '&quot;' :
+                '&#39;'
+  ))
 }
 
 function stateLabel(item: PrRow): { text: string; cls: string } {
@@ -99,40 +128,50 @@ function humanAvatarFallback(username: string): string {
   return `https://github.com/${encodeURIComponent(username)}.png?size=48`
 }
 
-function lastCell(item: PrRow): string {
-  // The "last" person on this thread. If nobody has commented yet, the original
-  // author is the most recent voice — fall through to them so we never show a dash.
-  let name = item.last_commenter
-  let avatar = item.last_commenter_avatar
-  if (!name) {
-    name = item.author
-    avatar = item.author_avatar
-  }
-  if (!name) return '<span class="last-dash">\u2014</span>'
-
+function ownerCell(item: PrRow): string {
+  const name = item.owner_login
+  if (!name) return '<span class="last-dash">—</span>'
   const isBot = /\[bot\]$/i.test(name)
-  const src = avatar && avatar.length > 0 ? avatar : humanAvatarFallback(name)
+  const src = item.owner_avatar && item.owner_avatar.length > 0 ? item.owner_avatar : humanAvatarFallback(name)
   const classes = ['last-avatar']
   if (isBot) classes.push('is-bot')
   return `<img class="${classes.join(' ')}" src="${src}" alt="${escapeHtml(name)}" title="${escapeHtml(name)}" loading="lazy" decoding="async" onerror="this.classList.add('broken')" />`
 }
 
-function buildRow(item: PrRow, animate: boolean, idx: number): HTMLTableRowElement {
+function lastCell(item: PrRow): string {
+  const name = item.author
+  if (!name) return '<span class="last-dash">\u2014</span>'
+
+  const isBot = /\[bot\]$/i.test(name)
+  const src = humanAvatarFallback(name)
+  const classes = ['last-avatar']
+  if (isBot) classes.push('is-bot')
+  return `<img class="${classes.join(' ')}" src="${src}" alt="${escapeHtml(name)}" title="${escapeHtml(name)}" loading="lazy" decoding="async" onerror="this.classList.add('broken')" />`
+}
+
+// Stable identity for a row across refreshes. Matches the format Current
+// uses for live items so the FLIP path captures the same kind of key.
+function rowKey(item: PrRow): string {
+  return `${item.repo}#${item.number}`
+}
+
+function buildRow(item: PrRow, animate: boolean): HTMLTableRowElement {
   const tr = document.createElement('tr')
   if (animate) tr.className = 'new'
-  tr.dataset.idx = String(idx)
+  tr.dataset.key = rowKey(item)
   const pr = item.is_pr === 1
   const st = stateLabel(item)
   const isDone = reviewed.has(item.html_url)
   const actionHtml = pr
-    ? `<button class="review-btn${isDone ? ' done' : ''}" data-idx="${idx}" title="Run consensus review">${PLAY_SVG}</button>`
+    ? `<button class="review-btn${isDone ? ' done' : ''}" title="Run consensus review">${PLAY_SVG}</button>`
     : ''
 
   tr.innerHTML = `
-    <td><span class="type-toggle ${pr ? 'pr' : 'issue'}" data-idx="${idx}">${pr ? 'PR' : 'IS'}</span></td>
+    <td><span class="type-toggle ${pr ? 'pr' : 'issue'}">${pr ? 'PR' : 'IS'}</span></td>
     <td class="title-cell"><a href="${item.html_url}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a></td>
     <td class="last-cell">${lastCell(item)}</td>
     <td><span class="repo-name">${escapeHtml(item.repo)}</span></td>
+    <td class="last-cell">${ownerCell(item)}</td>
     <td><span class="state ${st.cls}">${st.text}</span></td>
     <td><span class="date">${relativeDate(item.updated_at)}</span></td>
     <td class="action-cell">${actionHtml}</td>
@@ -154,25 +193,97 @@ function renderAll() {
   }
   table.hidden = false
   empty.hidden = true
-  for (let i = 0; i < items.length; i++) {
-    tbody.appendChild(buildRow(items[i], false, i))
+  for (const item of items) {
+    tbody.appendChild(buildRow(item, false))
   }
   updateCount()
 }
 
-function appendRows(newItems: PrRow[], startIdx: number) {
+function appendRows(newItems: PrRow[]) {
   table.hidden = false
   empty.hidden = true
   // Batch append in a fragment to reduce reflows
   const frag = document.createDocumentFragment()
   for (let i = 0; i < newItems.length; i++) {
-    const tr = buildRow(newItems[i], true, startIdx + i)
+    const tr = buildRow(newItems[i], true)
     // Tighter stagger (max 10 steps), capped at 80ms total
     tr.style.animationDelay = `${Math.min(i, 10) * 8}ms`
     frag.appendChild(tr)
   }
   tbody.appendChild(frag)
   updateCount()
+}
+
+// FLIP — same pattern Current uses for its live lanes. Reorders existing
+// rows in place via inverse-transform-then-animate-back so the user sees
+// the table settling into its new sort order rather than a cold rebuild.
+// Existing <tr> nodes are MOVED via fragment, never replaced — that
+// preserves expanded inline comments, hover state, and any in-flight
+// review buttons. Only newly-arriving rows get fresh DOM with .new for
+// the fade-in. Rows that left silently disappear.
+const FLIP_MS = 700
+
+function applyMainFlip(nextItems: PrRow[]) {
+  // 1. First — capture rects of all existing rows.
+  const firstRects = new Map<string, DOMRect>()
+  const existingEls = new Map<string, HTMLTableRowElement>()
+  for (const el of [...tbody.children] as HTMLTableRowElement[]) {
+    const k = el.dataset.key
+    if (!k) continue
+    firstRects.set(k, el.getBoundingClientRect())
+    existingEls.set(k, el)
+  }
+
+  // 2. Last — drop departed rows, then reorder/insert into a fragment.
+  const newKeys = new Set(nextItems.map(rowKey))
+  for (const [k, el] of existingEls) {
+    if (!newKeys.has(k)) el.remove()
+  }
+  const fragment = document.createDocumentFragment()
+  for (const item of nextItems) {
+    const k = rowKey(item)
+    const existing = existingEls.get(k)
+    if (existing) {
+      fragment.appendChild(existing)         // moved to its new position
+    } else {
+      fragment.appendChild(buildRow(item, true))   // .new for fade-in
+    }
+  }
+  tbody.appendChild(fragment)
+
+  // 3. Invert — for every row that existed before AND after, apply the
+  //    inverse translateY so it visually stays where it was.
+  const movers: HTMLTableRowElement[] = []
+  for (const item of nextItems) {
+    const k = rowKey(item)
+    const cardEl = existingEls.get(k)
+    if (!cardEl) continue
+    const firstRect = firstRects.get(k)
+    if (!firstRect) continue
+    const lastRect = cardEl.getBoundingClientRect()
+    const dy = firstRect.top - lastRect.top
+    if (Math.abs(dy) < 0.5) continue
+    cardEl.style.transition = 'none'
+    cardEl.style.transform = `translateY(${dy}px)`
+    movers.push(cardEl)
+  }
+
+  // 4. Play — flush layout, then animate transform back to identity.
+  if (movers.length > 0) {
+    void tbody.offsetHeight
+    requestAnimationFrame(() => {
+      for (const cardEl of movers) {
+        cardEl.style.transition = `transform ${FLIP_MS}ms cubic-bezier(0.4, 0, 0.2, 1)`
+        cardEl.style.transform = ''
+      }
+      window.setTimeout(() => {
+        for (const cardEl of movers) {
+          cardEl.style.transition = ''
+          cardEl.style.transform = ''
+        }
+      }, FLIP_MS + 50)
+    })
+  }
 }
 
 function sentinelNeedsFetch(): boolean {
@@ -182,24 +293,87 @@ function sentinelNeedsFetch(): boolean {
   return rect.top < window.innerHeight + 400
 }
 
+// Subset of the /api/gh record shape used by Archive. The proxy keeps
+// the legacy envelope; we only pluck what the table needs.
+interface GhRecord {
+  kind: 'pr' | 'issue'
+  repo: string                      // "Vaquum/foo"
+  number: number
+  state: 'open' | 'closed' | 'merged'
+  title: string
+  url: string
+  updated_at: string
+  author: string
+  merged_at: string | null
+  owner_login: string | null
+  owner_avatar: string | null
+}
+
+function recordToRow(r: GhRecord): PrRow {
+  const shortRepo = r.repo.includes('/') ? r.repo.split('/', 2)[1] : r.repo
+  return {
+    repo: shortRepo,
+    number: r.number,
+    title: r.title,
+    html_url: r.url,
+    author: r.author,
+    is_pr: r.kind === 'pr' ? 1 : 0,
+    state: r.state === 'merged' ? 'closed' : r.state,   // collapse to open/closed; merged_at distinguishes
+    owner_login: r.owner_login,
+    owner_avatar: r.owner_avatar,
+    updated_at: r.updated_at,
+    merged_at: r.merged_at,
+  }
+}
+
+function buildListPayload(): Record<string, unknown> {
+  const win = timeWindow()
+  const payload: Record<string, unknown> = {
+    operation: 'list',
+    record_type: typeFilter === 'both' ? 'all' : (typeFilter === 'pr' ? 'pull_request' : 'issue'),
+    record_state: statusFilter === 'open' ? 'open' : 'all',
+    limit: PAGE_SIZE,
+    offset,
+  }
+  if (win.since)    payload.updated_since = win.since
+  if (win.until)    payload.updated_until = win.until
+  if (searchQuery)  payload.q = searchQuery
+  return payload
+}
+
 async function fetchPage(): Promise<void> {
   if (done || fetching) return
   fetching = true
   loader.hidden = false
   try {
-    const url = `/api/cache/prs?type=${typeFilter}&status=${statusFilter}&limit=${PAGE_SIZE}&offset=${offset}`
-    const res = await fetch(url)
-    if (!res.ok) throw new Error(`Cache ${res.status}`)
-    const data = await res.json()
-    const newItems: PrRow[] = data.items
-    total = data.total
-    const startIdx = items.length
+    const payload = buildListPayload()
+    const [pageRes, countRes] = await Promise.all([
+      fetch('/api/gh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }),
+      // Total count is a separate call so the page payload doesn't carry it.
+      // count_only ignores limit/offset — it returns the size of the full
+      // filtered set so the "20 / 1083" pill stays honest as the user pages.
+      fetch('/api/gh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, count_only: true, limit: undefined, offset: undefined }),
+      }),
+    ])
+    if (!pageRes.ok)  throw new Error(`Github ${pageRes.status}`)
+    if (!countRes.ok) throw new Error(`Github ${countRes.status}`)
+    const pageData  = await pageRes.json()
+    const countData = await countRes.json()
+    const newItems: PrRow[] = (pageData.records as GhRecord[] || []).map(recordToRow)
+    total = typeof countData.count === 'number' ? countData.count : items.length + newItems.length
     items.push(...newItems)
     offset += newItems.length
     if (newItems.length < PAGE_SIZE || items.length >= total) done = true
 
     loader.hidden = done
-    appendRows(newItems, startIdx)
+    appendRows(newItems)
   } catch (err) {
     loader.hidden = true
     empty.textContent = `Error: ${(err as Error).message}`
@@ -230,24 +404,27 @@ function resetAndFetch() {
 }
 
 function initFilterButtons() {
-  filtersEl.querySelectorAll<HTMLButtonElement>('[data-filter]').forEach((b) => {
+  clusterEl.querySelectorAll<HTMLButtonElement>('[data-filter]').forEach((b) => {
     b.classList.toggle('active', b.dataset.filter === typeFilter)
   })
-  filtersEl.querySelectorAll<HTMLButtonElement>('[data-status]').forEach((b) => {
+  clusterEl.querySelectorAll<HTMLButtonElement>('[data-status]').forEach((b) => {
     b.classList.toggle('active', b.dataset.status === statusFilter)
+  })
+  timePickerEl.querySelectorAll<HTMLButtonElement>('[data-time]').forEach((b) => {
+    b.classList.toggle('active', b.dataset.time === timeFilter)
   })
 }
 
 function attachHandlers() {
-  // Filters
-  filtersEl.addEventListener('click', (e) => {
+  // All filter pills live in one cluster now — single delegated click handler
+  clusterEl.addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest('button')
     if (!btn) return
     if (btn.dataset.filter) {
       const next = btn.dataset.filter as TypeFilter
       if (next === typeFilter) return
       typeFilter = next
-      filtersEl.querySelectorAll<HTMLButtonElement>('[data-filter]').forEach((b) => b.classList.remove('active'))
+      clusterEl.querySelectorAll<HTMLButtonElement>('[data-filter]').forEach((b) => b.classList.remove('active'))
       btn.classList.add('active')
       saveFilters()
       resetAndFetch()
@@ -256,54 +433,44 @@ function attachHandlers() {
       const next = btn.dataset.status as StatusFilter
       if (next === statusFilter) return
       statusFilter = next
-      filtersEl.querySelectorAll<HTMLButtonElement>('[data-status]').forEach((b) => b.classList.remove('active'))
+      clusterEl.querySelectorAll<HTMLButtonElement>('[data-status]').forEach((b) => b.classList.remove('active'))
+      btn.classList.add('active')
+      saveFilters()
+      resetAndFetch()
+    }
+    if (btn.dataset.time) {
+      const next = btn.dataset.time as TimeFilter
+      if (next === timeFilter) return
+      timeFilter = next
+      clusterEl.querySelectorAll<HTMLButtonElement>('[data-time]').forEach((b) => b.classList.remove('active'))
       btn.classList.add('active')
       saveFilters()
       resetAndFetch()
     }
   })
 
-  // Expand/collapse last comment (already cached — no fetch!)
-  tbody.addEventListener('click', (e) => {
-    const toggle = (e.target as HTMLElement).closest('.type-toggle')
-    if (!toggle) return
-    const idx = Number((toggle as HTMLElement).dataset.idx)
-    const item = items[idx]
-    if (!item) return
-    const row = toggle.closest('tr')!
-    const titleCell = row.querySelector('.title-cell')!
-    const existing = titleCell.querySelector('.inline-comment')
-    if (existing) {
-      existing.classList.add('closing')
-      existing.addEventListener('animationend', () => existing.remove(), { once: true })
-      row.classList.remove('expanded')
-      return
-    }
-    row.classList.add('expanded')
-    const wrapper = document.createElement('div')
-    wrapper.className = 'inline-comment'
-
-    const commenter = item.last_commenter || ''
-    const isMe = commenter.toLowerCase() === ME
-    const nameHtml = commenter
-      ? `<span class="comment-author ${isMe ? 'is-me' : ''}">${escapeHtml(commenter)}</span> `
-      : ''
-
-    if (item.last_comment_body) {
-      wrapper.innerHTML = `${nameHtml}${escapeHtml(item.last_comment_body)}`
-    } else {
-      wrapper.innerHTML = '<span class="comment-none">no comments</span>'
-    }
-    titleCell.appendChild(wrapper)
+  // Search — debounced live filter; resets pagination because the server
+  // applies the LIKE query and re-counts the result set.
+  searchInput.addEventListener('input', () => {
+    if (searchDebounce) clearTimeout(searchDebounce)
+    searchDebounce = setTimeout(() => {
+      const next = searchInput.value.trim()
+      if (next === searchQuery) return
+      searchQuery = next
+      resetAndFetch()
+    }, 150)
   })
 
-  // Consensus review
+  // Consensus review — Confab does the work and any side effects (e.g.
+  // posting a comment back on the PR). Poise just kicks it off and
+  // marks the row as reviewed when Confab returns OK.
   tbody.addEventListener('click', async (e) => {
     const btn = (e.target as HTMLElement).closest('.review-btn')
     if (!btn) return
     if ((btn as HTMLButtonElement).disabled) return
-    const idx = Number((btn as HTMLElement).dataset.idx)
-    const item = items[idx]
+    const row = btn.closest('tr')!
+    const key = row.dataset.key
+    const item = items.find((i) => rowKey(i) === key)
     if (!item || item.is_pr !== 1) return
     const button = btn as HTMLButtonElement
     button.disabled = true
@@ -315,13 +482,6 @@ function attachHandlers() {
         body: JSON.stringify({ url: item.html_url }),
       })
       if (!reviewRes.ok) throw new Error(`Review API ${reviewRes.status}`)
-      const reviewData = await reviewRes.json()
-      const synthesis: string = reviewData.synthesis
-      const commentRes = await fetch(`/api/github/repos/Vaquum/${item.repo}/issues/${item.number}/comments`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ body: synthesis }),
-      })
-      if (!commentRes.ok) throw new Error(`GitHub comment ${commentRes.status}`)
       reviewed.add(item.html_url)
       saveReviewed()
       button.innerHTML = PLAY_SVG
@@ -346,12 +506,15 @@ export function initMainView() {
   loader = document.getElementById('loader') as HTMLDivElement
   empty = document.getElementById('empty') as HTMLParagraphElement
   table = document.getElementById('table') as HTMLTableElement
-  filtersEl = document.getElementById('filters') as HTMLElement
+  clusterEl = document.getElementById('main-filters') as HTMLElement
+  timePickerEl = document.getElementById('time-picker') as HTMLElement
+  searchInput = document.getElementById('search-input') as HTMLInputElement
   countEl = document.getElementById('count') as HTMLSpanElement
 
   const saved = loadFilters()
   typeFilter = saved.type
   statusFilter = saved.status
+  timeFilter = saved.time
 
   initFilterButtons()
   attachHandlers()
@@ -366,10 +529,90 @@ export function initMainView() {
   observer.observe(sentinel)
 
   fetchPage()
+  startMainTimer()
 }
 
-// Called by idle refresh
+// Background refresh at the user-chosen cadence (1m or 5m). Pulls page 1
+// only — the visible top of the table — and stitches it onto the tail of
+// what's already loaded so scroll position is preserved and the user
+// doesn't watch the table empty out and rebuild. Existing rows glide to
+// their new positions through the FLIP animator; new rows fade in;
+// expanded inline comments and other in-row state survive.
+async function refreshMainSoft() {
+  if (!initialized || fetching) return
+  try {
+    const win = timeWindow()
+    const payload: Record<string, unknown> = {
+      operation: 'list',
+      record_type: typeFilter === 'both' ? 'all' : (typeFilter === 'pr' ? 'pull_request' : 'issue'),
+      record_state: statusFilter === 'open' ? 'open' : 'all',
+      limit: PAGE_SIZE,
+      offset: 0,
+    }
+    if (win.since)   payload.updated_since = win.since
+    if (win.until)   payload.updated_until = win.until
+    if (searchQuery) payload.q = searchQuery
+
+    const [pageRes, countRes] = await Promise.all([
+      fetch('/api/gh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }),
+      fetch('/api/gh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, count_only: true, limit: undefined, offset: undefined }),
+      }),
+    ])
+    if (!pageRes.ok || !countRes.ok) return
+    const pageData  = await pageRes.json()
+    const countData = await countRes.json()
+    const newTop: PrRow[] = (pageData.records as GhRecord[] || []).map(recordToRow)
+
+    // Stitch: new top + existing tail past PAGE_SIZE, deduped against new top
+    const newKeyset = new Set(newTop.map(rowKey))
+    const tail = items.slice(PAGE_SIZE).filter((i) => !newKeyset.has(rowKey(i)))
+    const next = [...newTop, ...tail]
+
+    total = typeof countData.count === 'number' ? countData.count : next.length
+    items = next
+    offset = items.length
+    done = items.length >= total
+    loader.hidden = done
+
+    if (next.length === 0) {
+      tbody.innerHTML = ''
+      table.hidden = true
+      empty.hidden = false
+    } else {
+      table.hidden = false
+      empty.hidden = true
+      applyMainFlip(next)
+    }
+    updateCount()
+  } catch { /* network blip — try again next tick */ }
+}
+
+// Called by the idle timer at the user-chosen cadence (1m / 5m).
+// Soft-refreshes the visible top so the table updates feel like a
+// settling rather than a cold rebuild. Filter / search changes still go
+// through resetAndFetch (which clears + refetches) because the user
+// initiated the change and expects a hard reset.
 export function refreshMainView() {
   if (!initialized) return
-  resetAndFetch()
+  refreshMainSoft()
+}
+
+export function stopMainRefresh() {
+  if (tickListening) {
+    window.removeEventListener('poise:refresh-tick', onTick)
+    tickListening = false
+  }
+}
+
+function startMainTimer() {
+  if (tickListening) return
+  window.addEventListener('poise:refresh-tick', onTick)
+  tickListening = true
 }

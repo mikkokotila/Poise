@@ -1,39 +1,32 @@
-// Settings panel — currently houses the GitHub personal access token.
+// Settings panel — org, username, timezone, refresh rate.
 // Slides in from the right, same pattern as the typography panel.
+//
+// GitHub auth no longer lives here — Poise reads through the local
+// `github-datastore` CLI which handles auth on its own side. The
+// username here scopes the views to the user-footprint (things you're
+// involved in) rather than the whole org.
+
+import { getSettings as getCachedSettings, setLocalSettings, loadSettings, getRefreshRate, setRefreshRate, getTheme, setTheme } from './config'
 
 let panelEl: HTMLElement | null = null
-let statusDot: HTMLElement | null = null
-let statusText: HTMLElement | null = null
-let tokenInput: HTMLInputElement | null = null
+let orgInput: HTMLInputElement | null = null
+let meInput: HTMLInputElement | null = null
+let tzSelect: HTMLSelectElement | null = null
 let saveBtn: HTMLButtonElement | null = null
-let clearBtn: HTMLButtonElement | null = null
 let helpEl: HTMLElement | null = null
-let configured = false
 
 async function refreshStatus(): Promise<void> {
-  try {
-    const res = await fetch('/api/auth/status')
-    const data = await res.json()
-    configured = !!data.configured
-    updateStatusUI()
-  } catch {
-    configured = false
-    updateStatusUI()
-  }
+  await loadSettings()
+  syncFieldsFromCache()
 }
 
-function updateStatusUI() {
-  if (!statusDot || !statusText || !tokenInput) return
-  if (configured) {
-    statusDot.className = 'st-dot ok'
-    statusText.textContent = 'Connected'
-    tokenInput.placeholder = '•••••••• (stored)'
-    clearBtn!.hidden = false
-  } else {
-    statusDot.className = 'st-dot missing'
-    statusText.textContent = 'No token'
-    tokenInput.placeholder = 'ghp_…'
-    clearBtn!.hidden = true
+function syncFieldsFromCache() {
+  const s = getCachedSettings()
+  if (orgInput) orgInput.value = s.org
+  if (meInput) meInput.value = s.me
+  if (tzSelect) {
+    const fallback = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone } catch { return 'UTC' } })()
+    tzSelect.value = s.timezone || fallback
   }
 }
 
@@ -43,32 +36,33 @@ function setHelp(text: string, cls: 'info' | 'error' | 'ok' = 'info') {
   helpEl.className = `st-help st-help-${cls}`
 }
 
-async function saveToken() {
-  if (!tokenInput || !saveBtn) return
-  const token = tokenInput.value.trim()
-  if (!token) {
-    setHelp('Paste a classic PAT starting with ghp_', 'error')
+async function saveAll() {
+  if (!saveBtn || !orgInput || !meInput || !tzSelect) return
+
+  const org = orgInput.value.trim()
+  const me = meInput.value.trim()
+  const tz = tzSelect.value
+
+  if (!org || !me) {
+    setHelp('Org and username are required.', 'error')
     return
   }
+
   saveBtn.disabled = true
   saveBtn.textContent = 'Saving…'
   try {
-    const res = await fetch('/api/auth/set-token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token }),
+    const res = await fetch('/api/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ org, me, timezone: tz }),
     })
     const data = await res.json()
     if (!res.ok) {
-      setHelp(data.error || 'Failed to save', 'error')
-    } else {
-      setHelp('Token saved. Running initial sync…', 'ok')
-      tokenInput.value = ''
-      configured = true
-      updateStatusUI()
-      // Kick off a sync right away so the user sees data populate
-      triggerSync()
+      setHelp(data.error || 'Failed to save settings', 'error')
+      return
     }
+    setLocalSettings(data)
+    setHelp('Saved.', 'ok')
+    window.dispatchEvent(new CustomEvent('poise:synced'))
   } catch (err) {
     setHelp('Network error: ' + (err as Error).message, 'error')
   } finally {
@@ -77,76 +71,111 @@ async function saveToken() {
   }
 }
 
-async function clearToken() {
-  if (!clearBtn) return
-  clearBtn.disabled = true
+function timezoneOptions(): string[] {
   try {
-    await fetch('/api/auth/set-token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: '' }),
-    })
-    configured = false
-    updateStatusUI()
-    setHelp('Token cleared.', 'info')
-  } finally {
-    clearBtn.disabled = false
-  }
-}
-
-async function triggerSync() {
-  try {
-    const res = await fetch('/api/cache/sync', { method: 'POST' })
-    if (!res.ok) return
-    // Broadcast so any visible view can refresh
-    window.dispatchEvent(new CustomEvent('poise:synced'))
+    const fn = (Intl as any).supportedValuesOf
+    if (typeof fn === 'function') return fn('timeZone') as string[]
   } catch { /* ignore */ }
+  return ['UTC', 'Europe/Helsinki', 'Europe/London', 'Europe/Berlin', 'America/New_York', 'America/Los_Angeles', 'Asia/Tokyo', 'Asia/Singapore']
 }
 
 function buildPanel(): HTMLElement {
   const panel = document.createElement('aside')
   panel.id = 'settings-panel'
+
+  const tzList = timezoneOptions()
+  const browserTz = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone } catch { return 'UTC' } })()
+  const tzOptionsHtml = tzList.map((z) => `<option value="${z}">${z}</option>`).join('')
+
   panel.innerHTML = `
     <div class="tp-header"><span class="tp-title">Settings</span></div>
     <div class="tp-body">
       <div class="tp-group-label">GitHub</div>
 
-      <div class="st-status">
-        <span class="st-dot missing"></span>
-        <span class="st-status-text">No token</span>
+      <div class="tp-section">
+        <label class="tp-label">Organization</label>
+        <input type="text" class="st-input st-input-org" autocomplete="off" spellcheck="false" placeholder="acme-corp" />
       </div>
 
       <div class="tp-section">
-        <label class="tp-label">Personal access token</label>
-        <input type="password" class="st-input" autocomplete="off" spellcheck="false" placeholder="ghp_…" />
-        <div class="st-help st-help-info">Classic PAT with <code>repo</code> + <code>read:org</code> scopes.</div>
+        <label class="tp-label">Username (you)</label>
+        <input type="text" class="st-input st-input-me" autocomplete="off" spellcheck="false" placeholder="octocat" />
+        <div class="st-help st-help-info">Scopes Current and Archive to your user-footprint (PRs and issues you're involved in). GitHub auth is handled by the local <code>github-datastore</code> CLI.</div>
+      </div>
+
+      <div class="tp-group-label">Time</div>
+
+      <div class="tp-section">
+        <label class="tp-label">Timezone</label>
+        <select class="st-select st-input-tz">${tzOptionsHtml}</select>
+        <div class="st-help st-help-info">Used to cut "today / yesterday / this week" in Main.</div>
+      </div>
+
+      <div class="tp-section">
+        <label class="tp-label">Refresh rate</label>
+        <div class="range-picker st-refresh-picker">
+          <button type="button" data-rate="1m" class="${getRefreshRate() === '1m' ? 'active' : ''}">1m</button>
+          <button type="button" data-rate="5m" class="${getRefreshRate() === '5m' ? 'active' : ''}">5m</button>
+        </div>
+        <div class="st-help st-help-info">How often Current, Swarm, and Archive pull fresh data.</div>
+      </div>
+
+      <div class="tp-group-label">Appearance</div>
+
+      <div class="tp-section">
+        <label class="tp-label">Theme</label>
+        <div class="range-picker st-theme-picker">
+          <button type="button" data-theme="light" class="${getTheme() === 'light' ? 'active' : ''}">Light</button>
+          <button type="button" data-theme="dark"  class="${getTheme() === 'dark'  ? 'active' : ''}">Dark</button>
+        </div>
+        <div class="st-help st-help-info">Applies instantly. Stored locally; no reload needed.</div>
       </div>
 
       <div class="st-row">
         <button class="st-save">Save</button>
-        <button class="st-clear" hidden>Clear</button>
       </div>
 
       <div class="tp-hint">
-        Create a token at
-        <a href="https://github.com/settings/tokens/new?scopes=repo,read:org&description=Poise"
-           target="_blank" rel="noopener">github.com/settings/tokens</a>.
-        It's stored locally in <code>~/.poise/cache.db</code> and only used to call the GitHub API on your behalf.
+        Settings are stored locally in <code>~/.poise/cache.db</code>.
       </div>
     </div>
   `
 
-  statusDot = panel.querySelector('.st-dot')
-  statusText = panel.querySelector('.st-status-text')
-  tokenInput = panel.querySelector('.st-input') as HTMLInputElement
+  orgInput = panel.querySelector('.st-input-org') as HTMLInputElement
+  meInput = panel.querySelector('.st-input-me') as HTMLInputElement
+  tzSelect = panel.querySelector('.st-input-tz') as HTMLSelectElement
   saveBtn = panel.querySelector('.st-save') as HTMLButtonElement
-  clearBtn = panel.querySelector('.st-clear') as HTMLButtonElement
   helpEl = panel.querySelector('.st-help')
 
-  saveBtn.addEventListener('click', saveToken)
-  clearBtn.addEventListener('click', clearToken)
-  tokenInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') saveToken()
+  // Default the timezone select to the browser zone before the cache loads.
+  tzSelect.value = browserTz
+
+  saveBtn.addEventListener('click', saveAll)
+  for (const inp of [orgInput, meInput]) {
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveAll() })
+  }
+
+  // Refresh-rate toggle — applies live (no Save needed); each view's
+  // running timer restarts via the `poise:refresh-rate-changed` event.
+  const refreshPicker = panel.querySelector<HTMLElement>('.st-refresh-picker')!
+  refreshPicker.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest('button')
+    if (!btn || !btn.dataset.rate) return
+    const rate = btn.dataset.rate as '1m' | '5m'
+    refreshPicker.querySelectorAll<HTMLButtonElement>('[data-rate]').forEach((b) => b.classList.remove('active'))
+    btn.classList.add('active')
+    setRefreshRate(rate)
+  })
+
+  // Theme toggle — applies live, persisted in localStorage.
+  const themePicker = panel.querySelector<HTMLElement>('.st-theme-picker')!
+  themePicker.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest('button')
+    if (!btn || !btn.dataset.theme) return
+    const theme = btn.dataset.theme as 'light' | 'dark'
+    themePicker.querySelectorAll<HTMLButtonElement>('[data-theme]').forEach((b) => b.classList.remove('active'))
+    btn.classList.add('active')
+    setTheme(theme)
   })
 
   return panel
@@ -162,7 +191,13 @@ export function openSettingsPanel() {
   if (!panelEl) return
   panelEl.classList.add('open')
   refreshStatus()
-  setTimeout(() => tokenInput?.focus(), 200)
+  setTimeout(() => {
+    // Focus the first empty required field
+    if (!orgInput || !meInput) return
+    if (!orgInput.value) orgInput.focus()
+    else if (!meInput.value) meInput.focus()
+    else orgInput.focus()
+  }, 200)
 }
 
 export function toggleSettingsPanel() {
@@ -171,7 +206,8 @@ export function toggleSettingsPanel() {
   else openSettingsPanel()
 }
 
-export async function isTokenConfigured(): Promise<boolean> {
+export async function isFullyConfigured(): Promise<boolean> {
   await refreshStatus()
-  return configured
+  const s = getCachedSettings()
+  return !!s.org && !!s.me
 }

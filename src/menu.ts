@@ -1,24 +1,41 @@
-// Burger menu — Main / Flow / Trust / divider / Settings / Typography
-// Integrates with the typography and settings panels (opens them when clicked).
+// Top-right chrome — three view-nav items inline (Current · Swarm ·
+// Archive) with the burger toggle as a sibling. The burger only opens
+// Settings + Typography now; view switching happens via the inline nav.
 
-type ViewName = 'main' | 'flow' | 'trust'
+type ViewName = 'current' | 'swarm' | 'main' | 'behaviors' | 'editor'
 
 const VIEW_KEY = 'poise-view'
 
-const ICON_MAIN  = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 3h10M2 7h10M2 11h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
-const ICON_FLOW  = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 10l3-3 3 2 4-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>'
-const ICON_TRUST = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1.5l4.5 1.8v3.8c0 2.4-1.8 4.6-4.5 5.4-2.7-.8-4.5-3-4.5-5.4V3.3L7 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="none"/></svg>'
 const ICON_TYPO  = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 3h10M4 3v8M10 3v8M4 11h1.5M8.5 11H10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
 const ICON_SETTINGS = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="2" stroke="currentColor" stroke-width="1.3"/><path d="M7 1v1.8M7 11.2V13M1 7h1.8M11.2 7H13M2.76 2.76l1.27 1.27M9.97 9.97l1.27 1.27M2.76 11.24l1.27-1.27M9.97 4.03l1.27-1.27" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>'
 const ICON_BURGER = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 5h10M3 8h10M3 11h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
 const ICON_CLOSE = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
 
+const VIEW_ITEMS: { key: ViewName; label: string }[] = [
+  { key: 'current',   label: 'Current'   },
+  { key: 'swarm',     label: 'Swarm'     },
+  { key: 'main',      label: 'Archive'   },
+  { key: 'behaviors', label: 'Behaviors' },
+  { key: 'editor',    label: 'Editor'    },
+]
+
 function loadView(): ViewName {
   try {
     const v = localStorage.getItem(VIEW_KEY)
-    if (v === 'main' || v === 'flow' || v === 'trust') return v
+    // Stream was renamed to Current (and Pipe before that). Collapse the
+    // legacy slugs to the new one once.
+    if (v === 'pipe' || v === 'stream') {
+      localStorage.setItem(VIEW_KEY, 'current')
+      return 'current'
+    }
+    if (v === 'flow' || v === 'trust') {
+      // Flow + Trust were dropped — land on Current (the new default).
+      localStorage.setItem(VIEW_KEY, 'current')
+      return 'current'
+    }
+    if (v === 'current' || v === 'swarm' || v === 'main' || v === 'behaviors' || v === 'editor') return v
   } catch { /* ignore */ }
-  return 'main'
+  return 'current'
 }
 function saveView(v: ViewName) { localStorage.setItem(VIEW_KEY, v) }
 
@@ -39,28 +56,26 @@ function closeAllPanels() {
 export function initMenu(callbacks: MenuCallbacks): { switchTo: (v: ViewName) => void; currentView: () => ViewName } {
   let current: ViewName = loadView()
 
-  // Toggle button (top-right)
+  // Inline view-nav (top-right, left of the burger toggle).
+  const nav = document.createElement('nav')
+  nav.id = 'top-nav'
+  nav.innerHTML = VIEW_ITEMS.map((v) => `
+    <button class="nav-item" data-view="${v.key}">${v.label}</button>
+  `).join('')
+  document.body.appendChild(nav)
+
+  // Burger toggle (top-right corner). Only opens Settings + Typography.
   const toggle = document.createElement('button')
   toggle.id = 'menu-toggle'
   toggle.innerHTML = ICON_BURGER
   toggle.setAttribute('aria-label', 'Menu')
   document.body.appendChild(toggle)
 
-  // Menu popover
+  // Menu popover — Settings + Typography only.
   const menu = document.createElement('div')
   menu.id = 'menu-popover'
   menu.hidden = true
   menu.innerHTML = `
-    <button class="menu-item" data-view="main">
-      <span class="menu-icon">${ICON_MAIN}</span><span class="menu-text">Main</span>
-    </button>
-    <button class="menu-item" data-view="flow">
-      <span class="menu-icon">${ICON_FLOW}</span><span class="menu-text">Flow</span>
-    </button>
-    <button class="menu-item" data-view="trust">
-      <span class="menu-icon">${ICON_TRUST}</span><span class="menu-text">Trust</span>
-    </button>
-    <div class="menu-divider"></div>
     <button class="menu-item" data-action="settings">
       <span class="menu-icon">${ICON_SETTINGS}</span><span class="menu-text">Settings</span>
     </button>
@@ -71,7 +86,7 @@ export function initMenu(callbacks: MenuCallbacks): { switchTo: (v: ViewName) =>
   document.body.appendChild(menu)
 
   function setActiveItem() {
-    menu.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((b) => {
+    nav.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((b) => {
       b.classList.toggle('active', b.dataset.view === current)
     })
   }
@@ -103,7 +118,6 @@ export function initMenu(callbacks: MenuCallbacks): { switchTo: (v: ViewName) =>
   }
   observePanel('typo-panel')
   observePanel('settings-panel')
-  // Also observe on first paint in case panels are appended later
   document.addEventListener('DOMContentLoaded', () => {
     observePanel('typo-panel')
     observePanel('settings-panel')
@@ -122,19 +136,22 @@ export function initMenu(callbacks: MenuCallbacks): { switchTo: (v: ViewName) =>
     syncToggleIcon()
   })
 
+  // Inline view-nav clicks
+  nav.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('.nav-item')
+    if (!btn || !btn.dataset.view) return
+    const next = btn.dataset.view as ViewName
+    if (next === current) return
+    current = next
+    saveView(current)
+    setActiveItem()
+    callbacks.onSelectView(current)
+  })
+
   menu.addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest('button')
     if (!btn) return
-    if (btn.dataset.view) {
-      const next = btn.dataset.view as ViewName
-      if (next !== current) {
-        current = next
-        saveView(current)
-        setActiveItem()
-        callbacks.onSelectView(current)
-      }
-      closeMenu()
-    } else if (btn.dataset.action === 'typography') {
+    if (btn.dataset.action === 'typography') {
       closeMenu()
       callbacks.onOpenTypography()
     } else if (btn.dataset.action === 'settings') {

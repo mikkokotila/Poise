@@ -7,7 +7,9 @@ export default defineConfig(({ mode }) => {
   const confabKey = env.CONFAB_API_KEY || ''
 
   return {
-    plugins: [cachePlugin()],
+    plugins: [cachePlugin({
+      reviewAgentUsername: env.REVIEW_AGENT_USERNAME || '',
+    })],
     optimizeDeps: {
       exclude: ['better-sqlite3'],
     },

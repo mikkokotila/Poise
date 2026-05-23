@@ -3,6 +3,15 @@ import { mkdirSync, existsSync } from 'fs'
 import { homedir } from 'os'
 import { join, dirname } from 'path'
 
+// Poise's local SQLite holds two things only:
+//   meta          — small key-value store for org / me / timezone settings
+//   current_cards  — the manual Idea / Concept / Plan kanban cards
+//
+// Everything else (issues, PRs, reviews, files) lives in the user's external
+// /github service. Older Poise versions kept a full mirror of GitHub data
+// here in `prs` / `reviews` / `pr_files` — those tables are dropped on first
+// load if they still exist.
+
 const DB_PATH = process.env.POISE_DB || join(homedir(), '.poise', 'cache.db')
 
 function ensureDbDir() {
@@ -16,83 +25,80 @@ export const db = new Database(DB_PATH)
 db.pragma('journal_mode = WAL')
 db.pragma('foreign_keys = ON')
 
-// Schema — repos, prs, reviews, comments, meta
 db.exec(`
   CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );
 
-  CREATE TABLE IF NOT EXISTS prs (
-    id INTEGER PRIMARY KEY,
-    org TEXT NOT NULL,
-    repo TEXT NOT NULL,
-    number INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    html_url TEXT NOT NULL,
-    author TEXT NOT NULL,
-    is_pr INTEGER NOT NULL,
-    state TEXT NOT NULL,
+  CREATE TABLE IF NOT EXISTS current_cards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    text TEXT NOT NULL,
+    lane TEXT NOT NULL,
+    position INTEGER NOT NULL,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    closed_at TEXT,
-    merged_at TEXT,
-    comments_count INTEGER NOT NULL DEFAULT 0,
-    additions INTEGER,
-    deletions INTEGER,
-    tag TEXT,
-    first_review_at TEXT,
-    iteration_count INTEGER,
-    last_commenter TEXT,
-    last_comment_body TEXT,
-    last_comment_at TEXT,
-    raw_json TEXT
+    updated_at TEXT NOT NULL
   );
+  CREATE INDEX IF NOT EXISTS idx_current_cards_lane ON current_cards(lane, position);
 
-  CREATE INDEX IF NOT EXISTS idx_prs_org ON prs(org);
-  CREATE INDEX IF NOT EXISTS idx_prs_is_pr ON prs(is_pr);
-  CREATE INDEX IF NOT EXISTS idx_prs_state ON prs(state);
-  CREATE INDEX IF NOT EXISTS idx_prs_updated_at ON prs(updated_at DESC);
-  CREATE INDEX IF NOT EXISTS idx_prs_merged_at ON prs(merged_at);
-  CREATE INDEX IF NOT EXISTS idx_prs_author ON prs(author);
-  CREATE INDEX IF NOT EXISTS idx_prs_repo_number ON prs(repo, number);
-
-  CREATE TABLE IF NOT EXISTS reviews (
-    id INTEGER PRIMARY KEY,
-    pr_id INTEGER NOT NULL,
-    reviewer TEXT NOT NULL,
-    state TEXT NOT NULL,
-    submitted_at TEXT NOT NULL,
-    FOREIGN KEY (pr_id) REFERENCES prs(id) ON DELETE CASCADE
+  -- Per-behavior dedupe ledger. Each row is "behavior <key> has already
+  -- claimed <target> at <seen_at>". Used by the server-side behavior
+  -- runtime (server/behaviors.ts) so concurrent runtimes — multiple
+  -- vite processes, accidental tick re-entry, datastore returning a
+  -- duplicate row, etc. — can't fire the same review twice. claimSeen
+  -- below is the only writer; INSERT OR IGNORE makes the claim atomic.
+  CREATE TABLE IF NOT EXISTS behavior_seen (
+    key TEXT NOT NULL,
+    target TEXT NOT NULL,
+    seen_at TEXT NOT NULL,
+    PRIMARY KEY (key, target)
   );
-  CREATE INDEX IF NOT EXISTS idx_reviews_pr ON reviews(pr_id);
-  CREATE INDEX IF NOT EXISTS idx_reviews_reviewer ON reviews(reviewer);
-
-  CREATE TABLE IF NOT EXISTS pr_files (
-    pr_id INTEGER NOT NULL,
-    filename TEXT NOT NULL,
-    additions INTEGER NOT NULL DEFAULT 0,
-    deletions INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (pr_id, filename),
-    FOREIGN KEY (pr_id) REFERENCES prs(id) ON DELETE CASCADE
-  );
-  CREATE INDEX IF NOT EXISTS idx_pr_files_filename ON pr_files(filename);
 `)
 
-// Migrations — add columns if missing
-const prCols = db.prepare('PRAGMA table_info(prs)').all() as { name: string }[]
-const hasCol = (name: string) => prCols.some((c) => c.name === name)
-if (!hasCol('files_changed'))          db.exec('ALTER TABLE prs ADD COLUMN files_changed INTEGER')
-if (!hasCol('last_commenter_avatar'))  db.exec('ALTER TABLE prs ADD COLUMN last_commenter_avatar TEXT')
-if (!hasCol('author_avatar')) {
-  db.exec('ALTER TABLE prs ADD COLUMN author_avatar TEXT')
-  // Backfill from the stored raw_json so existing rows don't need a resync
+// One-time migrations: the kanban table has been renamed twice.
+//   pipe_cards   (when the view was called Pipe)
+//   stream_cards (when it was Stream)
+//   current_cards (now)
+// Each block is idempotent — guarded by sqlite_master so it only runs
+// while the legacy table still exists, and re-runs are no-ops.
+function migrateKanbanTable(legacy: string) {
+  const exists = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
+  ).get(legacy) as { name: string } | undefined
+  if (!exists) return
   db.exec(`
-    UPDATE prs
-    SET author_avatar = json_extract(raw_json, '$.user.avatar_url')
-    WHERE raw_json IS NOT NULL
+    INSERT OR IGNORE INTO current_cards (id, text, lane, position, created_at, updated_at)
+    SELECT id, text, lane, position, created_at, updated_at FROM ${legacy};
+    DROP TABLE ${legacy};
   `)
 }
+migrateKanbanTable('pipe_cards')
+migrateKanbanTable('stream_cards')
+
+// Add the `repo` column if it's not there yet — manual cards can be
+// linked to a repo (full owner/name, e.g. "Vaquum/foo") so the meta
+// row reads consistently with the live PR/Issue lanes.
+function ensureColumn(table: string, column: string, ddl: string) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+  if (cols.some((c) => c.name === column)) return
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`)
+}
+ensureColumn('current_cards', 'repo', 'repo TEXT')
+
+// One-time cleanup: drop the legacy GitHub-mirror tables if they exist.
+// Idempotent — runs once and the DROP is a no-op afterwards.
+for (const t of ['pr_files', 'reviews', 'prs']) {
+  db.exec(`DROP TABLE IF EXISTS ${t}`)
+}
+// And the meta keys that no longer matter
+for (const k of ['github_token', 'last_sync_at', 'mig_status_v2']) {
+  db.prepare('DELETE FROM meta WHERE key = ?').run(k)
+}
+// behavior_*_last_at / behavior_*_last_target were Poise's parallel
+// log of agent-interface fires. They're now derived live from
+// `agent-interface --logs` — the persisted copy is dead data. Wipe
+// idempotently on boot so cache.db doesn't accumulate orphans.
+db.prepare("DELETE FROM meta WHERE key LIKE 'behavior_%_last_at' OR key LIKE 'behavior_%_last_target'").run()
 
 export function getMeta(key: string): string | null {
   const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined
@@ -101,4 +107,48 @@ export function getMeta(key: string): string | null {
 
 export function setMeta(key: string, value: string): void {
   db.prepare('INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value)
+}
+
+// ── Behavior dedupe (atomic across runtimes) ──────────────────────────
+// All four functions are tiny wrappers around behavior_seen so any
+// server module that needs the ledger can use them without re-deriving
+// the schema or the locking semantics.
+
+// Atomically claim a (key, target) pair. Returns true if this caller
+// inserted a new row (i.e. nobody had claimed it yet — caller should
+// proceed with the side effect). Returns false if the row already
+// existed (caller must skip). Race-safe: SQLite serializes concurrent
+// INSERT OR IGNORE statements, so out of N callers exactly ONE gets
+// `true` for any given (key, target).
+export function claimSeen(key: string, target: string): boolean {
+  const info = db.prepare(
+    'INSERT OR IGNORE INTO behavior_seen(key, target, seen_at) VALUES(?, ?, ?)'
+  ).run(key, target, new Date().toISOString())
+  return info.changes === 1
+}
+
+// Mark a target as seen WITHOUT signalling "newly claimed" — used by
+// the snapshot path where we just want to populate the ledger with
+// current state so subsequent ticks don't fire on existing items.
+export function recordSeen(key: string, target: string): void {
+  db.prepare(
+    'INSERT OR IGNORE INTO behavior_seen(key, target, seen_at) VALUES(?, ?, ?)'
+  ).run(key, target, new Date().toISOString())
+}
+
+// Whether any rows exist for this behavior — proxy for "snapshot has
+// been taken at least once". Used to differentiate a fresh enable
+// (no rows yet → take snapshot, don't fire on first tick) from a
+// running behavior (rows exist → fire on net-new targets).
+export function hasSeenAny(key: string): boolean {
+  const row = db.prepare(
+    'SELECT 1 AS x FROM behavior_seen WHERE key = ? LIMIT 1'
+  ).get(key) as { x: number } | undefined
+  return !!row
+}
+
+// Wipe the ledger for a key — used when the user disables the
+// behavior. Re-enabling will trigger a fresh snapshot.
+export function clearSeen(key: string): void {
+  db.prepare('DELETE FROM behavior_seen WHERE key = ?').run(key)
 }

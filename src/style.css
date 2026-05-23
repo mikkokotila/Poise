@@ -1,25 +1,73 @@
 :root {
-  /* Surface */
-  --bg: #fafafa;
-  --surface: #ffffff;
-  --hover: #f5f5f5;
+  /* ────────────────────────────────────────────────────────────────────
+     Design System v1 — see docs/Local-Design-System.md
+     ──────────────────────────────────────────────────────────────────── */
 
-  /* Text */
-  --text: #1a1a1a;
-  --text-secondary: #737373;
-  --text-tertiary: #a3a3a3;
-
-  /* Lines */
-  --border: #e5e5e5;
-  --hairline: #f0f0f0;
+  /* Neutrals */
+  --n0: #F7F8F9;
+  --n1: #EEF0F2;
+  --n2: #DEE2E6;
+  --n3: #C5CBD1;
+  --n4: #8E959E;
+  --n5: #5C636D;
+  --n6: #2F353D;
+  --n7: #161A20;
 
   /* Accents */
-  --accent: #18181b;
-  --green: #16a34a;
-  --green-soft: #6bc77a;
-  --purple: #7c3aed;
-  --red: #dc2626;
-  --red-soft: #f7c0c0;
+  --a1: #3A72B0;   /* Blue   — info, primary data, focus */
+  --a2: #3D8E84;   /* Teal   — stable, active, secondary data */
+  --a3: #4A8E5E;   /* Green  — success */
+  --a4: #A8792B;   /* Amber  — warning, pending */
+  --a5: #B85048;   /* Red    — error, destructive */
+  --a6: #B0537B;   /* Rose   — risk, exception, categorical */
+  --a7: #7560A8;   /* Violet — categorical, special state */
+  --a8: #6E7886;   /* Slate  — neutral category, "other" */
+
+  /* Borders */
+  --b-hair: 0.5px solid var(--n2);
+  --b-base: 1px solid var(--n3);
+  --b-focus: 2px solid var(--a1);
+
+  /* Elevation ladder — borders carry resting depth, shadows on interaction */
+  --e-0: none;
+  --e-1: 0 1px 2px rgba(22, 26, 32, .06), 0 2px 4px rgba(22, 26, 32, .04);
+  --e-2: 0 4px 8px rgba(22, 26, 32, .08), 0 2px 4px rgba(22, 26, 32, .05);
+  --e-3: 0 12px 24px rgba(22, 26, 32, .14), 0 4px 8px rgba(22, 26, 32, .06);
+
+  /* ────────────────────────────────────────────────────────────────────
+     Legacy aliases — bound to DS values so every existing var() call
+     across Main / Flow / Trust / Swarm / Settings inherits the DS look
+     without per-rule edits. New code should use the DS tokens directly.
+     ──────────────────────────────────────────────────────────────────── */
+
+  /* Surfaces — literal values (NOT var(--nX)) so dark-mode overrides
+     win cleanly. Chrome's resolution of chained custom properties
+     declared in :root caches the substituted value, so a later
+     [data-theme="dark"] override of the underlying neutral doesn't
+     propagate up through the alias. Keep it flat. */
+  --bg:       #F7F8F9;     /* N0 */
+  --surface:  #EEF0F2;     /* N1 — DS: panels & raised surfaces sit one tone above app bg */
+  --hover:    #DEE2E6;     /* N2 */
+
+  /* Text */
+  --text:           #2F353D;     /* N6 */
+  --text-secondary: #5C636D;     /* N5 */
+  --text-tertiary:  #8E959E;     /* N4 */
+
+  /* Lines */
+  --border:   #C5CBD1;     /* N3 */
+  --hairline: #DEE2E6;     /* N2 */
+
+  /* Action / accents — kept as DS approximations of the old hues so
+     status pills (Trust feat/fix, Swarm pills) still read the same. */
+  --accent:     #161A20;       /* N7 — flat literal for dark-mode overrideability */
+  --green:      var(--a3);
+  --green-soft: #8FBE9C;       /* lighter A3 — approval pill borders */
+  --purple:     var(--a7);
+  --red:        var(--a5);
+  --red-soft:   #DDA8A4;       /* lighter A5 — blocked pill borders */
+  --blue:       var(--a1);
+  --amber:      var(--a4);
 
   /* Spacing scale */
   --sp-1: 4px;
@@ -31,15 +79,101 @@
   --sp-7: 48px;
   --sp-8: 64px;
 
-  /* Radii */
-  --r-sm: 4px;
-  --r-md: 6px;
-  --r-lg: 8px;
-  --r-pill: 100px;
+  /* Radii — aligned to DS (r-0=0, r-sm=4, r-md=8, r-full=999) */
+  --r-sm:   4px;
+  --r-md:   8px;
+  --r-lg:   8px;       /* alias of r-md, kept for legacy callers */
+  --r-pill: 999px;
 
-  /* Shadows */
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.04);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.06);
+  /* Soft accent tints — used for status pills where background colour
+     adds emphasis. Derived from A3/A5/A1 at low alpha. */
+  --tint-a1: rgba(58, 114, 176, 0.06);
+  --tint-a3: rgba(74, 142, 94, 0.07);
+  --tint-a5: rgba(184, 80, 72, 0.06);
+
+  /* Motion — three canonical durations, all eased the same way. Quick is
+     for hover/press, base is for state toggles, slow is for surfaces
+     entering/leaving. Anything outside this triplet is a smell. */
+  --t-quick: 120ms;
+  --t-base:  180ms;
+  --t-slow:  250ms;
+  --ease:    cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Dark mode — perfect counterpart to the light system.
+
+   Strategy: rebind the neutral scale itself rather than override every
+   semantic alias. Aliases (--bg, --surface, --text, --border, --hairline,
+   --hover, --green-soft, --red-soft) and any rule that uses var(--nX)
+   directly auto-flips. Accents hold (A1–A8 unchanged). Tints raise to
+   ~25% alpha per DS rule. Elevation alphas climb so shadows still
+   register on a dark canvas.
+
+   The neutral mapping is NOT a literal lightness inversion of the DS
+   palette — that produces too-contrasty borders and breaks the DS hint
+   that N4 is the bridge tone working as secondary text in both modes.
+   Instead: N4 holds; the dark stack steps tightly from #161A20 (bg) up
+   through a custom #1C2129 (surface lift) so the bg→surface gap feels
+   the same low-contrast "calm" as light mode's N0 → N1.
+   ───────────────────────────────────────────────────────────────────────── */
+
+[data-theme="dark"] {
+  /* Neutrals — N4 unchanged (DS bridge), the rest swap roles. */
+  --n0: #161A20;       /* app bg               (was N7) */
+  --n1: #1C2129;       /* panels, raised       (custom step) */
+  --n2: #2F353D;       /* hairlines, dividers  (was N6) */
+  --n3: #5C636D;       /* borders              (was N5) */
+  --n4: #8E959E;       /* secondary text       (unchanged — DS bridge) */
+  --n5: #C5CBD1;       /* mid-light            (was N3) */
+  --n6: #DEE2E6;       /* primary text         (was N2) */
+  --n7: #F7F8F9;       /* maximum contrast     (was N0) */
+
+  /* Semantic aliases — declared explicitly here (with literal values)
+     instead of relying on the var(--nX) chain through :root. The chain
+     resolves stale on initial paint (Chrome caches the chained
+     substitution against the original neutral values, so flipping the
+     N tokens leaves --bg, --text, --border etc. pointing at the light
+     values until a layout-changing recompute kicks them). Direct
+     overrides here are bullet-proof. */
+  --bg:             #161A20;
+  --surface:        #1C2129;
+  --hover:          #2F353D;
+  --text:           #DEE2E6;
+  --text-secondary: #C5CBD1;
+  --text-tertiary:  #8E959E;
+  --border:         #5C636D;
+  --hairline:       #2F353D;
+  --accent:         #F7F8F9;
+
+  /* Border shorthands — same story; the chain through var(--nX) gets
+     stranded on light values without explicit redeclaration. */
+  --b-hair: 0.5px solid #2F353D;
+  --b-base: 1px solid #5C636D;
+
+  /* Pill borders — pastels don't read on dark; use accent at higher
+     alpha so the colour still telegraphs success / blocked without
+     leaning pastel. */
+  --green-soft: rgba(74, 142, 94, 0.6);
+  --red-soft:   rgba(184, 80, 72, 0.6);
+
+  /* Tint backgrounds — DS dark-mode rule: ~25% alpha for badges. */
+  --tint-a1: rgba(58, 114, 176, 0.20);
+  --tint-a3: rgba(74, 142, 94, 0.20);
+  --tint-a5: rgba(184, 80, 72, 0.20);
+
+  /* Elevation — light-mode shadows used rgba(22,26,32,…) which
+     vanishes on a dark canvas. Pure black at higher alpha lets the
+     hover/popover/modal lift register. */
+  --e-1: 0 1px 2px rgba(0, 0, 0, .35), 0 2px 4px rgba(0, 0, 0, .25);
+  --e-2: 0 4px 8px rgba(0, 0, 0, .45), 0 2px 4px rgba(0, 0, 0, .30);
+  --e-3: 0 12px 24px rgba(0, 0, 0, .55), 0 4px 8px rgba(0, 0, 0, .35);
+}
+
+/* Tell the browser its native chrome (form controls, scrollbars,
+   placeholders) about the theme so they match instead of fighting. */
+[data-theme="dark"] {
+  color-scheme: dark;
 }
 
 *,
@@ -50,6 +184,40 @@
   box-sizing: border-box;
 }
 
+/* Global DS focus ring — 2px A1, 2px offset, inherits the element's
+   radius. Longhand props because var() in `outline` shorthand expands
+   inconsistently. Click focus is suppressed (focus-visible only) so
+   the ring is a keyboard affordance, not visual noise on every click. */
+:focus-visible {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
+}
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Text selection — soft A1 tint instead of the browser-default hard blue.
+   Sits in the same hue family as focus + drop-indicator for coherence. */
+::selection {
+  background: var(--tint-a1);
+  color: var(--text);
+}
+
+/* Honour reduced-motion: collapse every transition / animation to a
+   near-instant fade so the app stays feeling crisp without movement. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 html {
   font-size: var(--typo-size, 15px);
   -webkit-font-smoothing: antialiased;
@@ -58,6 +226,13 @@ html {
   /* Reserve the vertical scrollbar gutter so filter changes don't nudge
      the page sideways when the content shrinks enough to hide the scrollbar. */
   scrollbar-gutter: stable;
+  /* Paint html itself so that any visible area outside body's painted
+     box (overscroll, scrollbar gutter, edge cases during scroll) still
+     reads as the canvas — critical in dark mode where a flash of
+     default-white html is jarring. */
+  background: var(--bg);
+  /* Tinted scrollbar that follows the theme — saves a per-mode override. */
+  scrollbar-color: var(--border) transparent;
 }
 
 body {
@@ -76,27 +251,84 @@ body {
   position: relative;
 }
 
-/* ── View header (shared across Main / Flow / Trust) ── */
+/* ── View header (shared across Main / Flow / Trust / Stream / Swarm) ──
+   Title text was removed app-wide — every view now centers its filter
+   cluster in the header. The burger menu (top-right, fixed) carries the
+   "which view am I on" cue, and the content itself differs enough per
+   view that an explicit page title is redundant. */
 .view-header {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
+  align-items: center;
+  justify-content: flex-start;
   margin-bottom: var(--sp-6);
+  min-height: 32px;             /* keeps vertical rhythm with the burger */
+  /* Reserve room on the right so a wrap-heavy filter cluster can't run
+     under the inline view-nav + burger. ~3 nav items + toggle + gap. */
+  padding-right: 280px;
 }
 
-.view-title {
-  font-size: 1.125rem;
-  font-weight: 600;
-  color: var(--text);
-  letter-spacing: -0.02em;
+/* Filter cluster — every range-picker group + the search input live
+   here, left-aligned. Wraps onto multiple lines on narrow viewports. */
+.filter-cluster {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
 }
 
-.view-sub {
+/* Search input — pill-shaped and sized identically to a range-picker
+   button so the cluster reads as one unified row. Padding + font +
+   border are intentionally the same tokens; height resolves
+   intrinsically so we never drift. Live filter, no submit button. */
+.search-input {
+  font-family: inherit;
+  font-size: 0.75rem;
   font-weight: 400;
-  color: var(--text-tertiary);
-  font-size: 0.8125rem;
-  margin-left: var(--sp-3);
+  letter-spacing: 0.01em;
+  padding: var(--sp-1) var(--sp-3);
+  width: 200px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+  transition: border-color var(--t-base) ease, width var(--t-base) ease;
+}
+
+.search-input::placeholder { color: var(--n4); }
+
+.search-input:hover { border-color: var(--text-tertiary); }
+
+.search-input:focus {
+  border-color: var(--a1);
+  width: 240px;                 /* gentle expansion on focus */
+}
+
+.search-input:focus-visible {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
+}
+
+/* Inline match-count next to the search input (kept subtle) */
+/* Search input + count read as one unit and wrap together. The count
+   sits immediately to the right of the search field across every view
+   for a consistent rhythm. */
+.search-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 0 0 auto;
+}
+
+.filter-count {
+  font-size: 0.6875rem;
+  color: var(--n4);
+  font-variant-numeric: tabular-nums;
   letter-spacing: 0;
+  white-space: nowrap;
 }
 
 /* ── Filters ── */
@@ -110,14 +342,14 @@ body {
 #filters button {
   font-family: inherit;
   font-size: 0.8125rem;
-  font-weight: 500;
+  font-weight: 600;
   padding: 6px 16px;
   border: 1px solid var(--border);
-  border-radius: 100px;
+  border-radius: var(--r-pill);
   background: var(--surface);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: color var(--t-base) ease, background var(--t-base) ease, border-color var(--t-base) ease;
   letter-spacing: 0.01em;
 }
 
@@ -126,10 +358,12 @@ body {
   color: var(--text);
 }
 
+/* Active pill: N5 mid-grey, not N7 black. Matches the primary-action
+   treatment in Stream / Settings — calm contrast, not eyepunch. */
 #filters button.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  background: var(--n5);
+  border-color: var(--n5);
+  color: var(--n0);
 }
 
 .separator {
@@ -156,12 +390,12 @@ table {
 thead th {
   text-align: left;
   font-size: var(--typo-header-size, 0.6875rem);
-  font-weight: 500;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-tertiary);
   padding: 0 12px 10px 0;
-  border-bottom: 1px solid var(--border);
+  border-bottom: var(--b-base);
   overflow: hidden;
 }
 
@@ -171,17 +405,20 @@ thead th:last-child {
 }
 
 /* Column widths */
+/* Type / action are icon columns; Title flexes; the rest are equal-width data columns */
 .col-type    { width: 40px; }
 .col-title   { /* remaining */ }
-.col-last    { width: 88px; }
-.col-repo    { width: 84px; }
-.col-state   { width: 64px; }
-.col-updated { width: 60px; text-align: right; }
+.col-last    { width: 80px; }
+.col-repo    { width: 80px; }
+.col-status  { width: 80px; }
+.col-owner   { width: 80px; }
+.col-state   { width: 80px; }
+.col-updated { width: 80px; text-align: right; }
 .col-action  { width: 32px; text-align: center; }
 
 /* ── Rows ── */
 tbody tr {
-  transition: background 0.1s ease;
+  transition: background var(--t-quick) ease;
 }
 
 tbody tr:hover {
@@ -194,14 +431,14 @@ tbody tr:hover {
 }
 
 tbody tr.new {
-  animation: rowIn 0.18s ease-out both;
+  animation: rowIn var(--t-base) ease-out both;
 }
 
 td {
   padding: var(--typo-row-pad, 11px) 12px var(--typo-row-pad, 11px) 0;
   font-size: var(--typo-row-size, 0.8125rem);
   vertical-align: middle;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: var(--b-hair);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -242,7 +479,7 @@ td:last-child {
   letter-spacing: 0.02em;
   cursor: pointer;
   user-select: none;
-  transition: opacity 0.15s ease;
+  transition: opacity var(--t-base) ease;
 }
 
 .type-toggle:hover {
@@ -258,14 +495,21 @@ td:first-child:has(.type-toggle) {
   color: var(--text-tertiary);
 }
 
-.type-toggle.issue { color: var(--green); }
-.type-toggle.pr    { color: var(--purple); }
+/* IS = teal (stable, secondary work), PR = violet (categorical, the
+   "ship" path). Both at full DS hue but small font + uppercase keeps
+   the wall-of-rows from shouting. */
+.type-toggle.issue { color: var(--a2); }
+.type-toggle.pr    { color: var(--a7); }
 
 /* ── Title ── */
 td a {
   color: var(--text);
   text-decoration: none;
-  font-weight: var(--typo-title-weight, 500);
+  /* --typo-heading-weight is the unified weight from typography
+     panel's "Heading weight" slider — drives both editor h1/h2 and
+     these table title-link cells, so dialing up boldness gives a
+     coherent pass over both surfaces. */
+  font-weight: var(--typo-heading-weight, 600);
 }
 
 td a:hover {
@@ -277,7 +521,7 @@ td a:hover {
 /* ── Inline comment (inside title cell) ── */
 .inline-comment {
   margin-top: 6px;
-  padding: 8px 24px 8px 0;
+  padding: var(--sp-2) var(--sp-5) var(--sp-2) 0;
   font-size: var(--typo-comment-size, 0.75rem);
   font-weight: var(--typo-comment-weight, 400);
   line-height: 1.6;
@@ -288,22 +532,22 @@ td a:hover {
   -webkit-line-clamp: var(--typo-comment-lines, 4);
   -webkit-box-orient: vertical;
   overflow: hidden;
-  animation: commentIn 0.2s ease both;
+  animation: commentIn var(--t-base) ease both;
 }
 
 .comment-author {
   font-weight: 600;
-  color: var(--accent);
+  color: var(--text);            /* N6, not N7 — bold carries the weight */
 }
 
 .comment-author.is-me {
   color: var(--text-tertiary);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .comment-none {
   color: var(--text-tertiary);
-  font-style: italic;
+  /* No italics per DS — color difference carries the emphasis */
 }
 
 .comment-loading {
@@ -311,17 +555,17 @@ td a:hover {
 }
 
 @keyframes commentIn {
-  from { opacity: 0; margin-top: 0; padding: 0 24px 0 0; max-height: 0; }
-  to   { opacity: 1; margin-top: 6px; padding: 8px 24px 8px 0; max-height: 120px; }
+  from { opacity: 0; margin-top: 0; padding: 0 var(--sp-5) 0 0; max-height: 0; }
+  to   { opacity: 1; margin-top: 6px; padding: var(--sp-2) var(--sp-5) var(--sp-2) 0; max-height: 120px; }
 }
 
 .inline-comment.closing {
-  animation: commentOut 0.15s ease both;
+  animation: commentOut var(--t-base) ease both;
 }
 
 @keyframes commentOut {
-  from { opacity: 1; margin-top: 6px; padding: 8px 24px 8px 0; max-height: 120px; }
-  to   { opacity: 0; margin-top: 0; padding: 0 24px 0 0; max-height: 0; }
+  from { opacity: 1; margin-top: 6px; padding: var(--sp-2) var(--sp-5) var(--sp-2) 0; max-height: 120px; }
+  to   { opacity: 0; margin-top: 0; padding: 0 var(--sp-5) 0 0; max-height: 0; }
 }
 
 /* ── Last commenter (avatar) ── */
@@ -332,12 +576,12 @@ td a:hover {
 .last-avatar {
   width: 22px;
   height: 22px;
-  border-radius: 50%;
+  border-radius: var(--r-pill);
   display: inline-block;
   vertical-align: middle;
   background: var(--hairline);
   object-fit: cover;
-  transition: opacity 0.15s ease;
+  transition: opacity var(--t-base) ease;
 }
 
 /* Bot — subtle ring to distinguish from humans, without dimming */
@@ -369,9 +613,25 @@ td a:hover {
   letter-spacing: 0.04em;
 }
 
-.state.open   { color: var(--green); }
-.state.closed { color: var(--red); }
-.state.merged { color: var(--purple); }
+/* DS hue assignments: A2 teal = "stable, active" (open) — quieter than
+   green so a feed full of open items doesn't fatigue. A3 green still
+   carries "successfully completed" for merged. A5 red flags the
+   abandoned ones the operator should notice. */
+.state.open   { color: var(--a2); }
+.state.merged { color: var(--a3); }
+.state.closed { color: var(--a5); }
+
+/* ── Status (workflow) ── */
+.status {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.status.allocated { color: var(--blue); }
+.status.building  { color: var(--amber); }
+.status.review    { color: var(--text-tertiary); }
 
 /* ── Date ── */
 .date {
@@ -391,7 +651,7 @@ td a:hover {
 .loader span {
   width: 5px;
   height: 5px;
-  border-radius: 50%;
+  border-radius: var(--r-pill);
   background: var(--text-tertiary);
   animation: pulse 1s ease-in-out infinite;
 }
@@ -431,7 +691,7 @@ td a:hover {
   align-items: center;
   justify-content: center;
   border-radius: var(--r-sm);
-  transition: color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+  transition: color var(--t-base) ease, background var(--t-base) ease, transform var(--t-quick) ease;
   padding: 0;
   opacity: 0.55;
 }
@@ -479,15 +739,15 @@ tr:hover .review-btn { opacity: 1; }
   right: 16px;
   width: 32px;
   height: 32px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: var(--b-base);
+  border-radius: var(--r-sm);
   background: var(--surface);
   color: var(--text-tertiary);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.15s ease;
+  transition: color var(--t-base) ease, background var(--t-base) ease, border-color var(--t-base) ease;
   z-index: 100;
 }
 
@@ -506,10 +766,10 @@ tr:hover .review-btn { opacity: 1; }
   height: 100vh;
   background: var(--surface);
   border-left: 1px solid var(--border);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--e-3);
   z-index: 110;
   transform: translateX(100%);
-  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform var(--t-slow) var(--ease);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -546,8 +806,8 @@ tr:hover .review-btn { opacity: 1; }
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 4px;
-  transition: all 0.1s ease;
+  border-radius: var(--r-sm);
+  transition: color var(--t-quick) ease, background var(--t-quick) ease;
 }
 
 .tp-close:hover {
@@ -565,7 +825,7 @@ tr:hover .review-btn { opacity: 1; }
   font-size: 0.625rem;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.08em;
   color: var(--text-tertiary);
   margin: 20px 0 12px;
   padding-bottom: 6px;
@@ -589,7 +849,7 @@ tr:hover .review-btn { opacity: 1; }
 
 .tp-label {
   font-size: 0.75rem;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text-secondary);
   display: block;
   margin-bottom: 4px;
@@ -611,8 +871,8 @@ tr:hover .review-btn { opacity: 1; }
   padding: 6px 10px;
   font-family: inherit;
   font-size: 0.8125rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: var(--b-base);
+  border-radius: var(--r-sm);
   background: var(--bg);
   color: var(--text);
   cursor: pointer;
@@ -621,15 +881,18 @@ tr:hover .review-btn { opacity: 1; }
 }
 
 .tp-select:focus {
-  border-color: var(--text-tertiary);
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
 }
 
 .tp-range {
   width: 100%;
   height: 4px;
   appearance: none;
-  background: var(--border);
-  border-radius: 2px;
+  background: var(--n2);
+  border-radius: var(--r-sm);
   outline: none;
   cursor: pointer;
 }
@@ -638,11 +901,11 @@ tr:hover .review-btn { opacity: 1; }
   appearance: none;
   width: 14px;
   height: 14px;
-  border-radius: 50%;
+  border-radius: var(--r-pill);
   background: var(--surface);
-  border: 2px solid var(--text-tertiary);
+  border: 2px solid var(--n4);
   cursor: pointer;
-  transition: border-color 0.1s ease;
+  transition: border-color var(--t-quick) ease;
 }
 
 .tp-range::-webkit-slider-thumb:hover {
@@ -650,7 +913,12 @@ tr:hover .review-btn { opacity: 1; }
 }
 
 .tp-range:active::-webkit-slider-thumb {
-  border-color: var(--accent);
+  border-color: var(--a1);
+}
+
+.tp-range:focus-visible::-webkit-slider-thumb {
+  border-color: var(--a1);
+  box-shadow: 0 0 0 2px var(--tint-a1);
 }
 
 .tp-color-section {
@@ -666,8 +934,8 @@ tr:hover .review-btn { opacity: 1; }
 .tp-color {
   width: 28px;
   height: 28px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  border: var(--b-base);
+  border-radius: var(--r-sm);
   padding: 2px;
   cursor: pointer;
   background: none;
@@ -679,7 +947,7 @@ tr:hover .review-btn { opacity: 1; }
 
 .tp-color::-webkit-color-swatch {
   border: none;
-  border-radius: 2px;
+  border-radius: 0;
 }
 
 .tp-reset {
@@ -688,13 +956,13 @@ tr:hover .review-btn { opacity: 1; }
   padding: 8px;
   font-family: inherit;
   font-size: 0.75rem;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text-tertiary);
   background: none;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: var(--b-base);
+  border-radius: var(--r-sm);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: color var(--t-base) ease, border-color var(--t-base) ease, background var(--t-base) ease;
 }
 
 .tp-reset:hover {
@@ -717,10 +985,62 @@ tr:hover .review-btn { opacity: 1; }
   to   { opacity: 1; transform: none; }
 }
 
-/* Burger toggle — top right. Always on top so it can close any overlay. */
+/* Top-nav — Current · Swarm · Archive, sat to the left of the burger.
+   Plain text buttons, no chrome at rest; active item gets the full
+   text colour + a touch more weight, hover gets a soft hover bg.
+   Sharp, restrained — the nav should feel like a label trail, not a
+   button row. */
+#top-nav {
+  position: fixed;
+  /* Sit on the same horizontal line as the view-header's filter row.
+     #app has padding-top: 40px and the view-header is 32px tall — both
+     the nav and the toggle pin to top:40px so all three pieces share
+     one baseline. */
+  top: 40px;
+  /* burger is at right: var(--sp-4) and width 32px; gap of var(--sp-2). */
+  right: calc(var(--sp-4) + 32px + var(--sp-2));
+  display: flex;
+  align-items: center;
+  height: 32px;
+  z-index: 120;
+}
+
+.nav-item {
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  padding: 0 var(--sp-3);
+  height: 32px;
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: var(--r-pill);
+  transition: color var(--t-base) ease, background var(--t-base) ease;
+  white-space: nowrap;
+}
+.nav-item:hover { color: var(--text-secondary); background: var(--hover); }
+.nav-item.active {
+  color: var(--text);
+  font-weight: 600;
+  cursor: default;
+}
+.nav-item.active:hover { background: transparent; }
+
+/* Hide the nav while a side panel is open so it doesn't overlay the
+   panel content. The burger stays visible — it's the × that closes. */
+body:has(#typo-panel.open) #top-nav,
+body:has(#settings-panel.open) #top-nav {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-base) ease;
+}
+
+/* Burger toggle — top right, aligned to the view-header's filter row. */
 #menu-toggle {
   position: fixed;
-  top: var(--sp-4);
+  top: 40px;                          /* matches #app padding-top + #top-nav */
   right: var(--sp-4);
   width: 32px;
   height: 32px;
@@ -732,7 +1052,7 @@ tr:hover .review-btn { opacity: 1; }
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  transition: color var(--t-base) ease, border-color var(--t-base) ease, background var(--t-base) ease;
   z-index: 120;
   padding: 0;
 }
@@ -754,14 +1074,14 @@ tr:hover .review-btn { opacity: 1; }
   right: 16px;
   min-width: 180px;
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+  border: var(--b-base);
+  border-radius: var(--r-md);
+  box-shadow: var(--e-2);
   padding: 4px;
   z-index: 101;
   opacity: 0;
   transform: translateY(-4px);
-  transition: opacity 0.15s ease, transform 0.15s ease;
+  transition: opacity var(--t-base) ease, transform var(--t-base) ease;
 }
 
 #menu-popover.open {
@@ -780,11 +1100,11 @@ tr:hover .review-btn { opacity: 1; }
   color: var(--text-secondary);
   font-family: inherit;
   font-size: 0.8125rem;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   text-align: left;
-  transition: background 0.1s ease, color 0.1s ease;
+  transition: background var(--t-quick) ease, color var(--t-quick) ease;
 }
 
 .menu-item:hover {
@@ -827,13 +1147,13 @@ tr:hover .review-btn { opacity: 1; }
 .range-picker button {
   font-family: inherit;
   font-size: 0.75rem;
-  font-weight: 500;
+  font-weight: 600;
   padding: var(--sp-1) var(--sp-3);
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  transition: color var(--t-base) ease, background var(--t-base) ease, border-color var(--t-base) ease;
   letter-spacing: 0.01em;
   font-variant-numeric: tabular-nums;
 }
@@ -844,27 +1164,27 @@ tr:hover .review-btn { opacity: 1; }
 
 .range-picker button:hover { color: var(--text); background: var(--hover); }
 .range-picker button.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  background: var(--n5);
+  border-color: var(--n5);
+  color: var(--n0);
 }
-.range-picker button.active:hover { background: var(--accent); }
+.range-picker button.active:hover { background: var(--n6); border-color: var(--n6); }
 
 /* KPI row */
 .kpi-row {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 24px;
+  gap: var(--sp-5);
   margin-bottom: 56px;
   padding-bottom: 40px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: var(--b-hair);  /* calmer than 1px N3 — half-pixel between sections */
 }
 
 .kpi-label {
   font-size: 0.625rem;
-  font-weight: 500;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.08em;
   color: var(--text-tertiary);
   margin-bottom: 8px;
 }
@@ -881,7 +1201,7 @@ tr:hover .review-btn { opacity: 1; }
 .kpi-delta {
   margin-top: 6px;
   font-size: 0.75rem;
-  font-weight: 500;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
@@ -896,9 +1216,9 @@ tr:hover .review-btn { opacity: 1; }
 
 .section-label {
   font-size: 0.625rem;
-  font-weight: 500;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.08em;
   color: var(--text-tertiary);
   margin-bottom: 16px;
 }
@@ -934,7 +1254,7 @@ tr:hover .review-btn { opacity: 1; }
 }
 
 .flow-line-merged {
-  stroke: var(--accent);
+  stroke: var(--a2);              /* stable forward — same hue as feat */
   stroke-width: 2;
   fill: none;
 }
@@ -966,30 +1286,33 @@ tr:hover .review-btn { opacity: 1; }
   display: flex;
   width: 100%;
   height: 8px;
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   overflow: hidden;
   background: var(--hover);
 }
 
 .mix-segment {
   height: 100%;
-  transition: opacity 0.15s ease;
+  transition: opacity var(--t-base) ease;
 }
 
 .mix-segment:hover { opacity: 0.8; }
 
-.mix-segment.tag-feat     { background: var(--accent); }
-.mix-segment.tag-fix      { background: var(--red); opacity: 0.7; }
-.mix-segment.tag-chore    { background: var(--text-tertiary); }
-.mix-segment.tag-refactor { background: var(--purple); opacity: 0.5; }
-.mix-segment.tag-docs     { background: var(--text-secondary); opacity: 0.5; }
-.mix-segment.tag-test     { background: var(--green); opacity: 0.6; }
-.mix-segment.tag-style    { background: var(--border); }
-.mix-segment.tag-perf     { background: var(--purple); opacity: 0.7; }
-.mix-segment.tag-build    { background: var(--text-tertiary); opacity: 0.6; }
-.mix-segment.tag-ci       { background: var(--text-tertiary); opacity: 0.4; }
-.mix-segment.tag-revert   { background: var(--red); opacity: 0.5; }
-.mix-segment.tag-other    { background: #d4d4d4; }
+/* Categorical palette mapped to the DS accent wheel. Each tag gets a
+   distinct hue at uniform low-saturation alpha so the stacked bar
+   reads as a calm spectrum, not a rainbow. */
+.mix-segment.tag-feat     { background: var(--a2); }                   /* teal — main forward */
+.mix-segment.tag-fix      { background: var(--a4); opacity: 0.85; }    /* amber — bug load */
+.mix-segment.tag-chore    { background: var(--a8); opacity: 0.7; }     /* slate — neutral */
+.mix-segment.tag-refactor { background: var(--a7); opacity: 0.7; }     /* violet — categorical */
+.mix-segment.tag-docs     { background: var(--a1); opacity: 0.7; }     /* blue — info */
+.mix-segment.tag-test     { background: var(--a3); opacity: 0.7; }     /* green — quality */
+.mix-segment.tag-style    { background: var(--n3); }                   /* recedes */
+.mix-segment.tag-perf     { background: var(--a6); opacity: 0.7; }     /* rose — exception */
+.mix-segment.tag-build    { background: var(--a8); opacity: 0.5; }     /* slate, fainter */
+.mix-segment.tag-ci       { background: var(--a8); opacity: 0.35; }    /* slate, faintest */
+.mix-segment.tag-revert   { background: var(--a5); opacity: 0.7; }     /* red — destructive */
+.mix-segment.tag-other    { background: var(--a8); opacity: 0.5; }
 
 .mix-legend {
   display: flex;
@@ -1010,23 +1333,23 @@ tr:hover .review-btn { opacity: 1; }
   display: inline-block;
   width: 8px;
   height: 8px;
-  border-radius: 2px;
+  border-radius: 0;
   vertical-align: middle;
   margin-right: 6px;
 }
 
-.mix-label.tag-feat     .sw { background: var(--accent); }
-.mix-label.tag-fix      .sw { background: var(--red); opacity: 0.7; }
-.mix-label.tag-chore    .sw { background: var(--text-tertiary); }
-.mix-label.tag-refactor .sw { background: var(--purple); opacity: 0.5; }
-.mix-label.tag-docs     .sw { background: var(--text-secondary); opacity: 0.5; }
-.mix-label.tag-test     .sw { background: var(--green); opacity: 0.6; }
-.mix-label.tag-style    .sw { background: var(--border); }
-.mix-label.tag-perf     .sw { background: var(--purple); opacity: 0.7; }
-.mix-label.tag-build    .sw { background: var(--text-tertiary); opacity: 0.6; }
-.mix-label.tag-ci       .sw { background: var(--text-tertiary); opacity: 0.4; }
-.mix-label.tag-revert   .sw { background: var(--red); opacity: 0.5; }
-.mix-label.tag-other    .sw { background: #d4d4d4; }
+.mix-label.tag-feat     .sw { background: var(--a2); }
+.mix-label.tag-fix      .sw { background: var(--a4); opacity: 0.85; }
+.mix-label.tag-chore    .sw { background: var(--a8); opacity: 0.7; }
+.mix-label.tag-refactor .sw { background: var(--a7); opacity: 0.7; }
+.mix-label.tag-docs     .sw { background: var(--a1); opacity: 0.7; }
+.mix-label.tag-test     .sw { background: var(--a3); opacity: 0.7; }
+.mix-label.tag-style    .sw { background: var(--n3); }
+.mix-label.tag-perf     .sw { background: var(--a6); opacity: 0.7; }
+.mix-label.tag-build    .sw { background: var(--a8); opacity: 0.5; }
+.mix-label.tag-ci       .sw { background: var(--a8); opacity: 0.35; }
+.mix-label.tag-revert   .sw { background: var(--a5); opacity: 0.7; }
+.mix-label.tag-other    .sw { background: var(--a8); opacity: 0.5; }
 
 /* People table */
 .ppl-table {
@@ -1037,7 +1360,7 @@ tr:hover .review-btn { opacity: 1; }
 .ppl-table th {
   text-align: left;
   font-size: 0.625rem;
-  font-weight: 500;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-tertiary);
@@ -1048,11 +1371,11 @@ tr:hover .review-btn { opacity: 1; }
 .ppl-table td {
   padding: 10px 12px 10px 0;
   font-size: 0.8125rem;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: var(--b-hair);
 }
 
 .ppl-name {
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text);
 }
 
@@ -1087,7 +1410,7 @@ tr:hover .review-btn { opacity: 1; }
   font-size: 0.6875rem;
   color: var(--text-secondary);
   margin-bottom: 12px;
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .waste-bars {
@@ -1102,8 +1425,8 @@ tr:hover .review-btn { opacity: 1; }
   background: var(--text-tertiary);
   opacity: 0.3;
   min-height: 2px;
-  border-radius: 1px 1px 0 0;
-  transition: opacity 0.1s ease;
+  border-radius: 0;
+  transition: opacity var(--t-quick) ease;
 }
 
 .waste-bar:hover { opacity: 0.6; }
@@ -1171,9 +1494,11 @@ tr:hover .review-btn { opacity: 1; }
   display: block;
 }
 
-.rw-feat  { fill: var(--accent); }
-.rw-fix   { fill: var(--red); opacity: 0.75; }
-.rw-other { fill: var(--border); }
+/* Bar fills: feat = A2 (stable, forward), fix = A4 (warning, signals
+   bug load), other = N3 (recedes). Calmer than feat-on-N7-black. */
+.rw-feat  { fill: var(--a2); }
+.rw-fix   { fill: var(--a4); opacity: 0.85; }
+.rw-other { fill: var(--n3); }
 
 .rework-legend {
   display: flex;
@@ -1187,13 +1512,13 @@ tr:hover .review-btn { opacity: 1; }
   display: inline-block;
   width: 8px;
   height: 8px;
-  border-radius: 2px;
+  border-radius: 0;
   vertical-align: middle;
   margin-right: 6px;
 }
-.rework-legend .sw.feat  { background: var(--accent); }
-.rework-legend .sw.fix   { background: var(--red); opacity: 0.75; }
-.rework-legend .sw.other { background: var(--border); }
+.rework-legend .sw.feat  { background: var(--a2); }
+.rework-legend .sw.fix   { background: var(--a4); opacity: 0.85; }
+.rework-legend .sw.other { background: var(--n3); }
 
 /* Buckets (engagement, iterations) */
 .buckets-title {
@@ -1219,37 +1544,42 @@ tr:hover .review-btn { opacity: 1; }
 
 .bucket-label {
   color: var(--text-secondary);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .bucket-bar {
   height: 5px;
   background: var(--hairline);
-  border-radius: 3px;
+  border-radius: 0;
   overflow: hidden;
 }
 
+/* Bucket fills sit in tables of small bars repeated many times — calm
+   N5 reads as "data" without shouting. Warn = A5 at low alpha so the
+   "0 non-author comments" bucket still pops without being alarming. */
 .bucket-fill {
   height: 100%;
-  background: var(--accent);
-  opacity: 0.75;
-  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  background: var(--n5);
+  opacity: 0.85;
+  transition: width var(--t-slow) var(--ease);
 }
 
 .bucket-fill.bar-warn {
-  background: var(--red);
-  opacity: 0.5;
+  background: var(--a5);
+  opacity: 0.55;
 }
 
 .bucket-count {
   text-align: right;
   color: var(--text);
-  font-weight: 500;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .bucket-pct {
   text-align: right;
   color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
 }
 
 /* Hotspots */
@@ -1268,7 +1598,7 @@ tr:hover .review-btn { opacity: 1; }
 .hs-table th {
   text-align: left;
   font-size: 0.625rem;
-  font-weight: 500;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-tertiary);
@@ -1281,7 +1611,7 @@ tr:hover .review-btn { opacity: 1; }
 .hs-table td {
   padding: 10px 12px 10px 0;
   font-size: 0.8125rem;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: var(--b-hair);
   vertical-align: middle;
 }
 
@@ -1303,10 +1633,10 @@ tr:hover .review-btn { opacity: 1; }
 
 .hs-fill {
   height: 4px;
-  background: var(--accent);
-  opacity: 0.35;
-  border-radius: 2px;
-  transition: width 0.25s ease;
+  background: var(--n5);          /* mid neutral — data, not alarm */
+  opacity: 0.7;
+  border-radius: 0;
+  transition: width var(--t-slow) ease;
 }
 
 .hs-num {
@@ -1353,11 +1683,11 @@ tr:hover .review-btn { opacity: 1; }
 .st-dot {
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  border-radius: var(--r-pill);
   display: inline-block;
 }
 
-.st-dot.ok { background: var(--green-soft); box-shadow: 0 0 0 3px rgba(107, 199, 122, 0.15); }
+.st-dot.ok { background: var(--a3); box-shadow: 0 0 0 3px var(--tint-a3); }
 .st-dot.missing { background: var(--text-tertiary); }
 
 .st-input {
@@ -1372,7 +1702,7 @@ tr:hover .review-btn { opacity: 1; }
   outline: none;
   letter-spacing: 0;
   margin-top: 4px;
-  transition: border-color 0.15s ease;
+  transition: border-color var(--t-base) ease;
 }
 
 .st-input:focus {
@@ -1381,6 +1711,24 @@ tr:hover .review-btn { opacity: 1; }
 
 .st-input::placeholder {
   color: var(--text-tertiary);
+}
+
+.st-select {
+  width: 100%;
+  padding: 8px 10px;
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-size: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  color: var(--text);
+  outline: none;
+  margin-top: 4px;
+  transition: border-color var(--t-base) ease;
+}
+
+.st-select:focus {
+  border-color: var(--text);
 }
 
 .st-help {
@@ -1394,7 +1742,7 @@ tr:hover .review-btn { opacity: 1; }
   font-size: 0.625rem;
   background: var(--hover);
   padding: 1px 4px;
-  border-radius: 3px;
+  border-radius: 0;
 }
 
 .st-help-info  { color: var(--text-tertiary); }
@@ -1411,23 +1759,26 @@ tr:hover .review-btn { opacity: 1; }
 .st-clear {
   font-family: inherit;
   font-size: 0.75rem;
-  font-weight: 500;
+  font-weight: 600;
   padding: 6px 14px;
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   background: var(--surface);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: color var(--t-base) ease, background var(--t-base) ease, border-color var(--t-base) ease;
 }
 
+/* Primary action: N5 mid-grey (matches Stream). Lighter than N7 so it
+   doesn't shout in the panel; N6 on hover gives the press signal. */
 .st-save {
-  background: var(--accent);
-  color: #fff;
-  border-color: var(--accent);
+  background: var(--n5);
+  color: var(--n0);
+  border-color: var(--n5);
+  transition: background var(--t-base) ease, border-color var(--t-base) ease;
 }
 
-.st-save:hover { opacity: 0.88; }
+.st-save:hover    { background: var(--n6); border-color: var(--n6); }
 .st-save:disabled { opacity: 0.5; cursor: default; }
 
 .st-clear:hover { color: var(--text); border-color: var(--text-tertiary); }
@@ -1435,7 +1786,7 @@ tr:hover .review-btn { opacity: 1; }
 .tp-hint {
   margin-top: var(--sp-6);
   padding-top: var(--sp-4);
-  border-top: 1px solid var(--hairline);
+  border-top: var(--b-hair);
   font-size: 0.6875rem;
   color: var(--text-tertiary);
   line-height: 1.5;
@@ -1454,3 +1805,2250 @@ tr:hover .review-btn { opacity: 1; }
   font-size: 0.625rem;
   color: var(--text-secondary);
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Stream (kanban)
+   ───────────────────────────────────────────────────────────────────────── */
+
+#view-current { padding-bottom: 64px; }
+
+/* Stream is the first view migrated to Design System v1. All values here
+   resolve through DS tokens (--n*, --a*, --b-*, --e-*) — never the legacy
+   --bg / --text / --border vars used elsewhere. Density is "calm":
+   row 36, card padding 12, card gap 10, column padding 12. */
+
+#view-current { color: var(--n6); }
+#view-current .view-title { color: var(--n6); font-weight: 600; }
+#view-current .view-sub   { color: var(--n4); font-weight: 400; }
+
+/* Kanban needs more horizontal real estate than the typography content
+   width permits, so break out and use the full viewport. */
+.kanban {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  overflow-x: auto;
+  padding: 0 24px 12px;
+  margin-top: 12px;
+  position: relative;
+  width: 100vw;
+  left: 50%;
+  transform: translateX(-50%);
+  scrollbar-width: thin;
+  scrollbar-color: var(--n3) transparent;
+}
+
+.kanban::-webkit-scrollbar { height: 8px; }
+.kanban::-webkit-scrollbar-track { background: transparent; }
+.kanban::-webkit-scrollbar-thumb { background: var(--n3); border-radius: var(--r-sm); }
+
+/* Lane = panel: r-md outer radius, b-base resting border, no shadow.
+   The whole lane (not just the inner list) is the drop target — that's
+   why the border + bg shift to A1 while a card hovers over it. */
+.lane {
+  flex: 1 1 0;
+  min-width: 220px;
+  background: var(--n1);
+  border: var(--b-base);
+  border-radius: var(--r-md);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 220px;
+  box-shadow: var(--e-0);
+  transition: border-color var(--t-quick) ease, background-color var(--t-quick) ease;
+}
+
+.lane.lane-drag-over {
+  border-color: var(--a1);
+  background: rgba(58, 114, 176, 0.05);
+}
+
+.lane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px 4px;
+}
+
+.lane-title {
+  font-size: 0.6875rem;
+  font-weight: 600;             /* sans-semibold */
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--n5);
+}
+
+/* Numeric count → mono per DS rule (aligned numerics) */
+.lane-count {
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-size: 0.6875rem;
+  font-weight: 400;             /* mono-regular */
+  font-variant-numeric: tabular-nums;
+  color: var(--n4);
+  background: var(--n0);
+  padding: 1px 8px;
+  border-radius: var(--r-pill);         /* r-full */
+  border: var(--b-base);
+}
+
+/* Lane-list grows to fill the lane, so an empty lane has a generous drop
+   zone instead of a thin sliver above the "+ Add a card" button. */
+.lane-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 60px;
+}
+
+/* ── Cards ────────────────────────────────────────────────────────────
+   Budget per spec: e-0 at rest → e-1 on drag, nothing more.
+   - Border (b-base) carries resting depth.
+   - Hover signals through cursor + the × revealing; no shadow change. */
+
+.card {
+  position: relative;
+  background: var(--n0);
+  border: var(--b-base);
+  border-radius: var(--r-sm);            /* r-sm */
+  padding: 12px;                  /* the bottom-right action corner is reserved on .card-meta, not here */
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  font-weight: 400;              /* sans-regular */
+  color: var(--n6);
+  cursor: grab;
+  user-select: none;
+  box-shadow: var(--e-0);
+  transition: box-shadow var(--t-base) ease, transform var(--t-quick) ease, opacity var(--t-base) ease;
+}
+
+.card:active { cursor: grabbing; }
+
+/* Drag = e-1 only. Opacity stays high enough that the source card reads
+   as "I'm being moved, not gone" — 0.4 made cards look deleted. */
+.card.dragging {
+  opacity: 0.55;
+  transform: scale(0.99);
+  box-shadow: var(--e-1);
+  cursor: grabbing;
+}
+
+/* Editing state inherits b-base; the textarea inside owns the focus ring */
+.card.editing {
+  cursor: default;
+}
+
+.card-text {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  /* Full width — the action strip lives at the bottom-right, so we
+     don't sacrifice any horizontal space here for icons that are
+     hidden 99% of the time anyway.
+
+     Cap visible content at 2 lines: 1 if the text only takes 1, 2
+     if it takes 2 or more (truncated with an ellipsis). The card
+     itself shrinks to fit when content is short. -webkit-line-clamp
+     is the universal short-hand for this — supported by every
+     evergreen browser. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* .card-delete and .card-review-btn now style themselves through the
+   shared .card-action-btn rule above (they live inside .card-actions
+   as siblings of .card-copy-btn / .card-chat-btn). The class names
+   are kept as click-handler hooks and per-icon accent overrides
+   — the standalone absolute-positioning blocks are gone. */
+
+/* ── Live card (Issue / PR feed) ──────────────────────────────────────
+   A card whose contents come from the cache, not the user. No drag, no
+   delete, no edit — clicking it opens the GitHub URL in a new tab. The
+   chrome matches the manual card (same surface, border, radius, hover)
+   so the lane reads as a unified column even though the two halves of
+   the data come from different places. */
+
+.card.card-live {
+  cursor: default;
+  padding: 0;                      /* inner anchor handles padding */
+}
+
+.card.card-live:hover {
+  border-color: var(--n4);
+}
+
+/* PR-card review icon kicks off agent-interface --pr-review for
+   the card's PR. Now a member of .card-actions — layout/hover/colour
+   come from the shared .card-action-btn rule plus the .running /
+   .done accents above. */
+
+.card-link {
+  display: block;
+  padding: 12px;
+  color: inherit;
+  text-decoration: none;
+  border-radius: inherit;          /* inherit r-sm from card */
+}
+
+/* All five lanes share one shape: title up top, meta row at the bottom
+   (repo · time, with state badge on live cards), action icon in the
+   bottom-right corner. This inset on the meta row carves out the
+   action corner so a long meta line never collides with the icon —
+   applies to manual cards and live cards alike for visual rhythm. */
+.card .card-meta {
+  padding-right: 26px;
+}
+
+.card-link:focus-visible {
+  /* The card already has the focus ring via the global rule when the
+     anchor is focused (focus moves to the anchor, not the article).
+     This nudges it visually inset so it doesn't sit on top of the card
+     border at the same exact pixel. */
+  outline-offset: 2px;
+}
+
+/* Live cards (Issue / PR) just override the typography on top of the
+   base .card-text rule above — the 2-line clamp is inherited. */
+.card-link .card-text {
+  font-weight: 500;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: var(--n6);
+  white-space: normal;        /* GitHub titles are single-line */
+}
+
+.card-meta {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.6875rem;
+  color: var(--n4);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.card-repo {
+  color: var(--n5);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.card-num {
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-size: 0.6875rem;
+  color: var(--n4);
+  flex: 0 0 auto;
+}
+
+.card-meta .state {
+  flex: 0 0 auto;
+}
+
+.card-time {
+  flex: 0 0 auto;
+  color: var(--n4);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Lower-case state labels in live cards (we use 'open' / 'merged' /
+   'closed' verbatim so they fit in the meta row without shouting). */
+.card-meta .state {
+  font-size: 0.6875rem;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* PR-card status accents — a 3px coloured stripe down the left edge so
+   actionable cards (mergeable, just-opened) catch the eye in a column
+   of mostly-neutral ones, without shouting. Mergeable wins if both
+   would apply: green = "this is ready", blue = "this is fresh". */
+.card.card-live.card-mergeable {
+  box-shadow: inset 3px 0 0 0 var(--a3);
+}
+
+.card.card-live.card-fresh:not(.card-mergeable) {
+  box-shadow: inset 3px 0 0 0 var(--a1);
+}
+
+/* Active — an agent-interface job is currently running for this PR or
+   issue. A soft amber breathing accent on the right edge says
+   "something is happening behind the scenes" without competing with
+   the green/blue left-edge state markers or the action icons. */
+.card.card-live.card-active {
+  position: relative;
+}
+.card.card-live.card-active::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  right: 0;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--a4);
+  pointer-events: none;
+  animation: card-active-breathe 1.8s ease-in-out infinite;
+}
+
+@keyframes card-active-breathe {
+  0%, 100% { opacity: 0.25; }
+  50%      { opacity: 0.9; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card.card-live.card-active::after { animation: none; opacity: 0.65; }
+}
+
+/* New live cards drop in from a few pixels above their final position
+   while fading in. Keeps the once-a-minute refresh from feeling like
+   a sudden insertion. The FLIP animator handles the *movement* of
+   existing cards via inline transforms; this animation is only for
+   cards arriving fresh in the lane. */
+.card.card-live.card-entering {
+  animation: currentCardIn 520ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+@keyframes currentCardIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Drop indicator = A1 (Blue), same hue as focus. Pill-shaped with a
+   subtle glow so it's hard to miss between cards. */
+.drop-indicator {
+  height: 3px;
+  background: var(--a1);
+  border-radius: var(--r-pill);
+  margin: 2px 2px;
+  pointer-events: none;
+  box-shadow: 0 0 0 2px rgba(58, 114, 176, 0.15);
+}
+
+/* ── Composer (add new) ──────────────────────────────────────────────
+   Inline popover treatment: b-base + e-1. Inside, the textarea gets the
+   focus ring (b-focus, 2px offset). No box-shadow halo — the spec
+   reserves shadows for interaction states only and the focus ring
+   carries that signal cleanly. */
+
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--n0);
+  border: var(--b-base);
+  border-radius: var(--r-sm);            /* r-sm — composer reads as a card */
+  padding: 8px;
+  box-shadow: var(--e-1);
+}
+
+/* Inline edit replaces the card body — no extra chrome. */
+.card-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  box-shadow: none;
+}
+
+.composer textarea,
+.card-edit textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 64px;
+  font-family: inherit;          /* sans body */
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  font-weight: 400;
+  color: var(--n6);
+  background: var(--n0);
+  border: var(--b-base);
+  border-radius: var(--r-sm);            /* r-sm */
+  padding: 8px 10px;
+  outline: none;
+  transition: outline-color var(--t-quick) ease;
+}
+
+/* Focus ring per DS: 2px solid A1, offset 2px, inherits radius.
+   Longhand props because var() inside the `outline` shorthand expands
+   inconsistently across browsers. */
+.composer textarea:focus,
+.card-edit textarea:focus {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
+}
+
+.composer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Primary action: mid-grey surface (N5), N0 text, sans-semibold.
+   N7 was too contrasty against an N1 panel; N5 keeps the button
+   readable as the darkest element on the panel without burning the eye. */
+.composer-add {
+  appearance: none;
+  background: var(--n5);
+  color: var(--n0);
+  border: none;
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;              /* sans-semibold */
+  padding: 6px 12px;
+  border-radius: var(--r-sm);            /* r-sm */
+  cursor: pointer;
+  transition: opacity var(--t-base) ease, background var(--t-base) ease;
+}
+
+.composer-add:hover    { background: var(--n6); }
+.composer-add:disabled { opacity: 0.5; cursor: default; }
+.composer-add:focus-visible {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
+}
+
+/* Secondary action: ghost button, secondary text */
+.composer-cancel {
+  appearance: none;
+  background: transparent;
+  color: var(--n5);
+  border: none;
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 400;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+.composer-cancel:hover { color: var(--n6); background: var(--n1); }
+.composer-cancel:focus-visible {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
+}
+
+/* Composer keyboard hint: keystroke is technical content → mono per DS */
+.composer-hint {
+  margin-left: auto;
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-size: 0.625rem;
+  font-weight: 400;
+  color: var(--n4);
+}
+
+/* "+ Add a card" — quiet at rest, dashed b-base on hover */
+.lane-add {
+  appearance: none;
+  background: transparent;
+  border: 1px dashed transparent;
+  color: var(--n4);
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 400;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);            /* r-sm */
+  cursor: pointer;
+  text-align: left;
+  transition: color var(--t-base) ease, background var(--t-base) ease, border-color var(--t-base) ease;
+}
+
+.lane-add:hover {
+  color: var(--n6);
+  background: var(--n0);
+  border-color: var(--n3);
+}
+
+.lane-add:focus-visible {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
+}
+
+/* ── Stream filter cluster ─────────────────────────────────────────
+   Status (Any / Open) and Time (Any time / Today / Yesterday / This
+   week) sit side-by-side in the view header right edge — both as
+   range-picker pill groups, separated by a small gap. Both narrow
+   only the live lanes (Issue / PR); manual lanes are unaffected. */
+
+.stream-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+/* ── Issue composer (Title / Body / Repo) ────────────────────────────
+   Inherits .composer surface; adds a title input above the textarea
+   and a repo selector below. Title is a single-line input — slightly
+   bolder than body to read as the primary field. */
+
+.composer-issue .issue-title {
+  width: 100%;
+  font-family: inherit;
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--n6);
+  background: var(--n0);
+  border: var(--b-base);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  outline: none;
+}
+
+.composer-issue .issue-title:focus,
+.composer-issue .issue-repo:focus {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
+}
+
+.composer-issue .issue-title::placeholder {
+  color: var(--n4);
+  font-weight: 400;
+}
+
+.composer-issue .issue-repo,
+.composer .manual-repo,
+.card-edit .manual-repo {
+  width: 100%;
+  font-family: inherit;
+  font-size: 0.8125rem;
+  font-weight: 400;
+  color: var(--n6);
+  background: var(--n0);
+  border: var(--b-base);
+  border-radius: var(--r-sm);
+  padding: 7px 10px;
+  outline: none;
+  cursor: pointer;
+}
+.composer .manual-repo,
+.card-edit .manual-repo { margin-top: 6px; }
+
+.composer-error {
+  font-size: 0.75rem;
+  color: var(--a5);
+  padding: 4px 2px 0;
+}
+
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Swarm (agent-interface log)
+   Same table contract as Archive — universal `table`, `thead th`,
+   `tbody tr`, `td`, hover, `.title-cell`, `.action-cell`, `.review-btn`,
+   `.state`, `.date` rules already do the heavy lifting. This block only
+   defines what's distinct: the column widths and the few cell flavors
+   Swarm has that Archive doesn't (model name, behavior tag, target
+   link, expand row).
+   ───────────────────────────────────────────────────────────────────────── */
+
+/* Six equally-wide data columns + the icon column. Each data column
+   takes the same fraction of (table width − action column) so the
+   layout reads as six even bays. Started + Elapsed right-align as
+   numeric columns. */
+.col-model,
+.col-behavior,
+.col-target,
+.col-status,
+.col-started,
+.col-elapsed {
+  /* Six evenly-sized data columns share whatever's left after the two
+     fixed-width columns on the right (Replay 56px + action chevron
+     32px). */
+  width: calc((100% - 56px - 32px) / 6);
+}
+.col-started  { text-align: right; }
+.col-elapsed  { text-align: right; }
+.col-replay   { width: 56px; text-align: center; }
+/* The text-align on the .col-* classes only hits the THs. The TDs need
+   their own pin so the values right-align under their headers. Started
+   and Elapsed get explicit classes; Replay is centered (overrides the
+   universal `td:nth-last-child(2) { text-align: right }` rule that
+   used to free-give Elapsed its alignment back when Elapsed was the
+   2nd-last column — Replay sits there now). */
+#view-swarm tbody td.started-cell { text-align: right; }
+#view-swarm tbody td.elapsed-cell { text-align: right; }
+#view-swarm tbody td.replay-cell  { text-align: center; }
+
+/* Soft fade when the 30s ticker advances a Started value (3m → 4m).
+   The class is re-added on each change; the keyframe restart trick
+   (offsetWidth read) replays it. Purely cosmetic — a quiet nod that
+   the column is live, not a hard text snap. */
+@keyframes swarm-date-tick {
+  from { opacity: 0.3; }
+  to   { opacity: 1; }
+}
+#view-swarm tbody td.started-cell .date.date-tick {
+  animation: swarm-date-tick 380ms ease-out;
+}
+
+/* Distinct cell flavors */
+.agent-model {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-behavior {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-target {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text);
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+}
+a.agent-target:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+.agent-dash {
+  color: var(--text-tertiary);
+}
+
+/* Status reuses Archive's .state pill — same shape across both views.
+   Add the agent-only flavors (ok / bad / flat) for completed / failed
+   / queued so the closed vocabulary lights up correctly. */
+.state.ok   { color: var(--a3); border-color: var(--a3); }
+.state.bad  { color: var(--a5); border-color: var(--a5); }
+.state.flat { color: var(--text-tertiary); }
+
+/* Expand toggle — sits in the .action-cell column, same icon-button
+   rhythm as .review-btn. Chevron rotates when the row is expanded.
+   The Replay button shares the same vocabulary; both classes pick up
+   the same hover/transform behavior. */
+.expand-btn,
+.replay-btn {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-sm);
+  opacity: 0.55;
+  padding: 0;
+  transition: color var(--t-base) ease, background var(--t-base) ease, transform var(--t-quick) ease;
+}
+tr:hover .expand-btn,
+tr:hover .replay-btn { opacity: 1; }
+.expand-btn:hover,
+.replay-btn:hover { color: var(--text); background: var(--hover); }
+.expand-btn:active,
+.replay-btn:active { transform: scale(0.92); }
+.replay-btn:disabled { cursor: not-allowed; opacity: 0.4; }
+.replay-btn.spinning svg { animation: replay-spin 0.7s linear infinite; }
+@keyframes replay-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.expand-btn .chev {
+  transition: transform var(--t-base) ease;
+}
+.expand-btn.open .chev {
+  transform: rotate(90deg);
+}
+
+/* Brief highlight when a row is focused via behaviors → swarm
+   navigation, so the eye lands on the right one. */
+@keyframes agent-row-focus-pulse {
+  0%, 100% { background: transparent; }
+  20%       { background: var(--tint-a1); }
+}
+#view-swarm tr.agent-row.agent-row-focus {
+  animation: agent-row-focus-pulse 1.5s ease-out 1;
+}
+
+/* Expanded response row — soft surface so the body reads as a
+   continuation of the row above rather than a separate item. */
+#view-swarm tr.agent-expand-row > td {
+  padding: var(--sp-4) var(--sp-5) var(--sp-5) var(--sp-5);
+  background: var(--surface);
+  border-bottom: var(--b-hair);
+  white-space: normal;
+}
+
+.agent-response-body {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  color: var(--text);
+  background: transparent;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.agent-response-loading,
+.agent-response-empty {
+  font-size: 0.8125rem;
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+#swarm-empty {
+  color: var(--text-tertiary);
+  font-size: 0.875rem;
+  text-align: center;
+  padding: var(--sp-7) 0;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Behaviors (agent automations table)
+   Same table contract as Archive / Swarm — universal `table`,
+   `thead th`, `tbody tr`, `td`, hover, animate-in already do the work.
+   This block only declares the column widths and the toggle switch.
+   ───────────────────────────────────────────────────────────────────────── */
+
+.col-owner-wide { width: 180px; }
+.col-setting    { width: 130px; }
+.col-last       { width: 130px; }
+.col-active     { width: 120px; }
+
+/* The universal `td:nth-last-child(2) { text-align: right }` rule is
+   meant for Archive's "Updated" column — it shouldn't apply here.
+   Force-left for behaviors' nth-last-child(2) cell (Last triggered)
+   so the link lines up under its header. */
+#behaviors-table tbody td:nth-last-child(2) {
+  text-align: left;
+}
+
+.behavior-last-link {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  text-decoration: none;
+  border-bottom: 1px dashed var(--border);
+}
+.behavior-last-link:hover {
+  color: var(--text);
+  border-bottom-color: var(--text-tertiary);
+}
+
+.behavior-name {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.behavior-owner {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.behavior-owner-name {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+
+/* Toggle cell — right-aligned with breathing room. The universal
+   `td:last-child { padding-right: 0 }` is meant for Archive's narrow
+   icon-only action column; for the toggle we want some inset so the
+   switch doesn't kiss the table edge. The header ACTIVE label gets
+   the same inset so it lines up over the toggle. */
+#behaviors-table .behavior-active-cell {
+  text-align: right;
+  padding-right: var(--sp-3);
+}
+#behaviors-table th.col-active {
+  text-align: right;
+  padding-right: var(--sp-3);
+}
+
+/* DS-aligned toggle — pill body, knob slides on activate, accent fill
+   on. Hover and focus follow the same grammar as range-picker buttons
+   so toggles read as the same kind of control. */
+.toggle {
+  position: relative;
+  display: inline-block;
+  width: 32px;
+  height: 18px;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  margin: 0;
+  pointer-events: none;
+}
+
+.toggle-slider {
+  position: absolute;
+  inset: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  transition: background var(--t-base) ease, border-color var(--t-base) ease;
+}
+
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  transform: translateY(-50%);
+  transition: transform var(--t-base) ease, background var(--t-base) ease;
+}
+
+.toggle:hover .toggle-slider {
+  border-color: var(--text-tertiary);
+}
+
+.toggle input:checked + .toggle-slider {
+  background: var(--a3);
+  border-color: var(--a3);
+}
+.toggle input:checked + .toggle-slider::before {
+  transform: translate(14px, -50%);
+  background: var(--n0);                      /* canvas tone — high contrast on the green pill */
+}
+
+.toggle input:focus-visible + .toggle-slider {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
+}
+
+/* Setting dropdown — pill-shaped, neutral chrome at rest, matches the
+   visual weight of the toggle next to it. Arrow indicator drawn with
+   a tiny inline SVG via mask so it tints with theme colour. */
+.behavior-setting {
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  /* The pill's border-radius (999px → effectively half-height) curves
+     inward ~11.5px on each side at the standard 23px height; arrows
+     and labels need to sit OUTSIDE that arc or they read as clipped.
+     Padding-right is bumped to 32px and the arrow is shifted left to
+     end at right:14px — well clear of the rounded corner. */
+  padding: 4px 32px 4px 14px;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--text-tertiary) 50%),
+    linear-gradient(135deg, var(--text-tertiary) 50%, transparent 50%);
+  background-position: calc(100% - 19px) 50%, calc(100% - 14px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  transition: border-color var(--t-base) ease, color var(--t-base) ease;
+}
+.behavior-setting:hover {
+  border-color: var(--text-tertiary);
+  color: var(--text);
+}
+.behavior-setting:focus-visible {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Chat pane (per-card, slides in from the LEFT)
+
+   Mirror of the right-side Settings/Typography panel pattern but
+   anchored left. Width is responsive at 25vw with a 360px floor so
+   the conversation stays readable on narrower viewports.
+   ───────────────────────────────────────────────────────────────────────── */
+
+#chat-panel {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 25vw;
+  min-width: 360px;
+  height: 100vh;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  box-shadow: var(--e-3);
+  z-index: 110;
+  transform: translateX(-100%);
+  transition: transform var(--t-slow) var(--ease);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#chat-panel.open { transform: translateX(0); }
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-5) var(--sp-5) var(--sp-4);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.chat-title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-right: var(--sp-3);
+}
+
+.chat-close {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-sm);
+  flex-shrink: 0;
+  transition: color var(--t-quick) ease, background var(--t-quick) ease;
+}
+.chat-close:hover { color: var(--text); background: var(--hover); }
+
+.chat-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--sp-4) var(--sp-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.chat-empty {
+  color: var(--text-tertiary);
+  font-size: 0.8125rem;
+  text-align: center;
+  padding: var(--sp-7) 0;
+}
+
+/* Messages — user is a small right-aligned pill with a soft A1 tint;
+   agent is left-aligned flat prose with no bubble background, so long
+   replies read like a document instead of a chat-toy speech balloon.
+   Pattern lifted from Confab's composer/message treatment, mapped onto
+   our DS tokens. */
+.chat-msg {
+  display: flex;
+  flex-direction: column;
+  max-width: 100%;
+}
+.chat-msg-user  { align-items: flex-end;   }
+.chat-msg-agent { align-items: flex-start; }
+
+.chat-msg-body {
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
+/* User: pill bubble, max 85% so very long prompts wrap before they
+   start mimicking the agent's full-width voice. */
+.chat-msg-user .chat-msg-body {
+  background: var(--tint-a1);
+  border-radius: 14px;
+  padding: var(--sp-2) var(--sp-3);
+  max-width: 85%;
+}
+
+/* Agent: bare prose, no bubble. Mono shows IDs / code-shaped output
+   as it would appear in a terminal. */
+.chat-msg-agent .chat-msg-body {
+  padding: var(--sp-1) 0;
+  max-width: 100%;
+}
+.chat-msg-mono {
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-size: 0.75rem;
+  line-height: 1.55;
+}
+
+/* Errors keep the red accent but stay within the prose layout. */
+.chat-msg-error .chat-msg-body {
+  color: var(--a5);
+}
+
+/* Pulsing-dots indicator while a reply is in flight — Confab's
+   thinking pattern, scaled to our scale and tinted to text-tertiary
+   so it reads as ambient activity rather than a status alarm. */
+.chat-thinking {
+  display: inline-flex;
+  gap: 4px;
+  padding: var(--sp-2) 0;
+  align-items: center;
+}
+.chat-thinking span {
+  width: 5px;
+  height: 5px;
+  background: var(--text-tertiary);
+  border-radius: 50%;
+  animation: chat-pulse 1.4s ease-in-out infinite;
+}
+.chat-thinking span:nth-child(2) { animation-delay: 0.2s; }
+.chat-thinking span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes chat-pulse {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40%           { opacity: 1;   transform: scale(1);   }
+}
+
+/* /content slash-command turn — instead of a reply bubble, the
+   "agent" side of an author_content call shows a link card pointing
+   to the editor article that was authored. The user can tap it to
+   open the editor on that doc. The article is the durable surface;
+   the chat just records the authoring happened. */
+.chat-content-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px dashed var(--border);
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--t-quick) ease, background var(--t-quick) ease, color var(--t-quick) ease;
+}
+.chat-content-link:hover {
+  border-color: var(--text-tertiary);
+  background: var(--hover);
+}
+.chat-content-link-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+.chat-content-link-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Edit cards — rendered when the chat-pane is opened with
+   parseEdits: true (currently: the editor's toolbar chat) and the
+   agent reply parses cleanly into a StructuredReply with edits.
+   Inert in this slice — no accept/decline, no hover-to-doc coupling.
+   The card sits below the agent's `chat` prose, indented a touch so
+   it reads as "attached to" that turn rather than free-floating.
+   Visual idiom: subtle tinted rows for old/new, with a leading -/+
+   mark in the gutter so the diff direction reads even before colour. */
+.chat-edit-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0 var(--sp-3);
+  width: 100%;
+}
+.chat-edit-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+.chat-edit-card-desc {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  margin-bottom: 2px;
+}
+.chat-edit-card-old,
+.chat-edit-card-new {
+  display: flex;
+  gap: var(--sp-2);
+  padding: 2px var(--sp-2);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.chat-edit-card-old {
+  background: var(--tint-a5);
+  color: var(--text);
+}
+.chat-edit-card-old .chat-edit-card-text {
+  text-decoration: line-through;
+  text-decoration-color: var(--red-soft);
+  opacity: 0.78;
+}
+.chat-edit-card-new {
+  background: var(--tint-a3);
+  color: var(--text);
+}
+.chat-edit-card-mark {
+  flex: 0 0 1ch;
+  text-align: center;
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-weight: 600;
+  user-select: none;
+}
+.chat-edit-card-old .chat-edit-card-mark { color: var(--red); }
+.chat-edit-card-new .chat-edit-card-mark { color: var(--green); }
+.chat-edit-card-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* Full-rewrite stub — visible placeholder until the rewrite viewer
+   binds in a later slice. Keeps the same card shell so the layout
+   doesn't reorganise when rewrites later get a richer surface. */
+.chat-edit-card[data-kind="rewrite"] {
+  background: var(--tint-a1);
+}
+
+/* Action row: accept / decline buttons or terminal-state badges. Sits
+   below the diff rows, right-aligned so the eye lands on the chat
+   text and diff first, the decision controls second. */
+.chat-edit-card-actions {
+  display: flex;
+  gap: var(--sp-2);
+  justify-content: flex-end;
+  align-items: center;
+  margin-top: var(--sp-2);
+}
+.chat-edit-card-btn {
+  appearance: none;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--hairline);
+  background: var(--bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.chat-edit-card-btn:hover {
+  border-color: var(--text-tertiary);
+  color: var(--text);
+}
+.chat-edit-card-accept:hover {
+  background: var(--tint-a3);
+  border-color: var(--green-soft);
+  color: var(--green);
+}
+.chat-edit-card-decline:hover {
+  background: var(--tint-a5);
+  border-color: var(--red-soft);
+  color: var(--red);
+}
+.chat-edit-card-badge {
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  white-space: nowrap;
+}
+.chat-edit-card-badge-applied {
+  background: var(--tint-a3);
+  color: var(--green);
+}
+.chat-edit-card-badge-declined {
+  background: var(--surface);
+  color: var(--text-tertiary);
+}
+.chat-edit-card-badge-conflict {
+  background: var(--tint-a5);
+  color: var(--red);
+  margin-right: auto;             /* push buttons to the right of the badge */
+}
+
+/* Terminal-state cards (applied / declined) fade their content so
+   they read as "done" rather than inviting re-engagement. The diff
+   rows lose their tint, the description goes tertiary, and the whole
+   card sits at lower opacity overall. */
+.chat-edit-card[data-state="applied"],
+.chat-edit-card[data-state="declined"] {
+  opacity: 0.7;
+}
+.chat-edit-card[data-state="applied"]   .chat-edit-card-old,
+.chat-edit-card[data-state="declined"]  .chat-edit-card-old,
+.chat-edit-card[data-state="applied"]   .chat-edit-card-new,
+.chat-edit-card[data-state="declined"]  .chat-edit-card-new {
+  background: transparent;
+}
+.chat-edit-card[data-state="conflict"] {
+  border-color: var(--red-soft);
+}
+
+/* Hover-highlight overlay rendered into .editor-annotations when the
+   user mouses over an edit card. Pointer-events disabled — this is a
+   transient visual cue, not interactive — so clicks still reach the
+   underlying contenteditable surface. The amber tone is distinct
+   from the annotation underline (which uses the same amber but as a
+   bottom stripe, not a fill) so the two surfaces don't compete. The
+   fade-in keeps the highlight from punching the page on first hover. */
+.edit-hover-mark {
+  position: absolute;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--a4, #c89b3c) 18%, transparent);
+  border-radius: 3px;
+  animation: edit-hover-mark-in 140ms ease-out;
+}
+@keyframes edit-hover-mark-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Small "/content" tag prepended to the user-bubble of an
+   author_content turn so the user knows at a glance which mode the
+   message went through. */
+.chat-msg-mode-tag {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: rgba(58, 114, 176, 0.18);
+  color: var(--text);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  vertical-align: 1px;
+}
+
+/* Composer — single bordered "wrap" with the textarea borderless
+   inside it and the send button absolute-positioned bottom-right.
+   The wrap is what owns the focus ring (focus-within), which makes
+   the input feel like one piece rather than a textarea + a button
+   awkwardly bolted side-by-side. */
+.chat-composer {
+  padding: var(--sp-3) var(--sp-5) var(--sp-5);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+/* Two-row composer:
+     ┌──────────────────────────────────┐
+     │ textarea (grows up to ~10 lines) │
+     ├──────────────────────────────────┤
+     │              [send]              │
+     └──────────────────────────────────┘
+   Bottom edge is fixed — as the textarea grows it pushes its top up,
+   the controls row stays anchored. Text and the send button live in
+   strictly separate flex children so they can never collide. */
+.chat-input-wrap {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--e-1);
+  transition: border-color var(--t-quick) ease, box-shadow var(--t-quick) ease;
+  overflow: hidden;          /* keeps the focus-within shadow tidy */
+}
+.chat-input-wrap:focus-within {
+  border-color: var(--text-tertiary);
+  box-shadow: var(--e-2);
+}
+
+.chat-input {
+  width: 100%;
+  display: block;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: var(--text);
+  padding: 9px 12px 4px 12px;
+  height: 32px;              /* one-line floor; JS auto-grows from here */
+  max-height: 210px;         /* ~10 lines before scrolling kicks in */
+  overflow-y: hidden;
+  transition: height var(--t-quick) ease;
+}
+.chat-input::placeholder { color: var(--text-tertiary); }
+
+.chat-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 4px 6px 6px;
+  flex-shrink: 0;
+}
+/* Push the send button to the far right; attach + model sit on the
+   left, the spacer fills the gap. */
+.chat-controls-spacer { flex: 1; }
+
+/* Slash-command mode-lock chip — appears in the controls row right
+   after the attach button when the composer is locked into a mode
+   (currently only /content). Same vocabulary as Confab's mode-lock
+   treatment, scaled for our tighter pane. The chip is decorative
+   (pointer-events: none) — exiting the mode happens via Backspace
+   at the start of the textarea or Cmd/Ctrl+X. */
+.chat-mode-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--r-pill);
+  background: var(--tint-a1);
+  border: 1px solid var(--tint-a1);
+  color: var(--text);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  user-select: none;
+  pointer-events: none;
+}
+.chat-mode-chip[hidden] { display: none; }
+/* Subtle accent on the input wrap when locked, so the whole composer
+   reads as "in a mode". The border tightens to the same A1 tint as
+   the chip so they read as one piece. */
+.chat-input-wrap.mode-locked {
+  border-color: rgba(58, 114, 176, 0.35);
+}
+
+/* Attach (+) — quiet ghost icon on the left of the controls row.
+   Same hover rhythm as the close X so the four chrome glyphs (close,
+   plus, model chevron, send) feel related. */
+.chat-attach {
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: color var(--t-quick) ease, background var(--t-quick) ease;
+}
+.chat-attach:hover { color: var(--text); background: var(--hover); }
+.chat-attach svg { display: block; }
+
+/* Model selector — a native <select> stripped of its OS chrome, with
+   a small chevron rendered as a sibling on the right. Clicking the
+   select opens the real OS popover (a11y for free); the chevron is
+   purely visual and pointer-event-transparent so it doesn't intercept
+   clicks. Quiet text-secondary tone so the selector reads as a
+   label rather than a heavy control. */
+.chat-model {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+}
+.chat-model-select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background: transparent;
+  border: none;
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--text-secondary);
+  height: 26px;
+  padding: 0 18px 0 8px;        /* right pad reserves room for chevron */
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  outline: none;
+  transition: color var(--t-quick) ease, background var(--t-quick) ease;
+}
+.chat-model-select:hover,
+.chat-model-select:focus { color: var(--text); background: var(--hover); }
+.chat-model-chevron {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.625rem;
+  line-height: 1;
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+
+/* Attachment chips — sit in their own row above the textarea,
+   horizontally scrollable if the user piles on a lot of files. Pill
+   shape + soft background mirrors Confab's treatment, scaled to our
+   tighter pane. */
+.chat-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 10px 0;
+}
+.chat-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 4px 0 8px;
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 0.6875rem;
+  line-height: 1;
+  max-width: 220px;
+}
+.chat-attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-attachment-remove {
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+  flex-shrink: 0;
+  transition: color var(--t-quick) ease, background var(--t-quick) ease;
+}
+.chat-attachment-remove:hover { color: var(--text); background: var(--hover); }
+
+/* Send button — same ghost-icon treatment as the close X and the
+   attach +, but tinted to full --text so it reads as the row's
+   primary action through colour weight rather than a heavy dark fill.
+   Hover lifts a soft surface bg, matching the rest of the chrome. */
+.chat-send {
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color var(--t-quick) ease, background var(--t-quick) ease, opacity var(--t-quick) ease;
+  padding: 0;
+  flex-shrink: 0;
+}
+.chat-send:hover { background: var(--hover); }
+.chat-send:disabled { opacity: 0.35; cursor: not-allowed; }
+.chat-send svg { width: 13px; height: 13px; display: block; }
+
+/* Bottom-right action strip — single horizontal cluster holding ALL
+   icons for the card (tools + per-card primary). See cardActions()
+   in current-view.ts for the strategy: content uses full card width;
+   the strip overlays the right end of the meta row (which fades out
+   on hover so icons never sit on visible text). Adding more icons
+   later is just another <button> child — the cluster grows leftward,
+   the per-card primary action (delete or review) stays as the
+   rightmost anchor. */
+.card-actions {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  display: inline-flex;
+  gap: 0;
+  opacity: 0;
+  transition: opacity var(--t-quick) ease;
+  z-index: 1;
+}
+.card:hover .card-actions { opacity: 0.7; }
+
+/* Shared icon button used by every member of .card-actions —
+   chat, copy, delete, review, and any future tool icon all pick
+   up size, color, hover treatment, and corner radius from here.
+   Per-icon classes (.card-delete, .card-review-btn, .card-copy-btn,
+   .card-chat-btn) are kept solely as click-handler hooks plus
+   per-icon accent overrides; they no longer carry layout. */
+.card-action-btn {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  padding: 0;
+  font-family: inherit;
+  font-size: 13px;     /* sized for the × glyph; SVGs ignore */
+  line-height: 1;
+  transition: background var(--t-quick) ease, color var(--t-quick) ease;
+}
+.card-action-btn:hover {
+  color: var(--text);
+  background: var(--border);
+}
+.card-action-btn:disabled { cursor: default; }
+
+/* Per-icon accents on direct hover. Delete tints to the destructive
+   red; review keeps neutral hover but uses A1/A3 to signal in-flight
+   / done state (set programmatically). Copy lands a quiet green
+   while the checkmark feedback is showing. */
+.card-action-btn.card-delete:hover    { color: var(--a5); }
+.card-action-btn.card-review-btn.running { opacity: 1; color: var(--a1); }
+.card-action-btn.card-review-btn.done    { opacity: 1; color: var(--a3); }
+.card-action-btn.is-copied            { color: var(--a3); }
+.card.editing .card-delete            { display: none; }
+
+/* Hide the meta row's right-side time when the card is hovered so
+   the action strip overlay doesn't sit on visible text. The repo
+   tag, number, and state stay visible on the left side of the meta
+   row — they're never under the strip. */
+.card-time { transition: opacity var(--t-quick) ease; }
+.card:hover .card-time { opacity: 0; }
+
+/* ─── Editor view ─────────────────────────────────────────────────────────
+   Minimalist markdown writing surface. The top bar IS a .view-header,
+   so its alignment (vertical position, side indent, right-pad to clear
+   the burger) is identical to every other view's header — the chrome
+   doesn't shift when the user switches views. Inside the bar, two
+   halves: icons on the left, meta + doc-picker on the right. */
+
+/* The bar piggybacks on .view-header for outer alignment. We
+   override the inner layout (split into left/right halves) AND clamp
+   the bar's width to the same max as the writing area below
+   (680px) so the chrome and the page sit in one column. The
+   .view-header's padding-right (which other views use to clear the
+   inline top-nav) isn't needed here — the centered 680px stays well
+   clear of the burger. */
+.editor-bar {
+  justify-content: space-between;
+  /* Drop the .view-header bottom margin — the writing area handles
+     its own breathing room. */
+  margin-bottom: var(--sp-4);
+  max-width: 680px;
+  margin-left: auto;
+  margin-right: auto;
+  padding-right: 0;
+}
+.editor-bar-left,
+.editor-bar-right {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+.editor-bar-right { gap: var(--sp-3); }
+
+/* + and × icon buttons — same ghost rhythm as the chat-pane / card
+   icons so the editor's chrome reads in the same vocabulary as the
+   rest of the app. */
+.editor-bar-btn {
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-sm);
+  padding: 0;
+  transition: color var(--t-quick) ease, background var(--t-quick) ease;
+}
+.editor-bar-btn:hover { color: var(--text); background: var(--hover); }
+.editor-bar-btn.editor-delete-btn:hover { color: var(--a5); }
+.editor-bar-btn svg { display: block; }
+
+/* Save / word-count cell on the right, kept quiet. */
+.editor-meta {
+  font-size: 0.6875rem;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The trigger + popover share a wrapper so the popover anchors to
+   the trigger's right edge, not the bar's. */
+.editor-doc-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.editor-doc-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 360px;
+  height: 28px;
+  padding: 0 var(--sp-2);
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background var(--t-quick) ease, color var(--t-quick) ease;
+}
+.editor-doc-trigger:hover,
+.editor-doc-trigger[aria-expanded="true"] { background: var(--hover); }
+.editor-doc-trigger-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
+}
+.editor-doc-trigger-chevron {
+  font-size: 0.625rem;
+  color: var(--text-tertiary);
+  line-height: 1;
+}
+
+/* Doc dropdown popover — anchored to the trigger wrapper's right
+   edge so the menu opens DOWN-LEFT from the trigger and never falls
+   off the viewport on narrow widths.
+
+   The [hidden] override below is load-bearing: HTML's `hidden`
+   attribute works by setting `display: none` via the user-agent
+   stylesheet, which any explicit `display: …` author rule beats.
+   Without this, the menu is permanently visible (empty before open,
+   populated after) and the toggle never appears to do anything. */
+.editor-doc-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  left: auto;
+  min-width: 260px;
+  max-width: 360px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--e-2);
+  padding: var(--sp-2);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.editor-doc-menu[hidden] { display: none; }
+.editor-doc-bucket {
+  font-size: 0.625rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin: var(--sp-3) var(--sp-2) var(--sp-1);
+  font-weight: 500;
+}
+.editor-doc-bucket:first-child { margin-top: var(--sp-1); }
+
+.editor-doc-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  cursor: pointer;
+  transition: background var(--t-quick) ease;
+}
+.editor-doc-item:hover { background: var(--hover); }
+.editor-doc-item.is-active {
+  background: var(--tint-a1);
+  color: var(--text);
+}
+.editor-doc-title {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+.editor-doc-time {
+  flex: 0 0 auto;
+  font-size: 0.6875rem;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.editor-doc-empty {
+  color: var(--text-tertiary);
+  font-size: 0.8125rem;
+  padding: var(--sp-3) var(--sp-2);
+}
+
+/* ── Writing area ──
+   The writing surface is a single `<div contenteditable>` whose direct
+   children are per-line `<div class="editor-line" data-kind="...">`
+   blocks — one per logical line of the markdown source. Each line
+   carries its own font-size and line-height (H1 28/40, H2 22/34, body
+   19/32), so the native caret rides the rendered glyphs directly.
+   This replaces an earlier textarea+mirror approach where different
+   per-line font-sizes broke caret alignment: the textarea computed
+   cursor x/y from a single font, while the mirror painted heading
+   text at a larger font, so the caret drifted by ~one character on
+   heading rows. Going contenteditable removes the dual-layer entirely
+   and lets each line size itself naturally. */
+.editor-page {
+  position: relative;
+  max-width: 680px;
+  margin: 0 auto;
+}
+
+.editor-doc {
+  width: 100%;
+  /* Body font follows the typography panel's archetype.body — the
+     editor stays in sync with whatever the writer picked from the
+     gear-menu Typography panel. The serif stack is a fallback for the
+     pre-init moment before typo.ts has set the var, so first paint is
+     never an unstyled flash. Sizes derive from --typo-size (base
+     slider) via offsets typo.ts publishes as --editor-*-size; line-
+     heights are pinned to whole pixels through --editor-*-lh because
+     fractional line-height breaks cursor alignment when lines have
+     different font sizes (different baselines diverge inside a shared
+     line box). */
+  font-family: var(--typo-body, 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif);
+  font-size: var(--editor-body-size, 19px);
+  line-height: var(--editor-body-lh, 32px);
+  padding: var(--sp-5) 0 var(--sp-7);
+  margin: 0;
+  min-height: calc(100vh - 200px);
+  color: var(--text);
+  caret-color: var(--text);
+  border: none;
+  outline: none;
+  background: transparent;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'liga' 1, 'kern' 1;
+  box-sizing: border-box;
+}
+.editor-doc:focus { outline: none; }
+
+/* Placeholder for an empty doc — JS toggles data-empty on the root.
+   We use ::before instead of CSS :empty because the root always has
+   one editor-line (with a <br> filler) even when "empty", to give
+   contenteditable a place for the caret. */
+.editor-doc[data-empty="true"]::before {
+  content: 'Start writing…';
+  color: var(--text-tertiary);
+  font-style: italic;
+  pointer-events: none;
+  position: absolute;
+}
+
+/* Per-line styling — each line gets its own font metrics. H1/H2 use
+   real heading sizes (the original spec); the contenteditable
+   architecture makes this safe because the caret is native — no
+   mirror to drift against. The leading `# ` / `## ` syntax stays in
+   the line's text content (so cursor offsets equal string offsets);
+   it renders at the heading's own size for visual consistency with
+   the heading body. */
+.editor-line {
+  /* Body lines inherit the body font from .editor-doc; sizes / line-
+     heights mirror the same vars so the values are still consistent
+     when child line divs are reflowed during contenteditable edits. */
+  font-size: var(--editor-body-size, 19px);
+  line-height: var(--editor-body-lh, 32px);
+  font-weight: normal;
+  letter-spacing: 0;
+  margin: 0;
+}
+/* Paragraph-spacing fires on every non-empty body line. The writer's
+   model: pressing Enter at the end of a line ends the paragraph, and
+   the gap below that line is the slider amount — no need to type a
+   second blank line. Empty body lines (markdown's `\n\n` separator)
+   keep their natural line-height as additional whitespace; they don't
+   stack their own paragraph-spacing on top, because that would
+   double the gap any time the writer DID type a blank line. */
+.editor-line[data-kind="body"] {
+  margin-bottom: var(--editor-paragraph-spacing, 0);
+}
+.editor-line[data-kind="body"]:has(> br:only-child) {
+  margin-bottom: 0;
+}
+.editor-line[data-kind="h1"] {
+  /* Heading lines pick up archetype.heading via --typo-heading. The
+     fallback is the body's serif stack so a freshly-loaded editor
+     before typo.ts has run still reads as serif rather than the
+     browser default. Size and weight come from the typography
+     panel's "Heading size" / "Heading weight" sliders; line-height
+     is the floor of size × line-height for whole-pixel alignment.
+     Heading-spacing applies symmetrically to top and bottom so the
+     slider can take the gap all the way down to flush (0px each
+     side) — far tighter than the previous fixed `0.5em` margin-top
+     would allow. */
+  font-family: var(--typo-heading, 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif);
+  font-size: var(--editor-h1-size, 28px);
+  line-height: var(--editor-h1-lh, 40px);
+  font-weight: var(--editor-h1-weight, 800);
+  letter-spacing: -0.01em;
+  /* em-based via --editor-heading-spacing — resolves against each
+     heading's own font-size so H1's gap and H2's gap scale together
+     in proportion to their sizes. Pixel fallback is em-equivalent at
+     default 28px H1 (0.3em = ~8.4px). */
+  margin-top:    var(--editor-heading-spacing, 0.3em);
+  margin-bottom: var(--editor-heading-spacing, 0.3em);
+}
+.editor-line[data-kind="h2"] {
+  font-family: var(--typo-heading, 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif);
+  font-size: var(--editor-h2-size, 22px);
+  line-height: var(--editor-h2-lh, 34px);
+  font-weight: var(--editor-h2-weight, 700);
+  letter-spacing: -0.005em;
+  /* em-based via --editor-heading-spacing — resolves against each
+     heading's own font-size so H1's gap and H2's gap scale together
+     in proportion to their sizes. Pixel fallback is em-equivalent at
+     default 28px H1 (0.3em = ~8.4px). */
+  margin-top:    var(--editor-heading-spacing, 0.3em);
+  margin-bottom: var(--editor-heading-spacing, 0.3em);
+}
+/* First line never carries a top margin — the bar sits right above
+   it and we don't want a heading-line first row to push the writing
+   area down further than a body-first row. */
+.editor-line:first-child { margin-top: 0; }
+
+/* ── List items ──
+   A line whose markdown starts with `- ` (hyphen + space) becomes a
+   styled list item. The `- ` marker stays in textContent (hidden by
+   the universal .md-marker rule) so save / copy round-trip the
+   markdown; a CSS pseudo-element ::before draws a designed bullet
+   in its place. The line gets left-padding so the bullet sits at
+   the page margin and the prose reads as visually nested.
+
+   Spacing logic: between consecutive list-items the margin-bottom
+   is --editor-list-spacing — a saturating non-linear function of
+   --editor-paragraph-spacing (computed in typo.ts) that always
+   keeps list-spacing tighter than paragraph-spacing. The last item
+   in a run (whose next sibling is not another list-item) reverts
+   to paragraph-spacing so the list "ends" with normal prose
+   breathing room before the next paragraph. */
+.editor-line[data-kind="list-item"] {
+  position: relative;
+  /* Wide enough gutter for typical numbered markers up to "999." or
+     "999)" — markers right-align inside a 1.7em column inside this
+     padding, with breathing room between the marker and the prose. */
+  padding-left: 2.2em;
+  margin-bottom: var(--editor-list-spacing, 4px);
+}
+.editor-line[data-kind="list-item"]::before {
+  /* The designed marker — `•` for bullet lists, the literal number
+     and the writer's chosen delimiter (`1.` or `1)`) for numbered
+     lists. buildLineEl writes the display string into
+     data-list-marker; attr() pulls it in here so a single CSS rule
+     covers both list flavours. Right-aligning the marker in a
+     fixed-width box at the line's left edge keeps every marker —
+     bullet, single-digit, multi-digit — anchored to the same right
+     edge, so prose always sits the same distance from the marker's
+     end. white-space:nowrap stops a multi-digit marker like "100."
+     from breaking across lines if it happens to exceed the box. */
+  content: attr(data-list-marker);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1.7em;
+  text-align: right;
+  white-space: nowrap;
+  color: var(--text-tertiary);
+  line-height: var(--editor-body-lh, 32px);
+  /* Slightly smaller than body so the marker doesn't dominate the
+     prose; numbers especially benefit from the lighter weight. */
+  font-size: 0.95em;
+  /* The marker is decoration only — keyboard navigation and
+     selection should ignore it (cursor / Cmd+A don't touch it). */
+  pointer-events: none;
+  user-select: none;
+}
+/* Last item in a list (next sibling isn't another list-item, or
+   it's the last line of the doc): use the wider paragraph-spacing
+   for the transition out into prose. The bare :last-child case
+   already gets paragraph-spacing because the :has() selector
+   fails-open to the base list-spacing rule, but adding it
+   explicitly keeps the intent visible. */
+.editor-line[data-kind="list-item"]:not(:has(+ .editor-line[data-kind="list-item"])) {
+  margin-bottom: var(--editor-paragraph-spacing, 0);
+}
+
+/* Hide the markdown markers (`# `, `## `, `**…**`) — the line / run
+   is already rendered (heading via data-kind, bold via <strong>), so
+   the marker chars are redundant on screen. The marker text still
+   lives in the DOM (and so in .textContent), so save and the
+   copy-document button see the true markdown. Browsers exclude
+   display:none content from Selection.toString() and the default copy
+   clipboard data, so a copy/cut handler in editor-view.ts
+   reconstructs the markdown from textContent for select+Cmd+C as
+   well. */
+.md-marker {
+  display: none;
+}
+
+/* Inline bold — the parser wraps `**…**` runs in <strong>. Pin the
+   weight to 700 so it reads as bold against the line's normal weight
+   (400) without leaning on user-agent defaults. Inside an H1 line
+   the line itself is already 800; we keep <strong> at 700 there too
+   so the bold-within-heading looks intentional rather than flatly
+   identical to its surroundings. */
+.editor-line strong {
+  font-weight: 700;
+}
+
+/* Inline code — the parser wraps `` `…` `` runs in <code>. Switch
+   to a UI-monospace stack so the run reads as code at-a-glance, drop
+   to 0.92em so the monospace x-height roughly matches the serif
+   body, and tint the background so the run is visually framed
+   without needing visible markers. The ~0.3em horizontal padding
+   gives the framing room to breathe; the small radius keeps it from
+   reading as a button. Hover-readable in both light and dark themes
+   via a translucent neutral. */
+.editor-line code {
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.92em;
+  background: rgba(127, 127, 127, 0.12);
+  padding: 0 0.3em;
+  border-radius: 3px;
+}
+
+/* ── Fenced code block ──
+   Three line kinds form a contiguous region:
+     code-fence-open  — line whose content is ```... (open fence)
+     code-content     — line inside the block
+     code-fence-close — line whose content is ``` (close fence)
+   The fence lines' textContent is wrapped entirely in <span class="md-marker">
+   and CSS hides those markers, so the fence rows render as visually
+   blank — only their min-height holds the row open. Sharing the same
+   tinted background across all three kinds makes the whole block read
+   as one region; min-height matching the body line-height (32px)
+   prevents the fence rows from collapsing or reflowing oddly. */
+.editor-line[data-kind="code-fence-open"],
+.editor-line[data-kind="code-fence-close"],
+.editor-line[data-kind="code-content"] {
+  background: rgba(127, 127, 127, 0.08);
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.92em;
+  padding-left:  var(--sp-3);
+  padding-right: var(--sp-3);
+  margin-top: 0;
+  margin-bottom: 0;
+}
+.editor-line[data-kind="code-fence-open"],
+.editor-line[data-kind="code-fence-close"] {
+  /* Hold a row of vertical space for the (visually empty) fence so
+     the block boundary reads as a soft top/bottom edge. */
+  min-height: 32px;
+}
+
+/* Copy-button success tint while the checkmark is showing.
+   --a3 is the green accent in the DS palette. */
+.editor-bar-btn.is-copied { color: var(--a3); }
+
+/* ── Writer mode ──
+   Click the focus icon and everything outside the page disappears:
+   the inline top-nav, the burger, and the rest of the editor bar.
+   The page (and only the page) is left with the focus toggle alone
+   in the corner so the writer can come back. */
+body.editor-writer-mode #top-nav,
+body.editor-writer-mode #menu-toggle {
+  display: none;
+}
+/* Hide every bar control except the focus toggle. The right side
+   (meta + doc-picker) goes too. */
+body.editor-writer-mode .editor-bar-right { display: none; }
+body.editor-writer-mode .editor-bar-left > .editor-bar-btn:not(.editor-focus-btn) {
+  display: none;
+}
+/* Drop the bar's bottom margin so the page rises to where the bar
+   used to be — less wasted space at the top. */
+body.editor-writer-mode .editor-bar { margin-bottom: 0; }
+/* The toggle itself stays subtle: same ghost styling, but a touch
+   more visible so the user can find their way out of writer mode
+   without hunting for it. */
+body.editor-writer-mode .editor-focus-btn { color: var(--text-tertiary); }
+body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
+
+/* ── Annotations ──
+   Range-anchored notes that the writer attaches to spans of text in
+   the doc. Rendered as a thin underline overlay on top of the
+   contenteditable; clicking opens a small floating panel with the
+   editable comment. The overlay layer sits inside .editor-page (which
+   is position:relative) so its absolute children inherit page-local
+   coordinates and stay pinned during scroll. The marks are
+   pointer-events:auto so clicks open the panel — typing into the
+   highlighted text still works because contenteditable handles
+   keyboard input regardless of click target. */
+.editor-annotations {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  pointer-events: none;     /* let parent clicks fall through; marks override */
+  z-index: 2;
+}
+.annotation-mark {
+  position: absolute;
+  pointer-events: auto;
+  cursor: pointer;
+  /* The underline lives just below the text baseline of the marked
+     range. Background is transparent so the text underneath shows
+     through; only the bottom edge carries a thin colored stripe. The
+     subtle hover effect helps the reader notice clickable marks
+     without the prose itself feeling decorated. */
+  background: transparent;
+  border-bottom: 2px solid color-mix(in srgb, var(--a4, #c89b3c) 65%, transparent);
+}
+.annotation-mark:hover {
+  background: color-mix(in srgb, var(--a4, #c89b3c) 14%, transparent);
+}
+
+/* Floating Comment button — appears just above-right of the live
+   selection inside the editor. position:fixed because the JS sets
+   page-level coordinates from getBoundingClientRect; combined with
+   z-index we float over the editor content. */
+.editor-comment-btn {
+  position: fixed;
+  z-index: 50;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface, #fff);
+  color: var(--text-secondary);
+  border: 1px solid var(--border, rgba(0,0,0,0.12));
+  border-radius: 999px;
+  padding: 0;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  transition: color 0.12s ease, transform 0.12s ease;
+}
+.editor-comment-btn:hover {
+  color: var(--text);
+  transform: scale(1.08);
+}
+.editor-comment-btn[hidden] { display: none; }
+
+/* Comment panel — single, shared, anchored next to the clicked
+   annotation. Fixed so it stays put on scroll; the JS recomputes
+   anchor position when reopened. Hidden via the [hidden] attribute
+   so the same selector works whether the panel exists yet or not.
+   Stacks three surfaces vertically: snippet header, the writer's
+   own editable comment, then the chat thread (transcript + composer)
+   that's a long-running agent session keyed on the annotation's id. */
+.editor-annotation-panel {
+  position: fixed;
+  z-index: 60;
+  width: 380px;
+  max-width: calc(100vw - 32px);
+  max-height: 70vh;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, rgba(0,0,0,0.12));
+  border-radius: 8px;
+  padding: var(--sp-3);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  overflow: hidden;
+}
+.editor-annotation-panel[hidden] { display: none; }
+.editor-annotation-text {
+  width: 100%;
+  min-height: 60px;
+  border: 1px solid var(--border, rgba(0,0,0,0.12));
+  border-radius: 4px;
+  padding: 6px 8px;
+  font: inherit;
+  background: transparent;
+  color: var(--text);
+  resize: vertical;
+}
+.editor-annotation-text:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--a4, #c89b3c) 60%, var(--border));
+}
+.editor-annotation-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.editor-annotation-snippet {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.editor-annotation-delete {
+  background: transparent;
+  border: none;
+  padding: 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.editor-annotation-delete:hover {
+  color: var(--a5);
+  background: var(--hover);
+}
+
+/* Chat transcript inside the annotation panel. Scrollable, capped
+   in height so a long thread doesn't push the composer out of
+   reach. Bubbles are styled like Confab's chat-pane but compacted
+   for the narrower panel. */
+.editor-annotation-chat-log {
+  flex: 1 1 auto;
+  min-height: 60px;
+  max-height: 240px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--border, rgba(0,0,0,0.08));
+  padding-top: var(--sp-2);
+}
+.editor-annotation-chat-empty {
+  color: var(--text-tertiary);
+  font-style: italic;
+  font-size: 12px;
+  text-align: center;
+  padding: var(--sp-2);
+}
+.editor-annotation-chat-msg {
+  display: flex;
+}
+.editor-annotation-chat-user { justify-content: flex-end; }
+.editor-annotation-chat-agent { justify-content: flex-start; }
+.editor-annotation-chat-body {
+  max-width: 85%;
+  padding: 6px 10px;
+  border-radius: 12px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.editor-annotation-chat-mono {
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  margin: 0;
+}
+.editor-annotation-chat-user .editor-annotation-chat-body {
+  background: color-mix(in srgb, var(--a4, #c89b3c) 16%, transparent);
+  color: var(--text);
+}
+.editor-annotation-chat-agent .editor-annotation-chat-body {
+  background: var(--hover, rgba(0,0,0,0.04));
+  color: var(--text);
+}
+.editor-annotation-chat-error .editor-annotation-chat-body {
+  background: color-mix(in srgb, var(--a5, #c0392b) 12%, transparent);
+  color: var(--a5, #c0392b);
+}
+
+/* Composer row — single-line autosizing textarea + send button. */
+.editor-annotation-chat-compose {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: flex-end;
+}
+.editor-annotation-chat-input {
+  flex: 1 1 auto;
+  resize: none;
+  border: 1px solid var(--border, rgba(0,0,0,0.12));
+  border-radius: 16px;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 13px;
+  background: transparent;
+  color: var(--text);
+  max-height: 120px;
+  line-height: 1.4;
+}
+.editor-annotation-chat-input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--a4, #c89b3c) 60%, var(--border));
+}
+.editor-annotation-chat-send {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--text);
+  color: var(--surface, #fff);
+  border: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+.editor-annotation-chat-send:hover { opacity: 0.85; }
+.editor-annotation-chat-send:disabled { opacity: 0.4; cursor: not-allowed; }
