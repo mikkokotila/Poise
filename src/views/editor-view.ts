@@ -233,16 +233,33 @@ function lineKindFor(text: string): 'h1' | 'h2' | 'body' | 'list-item' {
 // exactly ```` closes the block. Unclosed openers run to end-of-doc
 // (everything past the open is code-content) — which is the same
 // behaviour CommonMark / iA Writer / Typora exhibit.
-function classifyAllLines(texts: string[]): LineKind[] {
+//
+// `graceIdx`: when ≥ 0, that line's fence-open / fence-close detection
+// is SKIPPED. This is the "caret is currently in this line" case: the
+// fence kinds hide the entire textContent inside a `display:none`
+// marker span, so promoting the line to fence-* the moment the user
+// types the third backtick would strand the caret outside the line
+// (Chrome can't position inside hidden text) — subsequent keystrokes
+// land in the wrong DOM position and the markdown text reverses
+// ("```js" becomes "j```" because 'j' gets inserted before the hidden
+// marker). Treating the active line as if it had no fence prefix
+// keeps it as a body line during editing, with `````` visible; the
+// next reclassify (fires on the keystroke that moves the caret off
+// the line — usually Enter) promotes it to its real fence kind and
+// hides the marker as designed. Subsequent lines re-classify under
+// the now-correct in/out-of-block state.
+function classifyAllLines(texts: string[], graceIdx: number = -1): LineKind[] {
   const out: LineKind[] = []
   let inBlock = false
-  for (const text of texts) {
+  for (let i = 0; i < texts.length; i++) {
+    const text = texts[i]
+    const grace = i === graceIdx
     if (inBlock) {
-      if (text === '```') { out.push('code-fence-close'); inBlock = false }
-      else                { out.push('code-content') }
+      if (text === '```' && !grace) { out.push('code-fence-close'); inBlock = false }
+      else                          { out.push('code-content') }
     } else {
-      if (/^```/.test(text)) { out.push('code-fence-open'); inBlock = true }
-      else                   { out.push(lineKindFor(text)) }
+      if (/^```/.test(text) && !grace) { out.push('code-fence-open'); inBlock = true }
+      else                              { out.push(lineKindFor(text)) }
     }
   }
   return out
@@ -635,18 +652,27 @@ function inlineWrapAtCaretEdge(range: Range): HTMLElement | null {
   return null
 }
 
-// Cmd+B handler. Three behaviours:
-//   - Selection inside an existing <strong>: unbold (replace the
-//     whole strong with its inner text node — markers fall away with
-//     it). Uses direct DOM replacement; execCommand('insertText')
-//     silently no-ops for selections that span an element boundary
-//     in some Chromium versions.
+// Cmd+B handler. Four behaviours:
+//   - Collapsed selection INSIDE a <strong>: exit bold mode. Move
+//     the caret to line-level immediately after the strong; the
+//     existing bold is preserved (this is the Word / iA Writer /
+//     Typora idiom — Cmd+B at a collapsed cursor means "stop bolding
+//     what I type next," not "un-bold what I already typed").
+//     The beforeinput handler (inlineWrapAtCaretEdge case 2) catches
+//     the next keystroke and routes it to a fresh text-node sibling
+//     so typing produces plain text.
+//   - Non-empty selection INSIDE a <strong>: unbold (replace the
+//     whole strong with its inner text node). Uses direct DOM
+//     replacement; execCommand('insertText') silently no-ops for
+//     selections that span an element boundary in some Chromium
+//     versions. (Partial un-bolding — splitting the strong at the
+//     selection boundaries — is out of scope for this pass.)
 //   - Non-empty selection elsewhere: wrap the visible selected text
 //     with `**…**` via insertText. The next reclassify rebuilds the
 //     line and the new markers fold into a <strong>.
-//   - Collapsed selection: insert `****` and park the caret between
-//     the two pairs, so the user can type the bold word and the line
-//     reclassifies into a <strong> on the next input.
+//   - Collapsed selection elsewhere: insert `****` and park the caret
+//     between the two pairs, so the user can type the bold word and
+//     the line reclassifies into a <strong> on the next input.
 function toggleBoldAtSelection() {
   const sel = window.getSelection()
   if (!sel || sel.rangeCount === 0) return
@@ -656,8 +682,20 @@ function toggleBoldAtSelection() {
 
   const strong = strongAncestorOf(range.commonAncestorContainer)
   if (strong) {
-    // Toggle off — direct DOM replacement, then run the post-edit
-    // pipeline ourselves since no input event fires.
+    if (range.collapsed) {
+      // Exit bold mode. Caret moves to line-level right after the
+      // strong; nothing inside it is touched, so previously-typed
+      // bold text stays bold.
+      const r = document.createRange()
+      r.setStartAfter(strong)
+      r.collapse(true)
+      sel.removeAllRanges()
+      sel.addRange(r)
+      return
+    }
+    // Non-empty selection inside strong: unwrap. Direct DOM
+    // replacement, then run the post-edit pipeline ourselves since
+    // no input event fires.
     const inner = strong.childNodes[1]
     const innerText = (inner && inner.nodeType === Node.TEXT_NODE) ? (inner.textContent || '') : ''
     const textNode = document.createTextNode(innerText)
@@ -1010,7 +1048,21 @@ function reclassifyLines() {
   // rebuild any line whose DOM doesn't match its expected shape.
   const lines = Array.from(docEl.children) as HTMLElement[]
   const texts = lines.map((l) => l.textContent || '')
-  const kinds = classifyAllLines(texts)
+  // Find which line currently holds the caret. classifyAllLines will
+  // grant that line a "still being typed" pass on fence promotion so
+  // the user can finish typing `\`\`\`lang` without the marker
+  // snapping to display:none mid-keystroke.
+  let caretLineIdx = -1
+  {
+    const sel = window.getSelection()
+    const anchor = sel && sel.rangeCount > 0 ? sel.anchorNode : null
+    if (anchor) {
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].contains(anchor)) { caretLineIdx = i; break }
+      }
+    }
+  }
+  const kinds = classifyAllLines(texts, caretLineIdx)
   for (let idx = 0; idx < lines.length; idx++) {
     const el = lines[idx]
     if (!lineMatchesModel(el, kinds[idx])) {
@@ -2223,10 +2275,56 @@ function attachHandlers() {
       sel.removeAllRanges()
       sel.addRange(r)
       // The browser won't fire 'input' for a prevented insertion, so
-      // run the post-edit pipeline ourselves to reclassify and save.
+      // run the post-edit pipeline ourselves to reclassify, save and
+      // refresh annotation underline geometry (it depends on DOM
+      // ranges that just moved).
       reclassifyLines()
       updateEmptyState()
       scheduleSave()
+      renderAnnotationOverlay()
+      return
+    }
+
+    // Delete/Backspace near a hidden marker. Chrome's default
+    // `deleteContentForward` / `deleteContentBackward` treats a
+    // `display:none` marker span as zero-width and consumes it together with
+    // the visible character on its other side:
+    //   - `# Heading|` + Home + Delete → `eading` (body) — ate `# H`
+    //   - `# H|eading` + Backspace      → `eading` (body) — ate `# H`
+    // Both shapes are: cursor at offset N of a text node whose immediate
+    // previous sibling is a `.md-marker` span; N is 0 for Delete (the char
+    // to remove is at offset 0), 1 for Backspace (the char to remove is at
+    // offset 0, the cursor sits just past it). In each case we delete just
+    // the one visible character ourselves and leave the marker alone, so
+    // the line keeps its kind. Inline wrap markers (`**` / `` ` ``) get the
+    // same treatment: the inner text node of a <strong>/<code> sits right
+    // after a marker span, so the bug otherwise eats the opening delimiter.
+    if (t === 'deleteContentForward' || t === 'deleteContentBackward') {
+      const sel = window.getSelection()
+      if (!sel || sel.rangeCount === 0) return
+      const range = sel.getRangeAt(0)
+      if (!range.collapsed) return
+      const a = range.startContainer
+      if (a.nodeType !== Node.TEXT_NODE) return
+      const expectedOffset = (t === 'deleteContentForward') ? 0 : 1
+      if (range.startOffset !== expectedOffset) return
+      const prev = a.previousSibling
+      if (!prev || prev.nodeType !== Node.ELEMENT_NODE) return
+      if (!(prev as HTMLElement).classList.contains('md-marker')) return
+      const txt = a as Text
+      if ((txt.data || '').length === 0) return
+      e.preventDefault()
+      txt.deleteData(0, 1)
+      const r = document.createRange()
+      r.setStart(txt, 0)
+      r.collapse(true)
+      sel.removeAllRanges()
+      sel.addRange(r)
+      reclassifyLines()
+      updateEmptyState()
+      scheduleSave()
+      renderAnnotationOverlay()
+      return
     }
   })
 
@@ -2385,6 +2483,102 @@ function attachHandlers() {
                 r.collapse(true)
                 sel.removeAllRanges()
                 sel.addRange(r)
+              }
+            }
+          }
+        }
+      }
+    }
+    // Enter inside a list-item: continue the list. Two cases, mirroring
+    // every well-behaved markdown editor:
+    //   - Empty list item (text is just the marker): exit the list. The
+    //     current line becomes body. No new line is inserted; the user
+    //     started a list and then changed their mind, so we don't want to
+    //     leave them with a stray blank list item AND a blank body line.
+    //   - Non-empty: split at the cursor. Text before the cursor stays in
+    //     the current list item; text after the cursor goes to a new
+    //     list-item line below, prefixed with the appropriate marker
+    //     (`- ` for bullet, incremented `N. ` / `N) ` for numbered). The
+    //     cursor lands just after the new marker, ready for typing.
+    //   - Cursor inside / before the marker prefix: leave default Enter
+    //     behaviour alone. The user is editing the prefix itself; we
+    //     shouldn't try to split there.
+    if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      const sel = window.getSelection()
+      if (sel && sel.rangeCount > 0) {
+        const range = sel.getRangeAt(0)
+        if (range.collapsed) {
+          // Walk up from the caret container to the line div.
+          let n: Node | null = range.startContainer
+          let line: HTMLElement | null = null
+          while (n) {
+            if (n.nodeType === Node.ELEMENT_NODE
+                && (n as HTMLElement).classList?.contains('editor-line')) {
+              line = n as HTMLElement
+              break
+            }
+            n = n.parentNode
+          }
+          if (line && line.dataset.kind === 'list-item') {
+            const lineText = line.textContent || ''
+            const markerMatch = lineText.match(/^(?:- |\d+[.)] )/)
+            if (markerMatch) {
+              const marker = markerMatch[0]
+              const markerLen = marker.length
+              const cursorOffset = getCursorOffsetInLine(line) ?? 0
+              if (lineText.length <= markerLen) {
+                // Empty list item — exit the list.
+                e.preventDefault()
+                while (line.firstChild) line.removeChild(line.firstChild)
+                line.dataset.kind = 'body'
+                delete line.dataset.listMarker
+                line.appendChild(document.createElement('br'))
+                const r = document.createRange()
+                r.setStart(line, 0)
+                r.collapse(true)
+                sel.removeAllRanges()
+                sel.addRange(r)
+                reclassifyLines()
+                updateEmptyState()
+                scheduleSave()
+                renderAnnotationOverlay()
+                return
+              }
+              if (cursorOffset >= markerLen) {
+                // Non-empty + cursor past the marker — split here.
+                e.preventDefault()
+                const before = lineText.slice(0, cursorOffset)
+                const after = lineText.slice(cursorOffset)
+                let newMarker = '- '
+                const numMatch = marker.match(/^(\d+)([.)]) /)
+                if (numMatch) {
+                  // Rename to avoid shadowing the outer `n: Node | null`
+                  // walker variable used a few lines above.
+                  const nextNum = parseInt(numMatch[1], 10) + 1
+                  newMarker = `${nextNum}${numMatch[2]} `
+                }
+                // Rebuild current line with the `before` text.
+                const beforeKind = lineKindFor(before)
+                const freshBefore = buildLineEl(before, beforeKind)
+                line.dataset.kind = freshBefore.dataset.kind!
+                if (freshBefore.dataset.listMarker !== undefined) {
+                  line.dataset.listMarker = freshBefore.dataset.listMarker
+                } else {
+                  delete line.dataset.listMarker
+                }
+                line.innerHTML = ''
+                while (freshBefore.firstChild) line.appendChild(freshBefore.firstChild)
+                // Create the new line with `newMarker + after`.
+                const newLineText = newMarker + after
+                const newKind = lineKindFor(newLineText)
+                const newLine = buildLineEl(newLineText, newKind)
+                line.parentNode!.insertBefore(newLine, line.nextSibling)
+                setCursorOffsetInLine(newLine, newMarker.length)
+                reclassifyLines()
+                updateEmptyState()
+                scheduleSave()
+                renderAnnotationOverlay()
+                return
               }
             }
           }
