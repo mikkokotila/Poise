@@ -15,11 +15,11 @@
 // the agent's reply lives at `agent-interface --read-response <hash>`.
 
 import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { join, resolve, isAbsolute } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
-import { mkdir, writeFile, readdir, rename, rmdir, stat } from 'node:fs/promises'
+import { mkdir, writeFile, readFile, readdir, rename, rmdir, stat } from 'node:fs/promises'
 import { fetchAgentLogs } from './agent'
-import { readDoc } from './editor'
+import { readDoc, slugFromEditorSession } from './editor'
 
 const AGENT_INTERFACE = 'agent-interface'
 
@@ -101,6 +101,49 @@ function safeAttachmentName(raw: string): string {
 
 const ATTACHMENT_MAX_BYTES = 2 * 1024 * 1024       // 2 MB / file
 
+// Voice style guide read fresh on every editor-bound chat turn so
+// edits to the file land in the next message (matches the writer's
+// expectation that what they see is what the agent sees). Path comes
+// from POISE_VOICE_GUIDE_PATH; relative paths resolve from the server
+// cwd, absolute paths pass through. Capped at 64 KB — anything larger
+// almost certainly means the env var points at the wrong file, and
+// silently flooding the prompt would mask the misconfiguration.
+const VOICE_GUIDE_MAX_BYTES = 64 * 1024
+
+// Response-format contract injected into every editor-bound turn so
+// the chat-pane can render proposed changes as reviewable cards
+// instead of a wall of text. The model is free to ignore it for
+// discussion turns — the parser only kicks in when a reply starts
+// with `{`. Format is identical to Confab's edit-card schema so the
+// model's "I know this" priors carry over across vendors (opus, gpt,
+// gemini, grok all handle it cleanly in practice).
+const EDITOR_RESPONSE_FORMAT = [
+  '[Response format]',
+  'For free-form discussion, questions, or feedback: reply with plain prose.',
+  'For one or more specific edits to the document: reply with a single JSON object — no prose around it:',
+  '{"chat": "<your message to the user>", "edits": [{"description": "<short summary>", "context_before": "<short snippet just before the change>", "old": "<exact text to replace, verbatim from the document>", "new": "<replacement text>", "context_after": "<short snippet just after the change>"}]}',
+  'For a full document rewrite: reply with JSON:',
+  '{"chat": "<your message>", "document": "<full new markdown>"}',
+  'Rules: "old" must be a verbatim substring of the current document. Pure insertions use "old": "". Pure deletions use "new": "". context_before and context_after are short (a few words) and only needed to disambiguate when "old" appears more than once.',
+].join('\n')
+
+async function readVoiceGuide(): Promise<string | null> {
+  const envPath = process.env.POISE_VOICE_GUIDE_PATH
+  if (!envPath) return null
+  const path = isAbsolute(envPath) ? envPath : resolve(process.cwd(), envPath)
+  try {
+    const content = await readFile(path, 'utf-8')
+    if (Buffer.byteLength(content, 'utf-8') > VOICE_GUIDE_MAX_BYTES) {
+      console.warn(`[chat] voice guide at ${path} exceeds ${VOICE_GUIDE_MAX_BYTES} bytes — skipping`)
+      return null
+    }
+    return content
+  } catch (err: any) {
+    console.warn(`[chat] POISE_VOICE_GUIDE_PATH unreadable (${path}): ${err.message || err}`)
+    return null
+  }
+}
+
 export interface ChatLogEntry {
   id: string
   session_id: string
@@ -164,6 +207,39 @@ export async function sendChat(
     prompt += `\n\n[Attached files in cwd: ${names.join(', ')}]`
   }
 
+  // Editor-bound chats: prepend the voice guide and the doc's current
+  // body. agent-interface --chat resumes the model's session memory,
+  // but the writer is actively editing — we feed the latest state on
+  // every turn so the model sees what the user sees. Voice guide is
+  // editor-only (it's about prose, not card chats). Both are
+  // best-effort: missing voice guide or deleted doc just skip that
+  // section, the conversation continues.
+  const editorSlug = slugFromEditorSession(sessionId)
+  if (editorSlug) {
+    const sections: string[] = []
+    const voice = await readVoiceGuide()
+    if (voice) {
+      sections.push(`[Voice guide — the user's writing voice. Apply this style when proposing edits or generating prose.]\n${voice}`)
+    }
+    try {
+      const doc = await readDoc(editorSlug)
+      sections.push(`[Current document:]\n${doc.content}`)
+    } catch (err: any) {
+      if (err.code !== 'ENOENT') {
+        console.warn(`[chat] could not read editor doc ${editorSlug}: ${err.message || err}`)
+      }
+    }
+    // Response-format contract. The chat-pane is willing to parse a
+    // single JSON object from the reply when it carries an `edits`
+    // array or a `document` string; otherwise it renders the reply
+    // as prose. The directive ships every turn (alongside voice +
+    // doc) so a long-lived session can't drift off the contract.
+    sections.push(EDITOR_RESPONSE_FORMAT)
+    if (sections.length) {
+      prompt = `${sections.join('\n\n')}\n\n[User's message:]\n${prompt}`
+    }
+  }
+
   // If this session has prior /content invocations, inject the
   // CURRENT body of each authored article as context. The user might
   // have edited the article in the editor since it was authored —
@@ -212,6 +288,66 @@ export async function saveAttachment(
   const name = safeAttachmentName(filename)
   await writeFile(join(pwd, name), body)
   return { ok: true, name, size: body.byteLength }
+}
+
+// ── /consensus → agent-interface --debate ─────────────────────────────
+// Synchronous wrapper around the local `agent-interface --debate`
+// runner. The CLI writes a row to agent-interface's calls log when it
+// fires, so the run appears in Swarm alongside chat/pr_review/etc.
+// Returns the parsed `{synthesis, rounds}` payload verbatim so the
+// chat-pane can render the synthesis as an agent turn.
+const DEBATE_MAX_ROUNDS = 8
+// agent-interface --debate already caps each call at 60 min internally
+// (debate.py: timeout_s=3600 default). Poise's outer timeout is set
+// slightly higher (65 min) so the CLI gets to write `finish(...)`
+// before we'd ever SIGTERM it — otherwise the row stays stuck at
+// `running` in agent-interface's calls log and Swarm can't tell the
+// difference between "still going" and "Poise killed it."
+const DEBATE_TIMEOUT_MS = 65 * 60_000
+export interface DebateResult { synthesis: string; rounds: any[] }
+export async function runDebate(topic: string, rounds: number = 1): Promise<DebateResult> {
+  const t = String(topic || '').trim()
+  if (!t) throw new Error('topic is required')
+  const r = Math.min(Math.max(Number.isFinite(rounds) ? rounds : 1, 1), DEBATE_MAX_ROUNDS)
+  return new Promise<DebateResult>((resolve, reject) => {
+    const child = spawn(
+      AGENT_INTERFACE,
+      ['--debate', t, '--rounds', String(r)],
+      { cwd: agentInterfaceCwd() },
+    )
+    let stdout = ''
+    let stderr = ''
+    const killer = setTimeout(() => { try { child.kill('SIGTERM') } catch { /* ignore */ } }, DEBATE_TIMEOUT_MS)
+    child.stdout.on('data', (d) => { stdout += d.toString() })
+    child.stderr.on('data', (d) => { stderr += d.toString() })
+    child.on('error', (err) => { clearTimeout(killer); reject(err) })
+    child.on('close', (code) => {
+      clearTimeout(killer)
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || stdout.trim() || `agent-interface --debate exited ${code}`))
+        return
+      }
+      try {
+        // The CLI wraps the debate output as
+        //   { id, model, rounds, response: "<json-string>" }
+        // where `response` is itself JSON containing {synthesis, rounds}.
+        // Unwrap one level to get the actual payload.
+        const wrapper = JSON.parse(stdout.trim()) as { response?: string }
+        if (typeof wrapper.response !== 'string') {
+          reject(new Error('debate output missing wrapper.response'))
+          return
+        }
+        const inner = JSON.parse(wrapper.response) as Partial<DebateResult>
+        if (typeof inner.synthesis !== 'string' || !Array.isArray(inner.rounds)) {
+          reject(new Error('debate inner payload missing synthesis or rounds'))
+          return
+        }
+        resolve({ synthesis: inner.synthesis, rounds: inner.rounds })
+      } catch (err) {
+        reject(new Error(`debate JSON parse failed: ${(err as Error).message}`))
+      }
+    })
+  })
 }
 
 // ── /content slash-command bridge ─────────────────────────────────────

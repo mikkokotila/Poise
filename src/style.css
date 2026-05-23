@@ -2397,6 +2397,18 @@ body:has(#settings-panel.open) #top-nav {
 #view-swarm tbody td.elapsed-cell { text-align: right; }
 #view-swarm tbody td.replay-cell  { text-align: center; }
 
+/* Soft fade when the 30s ticker advances a Started value (3m → 4m).
+   The class is re-added on each change; the keyframe restart trick
+   (offsetWidth read) replays it. Purely cosmetic — a quiet nod that
+   the column is live, not a hard text snap. */
+@keyframes swarm-date-tick {
+  from { opacity: 0.3; }
+  to   { opacity: 1; }
+}
+#view-swarm tbody td.started-cell .date.date-tick {
+  animation: swarm-date-tick 380ms ease-out;
+}
+
 /* Distinct cell flavors */
 .agent-model {
   font-size: 0.75rem;
@@ -2862,6 +2874,176 @@ tr:hover .replay-btn { opacity: 1; }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Edit cards — rendered when the chat-pane is opened with
+   parseEdits: true (currently: the editor's toolbar chat) and the
+   agent reply parses cleanly into a StructuredReply with edits.
+   Inert in this slice — no accept/decline, no hover-to-doc coupling.
+   The card sits below the agent's `chat` prose, indented a touch so
+   it reads as "attached to" that turn rather than free-floating.
+   Visual idiom: subtle tinted rows for old/new, with a leading -/+
+   mark in the gutter so the diff direction reads even before colour. */
+.chat-edit-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0 var(--sp-3);
+  width: 100%;
+}
+.chat-edit-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+.chat-edit-card-desc {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  margin-bottom: 2px;
+}
+.chat-edit-card-old,
+.chat-edit-card-new {
+  display: flex;
+  gap: var(--sp-2);
+  padding: 2px var(--sp-2);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.chat-edit-card-old {
+  background: var(--tint-a5);
+  color: var(--text);
+}
+.chat-edit-card-old .chat-edit-card-text {
+  text-decoration: line-through;
+  text-decoration-color: var(--red-soft);
+  opacity: 0.78;
+}
+.chat-edit-card-new {
+  background: var(--tint-a3);
+  color: var(--text);
+}
+.chat-edit-card-mark {
+  flex: 0 0 1ch;
+  text-align: center;
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-weight: 600;
+  user-select: none;
+}
+.chat-edit-card-old .chat-edit-card-mark { color: var(--red); }
+.chat-edit-card-new .chat-edit-card-mark { color: var(--green); }
+.chat-edit-card-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* Full-rewrite stub — visible placeholder until the rewrite viewer
+   binds in a later slice. Keeps the same card shell so the layout
+   doesn't reorganise when rewrites later get a richer surface. */
+.chat-edit-card[data-kind="rewrite"] {
+  background: var(--tint-a1);
+}
+
+/* Action row: accept / decline buttons or terminal-state badges. Sits
+   below the diff rows, right-aligned so the eye lands on the chat
+   text and diff first, the decision controls second. */
+.chat-edit-card-actions {
+  display: flex;
+  gap: var(--sp-2);
+  justify-content: flex-end;
+  align-items: center;
+  margin-top: var(--sp-2);
+}
+.chat-edit-card-btn {
+  appearance: none;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--hairline);
+  background: var(--bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.chat-edit-card-btn:hover {
+  border-color: var(--text-tertiary);
+  color: var(--text);
+}
+.chat-edit-card-accept:hover {
+  background: var(--tint-a3);
+  border-color: var(--green-soft);
+  color: var(--green);
+}
+.chat-edit-card-decline:hover {
+  background: var(--tint-a5);
+  border-color: var(--red-soft);
+  color: var(--red);
+}
+.chat-edit-card-badge {
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  white-space: nowrap;
+}
+.chat-edit-card-badge-applied {
+  background: var(--tint-a3);
+  color: var(--green);
+}
+.chat-edit-card-badge-declined {
+  background: var(--surface);
+  color: var(--text-tertiary);
+}
+.chat-edit-card-badge-conflict {
+  background: var(--tint-a5);
+  color: var(--red);
+  margin-right: auto;             /* push buttons to the right of the badge */
+}
+
+/* Terminal-state cards (applied / declined) fade their content so
+   they read as "done" rather than inviting re-engagement. The diff
+   rows lose their tint, the description goes tertiary, and the whole
+   card sits at lower opacity overall. */
+.chat-edit-card[data-state="applied"],
+.chat-edit-card[data-state="declined"] {
+  opacity: 0.7;
+}
+.chat-edit-card[data-state="applied"]   .chat-edit-card-old,
+.chat-edit-card[data-state="declined"]  .chat-edit-card-old,
+.chat-edit-card[data-state="applied"]   .chat-edit-card-new,
+.chat-edit-card[data-state="declined"]  .chat-edit-card-new {
+  background: transparent;
+}
+.chat-edit-card[data-state="conflict"] {
+  border-color: var(--red-soft);
+}
+
+/* Hover-highlight overlay rendered into .editor-annotations when the
+   user mouses over an edit card. Pointer-events disabled — this is a
+   transient visual cue, not interactive — so clicks still reach the
+   underlying contenteditable surface. The amber tone is distinct
+   from the annotation underline (which uses the same amber but as a
+   bottom stripe, not a fill) so the two surfaces don't compete. The
+   fade-in keeps the highlight from punching the page on first hover. */
+.edit-hover-mark {
+  position: absolute;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--a4, #c89b3c) 18%, transparent);
+  border-radius: 3px;
+  animation: edit-hover-mark-in 140ms ease-out;
+}
+@keyframes edit-hover-mark-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
 
 /* Small "/content" tag prepended to the user-bubble of an

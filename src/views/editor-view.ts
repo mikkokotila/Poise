@@ -134,6 +134,11 @@ const ICON_CHECK = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none">
 // vocabulary, reads as a mode toggle without a label.
 const ICON_FOCUS_ENTER = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 5V2h3M9 2h3v3M2 9v3h3M9 12h3V9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>'
 const ICON_FOCUS_EXIT  = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M5 2v3H2M9 5h3V2M5 12V9H2M9 9v3h3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+// Speech-bubble with two short message-lines inside — reads as "chat
+// thread" rather than the empty comment-bubble used by the floating
+// per-selection annotation button. Same 14×14 stroke weight as the
+// rest of the bar so the row stays visually even.
+const ICON_CHAT  = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 3.5a1.5 1.5 0 0 1 1.5-1.5h7A1.5 1.5 0 0 1 12 3.5v5A1.5 1.5 0 0 1 10.5 10H6l-2.5 2V10A1.5 1.5 0 0 1 2 8.5v-5z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M4.5 5h5M4.5 7h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>'
 
 function renderShell(): string {
   // .view-header carries the standard cross-view alignment (vertical
@@ -147,6 +152,7 @@ function renderShell(): string {
         <button type="button" class="editor-bar-btn editor-focus-btn"  title="Writer mode" aria-label="Toggle writer mode" aria-pressed="false">${ICON_FOCUS_ENTER}</button>
         <button type="button" class="editor-bar-btn editor-new-btn"    title="New (⌘N)" aria-label="New">${ICON_PLUS}</button>
         <button type="button" class="editor-bar-btn editor-copy-btn"   title="Copy document" aria-label="Copy document">${ICON_COPY}</button>
+        <button type="button" class="editor-bar-btn editor-chat-btn"   title="Chat about this document" aria-label="Open chat">${ICON_CHAT}</button>
         <button type="button" class="editor-bar-btn editor-delete-btn" title="Delete" aria-label="Delete">${ICON_TRASH}</button>
       </div>
       <div class="editor-bar-right">
@@ -1262,6 +1268,265 @@ async function deleteCurrent() {
   }
 }
 
+// Toolbar chat button: fetch (or mint) the long-lived chat session
+// bound to this doc, then hand off to the shared chat pane via
+// `poise:open-chat`. The session_id is stable per-doc — reopening
+// the chat for the same doc resumes the same conversation. The pane
+// itself is the modular `src/views/chat-pane.ts` already used by the
+// card-chats; we just bring it up with a doc-scoped session id and
+// the doc's current title as the header label.
+async function openChatForCurrentDoc(): Promise<void> {
+  if (!currentSlug) return
+  const slug = currentSlug
+  try {
+    const res = await fetch(`/api/editor/doc/${encodeURIComponent(slug)}/chat-session`)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json() as { session_id: string }
+    if (!data.session_id) throw new Error('no session_id in response')
+    const d = currentDoc()
+    const label = d?.title || slug
+    // parseEdits: true asks the chat-pane to interpret JSON replies as
+    // edit-card proposals (matched against the response-format
+    // directive injected server-side for editor sessions). The four
+    // callbacks bind the cards to *this* doc: hover → highlight +
+    // smooth scroll-to-center; accept → mutate the doc + save;
+    // decline → no-op on the doc side.
+    window.dispatchEvent(new CustomEvent('poise:open-chat', {
+      detail: {
+        session: data.session_id,
+        label,
+        parseEdits: true,
+        onEditHover: (edit: EditCardData) => { showEditHoverHighlight(edit) },
+        onEditLeave: () => { clearEditHoverHighlight() },
+        onEditAccept: (edit: EditCardData) => applyEditToDoc(edit),
+        onEditDecline: () => { /* no doc-side work; pane updates its own state */ },
+      },
+    }))
+  } catch (err) {
+    console.error('[editor] openChatForCurrentDoc failed:', err)
+  }
+}
+
+// ── Edit-card binding ────────────────────────────────────────────────
+//
+// The chat-pane fires hover / accept / decline events on edit cards
+// and passes back a plain-object EditCardData shape (mirrors the
+// EditProposal interface in chat-pane.ts — kept local here so the
+// editor doesn't import from a sibling view). The host's job is:
+//   - hover  → locate the `old` text in the doc and visually highlight
+//              it; smooth-scroll the highlight into vertical centre.
+//   - accept → apply the patch (replace `old` with `new`, or insert
+//              after `context_before` for a pure insertion), then
+//              save. Returns 'applied' or 'conflict' so the pane can
+//              update card state accordingly.
+//   - decline → nothing on the doc; pane handles its own visual.
+//
+// All locate operations work in the same character-offset space as
+// the existing annotation system (sum of textContent across lines,
+// joined by '\n'). Disambiguation when `old` appears more than once
+// uses context_before / context_after as anchors — the same model
+// the response-format directive promises.
+
+interface EditCardData {
+  description?: string
+  context_before?: string
+  old: string
+  new: string
+  context_after?: string
+}
+
+// Snapshot of the doc as a flat string + a line-prefix table for
+// converting global char offsets back into (line, lineOffset) pairs.
+// One walk per call — cheap, and the alternative (cached + invalidated
+// on every keystroke) would be drift-prone.
+function docTextSnapshot(): { text: string, lineStarts: number[] } {
+  if (!docEl) return { text: '', lineStarts: [0] }
+  const lines: string[] = []
+  for (const child of Array.from(docEl.children)) {
+    lines.push((child as HTMLElement).textContent || '')
+  }
+  const text = lines.join('\n')
+  const lineStarts: number[] = [0]
+  let acc = 0
+  for (let i = 0; i < lines.length - 1; i++) {
+    acc += lines[i].length + 1                 // +1 for the '\n'
+    lineStarts.push(acc)
+  }
+  return { text, lineStarts }
+}
+
+// Locate the edit's target in the doc as a global char-offset range.
+// Returns null if `old` isn't findable, or is findable in multiple
+// places that context_before / context_after can't disambiguate.
+// For pure insertions (old=""): the "range" is a zero-width slot
+// positioned right after context_before's occurrence; we never insert
+// blind into an ambiguous doc.
+function findCharRangeForEdit(text: string, edit: EditCardData): { start: number, end: number } | null {
+  const before = edit.context_before || ''
+  const after  = edit.context_after  || ''
+  if (edit.old === '') {
+    if (!before) return null            // pure insertion with no anchor is unsafe
+    // Disambiguate context_before by context_after if both given.
+    const occurrences = allOccurrences(text, before)
+    if (occurrences.length === 0) return null
+    if (occurrences.length === 1) {
+      const pos = occurrences[0] + before.length
+      return { start: pos, end: pos }
+    }
+    for (const idx of occurrences) {
+      const followStart = idx + before.length
+      const follow = text.slice(followStart, followStart + after.length)
+      if (after && follow === after) return { start: followStart, end: followStart }
+    }
+    return null
+  }
+  const occurrences = allOccurrences(text, edit.old)
+  if (occurrences.length === 0) return null
+  if (occurrences.length === 1) {
+    return { start: occurrences[0], end: occurrences[0] + edit.old.length }
+  }
+  // Multiple matches — refuse to guess. At least one context anchor
+  // must be supplied and must positively single out an occurrence;
+  // otherwise the host treats it as a conflict and the user can ask
+  // the model to provide context.
+  if (!before && !after) return null
+  for (const idx of occurrences) {
+    const leftStart = Math.max(0, idx - before.length)
+    const left = text.slice(leftStart, idx)
+    const rightEnd = idx + edit.old.length + after.length
+    const right = text.slice(idx + edit.old.length, rightEnd)
+    if ((!before || left === before) && (!after || right === after)) {
+      return { start: idx, end: idx + edit.old.length }
+    }
+  }
+  return null
+}
+
+function allOccurrences(text: string, needle: string): number[] {
+  if (!needle) return []
+  const out: number[] = []
+  let from = 0
+  while (true) {
+    const idx = text.indexOf(needle, from)
+    if (idx < 0) break
+    out.push(idx)
+    from = idx + 1
+  }
+  return out
+}
+
+// Convert a global char range into a DOM Range, using the line-prefix
+// table from docTextSnapshot. For zero-width "ranges" (insertion
+// points) we collapse the Range to that exact position so a single
+// caret-like rect can be measured for highlight + scroll purposes.
+function domRangeForCharRange(snap: { text: string, lineStarts: number[] }, start: number, end: number): Range | null {
+  if (!docEl) return null
+  const lines = Array.from(docEl.children) as HTMLElement[]
+  const startLineIdx = locateLine(snap.lineStarts, start)
+  const endLineIdx   = locateLine(snap.lineStarts, end)
+  const startLine = lines[startLineIdx]
+  const endLine   = lines[endLineIdx]
+  if (!startLine || !endLine) return null
+  const startOff = start - snap.lineStarts[startLineIdx]
+  const endOff   = end   - snap.lineStarts[endLineIdx]
+  const s = textNodeAtOffset(startLine, startOff)
+  const e = textNodeAtOffset(endLine,   endOff)
+  if (!s || !e) return null
+  try {
+    const range = document.createRange()
+    range.setStart(s.node, s.offset)
+    range.setEnd(e.node, e.offset)
+    return range
+  } catch { return null }
+}
+
+function locateLine(lineStarts: number[], charIdx: number): number {
+  // Linear walk — line count is small (writer docs, not log files);
+  // bisection is bloat for the scale we're at.
+  for (let i = lineStarts.length - 1; i >= 0; i--) {
+    if (lineStarts[i] <= charIdx) return i
+  }
+  return 0
+}
+
+// Hover overlay — rendered into the same .editor-annotations container
+// as the annotation marks, but with a different class so the visual
+// reads as a transient "the model is talking about this" highlight
+// rather than a persistent annotation underline. Replaced (not
+// appended to) on every hover so a fast move between cards doesn't
+// pile up stale marks.
+function showEditHoverHighlight(edit: EditCardData): void {
+  clearEditHoverHighlight()
+  if (!docEl || !overlayEl) return
+  const snap = docTextSnapshot()
+  const charRange = findCharRangeForEdit(snap.text, edit)
+  if (!charRange) return                       // host silently does nothing; conflict surfaces on accept
+  // For pure insertions, expand the zero-width range a tiny bit to
+  // the LEFT so the user still sees a visible mark at the insertion
+  // point. One char of context is enough to draw something.
+  let start = charRange.start
+  let end = charRange.end
+  if (start === end && start > 0) start -= 1
+  const range = domRangeForCharRange(snap, start, end)
+  if (!range) return
+  const page = overlayEl.parentElement as HTMLElement | null
+  if (!page) return
+  const pageRect = page.getBoundingClientRect()
+  const rects = Array.from(range.getClientRects())
+  let firstMark: HTMLElement | null = null
+  for (const rect of rects) {
+    if (rect.width < 0.5 && rect.height < 0.5) continue
+    const mark = document.createElement('div')
+    mark.className = 'edit-hover-mark'
+    mark.style.left   = (rect.left   - pageRect.left) + 'px'
+    mark.style.top    = (rect.top    - pageRect.top)  + 'px'
+    mark.style.width  = Math.max(rect.width, 2) + 'px'      // 2px floor so zero-width insertions render
+    mark.style.height = rect.height + 'px'
+    overlayEl.appendChild(mark)
+    if (!firstMark) firstMark = mark
+  }
+  // Smooth-scroll the first rect into vertical centre. Native
+  // scrollIntoView with block: 'center' handles both directions and
+  // the right scroll container automatically — no need to walk
+  // overflow ancestors ourselves.
+  if (firstMark) firstMark.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
+
+function clearEditHoverHighlight(): void {
+  if (!overlayEl) return
+  overlayEl.querySelectorAll('.edit-hover-mark').forEach((el) => el.remove())
+}
+
+// Apply an edit to the doc. We work at the markdown source level —
+// serialize, splice, re-render — so line classification (headings,
+// list items, code fences) re-flows cleanly from the new text without
+// us replicating that logic at the DOM level. The cost is losing the
+// caret position, but for an explicit accept gesture that's expected:
+// the user just made a deliberate change to the doc, they aren't in
+// the middle of typing somewhere else.
+// Returns 'applied' (success, save scheduled) or 'conflict' (the
+// edit's `old` could no longer be located — the pane shows the card
+// as conflict so the user can try again after fixing the drift).
+function applyEditToDoc(edit: EditCardData): 'applied' | 'conflict' {
+  if (!docEl) return 'conflict'
+  const snap = docTextSnapshot()
+  const charRange = findCharRangeForEdit(snap.text, edit)
+  if (!charRange) return 'conflict'
+  const next = snap.text.slice(0, charRange.start) + edit.new + snap.text.slice(charRange.end)
+  loadIntoEditor(next)
+  // After re-render, scroll the (now visible) `new` text into view.
+  const afterSnap = docTextSnapshot()
+  const lineIdx = locateLine(afterSnap.lineStarts, charRange.start)
+  const lines = Array.from(docEl.children) as HTMLElement[]
+  const target = lines[lineIdx]
+  if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  // Refresh annotation overlay (line count / positions may have
+  // shifted) and trigger the autosave so the change persists.
+  renderAnnotationOverlay()
+  scheduleSave()
+  return 'applied'
+}
+
 async function flushSave() {
   if (!docEl || !currentSlug || saveInFlight) return
   saveInFlight = true
@@ -1893,6 +2158,8 @@ function attachHandlers() {
     .addEventListener('click', () => { void deleteCurrent() })
   copyBtnEl = viewEl.querySelector<HTMLButtonElement>('.editor-copy-btn')!
   copyBtnEl.addEventListener('click', () => { void copyDoc() })
+  viewEl.querySelector<HTMLButtonElement>('.editor-chat-btn')!
+    .addEventListener('click', () => { void openChatForCurrentDoc() })
 
   const focusBtn = viewEl.querySelector<HTMLButtonElement>('.editor-focus-btn')!
   focusBtn.addEventListener('click', () => {

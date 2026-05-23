@@ -3,9 +3,9 @@ import { getSettings, setSettings } from './settings'
 import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, type Lane } from './current'
 import { handleGhBody, listOrgRepos } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, triggerPrReview, replayAgentJob } from './agent'
-import { listChatHistory, sendChat, saveAttachment, startAuthorContent, authorContentStatus, contentSlugForCallId } from './chat'
-import { listDocs, readDoc, writeDoc, deleteDoc, newSlug, readAnnotations, writeAnnotations } from './editor'
-import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, getEnabledMap, getSettingMap, isValidSetting, startBehaviorsRuntime, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
+import { listChatHistory, sendChat, saveAttachment, startAuthorContent, authorContentStatus, contentSlugForCallId, runDebate } from './chat'
+import { listDocs, readDoc, writeDoc, deleteDoc, newSlug, readAnnotations, writeAnnotations, getOrCreateChatSession } from './editor'
+import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, getEnabledMap, getSettingMap, isValidSetting, startBehaviorsRuntime, getResolveUnblockingLastFired, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
 
 function json(res: any, status: number, body: unknown) {
   res.statusCode = status
@@ -143,12 +143,15 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
               lastTriggered: lastFor('pr_approve'),
             },
             // resolve-unblocking calls github-interface directly (no
-            // agent), so no priority setting and no log surface today.
+            // agent), so it has no agent-interface log surface. Its
+            // lastTriggered is instead persisted by the behavior
+            // itself in cache.db meta whenever it actually resolves a
+            // conversation — getResolveUnblockingLastFired reads it.
             'resolve-unblocking': {
               owner: opts.reviewAgentUsername || null,
               enabled: enabled['resolve-unblocking'],
               setting: null,
-              lastTriggered: null,
+              lastTriggered: getResolveUnblockingLastFired(),
             },
           })
         }
@@ -305,6 +308,22 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
           }
         }
 
+        // ── /api/debate — wraps agent-interface --debate ──
+        // Routed here by the chat-pane's `/consensus` slash command.
+        // Synchronous: blocks until the local multi-model debate
+        // completes, then returns the parsed JSON {synthesis, rounds}.
+        // agent-interface logs the call so it appears in Swarm.
+        if (url === '/api/debate' && req.method === 'POST') {
+          try {
+            const raw = await readBody(req)
+            const body = raw ? JSON.parse(raw) : {}
+            const result = await runDebate(String(body.topic || ''), Number(body.rounds || 1))
+            return json(res, 200, result)
+          } catch (err: any) {
+            return json(res, 500, { error: err?.message || String(err) })
+          }
+        }
+
         // ── /api/pr-review — kick off agent-interface --pr-review ──
         // Body: { url } where url is a github PR URL. Resolves the
         // local checkout path via github-interface, then spawns the
@@ -412,6 +431,23 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
             return json(res, 200, result)
           } catch (err: any) {
             return json(res, 400, { error: err.message || String(err) })
+          }
+        }
+
+        // ── /api/editor/doc/:slug/chat-session — per-doc long-lived chat ──
+        // GET returns the doc's chat session (minting on first call),
+        // so the editor can dispatch `poise:open-chat` against the
+        // existing chat-pane with a stable session_id. The transcript
+        // itself lives in agent-interface's DB — we only persist the
+        // session_id (in <slug>.chat.json) so we can resume the same
+        // conversation forever.
+        const editorChatMatch = url.match(/^\/api\/editor\/doc\/([A-Za-z0-9._-]+)\/chat-session$/)
+        if (editorChatMatch && req.method === 'GET') {
+          try {
+            const result = await getOrCreateChatSession(editorChatMatch[1])
+            return json(res, 200, result)
+          } catch (err: any) {
+            return json(res, 500, { error: err.message || String(err) })
           }
         }
 

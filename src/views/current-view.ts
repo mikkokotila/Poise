@@ -195,6 +195,12 @@ function shortRepo(fullRepo: string): string {
 }
 
 function isFresh(item: LiveItem): boolean {
+  // "Fresh" is a stripe that says "newly opened, hasn't gathered review
+  // signal yet" — it must not survive closure. A PR that was opened and
+  // merged within the same 6-hour window would otherwise keep the blue
+  // stripe even after merging, contradicting the merged/closed state
+  // already rendered in its meta row.
+  if (item.state !== 'open') return false
   return Date.now() - new Date(item.created_at).getTime() < FRESH_WINDOW_MS
 }
 

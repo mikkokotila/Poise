@@ -194,21 +194,21 @@ function renderShell() {
   })
 }
 
-function buildMainRow(e: LogEntry): HTMLTableRowElement {
-  const tr = document.createElement('tr')
-  tr.className = 'agent-row'
-  tr.dataset.id = e.id
-  tr.dataset.hash = e.response || ''
+// Cell markup for one agent-call row. Split out from buildMainRow so
+// the FLIP path can refresh an *existing* row's cells in place — every
+// value here (status, started, elapsed) is recomputed each call, so a
+// reused row stops freezing at its first-render values.
+// Prompt column dropped — agent-interface behaviors are mostly
+// input-driven (pr_review takes a PR id, mergeable takes a PR), so
+// the prompt field is empty for almost every row. The full prompt
+// is still visible inside the expanded response view when relevant.
+function mainRowInnerHTML(e: LogEntry): string {
   const hasResponse = !!e.response
   const isOpen = expanded.has(e.id)
   const btn = hasResponse
     ? `<button class="expand-btn${isOpen ? ' open' : ''}" title="${isOpen ? 'Hide response' : 'View response'}" aria-label="Toggle response">${CHEV_SVG}</button>`
     : ''
-  // Prompt column dropped — agent-interface behaviors are mostly
-  // input-driven (pr_review takes a PR id, mergeable takes a PR), so
-  // the prompt field is empty for almost every row. The full prompt
-  // is still visible inside the expanded response view when relevant.
-  tr.innerHTML = `
+  return `
     <td>${modelCell(e.model)}</td>
     <td>${behaviorCell(e.behavior)}</td>
     <td>${targetCell(e)}</td>
@@ -218,6 +218,14 @@ function buildMainRow(e: LogEntry): HTMLTableRowElement {
     <td class="replay-cell">${replayCell(e)}</td>
     <td class="action-cell">${btn}</td>
   `
+}
+
+function buildMainRow(e: LogEntry): HTMLTableRowElement {
+  const tr = document.createElement('tr')
+  tr.className = 'agent-row'
+  tr.dataset.id = e.id
+  tr.dataset.hash = e.response || ''
+  tr.innerHTML = mainRowInnerHTML(e)
   return tr
 }
 
@@ -274,6 +282,14 @@ function applySwarmFlip(nextEntries: LogEntry[]) {
   for (const e of nextEntries) {
     const main = existingMain.get(e.id)
     if (main) {
+      // Reused row: refresh its cells from the latest data. Without
+      // this the row keeps its first-render values forever (Started
+      // frozen, status stuck at 'running'). The <tr> element identity
+      // is preserved, so the FLIP slide animation is unaffected — only
+      // the innards are swapped. dataset.hash too: a row going
+      // running→completed gains a response hash.
+      main.dataset.hash = e.response || ''
+      main.innerHTML = mainRowInnerHTML(e)
       fragment.appendChild(main)
     } else {
       const row = buildMainRow(e)
@@ -504,6 +520,35 @@ async function pollOnce() {
   }
 }
 
+// The Started column shows a relative time ("3m") computed at render.
+// Polling only re-renders every 1–5 min, so between polls every
+// Started cell is stale. This ticker re-derives just the Started text
+// from data already in hand — no fetch — every 30s, so the column
+// stays live. A changed value gets a `.date-tick` class for a soft
+// fade. Created once; cheap enough (a handful of text comparisons) to
+// leave running for the app's lifetime.
+const STARTED_TICK_MS = 30_000
+let startedTickTimer: ReturnType<typeof setInterval> | null = null
+
+function refreshStartedCells(): void {
+  if (!bodyEl) return
+  for (const row of bodyEl.querySelectorAll<HTMLElement>('.agent-row')) {
+    const id = row.dataset.id
+    if (!id) continue
+    const e = entries.find((x) => x.id === id)
+    if (!e) continue
+    const cell = row.querySelector<HTMLElement>('.started-cell .date')
+    if (!cell) continue
+    const next = startedRel(e.started_at)
+    if (cell.textContent !== next) {
+      cell.textContent = next
+      cell.classList.remove('date-tick')
+      void cell.offsetWidth                          // restart the keyframe
+      cell.classList.add('date-tick')
+    }
+  }
+}
+
 export async function initSwarmView() {
   viewEl = document.getElementById('view-swarm')!
   if (!initialized) {
@@ -513,6 +558,7 @@ export async function initSwarmView() {
   }
   await pollOnce()
   startSwarmPolling()
+  if (!startedTickTimer) startedTickTimer = setInterval(refreshStartedCells, STARTED_TICK_MS)
 }
 
 export function stopSwarmRefresh() {

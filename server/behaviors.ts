@@ -20,6 +20,7 @@ import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { mkdir } from 'node:fs/promises'
 import { getMeta, setMeta, claimSeen, recordSeen, hasSeenAny, clearSeen } from './db'
+import { getHeadSha } from './gh'
 
 const execFileP = promisify(execFile)
 const DATASTORE = 'github-datastore'
@@ -146,7 +147,16 @@ async function snapshotReviewNewPrs(): Promise<void> {
   try {
     const prs = await listOpenPrsByAuthor(author)
     for (const p of prs) {
-      recordSeen('review-new-prs', `${p.repo}#${p.number}`)
+      try {
+        const sha = await getHeadSha(p.repo, p.number)
+        recordSeen('review-new-prs', `${p.repo}#${p.number}@${sha}`)
+      } catch (err) {
+        // Couldn't get head_sha right now — skip silently; the next
+        // tick will re-attempt and either snapshot or claim. Better
+        // to under-stamp the snapshot than to leave an unsuffixed key
+        // that would never match the new format.
+        console.warn(`[behaviors] snapshot head_sha failed for ${p.repo}#${p.number}:`, err)
+      }
     }
   } catch (err) {
     console.error('[behaviors] snapshot failed:', err)
@@ -156,6 +166,23 @@ async function snapshotReviewNewPrs(): Promise<void> {
 async function tickReviewNewPrs(): Promise<void> {
   const author = getMeta('me') || ''
   if (!author) return
+  const reviewer = reviewAgentUsername
+
+  // The dedupe key shape changed in keyver=2: from `${repo}#${number}`
+  // to `${repo}#${number}@${head_sha}`, so a force-push (or any new
+  // commit) is recognised as a fresh target for re-review. Without
+  // this migration, every currently-open PR would fire on the very
+  // next tick after deploy (their old keys don't match the new
+  // shape). Wipe + re-snapshot brings the ledger in sync with the
+  // current head of each open PR; subsequent ticks then only see new
+  // shas as new work.
+  if (getMeta('behavior_review_new_prs_keyver') !== '2') {
+    clearSeen('review-new-prs')
+    setMeta('behavior_review_new_prs_keyver', '2')
+    await snapshotReviewNewPrs()
+    return
+  }
+
   // First tick after boot/enable with no snapshot — take one and bail.
   if (!hasSeenAny('review-new-prs')) {
     await snapshotReviewNewPrs()
@@ -165,15 +192,36 @@ async function tickReviewNewPrs(): Promise<void> {
   try {
     const prs = await listOpenPrsByAuthor(author)
     for (const pr of prs) {
-      const key = `${pr.repo}#${pr.number}`
-      // Atomic claim: exactly one caller succeeds for any given key
-      // across all concurrent runtimes. Losers skip silently.
-      if (!claimSeen('review-new-prs', key)) continue
       try {
+        const sha = await getHeadSha(pr.repo, pr.number)
+        const key = `${pr.repo}#${pr.number}@${sha}`
+        // Atomic claim: exactly one caller succeeds for any given key
+        // across all concurrent runtimes. Losers skip silently.
+        if (!claimSeen('review-new-prs', key)) continue
+
+        // Guard against double-firing with approve-prs: if bit-mis has
+        // an outstanding CHANGES_REQUESTED on this PR, the follow-up
+        // loop is approve-prs's job. The claim still consumed the key,
+        // so we don't try again on the same head; approve-prs will
+        // re-evaluate as the author commits accumulate.
+        if (reviewer) {
+          try {
+            const ch = await checkChangesAddressed(pr.repo, pr.number, reviewer)
+            if (ch.has_change_request) {
+              console.log(`[behaviors] review-new-prs skipped for ${pr.repo}#${pr.number}@${sha.slice(0, 8)} — outstanding CHANGES_REQUESTED, approve-prs owns it`)
+              continue
+            }
+          } catch (err) {
+            // If the check itself fails (rate-limit / network), fall
+            // through and fire — over-reviewing is the safer regression.
+            console.warn(`[behaviors] checkChangesAddressed failed for ${pr.repo}#${pr.number}, firing anyway:`, err)
+          }
+        }
+
         await fireReview(pr, setting)
-        console.log(`[behaviors] review-new-prs fired for ${key} (p=${setting})`)
+        console.log(`[behaviors] review-new-prs fired for ${pr.repo}#${pr.number}@${sha.slice(0, 8)} (p=${setting})`)
       } catch (err) {
-        console.error(`[behaviors] fireReview failed for ${key}:`, err)
+        console.error(`[behaviors] review-new-prs step failed for ${pr.repo}#${pr.number}:`, err)
       }
     }
   } catch (err) {
@@ -197,12 +245,13 @@ async function tickReviewNewPrs(): Promise<void> {
 interface ChangesAddressedResult {
   has_change_request: boolean
   latest_request_at: string
-  // Strictly-increasing counter of author commits since the most
-  // recent reviewer review; resets to 0 whenever the reviewer posts
-  // another review (latest_request_at advances). This is the version
-  // the dedupe ledger keys off — every new push by the author bumps
-  // it, every bumps means "look at this again".
+  // Both counters reset to 0 whenever the reviewer posts another
+  // review (latest_request_at advances) and strictly increase as the
+  // author engages — either by pushing a commit or by replying to a
+  // review thread. Either kind of engagement counts as a "response"
+  // worth re-evaluating, so the dedupe key keys off the sum.
   author_commits_after_request: number
+  author_inline_replies_after_request: number
 }
 
 async function checkChangesAddressed(repo: string, number: number, reviewer: string): Promise<ChangesAddressedResult> {
@@ -219,6 +268,7 @@ async function checkChangesAddressed(repo: string, number: number, reviewer: str
     has_change_request: !!data.has_change_request,
     latest_request_at: String(data.latest_request_at || ''),
     author_commits_after_request: Number(data.author_commits_after_request || 0),
+    author_inline_replies_after_request: Number(data.author_inline_replies_after_request || 0),
   }
 }
 
@@ -251,21 +301,26 @@ async function tickApprovePrs(): Promise<void> {
       try {
         const check = await checkChangesAddressed(pr.repo, pr.number, reviewer)
         // Trigger: reviewer has at least one CHANGES_REQUESTED review
-        // on the PR, AND the author has pushed at least one commit
-        // since that review. Each subsequent author commit re-arms
-        // the trigger — the dedupe key includes the commit count.
-        // The reviewer's subsequent comments / re-reviews are
-        // irrelevant to the trigger; if they DO post another review
-        // (advancing latest_request_at), the count resets to 0 and a
-        // fresh round begins on the next author commit. The agent
-        // run itself decides each round whether to approve or leave
-        // new feedback — Poise just fires; the agent decides.
-        if (!check.has_change_request)             continue
-        if (check.author_commits_after_request < 1) continue
-        const seenTarget = `${pr.repo}#${pr.number}@req=${check.latest_request_at}/c=${check.author_commits_after_request}`
+        // on the PR, AND the author has engaged with it at least once
+        // since — either by pushing a commit OR by replying inline
+        // on a review thread. A refutation reply ("FTL is internal,
+        // everyone knows") is as much a "respond to this" signal as
+        // a code change; the agent run that follows decides whether
+        // it's convincing.
+        //
+        // Each subsequent author response (commit or reply) re-arms
+        // the trigger — the dedupe key sums both counters, so every
+        // increment produces a fresh seen-key. If the reviewer posts
+        // another CHANGES_REQUESTED (latest_request_at advances),
+        // both counters reset to 0 and a fresh round begins on the
+        // next author response.
+        if (!check.has_change_request) continue
+        const responses = check.author_commits_after_request + check.author_inline_replies_after_request
+        if (responses < 1) continue
+        const seenTarget = `${pr.repo}#${pr.number}@req=${check.latest_request_at}/r=${responses}`
         if (!claimSeen('approve-prs', seenTarget)) continue
         await fireApprove(pr)
-        console.log(`[behaviors] approve-prs fired for ${pr.repo}#${pr.number} (req=${check.latest_request_at}, c=${check.author_commits_after_request})`)
+        console.log(`[behaviors] approve-prs fired for ${pr.repo}#${pr.number} (req=${check.latest_request_at}, r=${responses}: ${check.author_commits_after_request}c+${check.author_inline_replies_after_request}reply)`)
       } catch (err) {
         console.error(`[behaviors] approve-prs check/fire failed for ${pr.repo}#${pr.number}:`, err)
       }
@@ -299,6 +354,28 @@ interface ResolveResult {
   unresolved_count: number
 }
 
+// Meta key holding the last real resolve-unblocking fire as JSON
+// { at, target }. setMeta overwrites, so it always reflects the most
+// recent resolve. Read back by the /api/behaviors handler.
+const RESOLVE_LAST_FIRED_KEY = 'behavior_resolve_unblocking_last_fired'
+
+// Last time resolve-unblocking actually resolved one or more
+// conversations — null if it hasn't fired since persistence was
+// added (the run history before that point was never recorded and
+// can't be reconstructed). Shape matches the lastTriggered envelope
+// the Behaviors view already consumes for the other two behaviors.
+export function getResolveUnblockingLastFired(): { at: string, target: string } | null {
+  const raw = getMeta(RESOLVE_LAST_FIRED_KEY)
+  if (!raw) return null
+  try {
+    const p = JSON.parse(raw)
+    if (typeof p.at === 'string' && typeof p.target === 'string') {
+      return { at: p.at, target: p.target }
+    }
+  } catch { /* corrupt value — treat as never-fired */ }
+  return null
+}
+
 async function resolveNonblockingIfReady(repo: string, number: number): Promise<ResolveResult> {
   const [owner, name] = repo.split('/', 2)
   const cwd = join(GH_INTERFACE_CWD_ROOT, owner, name)
@@ -327,10 +404,15 @@ async function tickResolveUnblocking(): Promise<void> {
         if (result.resolved_count > 0) {
           const key = `${pr.repo}#${pr.number}`
           console.log(`[behaviors] resolve-unblocking cleared ${result.resolved_count} convo(s) on ${key}`)
-          // No persistence here — github-interface doesn't write a log
-          // row for this call, so until that interface gap is filled,
-          // the Behaviors view's "Last triggered" cell stays "—" for
-          // this behavior. See cache-plugin.ts /api/behaviors.
+          // github-interface doesn't write a log row for this call, so
+          // unlike pr_review / pr_approve there's no agent-interface
+          // surface to derive "last triggered" from. Persist it here:
+          // a meta row that setMeta overwrites, so the Behaviors view
+          // shows the most recent real resolve instead of a dash.
+          setMeta(RESOLVE_LAST_FIRED_KEY, JSON.stringify({
+            at: new Date().toISOString(),
+            target: key,
+          }))
         }
       } catch (err) {
         console.error(`[behaviors] resolve-unblocking failed for ${pr.repo}#${pr.number}:`, err)

@@ -157,11 +157,14 @@ export async function deleteDoc(slug: string): Promise<{ ok: true }> {
   const path = fileFor(slug)
   try { await unlink(path) }
   catch (err: any) { if (err.code !== 'ENOENT') throw err }
-  // Take any side-car annotations with the doc. Both deletes are
-  // best-effort (ENOENT on the side-car is normal — most docs won't
-  // have annotations).
+  // Take any side-cars with the doc — annotations and chat-session
+  // bookkeeping. All best-effort: ENOENT on a side-car is normal
+  // (most docs won't have annotations or an opened chat).
   const annPath = annotationsFileFor(slug)
   try { await unlink(annPath) }
+  catch (err: any) { if (err.code !== 'ENOENT') throw err }
+  const chatPath = chatSessionFileFor(slug)
+  try { await unlink(chatPath) }
   catch (err: any) { if (err.code !== 'ENOENT') throw err }
   return { ok: true }
 }
@@ -260,4 +263,81 @@ export async function deleteAnnotations(slug: string): Promise<{ ok: true }> {
   try { await unlink(path) }
   catch (err: any) { if (err.code !== 'ENOENT') throw err }
   return { ok: true }
+}
+
+// ── Chat session ──────────────────────────────────────────────────────
+//
+// Each editor doc can open a long-lived chat sidebar (the existing
+// `chat-pane.ts` view, opened via `poise:open-chat`). The chat itself
+// is held by agent-interface — the model session, the transcript, the
+// tokens — all keyed off a single session_id string. We just need to
+// remember which session_id belongs to which doc, so reopening the
+// chat for the same doc resumes the same conversation forever.
+//
+// Stored as a third side-car next to the .md and .annotations.json:
+//   <slug>.chat.json  →  { session_id, created_at }
+//
+// session_id format: `editor-<sanitized-slug>-<ms>`. The slug part
+// makes the id self-describing in `agent-interface --logs`; the ms
+// suffix is uniqueness insurance — if the side-car is deleted and a
+// fresh chat is started for the same slug later, the new session_id
+// won't collide with whatever orphaned history the old one left behind.
+// The file is small and stable: the schema can grow (e.g. tracking
+// which voice guide was active) without breaking older readers.
+
+export interface ChatSessionFile {
+  session_id: string
+  created_at: string
+}
+
+function chatSessionFileFor(slug: string): string {
+  const safe = sanitizeSlug(slug)
+  if (!safe) throw new Error('invalid slug')
+  return join(EDITOR_DIR, safe + '.chat.json')
+}
+
+// Return the chat session for `slug`, minting + persisting a new one
+// on first call. Idempotent: subsequent calls return the same row.
+// If the side-car exists but is corrupt or missing fields, we treat
+// it as absent and overwrite — losing a corrupt session_id loses
+// orphaned chat history but never corrupts a working doc.
+export async function getOrCreateChatSession(slug: string): Promise<ChatSessionFile> {
+  await ensureDir()
+  const path = chatSessionFileFor(slug)
+  try {
+    const raw = await readFile(path, 'utf-8')
+    const parsed = JSON.parse(raw) as Partial<ChatSessionFile>
+    if (parsed && typeof parsed.session_id === 'string' && parsed.session_id) {
+      return {
+        session_id: parsed.session_id,
+        created_at: typeof parsed.created_at === 'string' ? parsed.created_at : new Date().toISOString(),
+      }
+    }
+    // Fall through to mint a fresh one — the file existed but its
+    // contents were unusable.
+  } catch (err: any) {
+    if (err.code !== 'ENOENT') {
+      // Surface unexpected read errors (perms, etc.) rather than
+      // silently minting a duplicate session.
+      throw err
+    }
+  }
+  const safe = sanitizeSlug(slug)
+  if (!safe) throw new Error('invalid slug')
+  const created_at = new Date().toISOString()
+  const session_id = `editor-${safe}-${Date.now()}`
+  const body: ChatSessionFile = { session_id, created_at }
+  await writeAtomic(path, JSON.stringify(body, null, 2))
+  return body
+}
+
+// Reverse-lookup: given a session_id minted by getOrCreateChatSession,
+// return the doc slug it belongs to. Returns null for session_ids that
+// aren't ours (card-chat sessions, /content sessions, anything bare).
+// Format: `editor-<sanitized-slug>-<ms-digits>`. The regex anchors on
+// the trailing all-digit ms suffix so slugs containing internal `-`
+// chars (e.g. `untitled-20260512123456`) are extracted correctly.
+export function slugFromEditorSession(sessionId: string): string | null {
+  const m = String(sessionId || '').match(/^editor-(.+)-\d+$/)
+  return m ? m[1] : null
 }

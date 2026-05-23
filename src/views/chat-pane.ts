@@ -43,6 +43,144 @@ const MODELS = ['opus', 'gpt', 'gemini', 'grok'] as const
 type ModelKey = typeof MODELS[number]
 const DEFAULT_MODEL: ModelKey = 'opus'
 
+// Structured reply shape the parser tries to recover when parseEdits
+// is enabled. Mirrors server/chat.ts EDITOR_RESPONSE_FORMAT — the
+// model is told to emit exactly this when proposing changes.
+interface EditProposal {
+  description?: string
+  context_before?: string
+  old: string
+  new: string
+  context_after?: string
+}
+interface StructuredReply {
+  chat: string
+  edits?: EditProposal[]
+  document?: string
+}
+
+// Try to interpret an agent reply as a StructuredReply. Returns null
+// on any deviation — non-JSON, missing `chat` field, invalid `edits`
+// items — and the caller falls back to plain rendering. The check is
+// deliberately strict: a single bad reply shouldn't cause us to
+// silently drop part of the model's message. `old` and `new` must
+// both be strings (empty allowed — that's how insertions/deletions
+// are expressed); the optional fields are coerced to strings or
+// dropped.
+function tryParseStructuredReply(text: string): StructuredReply | null {
+  const t = (text || '').trim()
+  if (!t.startsWith('{')) return null
+  let parsed: any
+  try { parsed = JSON.parse(t) } catch { return null }
+  if (!parsed || typeof parsed !== 'object') return null
+  if (typeof parsed.chat !== 'string') return null
+  const out: StructuredReply = { chat: parsed.chat }
+  if (Array.isArray(parsed.edits)) {
+    const edits: EditProposal[] = []
+    for (const e of parsed.edits) {
+      if (!e || typeof e !== 'object') continue
+      if (typeof e.old !== 'string' || typeof e.new !== 'string') continue
+      edits.push({
+        description: typeof e.description === 'string' ? e.description : undefined,
+        context_before: typeof e.context_before === 'string' ? e.context_before : undefined,
+        old: e.old,
+        new: e.new,
+        context_after: typeof e.context_after === 'string' ? e.context_after : undefined,
+      })
+    }
+    if (edits.length) out.edits = edits
+  }
+  if (typeof parsed.document === 'string' && parsed.document) {
+    out.document = parsed.document
+  }
+  return out
+}
+
+// Render a successfully-parsed StructuredReply: the `chat` line first
+// as agent prose, then each proposed edit as a card with accept /
+// decline buttons. Cards carry every field of their edit as data-*
+// attributes so the delegated handlers in renderShell can rebuild
+// the EditProposal without consulting any external map — the DOM is
+// the single source of truth for the edit's contents.
+//
+// Per-card UI state ('pending' / 'applied' / 'declined' / 'conflict')
+// lives in the cardStates module map, keyed by `${msgId}:${idx}`. We
+// look it up here so re-renders preserve state across reflows.
+//
+// Visual: description (if any) above a two-track diff — `old` with red
+// tint + strikethrough, `new` with green tint. Pure insertions
+// (old="") and deletions (new="") collapse to the single relevant
+// track so the card stays compact.
+function renderStructuredReply(reply: StructuredReply, msgId: string): string {
+  const parts: string[] = []
+  if (reply.chat) {
+    parts.push(`
+      <div class="chat-msg chat-msg-agent">
+        <pre class="chat-msg-body chat-msg-mono">${escapeHtml(reply.chat)}</pre>
+      </div>
+    `)
+  }
+  if (reply.edits && reply.edits.length) {
+    const cards = reply.edits.map((e, idx) => {
+      const cardKey = `${msgId}:${idx}`
+      const state = cardStates.get(cardKey) || 'pending'
+      const showOld = e.old.length > 0
+      const showNew = e.new.length > 0
+      const kind = showOld && showNew ? 'replace' : showOld ? 'delete' : 'insert'
+      const desc = e.description
+        ? `<div class="chat-edit-card-desc">${escapeHtml(e.description)}</div>`
+        : ''
+      const oldRow = showOld
+        ? `<div class="chat-edit-card-old"><span class="chat-edit-card-mark" aria-hidden="true">−</span><span class="chat-edit-card-text">${escapeHtml(e.old)}</span></div>`
+        : ''
+      const newRow = showNew
+        ? `<div class="chat-edit-card-new"><span class="chat-edit-card-mark" aria-hidden="true">+</span><span class="chat-edit-card-text">${escapeHtml(e.new)}</span></div>`
+        : ''
+      // Action row: accept / decline buttons, plus a state badge that
+      // takes their place once a decision is made. Disabled-looking
+      // styling on terminal states (applied / declined) keeps the
+      // card from inviting re-clicks while still showing what
+      // happened. Conflict state keeps the buttons live so the user
+      // can re-try after editing the doc back into a state where
+      // `old` is findable again.
+      const actions = state === 'pending' || state === 'conflict'
+        ? `<div class="chat-edit-card-actions">
+             ${state === 'conflict' ? `<span class="chat-edit-card-badge chat-edit-card-badge-conflict">Conflict — text not found</span>` : ''}
+             <button type="button" class="chat-edit-card-btn chat-edit-card-decline" data-card-key="${escapeHtml(cardKey)}">Decline</button>
+             <button type="button" class="chat-edit-card-btn chat-edit-card-accept" data-card-key="${escapeHtml(cardKey)}">Accept</button>
+           </div>`
+        : state === 'applied'
+        ? `<div class="chat-edit-card-actions"><span class="chat-edit-card-badge chat-edit-card-badge-applied">Applied</span></div>`
+        : `<div class="chat-edit-card-actions"><span class="chat-edit-card-badge chat-edit-card-badge-declined">Declined</span></div>`
+      return `<div class="chat-edit-card" data-kind="${kind}" data-state="${state}" data-card-key="${escapeHtml(cardKey)}" data-old="${escapeHtml(e.old)}" data-new="${escapeHtml(e.new)}" data-context-before="${escapeHtml(e.context_before || '')}" data-context-after="${escapeHtml(e.context_after || '')}" data-description="${escapeHtml(e.description || '')}">${desc}${oldRow}${newRow}${actions}</div>`
+    }).join('')
+    parts.push(`<div class="chat-edit-cards">${cards}</div>`)
+  }
+  // `document` (full rewrite) is parsed but not yet displayed — the
+  // viewer for full rewrites belongs in a later slice. We still
+  // surface a small badge so the user sees the model proposed one
+  // rather than thinking the reply was empty.
+  if (reply.document) {
+    parts.push(`<div class="chat-edit-cards"><div class="chat-edit-card" data-kind="rewrite"><div class="chat-edit-card-desc">Full document rewrite proposed (viewer not yet wired)</div></div></div>`)
+  }
+  return parts.join('')
+}
+
+// Read an EditProposal back out of a `.chat-edit-card` DOM element.
+// Mirrors the data-* attrs written by renderStructuredReply. Used by
+// the delegated mouseover / click handlers — the DOM is the source of
+// truth, so cards re-rendered during reflows still produce the same
+// EditProposal value.
+function editFromCard(card: HTMLElement): EditProposal {
+  return {
+    description: card.dataset.description || undefined,
+    context_before: card.dataset.contextBefore || undefined,
+    old: card.dataset.old || '',
+    new: card.dataset.new || '',
+    context_after: card.dataset.contextAfter || undefined,
+  }
+}
+
 let panelEl: HTMLElement | null = null
 let titleEl: HTMLElement | null = null
 let bodyEl: HTMLElement | null = null
@@ -60,14 +198,41 @@ let currentSession: string | null = null
 let messages: ChatLogEntry[] = []
 let attachments: Attachment[] = []
 let selectedModel: ModelKey = DEFAULT_MODEL
+// When opened with { parseEdits: true } (e.g. by the editor view's
+// toolbar chat button) we attempt to read each agent reply as a
+// single JSON object carrying `chat` + optional `edits[]` / `document`
+// fields, and render the proposed edits as inert cards. When the
+// reply isn't valid JSON (most discussion turns) we fall back to the
+// existing plain-text rendering. Card-chats keep parseEdits=false.
+let parseEditsEnabled = false
+
+// Host callbacks for edit-card interactions. The pane stays
+// host-agnostic: it knows nothing about documents or DOM positions.
+// It just fires these on the right user gesture; the host (editor
+// view) does the actual highlight / scroll / apply. All four are
+// optional — a host can wire just hover, just apply, or all of them.
+let hoverCb: ((edit: EditProposal) => void) | null = null
+let leaveCb: (() => void) | null = null
+let acceptCb: ((edit: EditProposal, cardKey: string) => 'applied' | 'conflict') | null = null
+let declineCb: ((edit: EditProposal, cardKey: string) => void) | null = null
+
+// Per-card UI state — pending (default), applied, declined, conflict.
+// Keyed by `${messageId}:${cardIdx}` so it survives renderMessages
+// reflows without being entangled with DOM identity. Cleared on
+// session switch alongside messages / repliesById.
+type CardState = 'pending' | 'applied' | 'declined' | 'conflict'
+const cardStates: Map<string, CardState> = new Map()
 // Slash-command mode lock. When the user types `/<token> ` at the
 // end of an empty-trimmed input, the composer "locks" into that mode
 // — visual chip in the input wrap, and on send we route to the mode's
-// dedicated path (currently only `/content` → agent-interface
-// --author-content). Same rhythm as Confab's mode-lock pattern.
-interface ModeToken { token: string; mode: 'content' }
+// dedicated path:
+//   `/content`   → agent-interface --author-content (no repo binding)
+//   `/consensus` → /api/confab/review/pr (Confab proxy; takes a PR url)
+// Same rhythm as Confab's mode-lock pattern.
+interface ModeToken { token: string; mode: 'content' | 'consensus' }
 const MODE_TOKENS: ModeToken[] = [
-  { token: '/content', mode: 'content' },
+  { token: '/content',   mode: 'content' },
+  { token: '/consensus', mode: 'consensus' },
 ]
 let activeMode: ModeToken | null = null
 // Cache of fetched reply bodies, keyed by call id, so we don't refetch.
@@ -165,6 +330,51 @@ function renderShell() {
     const slug = link.dataset.slug || ''
     if (!slug) return
     window.dispatchEvent(new CustomEvent('poise:open-editor-doc', { detail: { slug } }))
+  })
+  // Edit-card click: accept or decline. Delegated so cards added by
+  // later re-renders pick up the same handler. We update the per-card
+  // state in cardStates and re-render so the visual transitions
+  // (button → badge, fade out, conflict warning) flow through the
+  // same render path everything else does.
+  bodyEl!.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement
+    const acceptBtn = target.closest<HTMLButtonElement>('.chat-edit-card-accept')
+    const declineBtn = target.closest<HTMLButtonElement>('.chat-edit-card-decline')
+    if (!acceptBtn && !declineBtn) return
+    const card = (acceptBtn || declineBtn)!.closest<HTMLElement>('.chat-edit-card')
+    if (!card) return
+    const cardKey = card.dataset.cardKey || ''
+    if (!cardKey) return
+    const edit = editFromCard(card)
+    if (acceptBtn) {
+      const result = acceptCb ? acceptCb(edit, cardKey) : 'conflict'
+      cardStates.set(cardKey, result)
+    } else if (declineBtn) {
+      declineCb?.(edit, cardKey)
+      cardStates.set(cardKey, 'declined')
+    }
+    renderMessages()
+  })
+  // Edit-card hover: notify the host so it can highlight + smooth-
+  // scroll the target span in its surface (the editor doc). Uses
+  // mouseover / mouseout with a relatedTarget guard so transitions
+  // within a card don't fire repeatedly, and movement between two
+  // adjacent cards fires leave-then-enter cleanly.
+  bodyEl!.addEventListener('mouseover', (e) => {
+    if (!hoverCb) return
+    const card = (e.target as HTMLElement).closest<HTMLElement>('.chat-edit-card')
+    if (!card) return
+    const related = e.relatedTarget as HTMLElement | null
+    if (related && card.contains(related)) return        // movement within the same card
+    hoverCb(editFromCard(card))
+  })
+  bodyEl!.addEventListener('mouseout', (e) => {
+    if (!leaveCb) return
+    const card = (e.target as HTMLElement).closest<HTMLElement>('.chat-edit-card')
+    if (!card) return
+    const related = e.relatedTarget as HTMLElement | null
+    if (related && card.contains(related)) return        // movement within the same card
+    leaveCb()
   })
   inputEl.addEventListener('input', () => autoResize())
   inputEl.addEventListener('keydown', (e) => {
@@ -384,11 +594,20 @@ function renderMessages() {
         </div>
       `)
     } else if (reply !== undefined) {
-      parts.push(`
-        <div class="chat-msg chat-msg-agent">
-          <pre class="chat-msg-body chat-msg-mono">${escapeHtml(reply)}</pre>
-        </div>
-      `)
+      // parseEdits hosts (editor doc-chat) get edit-card rendering
+      // when the reply is a well-formed StructuredReply; everyone
+      // else, and any malformed/freeform reply, falls back to the
+      // existing monospace block.
+      const structured = parseEditsEnabled ? tryParseStructuredReply(reply) : null
+      if (structured) {
+        parts.push(renderStructuredReply(structured, m.id))
+      } else {
+        parts.push(`
+          <div class="chat-msg chat-msg-agent">
+            <pre class="chat-msg-body chat-msg-mono">${escapeHtml(reply)}</pre>
+          </div>
+        `)
+      }
     } else if (m.response) {
       // Completed but body not yet fetched
       parts.push(`
@@ -416,7 +635,15 @@ async function refresh() {
     const res = await fetch(`/api/chat?session=${encodeURIComponent(currentSession)}`)
     if (!res.ok) return
     const data = await res.json()
-    messages = (data.messages || []) as ChatLogEntry[]
+    // /consensus → agent-interface --debate doesn't write a row in
+    // --logs, so the server's chat history wouldn't include it.
+    // Preserve consensus rows (tagged `__consensus-*`) across the
+    // refresh, sorting the merged set by started_at so timeline order
+    // stays correct.
+    const consensusKept = messages.filter((m) => m.id.startsWith('__consensus-'))
+    const serverMessages = (data.messages || []) as ChatLogEntry[]
+    messages = [...serverMessages, ...consensusKept]
+      .sort((a, b) => (a.started_at || '').localeCompare(b.started_at || ''))
     // Resolve replies for every completed entry whose body we don't
     // have cached yet. Fire in parallel — tiny payloads, server-side
     // already cached the read.
@@ -457,6 +684,10 @@ async function send() {
   // navigated there.
   if (activeMode?.mode === 'content') {
     void sendContent(text)
+    return
+  }
+  if (activeMode?.mode === 'consensus') {
+    void sendConsensus(text)
     return
   }
   sendBtn.disabled = true
@@ -583,6 +814,73 @@ async function pollContentUntilDone(callId: string): Promise<string | null> {
   throw new Error('author-content timed out')
 }
 
+// /consensus takes a PR url (anything that looks like a github PR
+// /consensus takes a free-form topic and runs the local
+// `agent-interface --debate` (four models in parallel, opus
+// moderator, default 1 round). Goes through Poise's /api/debate
+// wrapper, which lets agent-interface log the call so it shows up
+// in Swarm alongside everything else. The synthesis lands as an
+// agent turn in the chat transcript, keyed by `__consensus-${ts}`
+// so refresh() preserves it across the 60s chat polls.
+async function sendConsensus(topic: string) {
+  if (!currentSession || !inputEl || !sendBtn) return
+  const consensusId = '__consensus-' + Date.now()
+  // Optimistic push so the user bubble + running placeholder land
+  // immediately. The synthesis fills in when Confab completes the
+  // multi-model review (~3–10 min in practice).
+  messages.push({
+    id: consensusId,
+    session_id: currentSession,
+    prompt: topic,
+    started_at: new Date().toISOString(),
+    status: 'running',
+    response: '',
+    error: '',
+  })
+  inputEl.value = ''
+  autoResize()
+  applyMode(null)
+  renderMessages()
+  sendBtn.disabled = true
+  inputEl.disabled = true
+  try {
+    const res = await fetch('/api/debate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic, rounds: 1 }),
+    })
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`)
+    }
+    const data = await res.json() as { synthesis?: string }
+    const synthesis = String(data.synthesis || '').trim()
+    if (!synthesis) throw new Error('debate returned no synthesis')
+    // Park the synthesis into the existing reply cache so
+    // renderMessages picks it up via its standard
+    // "completed → mono pre" branch — no new render path needed.
+    repliesById.set(consensusId, synthesis)
+    const idx = messages.findIndex((m) => m.id === consensusId)
+    if (idx >= 0) {
+      messages[idx] = { ...messages[idx], status: 'completed', response: consensusId }
+    }
+    renderMessages()
+  } catch (err) {
+    console.error('[chat] /consensus failed:', err)
+    const idx = messages.findIndex((m) => m.id === consensusId)
+    if (idx >= 0) {
+      messages[idx] = { ...messages[idx], status: 'failed', error: (err as Error).message }
+    }
+    renderMessages()
+  } finally {
+    if (inputEl) {
+      inputEl.disabled = false
+      inputEl.focus()
+    }
+    if (sendBtn) sendBtn.disabled = false
+  }
+}
+
 function isOpen(): boolean {
   return !!panelEl && panelEl.classList.contains('open')
 }
@@ -593,7 +891,28 @@ export function close() {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null }
 }
 
-export async function open(sessionId: string, label: string, draft?: string) {
+export interface OpenOptions {
+  /** Caller is in a context where agent replies may be JSON-encoded
+   *  edit proposals; render them as cards. Editor doc-chat sets this
+   *  true; card-chats leave it off. */
+  parseEdits?: boolean
+  /** Mouse entered an edit card. Host highlights the corresponding
+   *  text span in its surface (e.g. the doc) and scrolls it into
+   *  view. The pane does not know what the "surface" is. */
+  onEditHover?: (edit: EditProposal) => void
+  /** Mouse left the edit card. Host clears any hover highlight. */
+  onEditLeave?: () => void
+  /** User clicked Accept on a card. Host applies the change and
+   *  returns 'applied' (success) or 'conflict' (the `old` text can't
+   *  be located — doc has drifted). The pane updates the card state
+   *  visually based on the return. */
+  onEditAccept?: (edit: EditProposal, cardKey: string) => 'applied' | 'conflict'
+  /** User clicked Decline. Host has no work to do but may want to
+   *  log / track; the pane updates card state to 'declined'. */
+  onEditDecline?: (edit: EditProposal, cardKey: string) => void
+}
+
+export async function open(sessionId: string, label: string, draft?: string, options: OpenOptions = {}) {
   if (!initialized) {
     initialized = true
     renderShell()
@@ -607,6 +926,7 @@ export async function open(sessionId: string, label: string, draft?: string) {
     currentSession = sessionId
     messages = []
     repliesById.clear()
+    cardStates.clear()
     attachments = []
     renderChips()
     applyMode(null)
@@ -617,6 +937,15 @@ export async function open(sessionId: string, label: string, draft?: string) {
       autoResize()
     }
   }
+  // parseEdits + the four edit callbacks are per-session config —
+  // re-evaluate on every open so a host can change its mind across
+  // opens. They track the caller's current intent rather than
+  // persisting across pane reuse.
+  parseEditsEnabled = !!options.parseEdits
+  hoverCb = options.onEditHover || null
+  leaveCb = options.onEditLeave || null
+  acceptCb = options.onEditAccept || null
+  declineCb = options.onEditDecline || null
   panelEl!.classList.add('open')
   inputEl?.focus()
   await refresh()
@@ -636,10 +965,10 @@ export async function open(sessionId: string, label: string, draft?: string) {
   schedulePoll()
 }
 
-export function toggle(sessionId: string, label: string, draft?: string) {
+export function toggle(sessionId: string, label: string, draft?: string, options: OpenOptions = {}) {
   if (isOpen() && currentSession === sessionId) {
     close()
   } else {
-    void open(sessionId, label, draft)
+    void open(sessionId, label, draft, options)
   }
 }

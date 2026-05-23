@@ -181,6 +181,24 @@ export async function localCheckoutPath(owner: string, repo: string): Promise<st
   return String(result.path)
 }
 
+// Ask github-interface for a PR's current head commit SHA. Used by
+// the review-new-prs dedupe key so a force-push (or any new commit)
+// is recognised as a fresh target for re-review rather than treated
+// as the already-reviewed PR. Single GitHub call, no pagination.
+export async function getHeadSha(repo: string, number: number): Promise<string> {
+  if (!repo.includes('/')) throw new Error('repo must be owner/name')
+  const [owner, name] = repo.split('/', 2)
+  const cwd = join(GH_INTERFACE_CWD_ROOT, owner, name)
+  await mkdir(cwd, { recursive: true })
+  const { stdout } = await execFileP(GH_INTERFACE, ['--head-sha', `#${number}`], {
+    cwd,
+    maxBuffer: 1 * 1024 * 1024,
+  })
+  const result = JSON.parse(stdout)
+  if (!result.head_sha) throw new Error('github-interface --head-sha returned no head_sha')
+  return String(result.head_sha)
+}
+
 // Ask github-interface whether a single PR is "green" (mergeable, open,
 // not draft, mergeable_state == clean). Cached per PR for ~60s so the
 // once-a-minute frontend poll doesn't refire the whole fanout every tick.

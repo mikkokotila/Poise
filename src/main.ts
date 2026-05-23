@@ -2,10 +2,10 @@ import './style.css'
 import { initTypography, toggleTypographyPanel } from './typo'
 import { initSettings, toggleSettingsPanel, openSettingsPanel, isFullyConfigured } from './settings'
 import { initMenu } from './menu'
-import { initMainView, refreshMainView, stopMainRefresh } from './views/main-view'
-import { initCurrentView, stopCurrentPolling } from './views/current-view'
-import { initSwarmView, stopSwarmRefresh, focusRow as focusSwarmRow } from './views/swarm-view'
-import { initBehaviorsView, stopBehaviorsRefresh } from './views/behaviors-view'
+import { initMainView, refreshMainView } from './views/main-view'
+import { initCurrentView } from './views/current-view'
+import { initSwarmView, focusRow as focusSwarmRow } from './views/swarm-view'
+import { initBehaviorsView } from './views/behaviors-view'
 import { initEditorView, stopEditorRefresh } from './views/editor-view'
 import { toggle as toggleChat } from './views/chat-pane'
 import { loadSettings, startRefreshTicker, applyTheme, getTheme } from './config'
@@ -27,11 +27,21 @@ function showView(v: ViewSlug) {
     : v === 'behaviors' ? viewBehaviorsEl
     :                     viewEditorEl
 
-  // Stop background polling when leaving the views that own them
-  if (v !== 'swarm')     stopSwarmRefresh()
-  if (v !== 'current')   stopCurrentPolling()
-  if (v !== 'main')      stopMainRefresh()
-  if (v !== 'behaviors') stopBehaviorsRefresh()
+  // Polling stays attached across view changes — every view that has
+  // been visited at least once keeps fetching on every `poise:refresh-
+  // tick`, so a row whose status flips from running → completed (or
+  // whose time-elapsed advances) reflects on its next tick whether or
+  // not its view is the one currently on screen. Returning to a view
+  // therefore shows fresh data instantly rather than waiting for an
+  // entry-fetch to land. The init functions are idempotent — each
+  // guards its tick-listener with a boolean so re-entering doesn't
+  // attach duplicates.
+  //
+  // Editor leave-cleanup is the one exception: stopEditorRefresh isn't
+  // a polling-stop (the editor has no tick listener) — it flushes the
+  // pending autosave, closes the doc-picker menu, and strips the
+  // writer-mode body class so the chrome reappears in other views.
+  // All of those are essential on leaving the editor; keep the call.
   if (v !== 'editor')    stopEditorRefresh()
 
   // Initialize the target first so content exists before the animation starts
@@ -94,11 +104,31 @@ window.addEventListener('poise:synced', () => {
 
 // Card chat icon → toggle the chat pane bound to that card's session.
 // Clicking the same card's icon again closes the pane; switching to a
-// different card swaps the conversation in place.
+// different card swaps the conversation in place. Hosts that want
+// JSON-edit-card rendering (currently: the editor's toolbar chat)
+// pass parseEdits=true in the event detail and may also supply hover
+// / accept / decline callbacks so the host can react to user gestures
+// on cards (highlight in surface, apply to surface, etc.); everyone
+// else leaves them unset and gets plain prose rendering.
 window.addEventListener('poise:open-chat', (ev) => {
-  const detail = (ev as CustomEvent<{ session: string, label: string, draft?: string }>).detail
+  const detail = (ev as CustomEvent<{
+    session: string,
+    label: string,
+    draft?: string,
+    parseEdits?: boolean,
+    onEditHover?: (edit: any) => void,
+    onEditLeave?: () => void,
+    onEditAccept?: (edit: any, key: string) => 'applied' | 'conflict',
+    onEditDecline?: (edit: any, key: string) => void,
+  }>).detail
   if (!detail) return
-  toggleChat(detail.session, detail.label, detail.draft)
+  toggleChat(detail.session, detail.label, detail.draft, {
+    parseEdits: detail.parseEdits,
+    onEditHover: detail.onEditHover,
+    onEditLeave: detail.onEditLeave,
+    onEditAccept: detail.onEditAccept,
+    onEditDecline: detail.onEditDecline,
+  })
 })
 
 // Behaviors view → Swarm row navigation. The "Last triggered" link
