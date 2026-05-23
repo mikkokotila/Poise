@@ -661,12 +661,15 @@ function inlineWrapAtCaretEdge(range: Range): HTMLElement | null {
 //     The beforeinput handler (inlineWrapAtCaretEdge case 2) catches
 //     the next keystroke and routes it to a fresh text-node sibling
 //     so typing produces plain text.
-//   - Non-empty selection INSIDE a <strong>: unbold (replace the
-//     whole strong with its inner text node). Uses direct DOM
-//     replacement; execCommand('insertText') silently no-ops for
-//     selections that span an element boundary in some Chromium
-//     versions. (Partial un-bolding — splitting the strong at the
-//     selection boundaries — is out of scope for this pass.)
+//   - Non-empty selection INSIDE a <strong>: split the run. Whatever
+//     fell INSIDE the selection becomes plain text, whatever sat
+//     before / after the selection stays bold. When the selection
+//     covers the whole inner text this degenerates to a full unwrap
+//     (no surrounding bold runs survive); when the selection is a
+//     proper subrange we leave one or two new bold runs flanking the
+//     plain text. The implementation rewrites the relevant span of
+//     the line's markdown text and lets reclassify rebuild the DOM,
+//     so the line ends up canonical regardless of the input shape.
 //   - Non-empty selection elsewhere: wrap the visible selected text
 //     with `**…**` via insertText. The next reclassify rebuilds the
 //     line and the new markers fold into a <strong>.
@@ -693,21 +696,61 @@ function toggleBoldAtSelection() {
       sel.addRange(r)
       return
     }
-    // Non-empty selection inside strong: unwrap. Direct DOM
-    // replacement, then run the post-edit pipeline ourselves since
-    // no input event fires.
+    // Non-empty selection inside strong. Split the inner text into
+    // before / selected / after; the selected part loses bold, the
+    // before / after parts each become their own `**…**` run. When
+    // before or after is empty the corresponding run is omitted, so
+    // a full-selection toggle still produces a clean unwrap.
+    //
+    // We require the selection to be entirely within the strong's
+    // inner text node — that's the common case from a double-click,
+    // a shift-arrow extend, or a mouse drag wholly inside the bold
+    // run. If the selection extends past the inner text (covering
+    // the markers or spilling into siblings), fall back to a whole-
+    // strong unwrap so we don't try to interpret an ambiguous range.
     const inner = strong.childNodes[1]
-    const innerText = (inner && inner.nodeType === Node.TEXT_NODE) ? (inner.textContent || '') : ''
-    const textNode = document.createTextNode(innerText)
-    strong.parentNode!.replaceChild(textNode, strong)
+    if (!inner || inner.nodeType !== Node.TEXT_NODE
+        || range.startContainer !== inner || range.endContainer !== inner) {
+      const innerText = (inner && inner.nodeType === Node.TEXT_NODE) ? (inner.textContent || '') : ''
+      const textNode = document.createTextNode(innerText)
+      strong.parentNode!.replaceChild(textNode, strong)
+      const r = document.createRange()
+      r.setStart(textNode, innerText.length)
+      r.collapse(true)
+      sel.removeAllRanges()
+      sel.addRange(r)
+      reclassifyLines()
+      updateEmptyState()
+      scheduleSave()
+      renderAnnotationOverlay()
+      return
+    }
+    const innerText = inner.textContent || ''
+    const selStart = Math.min(range.startOffset, range.endOffset)
+    const selEnd   = Math.max(range.startOffset, range.endOffset)
+    const before   = innerText.slice(0, selStart)
+    const selected = innerText.slice(selStart, selEnd)
+    const after    = innerText.slice(selEnd)
+    const replacement =
+      (before ? `**${before}**` : '') +
+      selected +
+      (after  ? `**${after}**`  : '')
+    // The cursor lands at the end of the now-plain selected run.
+    // That's `before` + `**…**` markers (4 chars) + `selected`
+    // chars into the replacement string, or just `selected.length`
+    // when there was nothing before the selection.
+    const cursorInReplacement = (before ? before.length + 4 : 0) + selected.length
+    const replacementNode = document.createTextNode(replacement)
+    strong.parentNode!.replaceChild(replacementNode, strong)
     const r = document.createRange()
-    r.setStart(textNode, innerText.length)
+    r.setStart(replacementNode, cursorInReplacement)
     r.collapse(true)
     sel.removeAllRanges()
     sel.addRange(r)
     reclassifyLines()
     updateEmptyState()
     scheduleSave()
+    renderAnnotationOverlay()
     return
   }
 
