@@ -2275,10 +2275,13 @@ function attachHandlers() {
       sel.removeAllRanges()
       sel.addRange(r)
       // The browser won't fire 'input' for a prevented insertion, so
-      // run the post-edit pipeline ourselves to reclassify and save.
+      // run the post-edit pipeline ourselves to reclassify, save and
+      // refresh annotation underline geometry (it depends on DOM
+      // ranges that just moved).
       reclassifyLines()
       updateEmptyState()
       scheduleSave()
+      renderAnnotationOverlay()
       return
     }
 
@@ -2549,8 +2552,10 @@ function attachHandlers() {
                 let newMarker = '- '
                 const numMatch = marker.match(/^(\d+)([.)]) /)
                 if (numMatch) {
-                  const n = parseInt(numMatch[1], 10) + 1
-                  newMarker = `${n}${numMatch[2]} `
+                  // Rename to avoid shadowing the outer `n: Node | null`
+                  // walker variable used a few lines above.
+                  const nextNum = parseInt(numMatch[1], 10) + 1
+                  newMarker = `${nextNum}${numMatch[2]} `
                 }
                 // Rebuild current line with the `before` text.
                 const beforeKind = lineKindFor(before)
