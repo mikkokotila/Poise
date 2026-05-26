@@ -79,10 +79,24 @@ let saveInFlight = false
 let annotations: Annotation[] = []
 let overlayEl: HTMLElement | null = null
 let commentBtnEl: HTMLButtonElement | null = null
+let issueBtnEl: HTMLButtonElement | null = null
 let panelEl: HTMLElement | null = null
 let panelForId: string | null = null
 let annotationsSaveTimer: ReturnType<typeof setTimeout> | null = null
 let annotationsSaveInFlight = false
+
+// Issue composer state. When the user clicks the floating Issue
+// trigger after making a selection, we mount a floating .composer
+// .composer-issue card near the selection (same DOM as Current's
+// lane composer — see src/views/current-view.ts openIssueComposer).
+// Selection collapses on focus-change to the title input, so we
+// freeze the snippet at click-time rather than reading the live
+// selection from inside the composer.
+let issueComposerEl: HTMLDivElement | null = null
+// Cached org-wide repo list, fetched once per view init from
+// /api/repos (the same source Current uses). Empty until the first
+// fetch lands; the composer falls back to a polite message.
+let allRepos: string[] = []
 
 const SAVE_DEBOUNCE_MS = 500
 const ANNOTATIONS_SAVE_DEBOUNCE_MS = 400
@@ -180,11 +194,16 @@ function renderShell(): string {
              so clicks open the comment panel. -->
         <div class="editor-annotations" id="editor-annotations" aria-hidden="true"></div>
       </div>
-      <!-- Floating Comment button: shown only when a non-collapsed
-           selection covers some text in the editor. Click → create
-           annotation + open panel. -->
+      <!-- Floating selection actions: shown only when a non-collapsed
+           selection covers some text in the editor. Comment → create
+           annotation + open panel. Issue → open the issue composer
+           prefilled with the selected snippet as body. Both are 24px
+           r-999 circles, anchored just above-right of the selection. -->
       <button type="button" class="editor-comment-btn" id="editor-comment-btn" hidden aria-label="Add comment">
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2.5 4a1.5 1.5 0 0 1 1.5-1.5h6A1.5 1.5 0 0 1 11.5 4v4a1.5 1.5 0 0 1-1.5 1.5H6.5L4 12V9.5a1.5 1.5 0 0 1-1.5-1.5V4z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+      </button>
+      <button type="button" class="editor-comment-btn editor-issue-btn" id="editor-issue-btn" hidden aria-label="Create issue from selection">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.2"/><circle cx="7" cy="7" r="1.4" fill="currentColor"/></svg>
       </button>
       <!-- Comment panel: floating, anchored near the clicked
            annotation. Shared across annotations — only one is open
@@ -1893,27 +1912,43 @@ function selectionAsAnnotationRange(): { range: AnnotationRange, snippet: string
   }
 }
 
-// Show or hide the floating Comment button based on the current
-// selection. Anchored just above-right of the selection's end rect.
+// Show or hide the floating selection-action buttons (Comment +
+// Issue) based on the current selection. Both are anchored just
+// above the selection's end rect: Comment sits closest to the
+// selection (left), Issue one button-width to its right. While the
+// issue composer is open the buttons stay hidden — focus is in the
+// composer and the selection has collapsed.
 function updateCommentButtonForSelection(): void {
   if (!commentBtnEl || !docEl) return
+  if (issueComposerEl) { commentBtnEl.hidden = true; if (issueBtnEl) issueBtnEl.hidden = true; return }
   const sel = window.getSelection()
   if (!sel || sel.rangeCount === 0 || sel.getRangeAt(0).collapsed) {
     commentBtnEl.hidden = true
+    if (issueBtnEl) issueBtnEl.hidden = true
     return
   }
   const range = sel.getRangeAt(0)
   if (!docEl.contains(range.commonAncestorContainer) && range.commonAncestorContainer !== docEl) {
     commentBtnEl.hidden = true
+    if (issueBtnEl) issueBtnEl.hidden = true
     return
   }
   const rects = range.getClientRects()
-  if (rects.length === 0) { commentBtnEl.hidden = true; return }
+  if (rects.length === 0) { commentBtnEl.hidden = true; if (issueBtnEl) issueBtnEl.hidden = true; return }
   const last = rects[rects.length - 1]
-  // Anchor just above the right end of the selection.
-  commentBtnEl.style.left = (last.right + window.scrollX + 4) + 'px'
-  commentBtnEl.style.top  = (last.top + window.scrollY - 28) + 'px'
+  const commentLeft = last.right + window.scrollX + 4
+  const top = last.top + window.scrollY - 28
+  commentBtnEl.style.left = commentLeft + 'px'
+  commentBtnEl.style.top  = top + 'px'
   commentBtnEl.hidden = false
+  if (issueBtnEl) {
+    // 24px button + 4px gap → issue sits one button-width to the
+    // right of comment. Cluster grows rightward from selection end;
+    // off-screen handling is the same as the single-button case.
+    issueBtnEl.style.left = (commentLeft + 28) + 'px'
+    issueBtnEl.style.top  = top + 'px'
+    issueBtnEl.hidden = false
+  }
 }
 
 // Create a new annotation from the current selection, append to the
@@ -1949,6 +1984,185 @@ function deleteAnnotation(id: string): void {
   scheduleAnnotationsSave()
   renderAnnotationOverlay()
   closePanel()
+}
+
+// ── Selection → "Create issue" composer ──────────────────────────────
+// Mirror of Current's lane issue composer (see openIssueComposer in
+// src/views/current-view.ts). Same DOM classes (.composer
+// .composer-issue) and same POST /api/gh { operation: 'open_issue' }
+// submission path — so styling and behavior stay identical between
+// the kanban Issue lane and the editor selection action.
+
+function shortRepo(fullRepo: string): string {
+  const i = fullRepo.indexOf('/')
+  return i < 0 ? fullRepo : fullRepo.slice(i + 1)
+}
+
+async function ensureRepos(): Promise<void> {
+  if (allRepos.length > 0) return
+  try {
+    const res = await fetch('/api/repos')
+    if (!res.ok) return
+    const data = await res.json()
+    allRepos = Array.isArray(data.repos) ? data.repos : []
+  } catch { /* composer renders the empty-state option */ }
+}
+
+// Position a floating element near the original selection rect.
+// Prefer below-and-left-aligned with the rect's left edge; fall back
+// above the selection if there isn't room below. Width is honoured
+// from the element's offsetWidth so we don't need to hard-code it.
+function placeComposerNearRect(el: HTMLElement, rect: DOMRect): void {
+  const margin = 8
+  const w = el.offsetWidth || 320
+  const h = el.offsetHeight || 200
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+  let left = rect.left
+  if (left + w > vw - margin) left = Math.max(margin, vw - margin - w)
+  if (left < margin) left = margin
+  const spaceBelow = vh - rect.bottom
+  let top: number
+  if (spaceBelow >= h + margin || spaceBelow >= vh - rect.top) {
+    top = rect.bottom + margin
+  } else {
+    top = Math.max(margin, rect.top - margin - h)
+  }
+  el.style.left = (left + window.scrollX) + 'px'
+  el.style.top  = (top + window.scrollY) + 'px'
+}
+
+function closeIssueComposer(): void {
+  if (!issueComposerEl) return
+  issueComposerEl.remove()
+  issueComposerEl = null
+  // Both selection-action buttons stay hidden — the selection has
+  // collapsed by now (focus moved to the composer). Next non-collapsed
+  // selection in the editor will re-show them via selectionchange.
+}
+
+function openIssueComposerFromSelection(): void {
+  if (issueComposerEl) {
+    ;(issueComposerEl.querySelector('input.issue-title') as HTMLInputElement | null)?.focus()
+    return
+  }
+  const got = selectionAsAnnotationRange()
+  if (!got) return
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0) return
+  // Freeze the selection rect now — clicking into the title input
+  // will collapse the selection, so we need its geometry up-front to
+  // anchor the composer near where the user was looking.
+  const rect = sel.getRangeAt(0).getBoundingClientRect()
+  // Hide the selection-action buttons immediately so they don't sit
+  // under the composer while it animates in.
+  if (commentBtnEl) commentBtnEl.hidden = true
+  if (issueBtnEl) issueBtnEl.hidden = true
+
+  const composer = document.createElement('div')
+  composer.className = 'composer composer-issue editor-floating-composer'
+  // Repo options render synchronously from the cached list; if it's
+  // empty we still mount the composer and refresh the <select> when
+  // /api/repos lands, so the typing cursor lands in the title field
+  // without waiting on the network.
+  const repoOptionsFor = (repos: string[]) => repos.length === 0
+    ? '<option value="">(no repos available)</option>'
+    : repos.map((r) => `<option value="${escapeHtml(r)}">${escapeHtml(shortRepo(r))}</option>`).join('')
+  composer.innerHTML = `
+    <input type="text" class="issue-title" placeholder="Issue title" autocomplete="off" spellcheck="true" />
+    <textarea class="issue-body" rows="4" placeholder="Body (optional)" spellcheck="true"></textarea>
+    <select class="issue-repo">${repoOptionsFor(allRepos)}</select>
+    <div class="composer-row">
+      <button class="composer-add">Open issue</button>
+      <button class="composer-cancel" type="button">Cancel</button>
+      <span class="composer-hint">⌘↵ to submit</span>
+    </div>
+    <div class="composer-error" hidden></div>
+  `
+  document.body.appendChild(composer)
+  issueComposerEl = composer
+
+  const titleInput = composer.querySelector<HTMLInputElement>('.issue-title')!
+  const bodyTa = composer.querySelector<HTMLTextAreaElement>('.issue-body')!
+  const repoSel = composer.querySelector<HTMLSelectElement>('.issue-repo')!
+  const addB = composer.querySelector<HTMLButtonElement>('.composer-add')!
+  const cancelB = composer.querySelector<HTMLButtonElement>('.composer-cancel')!
+  const errEl = composer.querySelector<HTMLElement>('.composer-error')!
+
+  // Selection text seeds the body so the user can flesh out the
+  // issue without retyping. Same prefill model as Current's
+  // drag-promote → issue composer.
+  bodyTa.value = got.snippet
+
+  placeComposerNearRect(composer, rect)
+  // If /api/repos hadn't returned yet at click-time, repopulate the
+  // <select> when it arrives (mirrors Current's behaviour).
+  if (allRepos.length === 0) {
+    ensureRepos().then(() => {
+      if (!issueComposerEl) return
+      const cur = repoSel.value
+      repoSel.innerHTML = repoOptionsFor(allRepos)
+      if (cur && allRepos.includes(cur)) repoSel.value = cur
+    })
+  }
+
+  const showError = (msg: string) => { errEl.textContent = msg; errEl.hidden = false }
+  const submit = async () => {
+    const title = titleInput.value.trim()
+    const body = bodyTa.value.trim()
+    const repo = repoSel.value
+    if (!title) { showError('Title is required'); titleInput.focus(); return }
+    if (!repo)  { showError('Repo is required'); return }
+
+    addB.disabled = true
+    addB.textContent = 'Opening…'
+    errEl.hidden = true
+    try {
+      const ghRes = await fetch('/api/gh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          operation: 'open_issue',
+          repository_full_name: repo,
+          title,
+          body,
+        }),
+      })
+      if (!ghRes.ok) {
+        const text = await ghRes.text().catch(() => '')
+        throw new Error(`Github ${ghRes.status}: ${text.slice(0, 160)}`)
+      }
+      closeIssueComposer()
+    } catch (err) {
+      addB.disabled = false
+      addB.textContent = 'Open issue'
+      showError((err as Error).message)
+    }
+  }
+
+  addB.addEventListener('click', submit)
+  cancelB.addEventListener('click', closeIssueComposer)
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') { e.preventDefault(); closeIssueComposer() }
+    else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit() }
+  }
+  titleInput.addEventListener('keydown', onKey)
+  bodyTa.addEventListener('keydown', onKey)
+  // Click-outside dismiss: any mousedown outside the composer that
+  // isn't the trigger button itself closes it. Captured so we run
+  // before the editor sees the click (it would otherwise refocus
+  // the doc and collapse anything still selected).
+  const outside = (e: MouseEvent) => {
+    if (!issueComposerEl) { document.removeEventListener('mousedown', outside, true); return }
+    const t = e.target as Node
+    if (issueComposerEl.contains(t)) return
+    if (issueBtnEl && issueBtnEl.contains(t)) return
+    closeIssueComposer()
+    document.removeEventListener('mousedown', outside, true)
+  }
+  document.addEventListener('mousedown', outside, true)
+
+  titleInput.focus()
 }
 
 function updateAnnotationComment(id: string, comment: string): void {
@@ -2465,6 +2679,20 @@ function attachHandlers() {
     e.preventDefault()
     createAnnotationFromSelection()
   })
+
+  // Issue button — sibling of the comment trigger. Same mousedown
+  // contract so the live selection survives long enough to be read
+  // and the snippet seeded into the composer body.
+  issueBtnEl = viewEl.querySelector<HTMLButtonElement>('#editor-issue-btn')
+  issueBtnEl?.addEventListener('mousedown', (e) => {
+    e.preventDefault()
+    openIssueComposerFromSelection()
+  })
+
+  // Warm the org-wide repo list so the composer's <select> is
+  // ready on first click. Cheap (5-min server cache); errors are
+  // swallowed inside ensureRepos.
+  ensureRepos()
 
   overlayEl = viewEl.querySelector<HTMLElement>('#editor-annotations')
   overlayEl?.addEventListener('click', (e) => {
