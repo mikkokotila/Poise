@@ -3886,6 +3886,19 @@ body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
 }
 .editor-comment-btn[hidden] { display: none; }
 
+/* Floating issue composer — same surface as Current's lane
+   .composer.composer-issue (border, shadow, r-sm), but anchored
+   to the page via position:fixed because the JS computes
+   coordinates from the original selection rect. Width matches the
+   annotation panel for visual rhyme; z-index sits above the
+   selection-action buttons so it lays over them cleanly. */
+.editor-floating-composer {
+  position: fixed;
+  z-index: 70;
+  width: 340px;
+  max-width: calc(100vw - 16px);
+}
+
 /* Comment panel — single, shared, anchored next to the clicked
    annotation. Fixed so it stays put on scroll; the JS recomputes
    anchor position when reopened. Hidden via the [hidden] attribute
