@@ -1,7 +1,7 @@
 import type { Plugin, Connect } from 'vite'
 import { getSettings, setSettings } from './settings'
 import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, type Lane } from './current'
-import { handleGhBody, listOrgRepos } from './gh'
+import { handleGhBody, listOrgRepos, setReviewAgentUsername } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, triggerPrReview, replayAgentJob } from './agent'
 import { listChatHistory, sendChat, saveAttachment, startAuthorContent, authorContentStatus, contentSlugForCallId, runDebate } from './chat'
 import { listDocs, readDoc, writeDoc, deleteDoc, newSlug, readAnnotations, writeAnnotations, getOrCreateChatSession } from './editor'
@@ -39,6 +39,13 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
       // approve-prs can pass it as `--username` to github-interface;
       // process.env is unreliable inside Vite plugins.
       startBehaviorsRuntime({ reviewAgentUsername: opts.reviewAgentUsername })
+
+      // Same identity, threaded into the /api/gh bridge: the involvement
+      // scope in server/gh.ts unions the review-agent's footprint with
+      // the user's so Current shows issues/PRs the agent opened. Like the
+      // behaviors runtime, this must come from the plugin opts — process.env
+      // is empty for this var inside the Vite plugin.
+      setReviewAgentUsername(opts.reviewAgentUsername || '')
 
       // /content finalization marker — set of call_ids we've already
       // written articles for, so repeated status polls don't re-write

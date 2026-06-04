@@ -26,6 +26,20 @@ import { getMeta } from './db'
 const execFileP = promisify(execFile)
 const CLI = 'github-datastore'
 const GH_INTERFACE = 'github-interface'
+const GH = 'gh'
+
+// Identity the review-agent uses on GitHub — threaded through from
+// cachePlugin's opts (Vite's loadEnv populates the plugin options object
+// but NOT process.env, so reading process.env.REVIEW_AGENT_USERNAME here
+// would silently come back empty — see the same note in
+// server/behaviors.ts). Set once at server start by
+// setReviewAgentUsername. The involvement scope in fetchKind unions this
+// account's *authored* issues/PRs with the configured `me`'s involvement,
+// so work the user's own agent opened surfaces in Current as the user's.
+let reviewAgentUsername = ''
+export function setReviewAgentUsername(name: string): void {
+  reviewAgentUsername = String(name || '')
+}
 
 // github-interface resolves the repo from cwd's last two path parts when
 // no git remote is found. We make a no-op directory under tmpdir for each
@@ -262,31 +276,66 @@ async function fetchGreenPrs(me: string): Promise<{ repo: string, number: number
 // ~1200 rows and the CLI does that under 150ms, so a generous ceiling
 // is cheap.
 async function fetchKind(itemType: 'pr' | 'issue', body: any, me: string): Promise<GhRecord[]> {
-  const args: string[] = ['view']
+  // Scope(s) selecting WHICH records — the leading CLI args that differ
+  // per query. The common filters (status / since / limit / format) are
+  // appended identically to each scope below.
+  //
   // When body.author is set, scope is "PRs/issues authored by X across
-  // the org" (uses views.pr / views.issue with --author). Otherwise
-  // scope is "things `me` is involved in" via views.user. The author
+  // the org" (uses views.pr / views.issue with --author). The author
   // path lets behaviors target a specific user (e.g. the Poise account)
-  // even when the configured `me` is a different user.
+  // even when the configured `me` is a different user — no agent union.
+  //
+  // Otherwise scope is "things `me` is involved in" via views.user. The
+  // review-agent acts on the user's behalf, so we also union what IT
+  // AUTHORED when one is configured and distinct: without this, issues/PRs
+  // the agent opened (e.g. bit-mis chores) never surface in Current even
+  // though they're the user's work.
+  //
+  // We use the agent's *authored* set (views.{issue,pr} --author), NOT its
+  // involvement view: github-datastore only populates views.user for the
+  // configured user, so the agent's involvement comes back empty — and
+  // "authored" is the semantic we want anyway (what the agent produced for
+  // us, not every PR it merely reviewed). Deduped by repo#number below.
+  const scopes: string[][] = []
   if (body.author) {
-    args.push(itemType, '--author', String(body.author))
+    scopes.push([itemType, '--author', String(body.author)])
   } else if (me) {
-    args.push('user', '--username', me, '--item-type', itemType)
+    scopes.push(['user', '--username', me, '--item-type', itemType])
+    if (reviewAgentUsername && reviewAgentUsername !== me) {
+      scopes.push([itemType, '--author', reviewAgentUsername])
+    }
   } else {
-    args.push(itemType)
+    scopes.push([itemType])
   }
-  if (body.record_state === 'open') args.push('--status', 'open')
-  if (body.updated_since)            args.push('--updated-since-datetime', body.updated_since)
+
+  const common: string[] = []
+  if (body.record_state === 'open') common.push('--status', 'open')
+  if (body.updated_since)            common.push('--updated-since-datetime', body.updated_since)
 
   const needsWide = !!(body.q || body.updated_until || body.count_only)
   const want = needsWide
     ? 5000
     : (Number(body.offset) || 0) + (Number(body.limit) || 200)
-  args.push('--limit', String(Math.min(Math.max(want, 1), 5000)))
-  args.push('--format', 'json')
+  common.push('--limit', String(Math.min(Math.max(want, 1), 5000)))
+  common.push('--format', 'json')
 
-  const recs = await runCli(args)
-  return recs.map((r) => toLegacy(r, itemType))
+  const batches = await Promise.all(scopes.map((scope) => runCli(['view', ...scope, ...common])))
+
+  // Merge + dedupe by repo#number: the same item can land in both the
+  // user's and the agent's involvement (one opened it, the other
+  // reviewed). handleGhBody re-sorts by updated_at, so order here is
+  // irrelevant — we just keep the first sighting of each record.
+  const seen = new Set<string>()
+  const out: GhRecord[] = []
+  for (const recs of batches) {
+    for (const r of recs) {
+      const key = `${r.repo}#${r.number}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(toLegacy(r, itemType))
+    }
+  }
+  return out
 }
 
 export async function handleGhBody(body: any): Promise<{ status: number, body: unknown }> {
@@ -343,32 +392,55 @@ export async function handleGhBody(body: any): Promise<{ status: number, body: u
   }
 
   if (op === 'open_issue') {
-    // Standalone issue creation via github-interface. Repo is inferred
-    // from cwd's last two parts — same hack as --mergeable.
+    // User-initiated issue creation — authored as the configured main user
+    // (settings.me), NOT the review-agent.
+    //
+    // We deliberately bypass `github-interface --create-issue`: its
+    // create_issue behavior hardcodes TOKEN_USER="bit-mis" (the bot
+    // account) with no flag/env/payload override, so every issue it opens
+    // is authored by the bot. Current's composer and Editor's "create
+    // issue from selection" are the user's OWN actions, so we POST through
+    // `gh api` with the token pinned to `me` (gh's stored credential for
+    // that account) — making the identity independent of whichever gh
+    // account happens to be "active".
     const repoFull = String(body.repository_full_name || '')
     const title = String(body.title || '').trim()
     const issueBody = String(body.body || '').trim()
     if (!repoFull.includes('/')) return { status: 400, body: { error: 'repository_full_name required (org/repo)' } }
     if (!title || !issueBody)    return { status: 400, body: { error: 'title and body are required' } }
     const [owner, repo] = repoFull.split('/', 2)
-    const cwd = join(GH_INTERFACE_CWD_ROOT, owner, repo)
+
+    // Resolve `me`'s gh credential. With no `me` configured, fall back to
+    // gh's active account.
+    let token = ''
     try {
-      await mkdir(cwd, { recursive: true })
-      const { stdout } = await execFileP(GH_INTERFACE, ['--create-issue', '--title', title, '--body', issueBody], {
-        cwd,
+      const tokenArgs = ['auth', 'token', ...(me ? ['--user', me] : [])]
+      token = (await execFileP(GH, tokenArgs, { maxBuffer: 1 * 1024 * 1024 })).stdout.trim()
+      if (!token) throw new Error('empty token')
+    } catch (err: any) {
+      const msg = err?.stderr?.toString?.() || err?.message || String(err)
+      return { status: 502, body: { error: `could not resolve a gh token for ${me || 'the active account'} (run \`gh auth login\` as ${me || 'that user'}): ${msg}` } }
+    }
+
+    try {
+      // `-f` sends raw string fields (no true/false/number coercion of the
+      // title/body); gh switches to POST automatically when fields are set.
+      const { stdout } = await execFileP(GH, [
+        'api', `repos/${owner}/${repo}/issues`,
+        '-f', `title=${title}`,
+        '-f', `body=${issueBody}`,
+      ], {
+        env: { ...process.env, GH_TOKEN: token, GH_HOST: 'github.com' },
         maxBuffer: 4 * 1024 * 1024,
       })
-      // github-interface returns the full GitHub API issue payload under
-      // `issue`. Normalize to a GhRecord so the frontend can splice the
-      // new issue straight into its liveItems while github-datastore
-      // catches up (the datastore is a polling consumer view, so the
-      // moment after creation it doesn't yet know about the new issue —
-      // an immediate fetch would come back empty).
-      const data = JSON.parse(stdout)
-      const issue = data?.issue || {}
+      // gh api returns the full GitHub issue payload at top level. Normalize
+      // to a GhRecord so the frontend can splice the new issue straight into
+      // liveItems while github-datastore (a polling consumer view) catches
+      // up — an immediate refetch wouldn't yet know about the new issue.
+      const issue = JSON.parse(stdout)
       const number = Number(issue.number || 0)
       if (!number) {
-        return { status: 502, body: { error: 'github-interface --create-issue: missing issue.number in response' } }
+        return { status: 502, body: { error: 'gh api create issue: missing number in response' } }
       }
       const nowIso = new Date().toISOString()
       const record: GhRecord = {
@@ -380,7 +452,7 @@ export async function handleGhBody(body: any): Promise<{ status: number, body: u
         url: String(issue.html_url || `https://github.com/${repoFull}/issues/${number}`),
         created_at: String(issue.created_at || nowIso),
         updated_at: String(issue.updated_at || issue.created_at || nowIso),
-        author: String(issue.user?.login || ''),
+        author: String(issue.user?.login || me || ''),
         author_avatar: issue.user?.avatar_url ? String(issue.user.avatar_url) : null,
         merged_at: null,
         comments_count: 0,
@@ -393,8 +465,9 @@ export async function handleGhBody(body: any): Promise<{ status: number, body: u
       }
       return { status: 200, body: { record } }
     } catch (err: any) {
-      const msg = err?.stderr?.toString?.() || err?.message || String(err)
-      return { status: 502, body: { error: 'github-interface --create-issue failed: ' + msg } }
+      let msg = err?.stderr?.toString?.() || err?.message || String(err)
+      if (token) msg = msg.split(token).join('***')   // never leak the token in errors
+      return { status: 502, body: { error: 'gh api create issue failed: ' + msg } }
     }
   }
 
