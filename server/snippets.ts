@@ -13,7 +13,7 @@
 
 import { mkdir, readFile, writeFile, unlink, rename } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { join, delimiter } from 'node:path'
+import { join, dirname, delimiter } from 'node:path'
 import { homedir } from 'node:os'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 
@@ -73,12 +73,40 @@ export function validateSnippets(input: unknown): Snippet[] {
   return out
 }
 
+// espanso refuses to start if its config root exists but has no config/
+// directory — it panics with "missing config directory" instead of
+// scaffolding defaults (it only scaffolds when the root is wholly
+// absent). Because writing poise.yml creates <root>/match/, a user who
+// adds a snippet BEFORE ever launching espanso would otherwise be left
+// with an unstartable, half-initialized config root. So whenever we
+// write into espanso's real default location, make sure a minimal
+// config/default.yml exists too. Never overwrites an existing config.
+const DEFAULT_ESPANSO_CONFIG = `# espanso configuration file
+#
+# espanso loads all match files from the sibling "match/" directory
+# (including Poise's poise.yml), so nothing is required here. This file
+# was created by Poise so espanso can start even when a snippet was added
+# before espanso's first launch. Edit freely — https://espanso.org/docs/
+`
+
+async function ensureEspansoConfigDir(): Promise<void> {
+  // With a custom POISE_ESPANSO_MATCH_DIR the caller owns the layout, so
+  // don't assume an espanso config root sits beside it.
+  if (process.env.POISE_ESPANSO_MATCH_DIR) return
+  const defaultYml = join(dirname(MATCH_DIR), 'config', 'default.yml')
+  if (existsSync(defaultYml)) return
+  await mkdir(dirname(defaultYml), { recursive: true })
+  if (!existsSync(defaultYml)) await writeFile(defaultYml, DEFAULT_ESPANSO_CONFIG, 'utf-8')
+}
+
 // Serialize to espanso's match schema and write atomically (tmp +
 // rename, same as server/editor.ts) so espanso's file watcher never sees
-// a half-written file. Creates the match dir if espanso hasn't yet.
+// a half-written file. Creates the match dir (and a minimal config/ so
+// espanso stays startable) if espanso hasn't been initialized yet.
 export async function saveSnippets(input: unknown): Promise<Snippet[]> {
   const snippets = validateSnippets(input)
   await mkdir(MATCH_DIR, { recursive: true })
+  await ensureEspansoConfigDir()
   // espanso schema: { matches: [{ trigger, replace }] }. yaml.stringify
   // owns the quoting/escaping and emits block scalars for multi-line
   // bodies — no manual escaping here.
