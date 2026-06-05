@@ -5,7 +5,7 @@ import { handleGhBody, listOrgRepos, setReviewAgentUsername } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, triggerPrReview, replayAgentJob } from './agent'
 import { listChatHistory, sendChat, saveAttachment, startAuthorContent, authorContentStatus, contentSlugForCallId, runDebate } from './chat'
 import { listDocs, readDoc, writeDoc, deleteDoc, newSlug, readAnnotations, writeAnnotations, getOrCreateChatSession } from './editor'
-import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, getEnabledMap, getSettingMap, isValidSetting, startBehaviorsRuntime, getResolveUnblockingLastFired, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
+import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, setScratchpad as setBehaviorScratchpad, getEnabledMap, getSettingMap, getScratchpadMap, isValidSetting, startBehaviorsRuntime, getResolveUnblockingLastFired, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
 
 function json(res: any, status: number, body: unknown) {
   res.statusCode = status
@@ -124,6 +124,7 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
         if (url === '/api/behaviors' && req.method === 'GET') {
           const enabled = getEnabledMap()
           const settings = getSettingMap()
+          const scratch = getScratchpadMap()
           let logs: Awaited<ReturnType<typeof fetchAgentLogs>> = []
           try { logs = await fetchAgentLogs() } catch { /* logs unavailable — lastTriggered nulls */ }
           // fetchAgentLogs returns newest-first, so .find() picks the
@@ -138,6 +139,7 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
               owner: opts.reviewAgentUsername || null,
               enabled: enabled['review-new-prs'],
               setting: settings['review-new-prs'],
+              scratchpad: scratch['review-new-prs'],
               lastTriggered: lastFor('pr_review'),
             },
             // approve-prs has no priority setting — `setting: null` so
@@ -147,6 +149,7 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
               owner: opts.reviewAgentUsername || null,
               enabled: enabled['approve-prs'],
               setting: null,
+              scratchpad: scratch['approve-prs'],
               lastTriggered: lastFor('pr_approve'),
             },
             // resolve-unblocking calls github-interface directly (no
@@ -154,10 +157,13 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
             // lastTriggered is instead persisted by the behavior
             // itself in cache.db meta whenever it actually resolves a
             // conversation — getResolveUnblockingLastFired reads it.
+            // `scratchpad: null` because there's no agent prompt to
+            // inject memory into — the view renders no memory control.
             'resolve-unblocking': {
               owner: opts.reviewAgentUsername || null,
               enabled: enabled['resolve-unblocking'],
               setting: null,
+              scratchpad: null,
               lastTriggered: getResolveUnblockingLastFired(),
             },
           })
@@ -181,10 +187,17 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
               }
               setBehaviorSetting(key, body.setting)
             }
+            if ('scratchpad' in body) {
+              if (typeof body.scratchpad !== 'string') {
+                return json(res, 400, { error: 'scratchpad must be a string' })
+              }
+              setBehaviorScratchpad(key, body.scratchpad)
+            }
             return json(res, 200, {
               ok: true,
               enabled: getEnabledMap()[key],
               setting: getSettingMap()[key],
+              scratchpad: getScratchpadMap()[key],
             })
           } catch (err: any) {
             return json(res, 400, { error: err.message || String(err) })
