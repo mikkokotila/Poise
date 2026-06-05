@@ -1,23 +1,28 @@
 // Snippets — manage espanso text-expansion pairs from Poise.
 //
-// Same table contract as Behaviors: the universal `table` / `thead th` /
-// `tbody tr` rules in style.css do the layout, and this view only sets
-// the trigger column width + the muted body preview. Editing reuses the
-// Settings-panel grammar — a right-side slide-in (`tp-*` / `st-*`
-// classes) holding the trigger + body fields. The list lives in
-// espanso's match/poise.yml (see server/snippets.ts): Poise reads it on
-// open and rewrites the whole set on each save; espanso hot-reloads so a
-// `;trigger` expansion goes live the moment you save.
+// Same table contract as Behaviors / Swarm (the universal `table` /
+// `thead th` / `tbody tr` rules do the layout). Editing is inline,
+// mirroring Swarm's row expansion: clicking a row toggles a sibling
+// expand row beneath it, with the same chevron cue (`.expand-btn` +
+// CHEV_SVG, rotated via `.open`). Unlike Swarm's read-only response
+// view, this expand row is an editor — trigger + body fields with Save
+// and Delete. One row open at a time. The list lives in espanso's
+// match/poise.yml (see server/snippets.ts): Poise rewrites the whole set
+// on each save and espanso hot-reloads, so a `;trigger` goes live at once.
 
 interface Snippet { trigger: string; replace: string }
 
 let viewEl: HTMLElement
+let tbodyEl: HTMLTableSectionElement
 let initialized = false
 let snippets: Snippet[] = []
 let espansoOk = true
 
-// Attribute-safe HTML escape — same helper the other views carry. Also
-// escapes " and ' so attribute interpolations don't break on quotes.
+// Chevron — identical to Swarm's (src/views/swarm-view.ts). Points right
+// when collapsed, rotates 90° via `.expand-btn.open .chev`.
+const CHEV_SVG = '<svg class="chev" width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4 2.5l4 3.5-4 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+
+// Attribute-safe HTML escape — same helper the other views carry.
 function escapeHtml(s: string): string {
   return String(s).replace(/[&<>"']/g, (c) => (
     c === '&' ? '&amp;' :
@@ -44,6 +49,7 @@ function renderShell(): string {
           <tr>
             <th class="col-snip-trigger">Trigger</th>
             <th class="col-title">Snippet</th>
+            <th class="col-action"></th>
           </tr>
         </thead>
         <tbody id="snippets-tbody"></tbody>
@@ -54,27 +60,28 @@ function renderShell(): string {
 }
 
 // First non-empty line of the body — the row stays one calm line; the
-// full text lives in the editor.
+// full text lives in the expanded editor.
 function previewLine(body: string): string {
   return body.split('\n').map((l) => l.trim()).find((l) => l) || ''
 }
 
 function renderRow(s: Snippet): HTMLTableRowElement {
   const tr = document.createElement('tr')
+  tr.className = 'snip-row'
   tr.dataset.trigger = s.trigger
   tr.innerHTML = `
     <td class="title-cell"><span class="snip-trigger">${escapeHtml(s.trigger)}</span></td>
     <td><span class="snip-preview">${escapeHtml(previewLine(s.replace))}</span></td>
+    <td class="action-cell"><button type="button" class="expand-btn" title="Edit" aria-label="Edit snippet">${CHEV_SVG}</button></td>
   `
   return tr
 }
 
 function renderRows() {
-  const tbody = viewEl.querySelector<HTMLTableSectionElement>('#snippets-tbody')!
-  tbody.innerHTML = ''
+  tbodyEl.innerHTML = ''
   const frag = document.createDocumentFragment()
   for (const s of snippets) frag.appendChild(renderRow(s))
-  tbody.appendChild(frag)
+  tbodyEl.appendChild(frag)
 
   const n = snippets.length
   viewEl.querySelector('#snippets-count')!.textContent = n ? `${n} snippet${n === 1 ? '' : 's'}` : ''
@@ -83,114 +90,80 @@ function renderRows() {
   viewEl.querySelector<HTMLElement>('.snip-espanso-hint')!.hidden = espansoOk
 }
 
-// ── editor panel (slide-in, Settings-panel grammar) ───────────────────────
-let panelEl: HTMLElement | null = null
-let triggerInput: HTMLInputElement | null = null
-let bodyInput: HTMLTextAreaElement | null = null
-let saveBtn: HTMLButtonElement | null = null
-let deleteBtn: HTMLButtonElement | null = null
-let statusEl: HTMLElement | null = null
-// Original trigger of the snippet being edited; null = add mode.
-let editingTrigger: string | null = null
-
-function setStatus(text: string, cls: 'info' | 'ok' | 'error' = 'info') {
-  if (!statusEl) return
-  statusEl.textContent = text
-  statusEl.className = `st-help st-help-${cls} snip-status`
+// ── inline edit row (expand-to-edit) ──────────────────────────────────────
+function setStatus(el: HTMLElement | null, text: string, cls: 'info' | 'ok' | 'error' = 'info') {
+  if (!el) return
+  el.textContent = text
+  el.className = `st-help st-help-${cls} snip-status`
 }
 
-function buildPanel(): HTMLElement {
-  const panel = document.createElement('aside')
-  panel.id = 'snippet-editor-panel'
-  panel.innerHTML = `
-    <div class="tp-header">
-      <span class="tp-title">Snippet</span>
-      <button type="button" class="tp-close" aria-label="Close">&times;</button>
-    </div>
-    <div class="tp-body">
-      <div class="tp-section">
-        <label class="tp-label">Trigger</label>
-        <input type="text" class="st-input snip-trigger-input" autocomplete="off" spellcheck="false" placeholder=";hello" />
-        <div class="st-help st-help-info">Type this anywhere and espanso swaps it for the snippet. Convention: lead with <code>;</code>.</div>
+function buildEditRow(snip: Snippet | null, isDraft: boolean): HTMLTableRowElement {
+  const tr = document.createElement('tr')
+  tr.className = 'snip-expand-row'
+  tr.innerHTML = `
+    <td colspan="3">
+      <div class="snip-edit">
+        <input type="text" class="st-input snip-trigger-input" placeholder=";hello" autocomplete="off" spellcheck="false" />
+        <textarea class="st-input snip-body-input" placeholder="The text that replaces the trigger…" spellcheck="false"></textarea>
+        <div class="st-row">
+          <button type="button" class="st-save snip-save">Save</button>
+          <button type="button" class="st-clear snip-delete">${isDraft ? 'Discard' : 'Delete'}</button>
+          <span class="st-help st-help-info snip-status" role="status"></span>
+        </div>
       </div>
-      <div class="tp-section">
-        <label class="tp-label">Snippet</label>
-        <textarea class="st-input snip-body-input" rows="8" spellcheck="false" placeholder="The text that replaces the trigger…"></textarea>
-      </div>
-      <div class="st-row">
-        <button type="button" class="st-save snip-save">Save</button>
-        <button type="button" class="st-clear snip-delete">Delete</button>
-        <span class="st-help st-help-info snip-status" role="status"></span>
-      </div>
-      <div class="tp-hint">
-        Stored in espanso's <code>match/poise.yml</code> and applied the moment you save.
-      </div>
-    </div>
+    </td>
   `
-  triggerInput = panel.querySelector<HTMLInputElement>('.snip-trigger-input')
-  bodyInput = panel.querySelector<HTMLTextAreaElement>('.snip-body-input')
-  saveBtn = panel.querySelector<HTMLButtonElement>('.snip-save')
-  deleteBtn = panel.querySelector<HTMLButtonElement>('.snip-delete')
-  statusEl = panel.querySelector<HTMLElement>('.snip-status')
+  const triggerInput = tr.querySelector<HTMLInputElement>('.snip-trigger-input')!
+  const bodyInput = tr.querySelector<HTMLTextAreaElement>('.snip-body-input')!
+  // Seed via .value (not inline HTML) to dodge the textarea leading-newline quirk.
+  triggerInput.value = snip?.trigger ?? ''
+  bodyInput.value = snip?.replace ?? ''
 
-  panel.querySelector('.tp-close')!.addEventListener('click', closePanel)
-  saveBtn!.addEventListener('click', () => void save())
-  deleteBtn!.addEventListener('click', () => void del())
-  // Plain Enter in the trigger field jumps to the body; Cmd/Ctrl+Enter
-  // saves from either field (the body keeps plain Enter for newlines).
-  triggerInput!.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter') return
-    e.preventDefault()
-    if (e.metaKey || e.ctrlKey) void save()
-    else bodyInput?.focus()
+  tr.querySelector('.snip-save')!.addEventListener('click', () => void save(tr))
+  tr.querySelector('.snip-delete')!.addEventListener('click', () => void del(tr))
+  // Escape collapses (discard); ⌘/Ctrl+↵ saves; plain Enter in the
+  // trigger jumps to the body (which keeps Enter for newlines).
+  triggerInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); collapseOpen(); return }
+    if (e.key === 'Enter') { e.preventDefault(); if (e.metaKey || e.ctrlKey) void save(tr); else bodyInput.focus() }
   })
-  bodyInput!.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void save() }
+  bodyInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); collapseOpen(); return }
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void save(tr) }
   })
-  return panel
+  return tr
 }
 
-function openPanel(snippet: Snippet | null) {
-  if (!panelEl) {
-    panelEl = buildPanel()
-    document.body.appendChild(panelEl)
+// Collapse whatever row is open: remove its expand row, un-rotate the
+// chevron, and discard the draft main row if that's what was open.
+function collapseOpen() {
+  const editRow = tbodyEl.querySelector('.snip-expand-row')
+  if (!editRow) return
+  const main = editRow.previousElementSibling as HTMLElement | null
+  editRow.remove()
+  if (main) {
+    main.querySelector('.expand-btn')?.classList.remove('open')
+    if (main.classList.contains('snip-draft')) main.remove()
   }
-  editingTrigger = snippet ? snippet.trigger : null
-  if (triggerInput) triggerInput.value = snippet ? snippet.trigger : ''
-  if (bodyInput) bodyInput.value = snippet ? snippet.replace : ''
-  if (deleteBtn) deleteBtn.hidden = !snippet          // Delete only in edit mode
-  setStatus('')
-  panelEl.classList.add('open')
-  // Defer listener attach so the click that opened the panel isn't read
-  // as an outside-click that immediately closes it.
-  setTimeout(() => {
-    document.addEventListener('mousedown', onOutside)
-    document.addEventListener('keydown', onKeydown)
-    ;(snippet ? bodyInput : triggerInput)?.focus()
-  }, 0)
 }
 
-function closePanel() {
-  if (!panelEl) return
-  panelEl.classList.remove('open')
-  editingTrigger = null
-  document.removeEventListener('mousedown', onOutside)
-  document.removeEventListener('keydown', onKeydown)
-}
-
-function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape') { e.preventDefault(); closePanel() }
-}
-
-// Close on any click outside the panel. The Add button and table rows
-// open/repopulate the panel themselves, so they're excluded — otherwise
-// the panel would animate out and straight back in. Switching views via
-// the top-nav is an outside click, so the panel tidies itself away.
-function onOutside(e: MouseEvent) {
-  if (!panelEl) return
-  const t = e.target as HTMLElement
-  if (panelEl.contains(t) || t.closest('.snip-add') || t.closest('#snippets-tbody tr')) return
-  closePanel()
+function onTbodyClick(e: MouseEvent) {
+  // Only main rows toggle. Clicks inside the expand row (inputs/buttons)
+  // have no `tr.snip-row` ancestor, so they never collapse the editor.
+  const main = (e.target as HTMLElement).closest<HTMLTableRowElement>('tr.snip-row')
+  if (!main || !tbodyEl.contains(main)) return
+  const sibling = main.nextElementSibling
+  const isOpen = !!sibling && sibling.classList.contains('snip-expand-row')
+  collapseOpen()
+  if (isOpen) return                                   // clicked the open row → toggled closed
+  const isDraft = main.classList.contains('snip-draft')
+  const snip = isDraft ? null : (snippets.find((s) => s.trigger === main.dataset.trigger) || null)
+  const editRow = buildEditRow(snip, isDraft)
+  main.insertAdjacentElement('afterend', editRow)
+  main.querySelector('.expand-btn')?.classList.add('open')
+  // Existing snippet → land in the body; draft/add → land in the trigger.
+  const focusSel = snip ? '.snip-body-input' : '.snip-trigger-input'
+  ;(editRow.querySelector(focusSel) as HTMLElement | null)?.focus()
 }
 
 async function putSnippets(list: Snippet[]): Promise<Snippet[]> {
@@ -204,60 +177,83 @@ async function putSnippets(list: Snippet[]): Promise<Snippet[]> {
   return data.snippets as Snippet[]
 }
 
-async function save() {
-  if (!triggerInput || !bodyInput || !saveBtn) return
+async function save(editRow: HTMLTableRowElement) {
+  const main = editRow.previousElementSibling as HTMLElement | null
+  const isDraft = !!main?.classList.contains('snip-draft')
+  const editingTrigger = isDraft ? null : (main?.dataset.trigger ?? null)
+  const triggerInput = editRow.querySelector<HTMLInputElement>('.snip-trigger-input')!
+  const bodyInput = editRow.querySelector<HTMLTextAreaElement>('.snip-body-input')!
+  const status = editRow.querySelector<HTMLElement>('.snip-status')
   const trigger = triggerInput.value.trim()
   const replace = bodyInput.value
-  if (!trigger) { setStatus('Trigger is required.', 'error'); triggerInput.focus(); return }
-  if (!replace.trim()) { setStatus('Snippet body is required.', 'error'); bodyInput.focus(); return }
-  // Build the next list, preserving order: edit replaces in place, add
-  // appends.
+  if (!trigger) { setStatus(status, 'Trigger is required.', 'error'); triggerInput.focus(); return }
+  if (!replace.trim()) { setStatus(status, 'Snippet body is required.', 'error'); bodyInput.focus(); return }
+  // Preserve order: edit replaces in place, add appends.
   const next = editingTrigger != null
     ? snippets.map((s) => (s.trigger === editingTrigger ? { trigger, replace } : s))
     : [...snippets, { trigger, replace }]
-  // Local uniqueness guard (the server enforces it too) for an instant message.
   if (next.filter((s) => s.trigger === trigger).length > 1) {
-    setStatus(`A snippet with trigger "${trigger}" already exists.`, 'error')
+    setStatus(status, `A snippet with trigger "${trigger}" already exists.`, 'error')
     return
   }
+  const saveBtn = editRow.querySelector<HTMLButtonElement>('.snip-save')!
   saveBtn.disabled = true
   saveBtn.textContent = 'Saving…'
   try {
     snippets = await putSnippets(next)
-    renderRows()
-    closePanel()
+    renderRows()                                       // rebuild collapses the (transient) edit row
   } catch (err) {
-    setStatus((err as Error).message || 'Failed to save.', 'error')
-  } finally {
+    setStatus(status, (err as Error).message || 'Failed to save.', 'error')
     saveBtn.disabled = false
     saveBtn.textContent = 'Save'
   }
 }
 
-async function del() {
-  if (editingTrigger == null || !deleteBtn) return
+async function del(editRow: HTMLTableRowElement) {
+  const main = editRow.previousElementSibling as HTMLElement | null
+  const editingTrigger = main?.dataset.trigger ?? null
+  // Draft (never saved) or somehow unkeyed → just discard, no server call.
+  if (main?.classList.contains('snip-draft') || editingTrigger == null) { collapseOpen(); return }
   const next = snippets.filter((s) => s.trigger !== editingTrigger)
-  deleteBtn.disabled = true
+  const delBtn = editRow.querySelector<HTMLButtonElement>('.snip-delete')!
+  delBtn.disabled = true
   try {
     snippets = await putSnippets(next)
     renderRows()
-    closePanel()
   } catch (err) {
-    setStatus((err as Error).message || 'Failed to delete.', 'error')
-  } finally {
-    deleteBtn.disabled = false
+    setStatus(editRow.querySelector<HTMLElement>('.snip-status'), (err as Error).message || 'Failed to delete.', 'error')
+    delBtn.disabled = false
   }
 }
 
+// "Add snippet" → a draft main row pinned at the top, opened in edit mode.
+// A second click on it / Escape / Discard removes it. One draft at a time.
+function openAdd() {
+  const existingDraft = tbodyEl.querySelector<HTMLElement>('tr.snip-draft')
+  if (existingDraft) {
+    ;(existingDraft.nextElementSibling?.querySelector('.snip-trigger-input') as HTMLElement | null)?.focus()
+    return
+  }
+  collapseOpen()
+  // The table is hidden while the saved list is empty — show it for the draft.
+  viewEl.querySelector<HTMLElement>('#snippets-table')!.hidden = false
+  viewEl.querySelector<HTMLElement>('.snip-empty')!.hidden = true
+  const main = document.createElement('tr')
+  main.className = 'snip-row snip-draft'
+  main.innerHTML = `
+    <td class="title-cell"><span class="snip-draft-label">New snippet</span></td>
+    <td><span class="snip-preview"></span></td>
+    <td class="action-cell"><button type="button" class="expand-btn open" title="Edit" aria-label="Edit snippet">${CHEV_SVG}</button></td>
+  `
+  tbodyEl.insertBefore(main, tbodyEl.firstChild)
+  const editRow = buildEditRow(null, true)
+  main.insertAdjacentElement('afterend', editRow)
+  ;(editRow.querySelector('.snip-trigger-input') as HTMLElement | null)?.focus()
+}
+
 function attachHandlers() {
-  viewEl.querySelector('.snip-add')!.addEventListener('click', () => openPanel(null))
-  const tbody = viewEl.querySelector<HTMLTableSectionElement>('#snippets-tbody')!
-  tbody.addEventListener('click', (e) => {
-    const tr = (e.target as HTMLElement).closest<HTMLTableRowElement>('tr[data-trigger]')
-    if (!tr) return
-    const s = snippets.find((x) => x.trigger === tr.dataset.trigger)
-    if (s) openPanel(s)
-  })
+  viewEl.querySelector('.snip-add')!.addEventListener('click', openAdd)
+  tbodyEl.addEventListener('click', onTbodyClick)
 }
 
 async function fetchSnippets() {
@@ -275,6 +271,7 @@ export async function initSnippetsView() {
   if (!initialized) {
     initialized = true
     viewEl.innerHTML = renderShell()
+    tbodyEl = viewEl.querySelector<HTMLTableSectionElement>('#snippets-tbody')!
     attachHandlers()
   }
   await fetchSnippets()

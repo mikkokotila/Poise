@@ -756,10 +756,9 @@ tr:hover .review-btn { opacity: 1; }
   border-color: var(--text-tertiary);
 }
 
-/* ── Side panels (Typography, Settings, Snippet editor) ── */
+/* ── Side panels (Typography, Settings) ── */
 #typo-panel,
-#settings-panel,
-#snippet-editor-panel {
+#settings-panel {
   position: fixed;
   top: 0;
   right: 0;
@@ -777,8 +776,7 @@ tr:hover .review-btn { opacity: 1; }
 }
 
 #typo-panel.open,
-#settings-panel.open,
-#snippet-editor-panel.open {
+#settings-panel.open {
   transform: translateX(0);
 }
 
@@ -1033,8 +1031,7 @@ tr:hover .review-btn { opacity: 1; }
 /* Hide the nav while a side panel is open so it doesn't overlay the
    panel content. The burger stays visible — it's the × that closes. */
 body:has(#typo-panel.open) #top-nav,
-body:has(#settings-panel.open) #top-nav,
-body:has(#snippet-editor-panel.open) #top-nav {
+body:has(#settings-panel.open) #top-nav {
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--t-base) ease;
@@ -4085,9 +4082,8 @@ body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
    Snippets — espanso text-expansion pairs. Same table contract as
    Behaviors / Archive (the universal `table` / `thead th` / `tbody tr`
    rules do the layout); this block only sets the trigger column, the
-   muted body preview, the clickable row, and the editor textarea sizing.
-   The editor panel's slide-in chrome is shared with Settings / Typography
-   (see the grouped #…-panel rules near the top of this file).
+   muted body preview, the clickable rows, and the inline editor row —
+   the same expand-row treatment as Swarm's response view, but editable.
    ───────────────────────────────────────────────────────────────────────── */
 
 .col-snip-trigger { width: 200px; }
@@ -4116,8 +4112,12 @@ body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
   text-align: left;
 }
 
-/* Whole row opens the editor. */
-#snippets-table tbody tr { cursor: pointer; }
+/* Only main rows expand-to-edit; the editor row itself isn't clickable. */
+#snippets-table tbody tr.snip-row { cursor: pointer; }
+#snippets-table .action-cell { text-align: right; }
+
+/* Draft row label — muted until it's saved with a real trigger. */
+.snip-draft-label { color: var(--text-tertiary); font-style: italic; }
 
 /* Add-snippet — the view's primary action: .st-save fill, trimmed to the
    header's pill rhythm. */
@@ -4133,10 +4133,24 @@ body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
   padding: var(--sp-4) 0;
 }
 
-/* Editor body reuses .st-input's look; add only the multi-line ergonomics
-   .st-input doesn't carry. */
-#snippet-editor-panel textarea.st-input {
-  min-height: 160px;
+/* Inline editor row — same soft-surface treatment as Swarm's expanded
+   response row (#view-swarm tr.agent-expand-row > td) so it reads as a
+   continuation of the row above. */
+#snippets-table tr.snip-expand-row > td {
+  padding: var(--sp-4) var(--sp-5) var(--sp-5) var(--sp-5);
+  background: var(--surface);
+  border-bottom: var(--b-hair);
+  white-space: normal;
+}
+.snip-edit {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  max-width: 720px;
+}
+/* Body reuses .st-input's look; add only the multi-line ergonomics. */
+.snip-edit textarea.st-input {
+  min-height: 140px;
   line-height: 1.5;
   resize: vertical;
 }
