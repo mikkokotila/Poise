@@ -5,6 +5,7 @@ import { handleGhBody, listOrgRepos, setReviewAgentUsername } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, triggerPrReview, replayAgentJob } from './agent'
 import { listChatHistory, sendChat, saveAttachment, startAuthorContent, authorContentStatus, contentSlugForCallId, runDebate } from './chat'
 import { listDocs, readDoc, writeDoc, deleteDoc, newSlug, readAnnotations, writeAnnotations, getOrCreateChatSession } from './editor'
+import { listSnippets, saveSnippets, espansoDetected } from './snippets'
 import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, getEnabledMap, getSettingMap, isValidSetting, startBehaviorsRuntime, getResolveUnblockingLastFired, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
 
 function json(res: any, status: number, body: unknown) {
@@ -519,6 +520,32 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
             } catch (err: any) {
               return json(res, 400, { error: err.message || String(err) })
             }
+          }
+        }
+
+        // ── /api/snippets — espanso text-expansion pairs ──
+        // Poise manages one espanso match file (<match>/poise.yml) as the
+        // single source of truth. GET returns the current pairs plus
+        // whether espanso looks installed (drives a UI hint). PUT replaces
+        // the whole set. See server/snippets.ts. espanso hot-reloads the
+        // file, so a successful PUT makes the `;trigger` expansions live
+        // immediately — no restart.
+        if (url === '/api/snippets' && req.method === 'GET') {
+          try {
+            const snippets = await listSnippets()
+            return json(res, 200, { snippets, espansoDetected: espansoDetected() })
+          } catch (err: any) {
+            return json(res, 500, { error: err.message || String(err) })
+          }
+        }
+        if (url === '/api/snippets' && req.method === 'PUT') {
+          try {
+            const raw = await readBody(req)
+            const body = raw ? JSON.parse(raw) : {}
+            const snippets = await saveSnippets(body.snippets)
+            return json(res, 200, { snippets })
+          } catch (err: any) {
+            return json(res, 400, { error: err.message || String(err) })
           }
         }
 

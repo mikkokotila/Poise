@@ -756,9 +756,10 @@ tr:hover .review-btn { opacity: 1; }
   border-color: var(--text-tertiary);
 }
 
-/* ── Side panels (Typography, Settings) ── */
+/* ── Side panels (Typography, Settings, Snippet editor) ── */
 #typo-panel,
-#settings-panel {
+#settings-panel,
+#snippet-editor-panel {
   position: fixed;
   top: 0;
   right: 0;
@@ -776,7 +777,8 @@ tr:hover .review-btn { opacity: 1; }
 }
 
 #typo-panel.open,
-#settings-panel.open {
+#settings-panel.open,
+#snippet-editor-panel.open {
   transform: translateX(0);
 }
 
@@ -1031,7 +1033,8 @@ tr:hover .review-btn { opacity: 1; }
 /* Hide the nav while a side panel is open so it doesn't overlay the
    panel content. The burger stays visible — it's the × that closes. */
 body:has(#typo-panel.open) #top-nav,
-body:has(#settings-panel.open) #top-nav {
+body:has(#settings-panel.open) #top-nav,
+body:has(#snippet-editor-panel.open) #top-nav {
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--t-base) ease;
@@ -4065,3 +4068,63 @@ body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
 }
 .editor-annotation-chat-send:hover { opacity: 0.85; }
 .editor-annotation-chat-send:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Snippets — espanso text-expansion pairs. Same table contract as
+   Behaviors / Archive (the universal `table` / `thead th` / `tbody tr`
+   rules do the layout); this block only sets the trigger column, the
+   muted body preview, the clickable row, and the editor textarea sizing.
+   The editor panel's slide-in chrome is shared with Settings / Typography
+   (see the grouped #…-panel rules near the top of this file).
+   ───────────────────────────────────────────────────────────────────────── */
+
+.col-snip-trigger { width: 200px; }
+
+/* Trigger is the row's identity — monospace, primary. */
+.snip-trigger {
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-size: 0.8125rem;
+  color: var(--text);
+}
+
+/* Body preview — one muted line, clamped (same technique as .title-cell). */
+.snip-preview {
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  color: var(--text-secondary);
+}
+
+/* The universal `td:nth-last-child(2) { text-align: right }` (meant for
+   Archive's Updated column) would right-align our Trigger — force it
+   left, exactly as the Behaviors table does for the same reason. */
+#snippets-table tbody td:nth-last-child(2),
+#snippets-table th:nth-last-child(2) {
+  text-align: left;
+}
+
+/* Whole row opens the editor. */
+#snippets-table tbody tr { cursor: pointer; }
+
+/* Add-snippet — the view's primary action: .st-save fill, trimmed to the
+   header's pill rhythm. */
+.snip-add {
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--r-pill);
+}
+
+/* Empty state — quiet, matches .st-help weight. */
+.snip-empty {
+  color: var(--text-tertiary);
+  font-size: 0.8125rem;
+  padding: var(--sp-4) 0;
+}
+
+/* Editor body reuses .st-input's look; add only the multi-line ergonomics
+   .st-input doesn't carry. */
+#snippet-editor-panel textarea.st-input {
+  min-height: 160px;
+  line-height: 1.5;
+  resize: vertical;
+}

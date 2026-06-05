@@ -6,6 +6,7 @@ import { initMainView, refreshMainView } from './views/main-view'
 import { initCurrentView } from './views/current-view'
 import { initSwarmView, focusRow as focusSwarmRow } from './views/swarm-view'
 import { initBehaviorsView } from './views/behaviors-view'
+import { initSnippetsView } from './views/snippets-view'
 import { initEditorView, stopEditorRefresh } from './views/editor-view'
 import { toggle as toggleChat } from './views/chat-pane'
 import { loadSettings, startRefreshTicker, applyTheme, getTheme } from './config'
@@ -14,17 +15,19 @@ const viewMainEl = document.getElementById('view-main')!
 const viewCurrentEl = document.getElementById('view-current')!
 const viewSwarmEl = document.getElementById('view-swarm')!
 const viewBehaviorsEl = document.getElementById('view-behaviors')!
+const viewSnippetsEl = document.getElementById('view-snippets')!
 const viewEditorEl = document.getElementById('view-editor')!
 
-type ViewSlug = 'main' | 'current' | 'swarm' | 'behaviors' | 'editor'
+type ViewSlug = 'main' | 'current' | 'swarm' | 'behaviors' | 'snippets' | 'editor'
 
 function showView(v: ViewSlug) {
-  const all = [viewMainEl, viewCurrentEl, viewSwarmEl, viewBehaviorsEl, viewEditorEl]
+  const all = [viewMainEl, viewCurrentEl, viewSwarmEl, viewBehaviorsEl, viewSnippetsEl, viewEditorEl]
   const target =
       v === 'main'      ? viewMainEl
     : v === 'current'   ? viewCurrentEl
     : v === 'swarm'     ? viewSwarmEl
     : v === 'behaviors' ? viewBehaviorsEl
+    : v === 'snippets'  ? viewSnippetsEl
     :                     viewEditorEl
 
   // Polling stays attached across view changes — every view that has
@@ -49,6 +52,7 @@ function showView(v: ViewSlug) {
   else if (v === 'current')   initCurrentView()
   else if (v === 'swarm')     initSwarmView()
   else if (v === 'behaviors') initBehaviorsView()
+  else if (v === 'snippets')  initSnippetsView()
   else                        initEditorView()
 
   for (const el of all) {
