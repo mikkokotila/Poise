@@ -407,7 +407,7 @@ export async function handleGhBody(body: any): Promise<{ status: number, body: u
     const title = String(body.title || '').trim()
     const issueBody = String(body.body || '').trim()
     if (!repoFull.includes('/')) return { status: 400, body: { error: 'repository_full_name required (org/repo)' } }
-    if (!title || !issueBody)    return { status: 400, body: { error: 'title and body are required' } }
+    if (!title)                  return { status: 400, body: { error: 'title is required' } }
     const [owner, repo] = repoFull.split('/', 2)
 
     // Resolve `me`'s gh credential. With no `me` configured, fall back to
@@ -423,13 +423,13 @@ export async function handleGhBody(body: any): Promise<{ status: number, body: u
     }
 
     try {
-      // `-f` sends raw string fields (no true/false/number coercion of the
-      // title/body); gh switches to POST automatically when fields are set.
-      const { stdout } = await execFileP(GH, [
-        'api', `repos/${owner}/${repo}/issues`,
-        '-f', `title=${title}`,
-        '-f', `body=${issueBody}`,
-      ], {
+      // `-f` sends raw string fields (no true/false/number coercion); gh
+      // switches to POST automatically once fields are set. Body is
+      // optional — only send the field when non-empty so a title-only
+      // issue is created with no body (GitHub allows that).
+      const apiArgs = ['api', `repos/${owner}/${repo}/issues`, '-f', `title=${title}`]
+      if (issueBody) apiArgs.push('-f', `body=${issueBody}`)
+      const { stdout } = await execFileP(GH, apiArgs, {
         env: { ...process.env, GH_TOKEN: token, GH_HOST: 'github.com' },
         maxBuffer: 4 * 1024 * 1024,
       })
