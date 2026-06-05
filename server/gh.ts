@@ -28,7 +28,7 @@ const CLI = 'github-datastore'
 const GH_INTERFACE = 'github-interface'
 const GH = 'gh'
 
-// Identity the review-agent uses on GitHub — threaded through from
+// The GitHub identity the review-agent acts as — threaded through from
 // cachePlugin's opts (Vite's loadEnv populates the plugin options object
 // but NOT process.env, so reading process.env.REVIEW_AGENT_USERNAME here
 // would silently come back empty — see the same note in
