@@ -80,6 +80,7 @@ let annotations: Annotation[] = []
 let overlayEl: HTMLElement | null = null
 let commentBtnEl: HTMLButtonElement | null = null
 let issueBtnEl: HTMLButtonElement | null = null
+let snippetBtnEl: HTMLButtonElement | null = null
 let panelEl: HTMLElement | null = null
 let panelForId: string | null = null
 let annotationsSaveTimer: ReturnType<typeof setTimeout> | null = null
@@ -93,6 +94,10 @@ let annotationsSaveInFlight = false
 // freeze the snippet at click-time rather than reading the live
 // selection from inside the composer.
 let issueComposerEl: HTMLDivElement | null = null
+// Snippet composer state — sibling of the issue composer, mounted from
+// the third selection action. Saves the selection as an espanso snippet
+// (a ;trigger → body pair) via POST /api/snippets.
+let snippetComposerEl: HTMLDivElement | null = null
 // Cached org-wide repo list, fetched once per view init from
 // /api/repos (the same source Current uses). Empty until the first
 // fetch lands; the composer falls back to a polite message.
@@ -204,6 +209,9 @@ function renderShell(): string {
       </button>
       <button type="button" class="editor-comment-btn editor-issue-btn" id="editor-issue-btn" hidden aria-label="Create issue from selection">
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.2"/><circle cx="7" cy="7" r="1.4" fill="currentColor"/></svg>
+      </button>
+      <button type="button" class="editor-comment-btn editor-snippet-btn" id="editor-snippet-btn" hidden aria-label="Save selection as snippet">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M8 1.5L3.5 8H6.5L6 12.5L10.5 6H7.5z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
       </button>
       <!-- Comment panel: floating, anchored near the clicked
            annotation. Shared across annotations — only one is open
@@ -1920,34 +1928,37 @@ function selectionAsAnnotationRange(): { range: AnnotationRange, snippet: string
 // composer and the selection has collapsed.
 function updateCommentButtonForSelection(): void {
   if (!commentBtnEl || !docEl) return
-  if (issueComposerEl) { commentBtnEl.hidden = true; if (issueBtnEl) issueBtnEl.hidden = true; return }
+  const hideAll = () => {
+    commentBtnEl!.hidden = true
+    if (issueBtnEl) issueBtnEl.hidden = true
+    if (snippetBtnEl) snippetBtnEl.hidden = true
+  }
+  // While either composer is open, focus is in it and the selection has
+  // collapsed — keep the whole cluster hidden.
+  if (issueComposerEl || snippetComposerEl) { hideAll(); return }
   const sel = window.getSelection()
-  if (!sel || sel.rangeCount === 0 || sel.getRangeAt(0).collapsed) {
-    commentBtnEl.hidden = true
-    if (issueBtnEl) issueBtnEl.hidden = true
-    return
-  }
+  if (!sel || sel.rangeCount === 0 || sel.getRangeAt(0).collapsed) { hideAll(); return }
   const range = sel.getRangeAt(0)
-  if (!docEl.contains(range.commonAncestorContainer) && range.commonAncestorContainer !== docEl) {
-    commentBtnEl.hidden = true
-    if (issueBtnEl) issueBtnEl.hidden = true
-    return
-  }
+  if (!docEl.contains(range.commonAncestorContainer) && range.commonAncestorContainer !== docEl) { hideAll(); return }
   const rects = range.getClientRects()
-  if (rects.length === 0) { commentBtnEl.hidden = true; if (issueBtnEl) issueBtnEl.hidden = true; return }
+  if (rects.length === 0) { hideAll(); return }
   const last = rects[rects.length - 1]
   const commentLeft = last.right + window.scrollX + 4
   const top = last.top + window.scrollY - 28
   commentBtnEl.style.left = commentLeft + 'px'
   commentBtnEl.style.top  = top + 'px'
   commentBtnEl.hidden = false
+  // 24px button + 4px gap = 28px per slot. The cluster grows rightward
+  // from the selection end: Comment, then Issue, then Snippet.
   if (issueBtnEl) {
-    // 24px button + 4px gap → issue sits one button-width to the
-    // right of comment. Cluster grows rightward from selection end;
-    // off-screen handling is the same as the single-button case.
     issueBtnEl.style.left = (commentLeft + 28) + 'px'
     issueBtnEl.style.top  = top + 'px'
     issueBtnEl.hidden = false
+  }
+  if (snippetBtnEl) {
+    snippetBtnEl.style.left = (commentLeft + 56) + 'px'
+    snippetBtnEl.style.top  = top + 'px'
+    snippetBtnEl.hidden = false
   }
 }
 
@@ -2163,6 +2174,113 @@ function openIssueComposerFromSelection(): void {
   document.addEventListener('mousedown', outside, true)
 
   titleInput.focus()
+}
+
+// ── Selection → "Save as snippet" composer ───────────────────────────
+// Sibling of the issue composer above: identical floating .composer
+// chrome, but two fields — a ;trigger and the body (seeded with the
+// selected text). Submits to POST /api/snippets, which appends the pair
+// to espanso's match/poise.yml (see server/snippets.ts) so it expands
+// system-wide immediately.
+
+function closeSnippetComposer(): void {
+  if (!snippetComposerEl) return
+  snippetComposerEl.remove()
+  snippetComposerEl = null
+}
+
+function openSnippetComposerFromSelection(): void {
+  if (snippetComposerEl) {
+    ;(snippetComposerEl.querySelector('input.snippet-trigger') as HTMLInputElement | null)?.focus()
+    return
+  }
+  const got = selectionAsAnnotationRange()
+  if (!got) return
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0) return
+  // Freeze the selection rect before focus moves to the composer and
+  // collapses it — same reason as the issue composer.
+  const rect = sel.getRangeAt(0).getBoundingClientRect()
+  if (commentBtnEl) commentBtnEl.hidden = true
+  if (issueBtnEl) issueBtnEl.hidden = true
+  if (snippetBtnEl) snippetBtnEl.hidden = true
+
+  const composer = document.createElement('div')
+  composer.className = 'composer composer-snippet editor-floating-composer'
+  composer.innerHTML = `
+    <input type="text" class="snippet-trigger" placeholder=";trigger" autocomplete="off" spellcheck="false" />
+    <textarea class="snippet-body" rows="4" placeholder="Snippet text" spellcheck="true"></textarea>
+    <div class="composer-row">
+      <button class="composer-add">Save snippet</button>
+      <button class="composer-cancel" type="button">Cancel</button>
+      <span class="composer-hint">⌘↵ to save</span>
+    </div>
+    <div class="composer-error" hidden></div>
+  `
+  document.body.appendChild(composer)
+  snippetComposerEl = composer
+
+  const triggerInput = composer.querySelector<HTMLInputElement>('.snippet-trigger')!
+  const bodyTa = composer.querySelector<HTMLTextAreaElement>('.snippet-body')!
+  const addB = composer.querySelector<HTMLButtonElement>('.composer-add')!
+  const cancelB = composer.querySelector<HTMLButtonElement>('.composer-cancel')!
+  const errEl = composer.querySelector<HTMLElement>('.composer-error')!
+
+  // The selected text seeds the body so the user only has to name the
+  // trigger; the body stays editable.
+  bodyTa.value = got.snippet
+
+  placeComposerNearRect(composer, rect)
+
+  const showError = (msg: string) => { errEl.textContent = msg; errEl.hidden = false }
+  const submit = async () => {
+    const trigger = triggerInput.value.trim()
+    const replace = bodyTa.value
+    if (!trigger) { showError('Trigger is required'); triggerInput.focus(); return }
+    if (!replace.trim()) { showError('Snippet text is required'); bodyTa.focus(); return }
+
+    addB.disabled = true
+    addB.textContent = 'Saving…'
+    errEl.hidden = true
+    try {
+      const res = await fetch('/api/snippets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trigger, replace }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error((data as { error?: string }).error || `request failed (${res.status})`)
+      }
+      closeSnippetComposer()
+    } catch (err) {
+      addB.disabled = false
+      addB.textContent = 'Save snippet'
+      showError((err as Error).message)
+    }
+  }
+
+  addB.addEventListener('click', submit)
+  cancelB.addEventListener('click', closeSnippetComposer)
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') { e.preventDefault(); closeSnippetComposer() }
+    else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit() }
+  }
+  triggerInput.addEventListener('keydown', onKey)
+  bodyTa.addEventListener('keydown', onKey)
+  const outside = (e: MouseEvent) => {
+    if (!snippetComposerEl) { document.removeEventListener('mousedown', outside, true); return }
+    const t = e.target as Node
+    if (snippetComposerEl.contains(t)) return
+    if (snippetBtnEl && snippetBtnEl.contains(t)) return
+    closeSnippetComposer()
+    document.removeEventListener('mousedown', outside, true)
+  }
+  document.addEventListener('mousedown', outside, true)
+
+  // Focus the trigger so the keyword can be typed right away — the body
+  // already carries the selection.
+  triggerInput.focus()
 }
 
 function updateAnnotationComment(id: string, comment: string): void {
@@ -2687,6 +2805,14 @@ function attachHandlers() {
   issueBtnEl?.addEventListener('mousedown', (e) => {
     e.preventDefault()
     openIssueComposerFromSelection()
+  })
+
+  // Snippet button — third sibling. Same mousedown contract so the live
+  // selection survives to seed the composer body.
+  snippetBtnEl = viewEl.querySelector<HTMLButtonElement>('#editor-snippet-btn')
+  snippetBtnEl?.addEventListener('mousedown', (e) => {
+    e.preventDefault()
+    openSnippetComposerFromSelection()
   })
 
   // Warm the org-wide repo list so the composer's <select> is

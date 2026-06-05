@@ -2310,7 +2310,8 @@ body:has(#snippet-editor-panel.open) #top-nav {
    and a repo selector below. Title is a single-line input — slightly
    bolder than body to read as the primary field. */
 
-.composer-issue .issue-title {
+.composer-issue .issue-title,
+.composer-snippet .snippet-trigger {
   width: 100%;
   font-family: inherit;
   font-size: 0.875rem;
@@ -2325,6 +2326,7 @@ body:has(#snippet-editor-panel.open) #top-nav {
 }
 
 .composer-issue .issue-title:focus,
+.composer-snippet .snippet-trigger:focus,
 .composer-issue .issue-repo:focus {
   outline-width: 2px;
   outline-style: solid;
@@ -2332,9 +2334,19 @@ body:has(#snippet-editor-panel.open) #top-nav {
   outline-offset: 2px;
 }
 
-.composer-issue .issue-title::placeholder {
+.composer-issue .issue-title::placeholder,
+.composer-snippet .snippet-trigger::placeholder {
   color: var(--n4);
   font-weight: 400;
+}
+
+/* The trigger is a literal token (;hello) — render it monospace and a
+   touch lighter than the issue title's bold; the rest of the field
+   chrome is inherited from the .issue-title rule above. */
+.composer-snippet .snippet-trigger {
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-weight: 500;
+  font-size: 0.8125rem;
 }
 
 .composer-issue .issue-repo,

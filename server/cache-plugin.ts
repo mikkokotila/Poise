@@ -5,7 +5,7 @@ import { handleGhBody, listOrgRepos, setReviewAgentUsername } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, triggerPrReview, replayAgentJob } from './agent'
 import { listChatHistory, sendChat, saveAttachment, startAuthorContent, authorContentStatus, contentSlugForCallId, runDebate } from './chat'
 import { listDocs, readDoc, writeDoc, deleteDoc, newSlug, readAnnotations, writeAnnotations, getOrCreateChatSession } from './editor'
-import { listSnippets, saveSnippets, espansoDetected } from './snippets'
+import { listSnippets, saveSnippets, addSnippet, espansoDetected } from './snippets'
 import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, getEnabledMap, getSettingMap, isValidSetting, startBehaviorsRuntime, getResolveUnblockingLastFired, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
 
 function json(res: any, status: number, body: unknown) {
@@ -544,6 +544,18 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
             const body = raw ? JSON.parse(raw) : {}
             const snippets = await saveSnippets(body.snippets)
             return json(res, 200, { snippets })
+          } catch (err: any) {
+            return json(res, 400, { error: err.message || String(err) })
+          }
+        }
+        // POST appends a single pair — used by the editor's "save
+        // selection as snippet" action so it needn't hold the full list.
+        if (url === '/api/snippets' && req.method === 'POST') {
+          try {
+            const raw = await readBody(req)
+            const body = raw ? JSON.parse(raw) : {}
+            const snippet = await addSnippet(body)
+            return json(res, 200, { snippet })
           } catch (err: any) {
             return json(res, 400, { error: err.message || String(err) })
           }

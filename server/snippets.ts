@@ -13,7 +13,7 @@
 
 import { mkdir, readFile, writeFile, unlink, rename } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { join, delimiter } from 'node:path'
 import { homedir } from 'node:os'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 
@@ -94,11 +94,26 @@ export async function saveSnippets(input: unknown): Promise<Snippet[]> {
   return snippets
 }
 
-// Best-effort "is espanso installed?" — drives a UI hint only, so we
-// just check the config root (parent of the match dir) rather than
-// shelling out. A custom POISE_ESPANSO_MATCH_DIR means the user knows
-// their setup, so assume yes.
+// Append one snippet to the current set and persist. The whole set is
+// re-validated by saveSnippets, so a duplicate or empty trigger is
+// rejected exactly as it would be on a full PUT. Returns the added pair.
+// Used by the editor's "save selection as snippet" action.
+export async function addSnippet(input: unknown): Promise<Snippet> {
+  const trigger = String((input as any)?.trigger ?? '').trim()
+  const replace = String((input as any)?.replace ?? '')
+  const current = await listSnippets()
+  await saveSnippets([...current, { trigger, replace }])
+  return { trigger, replace }
+}
+
+// Best-effort "is espanso installed?" — drives a UI hint only. We look
+// for the `espanso` binary on PATH rather than for a directory: espanso
+// is commonly installed before its config dir exists (in that state
+// `espanso path` itself panics with "missing config directory"), so a
+// dir check gives false negatives. A custom POISE_ESPANSO_MATCH_DIR
+// means the user knows their setup, so assume yes.
 export function espansoDetected(): boolean {
   if (process.env.POISE_ESPANSO_MATCH_DIR) return true
-  return existsSync(dirname(MATCH_DIR))
+  const dirs = (process.env.PATH || '').split(delimiter)
+  return dirs.some((p) => p !== '' && existsSync(join(p, 'espanso')))
 }
