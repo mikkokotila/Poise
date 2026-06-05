@@ -78,6 +78,45 @@ export function isValidSetting(v: unknown): v is BehaviorSetting {
   return typeof v === 'string' && (VALID_SETTINGS as string[]).includes(v)
 }
 
+// ── Per-behavior memory (scratchpad) ────────────────────────────────────
+// Free-text the user types in the Behaviors view that gets appended to
+// the agent's prompt on every fire of that behavior — a durable,
+// behavior-scoped instruction ("always check the changelog", "this repo
+// uses pnpm", …). Stored in the meta table under
+// behavior_<key>_scratchpad and delivered via agent-interface's `--note`
+// flag (see fireReview / fireApprove). Only the agent-backed behaviors
+// (review-new-prs, approve-prs) have a prompt to inject into;
+// resolve-unblocking calls github-interface directly with no agent, so
+// it has no scratchpad.
+
+function scratchpadKey(k: BehaviorKey): string { return META_PREFIX + k.replace(/-/g, '_') + '_scratchpad' }
+
+// Upper bound so a runaway note can't bloat the prompt or blow past the
+// OS argv limit when passed as --note. Generous for instructions;
+// trimmed silently rather than rejected so the UI stays forgiving.
+const MAX_SCRATCHPAD = 8000
+
+export function getScratchpad(key: BehaviorKey): string {
+  return getMeta(scratchpadKey(key)) || ''
+}
+
+export function setScratchpad(key: BehaviorKey, text: string): void {
+  setMeta(scratchpadKey(key), String(text ?? '').slice(0, MAX_SCRATCHPAD))
+}
+
+// Build the `--note <text>` argv fragment for a spawn, or [] when the
+// behavior has no memory set. agent-interface ALREADY plumbs a `note`
+// end-to-end into the agent prompt (run_pr_review → run_behavior →
+// mod.run → prompt(cmd, tools, note)); the one missing link is that its
+// main() doesn't yet read a `--note` flag, so today this fragment is
+// accepted-but-ignored (agent-interface skips unknown trailing flags).
+// Wiring `--note` there is a ~2-line change but lives in a separate repo
+// — until it lands, the note is passed but does not reach the agent.
+function noteArgs(key: BehaviorKey): string[] {
+  const note = getScratchpad(key).trim()
+  return note ? ['--note', note] : []
+}
+
 // Last-fired info is intentionally NOT persisted here — agent-interface
 // already records every pr_review / pr_approve run in its calls log,
 // and that's the single source of truth. The /api/behaviors GET
@@ -133,7 +172,8 @@ async function fireReview(pr: DatastorePr, setting: BehaviorSetting): Promise<vo
   // Pass the priority ceiling through as `--p`. agent-interface forwards
   // it to github-interface as `--p <value>`; for review-new-prs the
   // possible values are p0 / p1 / p2.
-  const child = spawn(AGENT_INTERFACE, ['--pr-review', `#${num}`, '--pwd', pwd, '--p', setting], {
+  const args = ['--pr-review', `#${num}`, '--pwd', pwd, '--p', setting, ...noteArgs('review-new-prs')]
+  const child = spawn(AGENT_INTERFACE, args, {
     cwd: agentInterfaceCwd(),
     detached: true,
     stdio: 'ignore',
@@ -278,7 +318,8 @@ async function fireApprove(pr: DatastorePr): Promise<void> {
   const [, owner, repo, num] = m
   const pwd = await localCheckoutPath(owner, repo)
   await mkdir(join(GH_INTERFACE_CWD_ROOT, owner, repo), { recursive: true })
-  const child = spawn(AGENT_INTERFACE, ['--pr-approve', `#${num}`, '--pwd', pwd], {
+  const args = ['--pr-approve', `#${num}`, '--pwd', pwd, ...noteArgs('approve-prs')]
+  const child = spawn(AGENT_INTERFACE, args, {
     cwd: agentInterfaceCwd(),
     detached: true,
     stdio: 'ignore',
@@ -509,5 +550,11 @@ export function getEnabledMap(): Record<BehaviorKey, boolean> {
 export function getSettingMap(): Record<BehaviorKey, BehaviorSetting> {
   const out: Record<BehaviorKey, BehaviorSetting> = {} as any
   for (const k of BEHAVIOR_KEYS) out[k] = getSetting(k)
+  return out
+}
+
+export function getScratchpadMap(): Record<BehaviorKey, string> {
+  const out: Record<BehaviorKey, string> = {} as any
+  for (const k of BEHAVIOR_KEYS) out[k] = getScratchpad(k)
   return out
 }
