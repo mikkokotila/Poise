@@ -14,15 +14,20 @@ export interface BehaviorMeta {
   // The Behaviors view renders an em dash in the Setting cell when
   // this is false.
   hasSetting: boolean
+  // Whether this behavior has a memory scratchpad — true only for the
+  // agent-backed behaviors whose prompt the note can be injected into.
+  // resolve-unblocking calls github-interface directly with no agent,
+  // so it has nothing to receive a note; the Memory cell shows a dash.
+  hasMemory: boolean
 }
 
 // The trilogy: initial review → follow-up review/approval → final
 // gate-clearing so a human can merge. Order matters for display since
 // the view renders rows in the listed sequence.
 export const BEHAVIORS: BehaviorMeta[] = [
-  { key: 'review-new-prs',     label: 'Review New Pull Requests',      hasSetting: true  },
-  { key: 'approve-prs',        label: 'Approve Pull Requests',         hasSetting: false },
-  { key: 'resolve-unblocking', label: 'Resolve Unblocking Conversations', hasSetting: false },
+  { key: 'review-new-prs',     label: 'Review New Pull Requests',      hasSetting: true,  hasMemory: true  },
+  { key: 'approve-prs',        label: 'Approve Pull Requests',         hasSetting: false, hasMemory: true  },
+  { key: 'resolve-unblocking', label: 'Resolve Unblocking Conversations', hasSetting: false, hasMemory: false },
 ]
 
 export type BehaviorSetting = 'p0' | 'p1' | 'p2' | 'p3' | 'p4'
@@ -33,6 +38,7 @@ export interface LastTriggered { at: string; target: string }
 const enabledByKey: Partial<Record<BehaviorKey, boolean>> = {}
 const settingByKey: Partial<Record<BehaviorKey, BehaviorSetting>> = {}
 const lastByKey: Partial<Record<BehaviorKey, LastTriggered | null>> = {}
+const scratchpadByKey: Partial<Record<BehaviorKey, string>> = {}
 
 export function isEnabled(key: BehaviorKey): boolean {
   return !!enabledByKey[key]
@@ -46,7 +52,11 @@ export function getLastTriggered(key: BehaviorKey): LastTriggered | null {
   return lastByKey[key] || null
 }
 
-async function postBehavior(key: BehaviorKey, body: { enabled?: boolean, setting?: BehaviorSetting }) {
+export function getScratchpad(key: BehaviorKey): string {
+  return scratchpadByKey[key] || ''
+}
+
+async function postBehavior(key: BehaviorKey, body: { enabled?: boolean, setting?: BehaviorSetting, scratchpad?: string }) {
   const res = await fetch(`/api/behaviors/${encodeURIComponent(key)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -83,6 +93,18 @@ export async function setSetting(key: BehaviorKey, setting: BehaviorSetting): Pr
   }
 }
 
+export async function setScratchpad(key: BehaviorKey, text: string): Promise<void> {
+  const previous = scratchpadByKey[key] ?? ''
+  scratchpadByKey[key] = text
+  try {
+    const data = await postBehavior(key, { scratchpad: text })
+    if (typeof data.scratchpad === 'string') scratchpadByKey[key] = data.scratchpad
+  } catch (err) {
+    scratchpadByKey[key] = previous
+    throw err
+  }
+}
+
 // Called by the view on init to load the current state from the server.
 export async function refreshState(): Promise<void> {
   try {
@@ -92,6 +114,7 @@ export async function refreshState(): Promise<void> {
     for (const k of Object.keys(data) as BehaviorKey[]) {
       enabledByKey[k] = !!data[k]?.enabled
       if (data[k]?.setting) settingByKey[k] = data[k].setting
+      scratchpadByKey[k] = typeof data[k]?.scratchpad === 'string' ? data[k].scratchpad : ''
       lastByKey[k] = data[k]?.lastTriggered ?? null
     }
   } catch { /* leave as-is */ }

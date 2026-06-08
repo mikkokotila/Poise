@@ -756,9 +756,10 @@ tr:hover .review-btn { opacity: 1; }
   border-color: var(--text-tertiary);
 }
 
-/* ── Side panels (Typography, Settings) ── */
+/* ── Side panels (Typography, Settings, Behavior memory) ── */
 #typo-panel,
-#settings-panel {
+#settings-panel,
+#behavior-memory-panel {
   position: fixed;
   top: 0;
   right: 0;
@@ -775,8 +776,13 @@ tr:hover .review-btn { opacity: 1; }
   overflow: hidden;
 }
 
+/* The memory editor holds a multi-line textarea, so it gets more room
+   than the form-field panels. */
+#behavior-memory-panel { width: 420px; }
+
 #typo-panel.open,
-#settings-panel.open {
+#settings-panel.open,
+#behavior-memory-panel.open {
   transform: translateX(0);
 }
 
@@ -1031,7 +1037,18 @@ tr:hover .review-btn { opacity: 1; }
 /* Hide the nav while a side panel is open so it doesn't overlay the
    panel content. The burger stays visible — it's the × that closes. */
 body:has(#typo-panel.open) #top-nav,
-body:has(#settings-panel.open) #top-nav {
+body:has(#settings-panel.open) #top-nav,
+body:has(#behavior-memory-panel.open) #top-nav {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-base) ease;
+}
+
+/* The memory panel carries its own × close button, so hide the burger
+   while it's open — menu.ts doesn't manage this panel, so the burger
+   would otherwise sit unmanaged over the panel header. (Typography and
+   Settings keep the burger: there it morphs into their × control.) */
+body:has(#behavior-memory-panel.open) #menu-toggle {
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--t-base) ease;
@@ -2551,6 +2568,7 @@ tr:hover .replay-btn { opacity: 1; }
 
 .col-owner-wide { width: 180px; }
 .col-setting    { width: 130px; }
+.col-memory     { width: 110px; }
 .col-last       { width: 130px; }
 .col-active     { width: 120px; }
 
@@ -2703,6 +2721,69 @@ tr:hover .replay-btn { opacity: 1; }
   outline-color: var(--a1);
   outline-offset: 2px;
 }
+
+/* Memory cell — a pill button echoing the setting pill's weight so the
+   two config controls read as a pair. The leading dot is muted when the
+   scratchpad is empty and tints to the accent when a note is saved. */
+.behavior-memory-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  padding: 4px 12px;
+  cursor: pointer;
+  transition: border-color var(--t-base) ease, color var(--t-base) ease;
+}
+.behavior-memory-btn:hover {
+  border-color: var(--text-tertiary);
+  color: var(--text);
+}
+.behavior-memory-btn:focus-visible {
+  outline-width: 2px;
+  outline-style: solid;
+  outline-color: var(--a1);
+  outline-offset: 2px;
+}
+.behavior-memory-btn.has-note { color: var(--text); }
+
+.behavior-memory-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  transition: background var(--t-base) ease;
+}
+.behavior-memory-btn.has-note .behavior-memory-dot { background: var(--a3); }
+
+/* Memory editor textarea — same chrome as .st-input, sized for prose. */
+.st-textarea {
+  width: 100%;
+  padding: 8px 10px;
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  color: var(--text);
+  outline: none;
+  margin-top: 4px;
+  resize: vertical;
+  min-height: 160px;
+  transition: border-color var(--t-base) ease;
+}
+.st-textarea:focus { border-color: var(--text); }
+.st-textarea::placeholder { color: var(--text-tertiary); }
+
+/* Status text in the memory panel's action row sits inline next to the
+   buttons; let it take the remaining width and align to the buttons. */
+.behavior-memory-status { margin-top: 0; align-self: center; flex: 1; }
 
 /* ─────────────────────────────────────────────────────────────────────────
    Chat pane (per-card, slides in from the LEFT)
