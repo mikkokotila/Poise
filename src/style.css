@@ -2324,7 +2324,8 @@ body:has(#behavior-memory-panel.open) #menu-toggle {
    and a repo selector below. Title is a single-line input — slightly
    bolder than body to read as the primary field. */
 
-.composer-issue .issue-title {
+.composer-issue .issue-title,
+.composer-snippet .snippet-trigger {
   width: 100%;
   font-family: inherit;
   font-size: 0.875rem;
@@ -2339,6 +2340,7 @@ body:has(#behavior-memory-panel.open) #menu-toggle {
 }
 
 .composer-issue .issue-title:focus,
+.composer-snippet .snippet-trigger:focus,
 .composer-issue .issue-repo:focus {
   outline-width: 2px;
   outline-style: solid;
@@ -2346,9 +2348,19 @@ body:has(#behavior-memory-panel.open) #menu-toggle {
   outline-offset: 2px;
 }
 
-.composer-issue .issue-title::placeholder {
+.composer-issue .issue-title::placeholder,
+.composer-snippet .snippet-trigger::placeholder {
   color: var(--n4);
   font-weight: 400;
+}
+
+/* The trigger is a literal token (;hello) — render it monospace and a
+   touch lighter than the issue title's bold; the rest of the field
+   chrome is inherited from the .issue-title rule above. */
+.composer-snippet .snippet-trigger {
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-weight: 500;
+  font-size: 0.8125rem;
 }
 
 .composer-issue .issue-repo,
@@ -4146,3 +4158,80 @@ body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
 }
 .editor-annotation-chat-send:hover { opacity: 0.85; }
 .editor-annotation-chat-send:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Snippets — espanso text-expansion pairs. Same table contract as
+   Behaviors / Archive (the universal `table` / `thead th` / `tbody tr`
+   rules do the layout); this block only sets the trigger column, the
+   muted body preview, the clickable rows, and the inline editor row —
+   the same expand-row treatment as Swarm's response view, but editable.
+   ───────────────────────────────────────────────────────────────────────── */
+
+.col-snip-trigger { width: 200px; }
+
+/* Trigger is the row's identity — monospace, primary. */
+.snip-trigger {
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-size: 0.8125rem;
+  color: var(--text);
+}
+
+/* Body preview — one muted line, clamped (same technique as .title-cell). */
+.snip-preview {
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  color: var(--text-secondary);
+}
+
+/* The universal `td:nth-last-child(2) { text-align: right }` (meant for
+   Archive's Updated column) would right-align our Trigger — force it
+   left, exactly as the Behaviors table does for the same reason. */
+#snippets-table tbody td:nth-last-child(2),
+#snippets-table th:nth-last-child(2) {
+  text-align: left;
+}
+
+/* Only main rows expand-to-edit; the editor row itself isn't clickable. */
+#snippets-table tbody tr.snip-row { cursor: pointer; }
+#snippets-table .action-cell { text-align: right; }
+
+/* Draft row label — muted until it's saved with a real trigger. */
+.snip-draft-label { color: var(--text-tertiary); font-style: italic; }
+
+/* Add-snippet — the view's primary action: .st-save fill, trimmed to the
+   header's pill rhythm. */
+.snip-add {
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--r-pill);
+}
+
+/* Empty state — quiet, matches .st-help weight. */
+.snip-empty {
+  color: var(--text-tertiary);
+  font-size: 0.8125rem;
+  padding: var(--sp-4) 0;
+}
+
+/* Inline editor row — same soft-surface treatment as Swarm's expanded
+   response row (#view-swarm tr.agent-expand-row > td) so it reads as a
+   continuation of the row above. */
+#snippets-table tr.snip-expand-row > td {
+  padding: var(--sp-4) var(--sp-5) var(--sp-5) var(--sp-5);
+  background: var(--surface);
+  border-bottom: var(--b-hair);
+  white-space: normal;
+}
+.snip-edit {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  max-width: 720px;
+}
+/* Body reuses .st-input's look; add only the multi-line ergonomics. */
+.snip-edit textarea.st-input {
+  min-height: 140px;
+  line-height: 1.5;
+  resize: vertical;
+}
