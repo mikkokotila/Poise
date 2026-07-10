@@ -14,6 +14,8 @@ export default defineConfig(({ mode }) => {
       exclude: ['better-sqlite3'],
     },
     server: {
+      port: 5555,
+      strictPort: true,
       proxy: {
         // Note: /api/github/* is NOT proxied here — it's handled by cachePlugin
         // middleware so the token can come from the SQLite meta table.
