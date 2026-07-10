@@ -16,7 +16,7 @@ cp .env.example .env   # optional: CONFAB_API_KEY enables consensus reviews
 npm run dev
 ```
 
-Open http://localhost:5173. On first load the Settings panel opens automatically — paste a [GitHub classic PAT](https://github.com/settings/tokens/new?scopes=repo,read:org&description=Poise) with `repo` + `read:org` scopes and click Save. The token is stored locally in `~/.poise/cache.db` (meta table) and used only to call the GitHub API on your behalf.
+Open http://localhost:5555. On first load the Settings panel opens automatically — paste a [GitHub classic PAT](https://github.com/settings/tokens/new?scopes=repo,read:org&description=Poise) with `repo` + `read:org` scopes and click Save. The token is stored locally in `~/.poise/cache.db` (meta table) and used only to call the GitHub API on your behalf.
 
 After the first save, Poise runs an initial sync (a few minutes for a busy org). Subsequent loads delta-sync using GitHub's `updated:>` search operator and are near-instant.
 
