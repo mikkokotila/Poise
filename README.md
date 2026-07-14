@@ -1,55 +1,107 @@
 # Poise
 
-A minimal local dashboard for your engineering work on GitHub — three views, one SQLite cache.
+Poise is a local engineering dashboard for GitHub work, agent activity,
+automations, snippets, and long-form writing. It is a TypeScript application
+with a framework-free browser client, a Node server, and a small SQLite store.
 
-- **Main** — every issue and PR you're part of, with the latest commenter shown as an avatar, a play button to run a consensus review via [Confab](https://github.com/world-federation-of-advertisers/Confab), and an inline expand to preview the last comment.
-- **Flow** — cycle time, throughput, first-review latency, waste, activity over time, work mix, top contributors, monthly waste bars.
-- **Trust** — rework, silent merges, bounce, blast radius, review engagement, return-to-author, and file-level hotspots.
+## Capabilities
 
-Built with Vite + TypeScript, no framework, no UI lib. All data is cached locally in SQLite (`~/.poise/cache.db`) — the GitHub API is hit only on sync.
+- **Current** — manual idea/concept/plan cards beside live issues and PRs.
+- **Swarm** — agent run status, responses, and safe replay controls.
+- **Archive** — searchable GitHub issue and PR history.
+- **Behaviors** — scheduled review, approval, and unblocking automations.
+- **Snippets** — simple Espanso trigger management.
+- **Editor** — atomic Markdown storage, annotations, and agent-backed chat.
 
-## Setup
+## Requirements
+
+- Node.js 20.19, 22.13, or 24.x and npm. Use an active LTS line in production.
+- `gh`, authenticated with `gh auth login`.
+- `github-datastore`, `github-interface`, and `agent-interface` on `PATH`.
+- A local checkout of `agent-interface`; set `AGENT_INTERFACE_ROOT` when it is
+  not at `~/dev/caller/agent_interface`.
+- Espanso is optional and only required for system-wide snippet expansion.
+
+Validate the local integrations without changing external state:
 
 ```bash
-npm install
-cp .env.example .env   # optional: CONFAB_API_KEY enables consensus reviews
+npm run doctor
+```
+
+GitHub credentials stay in `gh`. Poise resolves the selected account's token
+through `gh` only for the lifetime of an issue-creation subprocess; it does not
+persist or expose that token. On upgrade, the schema migration removes the
+retired plaintext `github_token` row while preserving legacy content tables.
+
+## Development
+
+```bash
+npm ci
+cp .env.example .env
+chmod 600 .env
 npm run dev
 ```
 
-Open http://localhost:5555. On first load the Settings panel opens automatically — paste a [GitHub classic PAT](https://github.com/settings/tokens/new?scopes=repo,read:org&description=Poise) with `repo` + `read:org` scopes and click Save. The token is stored locally in `~/.poise/cache.db` (meta table) and used only to call the GitHub API on your behalf.
+Open <http://localhost:5555>. Configure the GitHub organization, username,
+timezone, refresh interval, and theme in Settings.
 
-After the first save, Poise runs an initial sync (a few minutes for a busy org). Subsequent loads delta-sync using GitHub's `updated:>` search operator and are near-instant.
+## Production
 
-## Architecture
+```bash
+npm ci
+npm run build
+npm start
+```
 
-- `src/` — three views (`main-view.ts`, `flow-view.ts`, `trust-view.ts`), a typography panel, a burger menu
-- `server/` — Vite middleware (`cache-plugin.ts`), sync pipeline (`sync.ts`), SQLite schema (`db.ts`), dashboard queries (`queries.ts`)
-- `~/.poise/cache.db` — local SQLite database, WAL mode
-
-## Endpoints
-
-**Auth**
-- `GET  /api/auth/status` — is a token configured?
-- `POST /api/auth/set-token` — `{ "token": "ghp_…" }` to save, `{ "token": "" }` to clear
-
-**Cache**
-- `POST /api/cache/sync` — delta sync from GitHub
-- `POST /api/cache/backfill-files?limit=N` — one-shot backfill of file-level data (for Trust hotspots)
-- `GET  /api/cache/prs?type=&status=&limit=&offset=` — paged list for Main
-- `GET  /api/cache/flow?range=7|30|90|365` — Flow dashboard payload
-- `GET  /api/cache/trust?range=7|30|90|365` — Trust dashboard payload
-
-**GitHub proxy**
-- `/api/github/*` — transparent proxy that injects the stored PAT as `Authorization: Bearer …`. Used for in-browser calls (e.g. posting PR review comments) without exposing the token to the browser.
+The production build emits the browser client under `dist/client` and the Node
+entrypoint at `dist/server.js`. The server binds `127.0.0.1:5555` by default.
+Poise intentionally refuses non-loopback bindings: its API can create GitHub
+issues, launch agents, and modify local files, so it is not a network service.
+Keep `.env` owner-readable only (`chmod 600 .env`) because it may contain the
+Confab API credential; `npm run doctor` rejects broader permissions.
 
 ## Configuration
 
-The burger menu (top-right) has two settings panels:
-- **Settings** — the GitHub PAT
-- **Typography** — five preset archetypes (Engineer, Editor, Minimalist, Companion, Auteur) and full control over font size, line height, row density, colors, and content width.
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `POISE_HOST` | Production bind address; loopback only | `127.0.0.1` |
+| `POISE_PORT` | Production port | `5555` |
+| `POISE_DB` | SQLite path | `~/.poise/cache.db` |
+| `POISE_EDITOR_DIR` | Markdown and annotation directory | `~/.poise/editor` |
+| `POISE_CHAT_ATTACHMENTS_DIR` | Durable chat attachments | `~/.poise/chat-attachments` |
+| `POISE_ESPANSO_MATCH_DIR` | Espanso match directory override | macOS Espanso default |
+| `AGENT_INTERFACE_ROOT` | `agent-interface` working directory | `~/dev/caller/agent_interface` |
+| `POISE_VOICE_GUIDE_PATH` | Optional editor-chat voice guide | unset |
+| `REVIEW_AGENT_USERNAME` | GitHub identity used by review automation | unset |
+| `CONFAB_URL` | Optional Confab service | `http://localhost:8000` |
+| `CONFAB_API_KEY` | Optional Confab bearer credential | unset |
 
-Filters, typography preferences, and the selected view persist in `localStorage`. The GitHub token persists in the SQLite `meta` table.
+The browser keeps view, filter, typography, refresh, and theme preferences in
+`localStorage`. SQLite uses WAL mode and stores local settings, manual cards,
+and automation deduplication state. Editor documents remain plain Markdown.
+
+## Quality gates
+
+```bash
+npm run check      # typecheck, lint, unit/integration tests, production build
+npm run test:e2e   # Playwright smoke and visual regression tests
+npm run verify     # both suites
+```
+
+CI runs the static, unit, build, and audit gates on Node 20, 22, and 24. Node 22
+also runs the browser suite and uploads its report.
+
+## Architecture
+
+- `src/` — browser views and interaction logic.
+- `server/cache-plugin.ts` — shared API middleware for development/production.
+- `server/production.ts` — loopback-only static and API server.
+- `server/process.ts` — bounded external process execution.
+- `server/db.ts` — SQLite schema, migrations, and automation claims.
+- `tests/` — unit, integration, browser, and visual regression coverage.
+
+See [SECURITY.md](SECURITY.md) for the supported trust boundary.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

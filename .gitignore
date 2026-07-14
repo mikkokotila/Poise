@@ -5,6 +5,12 @@ dist/
 .env.*
 !.env.example
 
+# Test and browser-runner output
+coverage/
+playwright-report/
+test-results/
+.playwright-mcp/
+
 # Claude-local
 .claude/plans/
 .claude/worktrees/

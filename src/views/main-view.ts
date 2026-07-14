@@ -117,6 +117,15 @@ function escapeHtml(s: string): string {
   ))
 }
 
+function safeHttpsUrl(value: string): string {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' ? escapeHtml(url.href) : '#'
+  } catch {
+    return '#'
+  }
+}
+
 function stateLabel(item: PrRow): { text: string; cls: string } {
   if (item.is_pr === 1 && item.merged_at) return { text: 'Merged', cls: 'merged' }
   return item.state === 'open' ? { text: 'Open', cls: 'open' } : { text: 'Closed', cls: 'closed' }
@@ -135,7 +144,7 @@ function ownerCell(item: PrRow): string {
   const src = item.owner_avatar && item.owner_avatar.length > 0 ? item.owner_avatar : humanAvatarFallback(name)
   const classes = ['last-avatar']
   if (isBot) classes.push('is-bot')
-  return `<img class="${classes.join(' ')}" src="${src}" alt="${escapeHtml(name)}" title="${escapeHtml(name)}" loading="lazy" decoding="async" onerror="this.classList.add('broken')" />`
+  return `<img class="${classes.join(' ')}" src="${safeHttpsUrl(src)}" alt="${escapeHtml(name)}" title="${escapeHtml(name)}" loading="lazy" decoding="async" onerror="this.classList.add('broken')" />`
 }
 
 function lastCell(item: PrRow): string {
@@ -146,7 +155,7 @@ function lastCell(item: PrRow): string {
   const src = humanAvatarFallback(name)
   const classes = ['last-avatar']
   if (isBot) classes.push('is-bot')
-  return `<img class="${classes.join(' ')}" src="${src}" alt="${escapeHtml(name)}" title="${escapeHtml(name)}" loading="lazy" decoding="async" onerror="this.classList.add('broken')" />`
+  return `<img class="${classes.join(' ')}" src="${safeHttpsUrl(src)}" alt="${escapeHtml(name)}" title="${escapeHtml(name)}" loading="lazy" decoding="async" onerror="this.classList.add('broken')" />`
 }
 
 // Stable identity for a row across refreshes. Matches the format Current
@@ -168,7 +177,7 @@ function buildRow(item: PrRow, animate: boolean): HTMLTableRowElement {
 
   tr.innerHTML = `
     <td><span class="type-toggle ${pr ? 'pr' : 'issue'}">${pr ? 'PR' : 'IS'}</span></td>
-    <td class="title-cell"><a href="${item.html_url}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a></td>
+    <td class="title-cell"><a href="${safeHttpsUrl(item.html_url)}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a></td>
     <td class="last-cell">${lastCell(item)}</td>
     <td><span class="repo-name">${escapeHtml(item.repo)}</span></td>
     <td class="last-cell">${ownerCell(item)}</td>

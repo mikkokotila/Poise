@@ -18,16 +18,10 @@ interface ChatLogEntry {
   prompt: string
   started_at: string
   status: string
-  response: string        // 8-char hash → fetch body via /api/agent-response/<hash>
+  response: string        // upstream availability marker; fetch body by full id
   error: string
   behavior?: string       // 'chat' | 'author_content' — drives rendering
-}
-
-// Slug derivation for editor articles produced by /content. Mirrors
-// contentSlugForCallId in server/chat.ts — the slug is a pure
-// function of the call id, no mapping ledger needed.
-function contentSlugForCallId(callId: string): string {
-  return 'content-' + String(callId).slice(0, 8)
+  content_slug?: string   // server-resolved current or legacy article slug
 }
 
 interface Attachment {
@@ -555,7 +549,7 @@ function renderMessages() {
     }
     if (isAuthored) {
       // Link card pointing to the editor doc derived from this call.
-      if (m.status === 'running') {
+      if (m.status === 'running' || m.status === 'pending') {
         parts.push(`
           <div class="chat-msg chat-msg-agent">
             <div class="chat-thinking"><span></span><span></span><span></span></div>
@@ -568,7 +562,8 @@ function renderMessages() {
           </div>
         `)
       } else if (m.status === 'completed') {
-        const slug = contentSlugForCallId(m.id)
+        const slug = m.content_slug
+        if (!slug) continue
         parts.push(`
           <div class="chat-msg chat-msg-agent">
             <button type="button" class="chat-content-link" data-slug="${escapeHtml(slug)}">
@@ -621,8 +616,8 @@ function renderMessages() {
   bodyEl.scrollTop = bodyEl.scrollHeight
 }
 
-async function fetchReply(hash: string): Promise<string> {
-  const res = await fetch(`/api/agent-response/${encodeURIComponent(hash)}`)
+async function fetchReply(callId: string): Promise<string> {
+  const res = await fetch(`/api/agent-response/${encodeURIComponent(callId)}`)
   if (!res.ok) throw new Error(`agent-response ${res.status}`)
   const data = await res.json()
   return String(data.body || '')
@@ -652,7 +647,7 @@ async function refresh() {
     const toFetch = messages.filter((m) => m.behavior !== 'author_content' && m.status === 'completed' && m.response && !repliesById.has(m.id))
     await Promise.all(
       toFetch.map(async (m) => {
-        try { repliesById.set(m.id, await fetchReply(m.response)) } catch { /* leave missing */ }
+        try { repliesById.set(m.id, await fetchReply(m.id)) } catch { /* leave missing */ }
       }),
     )
     renderMessages()
@@ -666,7 +661,7 @@ function schedulePoll() {
   if (!isOpen()) return
   // If anything is still running on the upstream side, poll fast so
   // the reply lands in the UI within seconds. Otherwise idle.
-  const hasInflight = messages.some((m) => m.status === 'running')
+  const hasInflight = messages.some((m) => m.status === 'running' || m.status === 'pending')
   const delay = hasInflight ? FAST_POLL_MS : SLOW_POLL_MS
   pollTimer = setTimeout(async () => {
     if (!inflight) await refresh()
@@ -800,16 +795,18 @@ async function pollContentUntilDone(callId: string): Promise<string | null> {
   const TIMEOUT_MS = 10 * 60_000
   while (Date.now() - start < TIMEOUT_MS) {
     await new Promise((r) => setTimeout(r, 2000))
+    let data: { status?: string; slug?: string; error?: string }
     try {
       const res = await fetch(`/api/chat-content/status?call_id=${encodeURIComponent(callId)}`)
       if (!res.ok) continue
-      const data = await res.json()
-      if (data.status === 'completed') return String(data.slug || '')
-      if (data.status === 'failed') throw new Error(String(data.error || 'agent failed'))
+      data = await res.json()
     } catch (err) {
       // Network blip — retry.
       console.error('[chat] /content status poll failed:', err)
+      continue
     }
+    if (data.status === 'completed') return String(data.slug || '')
+    if (data.status === 'failed') throw new Error(String(data.error || 'agent failed'))
   }
   throw new Error('author-content timed out')
 }

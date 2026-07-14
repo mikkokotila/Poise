@@ -6,7 +6,7 @@
 // unaffected. The Issue lane has a richer composer (title / body / repo)
 // that opens a real GitHub issue via the proxy.
 
-import { getSettings, midnightInZone, startOfWeekInZone } from '../config'
+import { midnightInZone, startOfWeekInZone } from '../config'
 
 type Lane = 'idea' | 'concept' | 'plan' | 'issue' | 'pr'
 type LaneType = 'manual' | 'live'
@@ -117,8 +117,13 @@ function escapeHtml(s: string): string {
   ))
 }
 
-function laneCfg(lane: Lane): LaneConfig {
-  return LANES.find((l) => l.key === lane)!
+function safeHttpsUrl(value: string): string {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' ? escapeHtml(url.href) : '#'
+  } catch {
+    return '#'
+  }
 }
 
 function laneEl(lane: Lane): HTMLElement {
@@ -408,7 +413,7 @@ function renderLiveItem(item: LiveItem): HTMLElement {
   // tools row.
   const primary = item.is_pr === 1 ? reviewButton() : ''
   el.innerHTML = `
-    <a class="card-link" href="${item.url}" target="_blank" rel="noopener">
+    <a class="card-link" href="${safeHttpsUrl(item.url)}" target="_blank" rel="noopener">
       <div class="card-text">${escapeHtml(item.title)}</div>
       <div class="card-meta">
         <span class="card-repo">${escapeHtml(shortRepo(item.repo))}</span>
@@ -955,7 +960,7 @@ function openIssueComposer(prefill?: IssueComposerPrefill) {
 
   addB.addEventListener('click', submit)
   cancelB.addEventListener('click', close)
-  for (const inp of [titleInput, bodyTa]) {
+  for (const inp of [titleInput, bodyTa] as HTMLElement[]) {
     inp.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') { e.preventDefault(); close() }
       else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit() }

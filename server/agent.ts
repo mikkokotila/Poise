@@ -2,20 +2,17 @@
 //
 // Two operations:
 //   --logs                  → JSON array of completed agent calls
-//   --read-response <hash>  → response body, looked up by the 8-char
-//                             prefix returned in the log's `response`
+//   --read-response <id>    → response body, looked up by the full call id
 //                             field
 //
 // Everything is hash-routed now — Poise never touches the filesystem
 // the agent-interface project owns.
 
-import { execFile, spawn } from 'node:child_process'
-import { promisify } from 'node:util'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { localCheckoutPath } from './gh'
+import { runFile, spawnDetached } from './process'
 
-const execFileP = promisify(execFile)
 const CLI = 'agent-interface'
 
 // agent-interface's DB stores some response_paths as relative
@@ -28,46 +25,49 @@ function agentCwd(): string {
     || join(homedir(), 'dev', 'caller', 'agent_interface')
 }
 
-interface LogEntry {
+export interface LogEntry {
   id: string
   pr_id: string | null
   repo: string | null
-  actor: string
+  actor: string | null
   model: string
   behavior: string | null   // agent-interface behavior name (pr-review, mergeable, etc.)
+  session_id: string | null
   prompt: string
+  started_at: string
   time_elapsed: string
   status: string
-  response: string        // 8-char hash; pass to --read-response for the body
+  response: string | null // upstream 8-char availability marker; read by full `id`
   error: string
 }
 
 export async function fetchAgentLogs(): Promise<LogEntry[]> {
-  const { stdout } = await execFileP(CLI, ['--logs'], {
+  const { stdout } = await runFile(CLI, ['--logs'], {
     cwd: agentCwd(),
-    maxBuffer: 32 * 1024 * 1024,
+    timeoutMs: 30_000,
+    maxOutputBytes: 32 * 1024 * 1024,
   })
   const trimmed = stdout.trim()
   if (!trimmed) return []
   // agent-interface returns oldest-first (`order by started_at`).
   // Surface newest-first so the front-end doesn't carry the convention.
-  const list: LogEntry[] = JSON.parse(trimmed)
+  const list: unknown = JSON.parse(trimmed)
+  if (!Array.isArray(list)) throw new Error('agent-interface --logs returned non-array JSON')
   return list.reverse()
 }
 
-// Fetch one response body by its hash (the 8-char value from a log
-// entry's `response` field). agent-interface looks up the full row by
-// `id like <hash>%` and prints the body.
-export async function fetchAgentResponse(hash: string): Promise<{ hash: string, body: string }> {
-  // Guard against shell-injection-style input — only hex prefixes pass.
-  if (!/^[0-9a-fA-F]+$/.test(hash)) {
-    throw new Error('invalid response hash')
+// Fetch one response body by the full 32-hex call id. agent-interface also
+// accepts prefixes, but those become ambiguous as the log grows.
+export async function fetchAgentResponse(callId: string): Promise<{ id: string, body: string }> {
+  if (!/^[0-9a-fA-F]{32}$/.test(callId)) {
+    throw new Error('invalid agent call id')
   }
-  const { stdout } = await execFileP(CLI, ['--read-response', hash], {
+  const { stdout } = await runFile(CLI, ['--read-response', callId], {
     cwd: agentCwd(),
-    maxBuffer: 32 * 1024 * 1024,
+    timeoutMs: 30_000,
+    maxOutputBytes: 32 * 1024 * 1024,
   })
-  return { hash, body: stdout }
+  return { id: callId, body: stdout }
 }
 
 // Kick off `agent-interface --pr-review #<num> --pwd <local-checkout>`.
@@ -81,12 +81,9 @@ export async function triggerPrReview(prUrl: string): Promise<{ ok: true }> {
   const [, owner, repo, num] = m
   const pwd = await localCheckoutPath(owner, repo)
 
-  const child = spawn(CLI, ['--pr-review', `#${num}`, '--pwd', pwd], {
+  await spawnDetached(CLI, ['--pr-review', `#${num}`, '--pwd', pwd], {
     cwd: agentCwd(),
-    detached: true,
-    stdio: 'ignore',
   })
-  child.unref()
   return { ok: true }
 }
 
@@ -116,11 +113,8 @@ export async function replayAgentJob(input: {
 
   const [owner, repoName] = repo.split('/', 2)
   const pwd = await localCheckoutPath(owner, repoName)
-  const child = spawn(CLI, [flag, `#${prId}`, '--pwd', pwd], {
+  await spawnDetached(CLI, [flag, `#${prId}`, '--pwd', pwd], {
     cwd: agentCwd(),
-    detached: true,
-    stdio: 'ignore',
   })
-  child.unref()
   return { ok: true }
 }
