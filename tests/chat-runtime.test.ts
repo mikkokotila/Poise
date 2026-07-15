@@ -8,6 +8,9 @@ const mocks = vi.hoisted(() => ({
   fetchAgentLogs: vi.fn(),
   runFile: vi.fn(),
   spawnDetached: vi.fn(),
+  authStatus: 'authenticated',
+  requireAuth: vi.fn(),
+  observeAuthFailure: vi.fn(),
 }))
 
 vi.mock('../server/agent', () => ({ fetchAgentLogs: mocks.fetchAgentLogs }))
@@ -15,6 +18,20 @@ vi.mock('../server/process', () => ({
   MAX_PROCESS_ARG_BYTES: 64 * 1024,
   runFile: mocks.runFile,
   spawnDetached: mocks.spawnDetached,
+  claudeSubscriptionEnvironment: () => ({
+    ANTHROPIC_API_KEY: undefined,
+    ANTHROPIC_AUTH_TOKEN: undefined,
+    ANTHROPIC_BASE_URL: undefined,
+    CLAUDE_CODE_OAUTH_TOKEN: undefined,
+    CLAUDE_CLI: '/poise/claude-subscription',
+  }),
+}))
+vi.mock('../server/claude-auth', () => ({
+  claudeAuth: {
+    snapshot: () => ({ status: mocks.authStatus }),
+    requireReady: mocks.requireAuth,
+    observeProcessFailure: mocks.observeAuthFailure,
+  },
 }))
 
 let root = ''
@@ -30,6 +47,11 @@ beforeEach(async () => {
   mocks.fetchAgentLogs.mockReset().mockResolvedValue([])
   mocks.runFile.mockReset()
   mocks.spawnDetached.mockReset().mockResolvedValue(undefined)
+  mocks.authStatus = 'authenticated'
+  mocks.requireAuth.mockReset().mockImplementation(() => {
+    if (mocks.authStatus !== 'authenticated') throw new Error('Claude authentication required')
+  })
+  mocks.observeAuthFailure.mockReset()
   vi.resetModules()
 })
 
@@ -54,6 +76,49 @@ function worktreeName(session: string): string {
 }
 
 describe('chat runtime hardening', () => {
+  it('gates Opus without blocking non-Claude chat models', async () => {
+    const chat = await import('../server/chat')
+    database = await import('../server/db')
+    mocks.authStatus = 'reauth_required'
+
+    await expect(chat.sendChat('claude-session', 'hello', 'opus'))
+      .rejects.toThrow(/Claude authentication required/)
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+
+    await expect(chat.sendChat('gpt-session', 'hello', 'gpt')).resolves.toEqual({ ok: true })
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(mocks.spawnDetached.mock.calls[0][2]).not.toHaveProperty('env')
+  })
+
+  it('rechecks Opus immediately before launching the monitored Claude binary', async () => {
+    const chat = await import('../server/chat')
+    database = await import('../server/db')
+
+    await expect(chat.sendChat('claude-session', 'hello', 'opus')).resolves.toEqual({ ok: true })
+
+    expect(mocks.requireAuth).toHaveBeenCalledTimes(2)
+    expect(mocks.spawnDetached.mock.calls[0][2]).toMatchObject({
+      env: {
+        ANTHROPIC_API_KEY: undefined,
+        ANTHROPIC_AUTH_TOKEN: undefined,
+        ANTHROPIC_BASE_URL: undefined,
+        CLAUDE_CODE_OAUTH_TOKEN: undefined,
+        CLAUDE_CLI: '/poise/claude-subscription',
+      },
+    })
+  })
+
+  it('does not classify another debate provider\'s 401 as Claude auth failure', async () => {
+    const failure = new Error('401 invalid API key')
+    mocks.runFile.mockRejectedValueOnce(failure)
+    const chat = await import('../server/chat')
+    database = await import('../server/db')
+
+    await expect(chat.runDebate('Compare the providers')).rejects.toBe(failure)
+
+    expect(mocks.observeAuthFailure).toHaveBeenCalledWith(failure)
+  })
+
   it('atomically migrates only uniquely attributable legacy attachment directories', async () => {
     const attachments = join(root, 'attachments')
     const legacyTmp = join(root, 'tmp', 'poise-chat')
@@ -245,6 +310,7 @@ describe('chat runtime hardening', () => {
       })
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
     expect(mocks.fetchAgentLogs).toHaveBeenCalledTimes(2)
+    expect(mocks.requireAuth).toHaveBeenCalledTimes(2)
   })
 
   it('keeps a pre-spawn log lookup failure definite', async () => {

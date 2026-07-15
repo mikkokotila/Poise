@@ -11,7 +11,8 @@
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { localCheckoutPath } from './gh'
-import { runFile, spawnDetached } from './process'
+import { claudeAuth } from './claude-auth'
+import { claudeSubscriptionEnvironment, runFile, spawnDetached } from './process'
 
 const CLI = 'agent-interface'
 
@@ -41,11 +42,14 @@ export interface LogEntry {
   error: string
 }
 
-export async function fetchAgentLogs(): Promise<LogEntry[]> {
+export async function fetchAgentLogs(
+  options: { signal?: AbortSignal } = {},
+): Promise<LogEntry[]> {
   const { stdout } = await runFile(CLI, ['--logs'], {
     cwd: agentCwd(),
     timeoutMs: 30_000,
     maxOutputBytes: 32 * 1024 * 1024,
+    signal: options.signal,
   })
   const trimmed = stdout.trim()
   if (!trimmed) return []
@@ -79,10 +83,14 @@ export async function triggerPrReview(prUrl: string): Promise<{ ok: true }> {
   const m = String(prUrl || '').match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
   if (!m) throw new Error('not a github PR url')
   const [, owner, repo, num] = m
+  await claudeAuth.requireReady()
   const pwd = await localCheckoutPath(owner, repo)
 
+  await claudeAuth.requireReady()
   await spawnDetached(CLI, ['--pr-review', `#${num}`, '--pwd', pwd], {
     cwd: agentCwd(),
+    env: claudeSubscriptionEnvironment(),
+    onExit: (result) => { claudeAuth.observeProcessFailure(result) },
   })
   return { ok: true }
 }
@@ -111,10 +119,14 @@ export async function replayAgentJob(input: {
   else if (behavior === 'pr_approve') flag = '--pr-approve'
   else throw new Error(`behavior "${behavior}" is not replayable`)
 
+  await claudeAuth.requireReady()
   const [owner, repoName] = repo.split('/', 2)
   const pwd = await localCheckoutPath(owner, repoName)
+  await claudeAuth.requireReady()
   await spawnDetached(CLI, [flag, `#${prId}`, '--pwd', pwd], {
     cwd: agentCwd(),
+    env: claudeSubscriptionEnvironment(),
+    onExit: (result) => { claudeAuth.observeProcessFailure(result) },
   })
   return { ok: true }
 }

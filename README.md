@@ -15,8 +15,12 @@ with a framework-free browser client, a Node server, and a small SQLite store.
 
 ## Requirements
 
+- macOS, Linux, or WSL. Native Windows is not supported.
 - Node.js 20.19, 22.13, or 24.x and npm. Use an active LTS line in production.
 - `gh`, authenticated with `gh auth login`.
+- Claude Code, authenticated to a Claude Pro or Max subscription with
+  `claude auth login --claudeai`. Poise does not require an Anthropic API key.
+  On Linux/WSL, in-app sign-in requires an active graphical desktop session.
 - `github-datastore`, `github-interface`, and `agent-interface` on `PATH`.
 - A local checkout of `agent-interface`; set `AGENT_INTERFACE_ROOT` when it is
   not at `~/dev/caller/agent_interface`.
@@ -32,6 +36,33 @@ GitHub credentials stay in `gh`. Poise resolves the selected account's token
 through `gh` only for the lifetime of an issue-creation subprocess; it does not
 persist or expose that token. On upgrade, the schema migration removes the
 retired plaintext `github_token` row while preserving legacy content tables.
+
+Claude credentials stay in Claude Code's local credential store. Poise checks
+the subscription session in the background, pauses only Claude-backed work
+when verification fails, and opens the Claude.ai sign-in flow from an in-app
+prompt. Ambiguous provider failures also offer reconnection without labeling a
+network outage as a rejected credential. A local wrapper uses an exact process
+environment allowlist, an isolated Anthropic profile store, and one merged
+settings overlay that neutralizes provider credentials and credential helpers.
+Immediately before each model process, it requires Claude Code to report the
+Claude.ai first-party provider. This keeps Poise-owned calls from silently
+switching to Console/API credentials. One failed worker attempt also opens a
+durable per-behavior circuit breaker, and Poise disables Claude Code's built-in
+request retry loop, so neither layer can repeat provider calls during an outage.
+
+Verification uses local status polling once per minute plus one minimal Haiku
+request at startup, after sign-in or a failed worker, every six hours while
+healthy, and immediately before a scheduled agent launch when the last canary
+is at least one minute old. Concurrent launch gates share the fresh result.
+These probes consume Pro/Max usage. Anthropic can bill account-level [Usage
+Credits](https://support.claude.com/en/articles/12429409-manage-usage-credits-for-paid-claude-plans)
+after included limits; disable them under Claude account Settings > Usage if you
+need a hard spending cap. Poise can isolate provider credentials, but it cannot
+change that account-level billing control. Transient probe failures back off for
+up to one hour; expired tokens fail closed until sign-in succeeds. Failed
+behavior scans and workers also back off exponentially for up to one hour,
+survive restarts, and keep `/api/health` degraded until a clean scan or worker
+success confirms recovery.
 
 ## Development
 

@@ -13,10 +13,12 @@
 // `agent-interface --pr-review '#<n>' --pwd <local-checkout>`
 // directly — no HTTP roundtrip, no /api/pr-review hop.
 
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { dirname, join, resolve } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { mkdir } from 'node:fs/promises'
 import { fetchAgentLogs } from './agent'
+import { claudeAuth } from './claude-auth'
 import {
   claimSeenOwned,
   clearSeen,
@@ -38,13 +40,14 @@ import {
 } from './db'
 import { getHeadSha } from './gh'
 import { HttpError } from './http'
-import { runFile, spawnDetached } from './process'
+import { claudeSubscriptionEnvironment, runFile, spawnDetached } from './process'
 import { withProcessLock } from './process-lock'
 
 const DATASTORE = 'github-datastore'
 const GH_INTERFACE = 'github-interface'
 const AGENT_INTERFACE = 'agent-interface'
 const REVIEW_SNAPSHOT_TARGET = '__snapshot_v2__'
+const BEHAVIOR_AUTH_FRESHNESS_MS = 60_000
 
 // Same cwd hack agent.ts uses — agent-interface infers the repo from
 // cwd's last two path parts when no git remote is found.
@@ -62,13 +65,27 @@ function behaviorProcessLockPath(behavior: 'review-new-prs' | 'approve-prs'): st
   return join(directory, `.poise-${behavior}-runtime-lock.sqlite3`)
 }
 
-async function withBehaviorProcessLock(
+const BEHAVIOR_LOCK_BUSY_MESSAGE = 'behavior operation is already running in another process'
+
+class BehaviorProcessLockContentionError extends HttpError {
+  readonly code = 'BEHAVIOR_PROCESS_LOCK_BUSY'
+
+  constructor() {
+    super(503, BEHAVIOR_LOCK_BUSY_MESSAGE)
+    this.name = 'BehaviorProcessLockContentionError'
+  }
+}
+
+async function withBehaviorProcessLock<T>(
   behavior: 'review-new-prs' | 'approve-prs',
-  operation: () => Promise<void>,
-): Promise<void> {
-  await withProcessLock({
+  operation: () => Promise<T>,
+): Promise<T> {
+  return await withProcessLock({
     path: behaviorProcessLockPath(behavior),
-    errorFactory: (message) => new HttpError(503, message),
+    timeoutMessage: BEHAVIOR_LOCK_BUSY_MESSAGE,
+    errorFactory: (message) => message === BEHAVIOR_LOCK_BUSY_MESSAGE
+      ? new BehaviorProcessLockContentionError()
+      : new HttpError(503, message),
   }, operation)
 }
 
@@ -76,15 +93,42 @@ export type BehaviorKey = 'review-new-prs' | 'approve-prs' | 'resolve-unblocking
 export const BEHAVIOR_KEYS: BehaviorKey[] = ['review-new-prs', 'approve-prs', 'resolve-unblocking']
 
 let behaviorAbortController: AbortController | null = null
+const behaviorOperationSignal = new AsyncLocalStorage<AbortSignal>()
 
 function behaviorSignal(): AbortSignal | undefined {
-  return behaviorAbortController?.signal
+  return behaviorOperationSignal.getStore() ?? behaviorAbortController?.signal
+}
+
+function behaviorAborted(): boolean {
+  return behaviorSignal()?.aborted === true
+}
+
+async function waitForBehavior<T>(operation: T | PromiseLike<T>): Promise<T> {
+  const pending = Promise.resolve(operation)
+  const signal = behaviorSignal()
+  if (!signal) return pending
+  if (signal.aborted) throw signal.reason
+  return await new Promise<T>((resolveOperation, rejectOperation) => {
+    const onAbort = () => rejectOperation(signal.reason)
+    signal.addEventListener('abort', onAbort, { once: true })
+    void pending.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort)
+        resolveOperation(value)
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort)
+        rejectOperation(error)
+      },
+    )
+  })
 }
 
 // ── Persistence ─────────────────────────────────────────────────────────
 // Enabled flags and dedupe claims survive server restarts via cache.db.
-// A restart still snapshots current PRs so work opened during downtime
-// does not flood the review agent.
+// The completed snapshot marker survives restarts so work opened during
+// downtime remains eligible. Only a new/cleared ledger takes an anti-flood
+// snapshot.
 
 const META_PREFIX = 'behavior_'
 
@@ -97,6 +141,73 @@ export function isEnabled(key: BehaviorKey): boolean {
 
 function setPersistedEnabled(key: BehaviorKey, enabled: boolean) {
   setMeta(enabledKey(key), enabled ? '1' : '0')
+}
+
+export const BEHAVIOR_RETRY_BASE_MS = 60_000
+export const BEHAVIOR_RETRY_MAX_MS = 60 * 60_000
+
+type BehaviorFailureKind = 'operation' | 'worker'
+
+interface PersistedBehaviorFailure {
+  kind: BehaviorFailureKind
+  consecutiveFailures: number
+  lastFailureAtMs: number
+  nextRetryAtMs: number
+}
+
+function failureKey(key: BehaviorKey): string {
+  return `${META_PREFIX}${key.replace(/-/g, '_')}_failure`
+}
+
+function readBehaviorFailure(key: BehaviorKey): PersistedBehaviorFailure | null {
+  const raw = getMeta(failureKey(key))
+  if (!raw) return null
+  try {
+    const value = JSON.parse(raw) as Partial<PersistedBehaviorFailure>
+    if ((value.kind !== 'operation' && value.kind !== 'worker')
+      || !Number.isSafeInteger(value.consecutiveFailures)
+      || Number(value.consecutiveFailures) < 1
+      || !Number.isFinite(value.lastFailureAtMs)
+      || Number(value.lastFailureAtMs) < 0
+      || Number(value.lastFailureAtMs) > 8.64e15
+      || !Number.isFinite(value.nextRetryAtMs)
+      || Number(value.nextRetryAtMs) < 0
+      || Number(value.nextRetryAtMs) > 8.64e15) return null
+    return {
+      kind: value.kind,
+      consecutiveFailures: Math.min(Number(value.consecutiveFailures), 31),
+      lastFailureAtMs: Number(value.lastFailureAtMs),
+      nextRetryAtMs: Number(value.nextRetryAtMs),
+    }
+  } catch {
+    return null
+  }
+}
+
+function recordBehaviorFailure(key: BehaviorKey, kind: BehaviorFailureKind): void {
+  if (!isEnabled(key)) return
+  const previous = readBehaviorFailure(key)
+  const consecutiveFailures = Math.min((previous?.consecutiveFailures ?? 0) + 1, 31)
+  const delayMs = Math.min(
+    BEHAVIOR_RETRY_BASE_MS * (2 ** Math.min(consecutiveFailures - 1, 20)),
+    BEHAVIOR_RETRY_MAX_MS,
+  )
+  const now = Date.now()
+  setMeta(failureKey(key), JSON.stringify({
+    kind,
+    consecutiveFailures,
+    lastFailureAtMs: now,
+    nextRetryAtMs: now + delayMs,
+  } satisfies PersistedBehaviorFailure))
+}
+
+function clearBehaviorFailure(key: BehaviorKey): void {
+  setMeta(failureKey(key), '')
+}
+
+function behaviorRetryDue(key: BehaviorKey): boolean {
+  const failure = readBehaviorFailure(key)
+  return failure === null || Date.now() >= failure.nextRetryAtMs
 }
 
 // Per-behavior setting (the priority ceiling for review-new-prs:
@@ -244,9 +355,9 @@ function retainClaimSafely(claim: BehaviorLaunchClaim, error: string): void {
   )
 }
 
-function completeClaimSafely(claim: BehaviorLaunchClaim, error: string | null = null): void {
+function completeClaimSafely(claim: BehaviorLaunchClaim, error: string | null = null): boolean {
   setBehaviorLaunchErrorOwned(claim.key, claim.target, claim.claimId, error)
-  completeSeenOwned(claim.key, claim.target, claim.claimId)
+  return completeSeenOwned(claim.key, claim.target, claim.claimId)
 }
 
 async function reconcileBehaviorLaunchClaims(
@@ -257,11 +368,11 @@ async function reconcileBehaviorLaunchClaims(
 
   let logs: Awaited<ReturnType<typeof fetchAgentLogs>>
   try {
-    logs = await fetchAgentLogs()
+    logs = await fetchAgentLogs({ signal: behaviorSignal() })
   } catch (error) {
     const message = `agent log reconciliation unavailable: ${error instanceof Error ? error.message : String(error)}`
     for (const claim of claims) retainClaimSafely(claim, message)
-    return
+    throw error
   }
 
   for (const claim of claims) {
@@ -324,7 +435,9 @@ async function reconcileBehaviorLaunchClaims(
         if (ageMs < BEHAVIOR_REGISTRATION_GRACE_MS) {
           retainClaimSafely(claim, 'awaiting agent call registration')
         } else {
-          releaseSeenOwned(claim.key, claim.target, claim.claimId)
+          if (releaseSeenOwned(claim.key, claim.target, claim.claimId)) {
+            recordBehaviorFailure(behavior, 'worker')
+          }
         }
         continue
       }
@@ -340,10 +453,22 @@ async function reconcileBehaviorLaunchClaims(
     }
 
     const status = String(call.status || '').toLowerCase()
+    const terminal = status === 'completed' || FAILED_AGENT_STATUSES.has(status)
+    if (!terminal && Date.now() - requestedAtMs >= BEHAVIOR_CLAIM_RENEWAL_MS) {
+      const message = `behavior launch exceeded ${BEHAVIOR_CLAIM_RENEWAL_MS}ms running limit`
+      if (releaseSeenOwned(claim.key, claim.target, claim.claimId)) {
+        recordBehaviorFailure(behavior, 'worker')
+        claudeAuth.observeProcessFailure({ code: 1, signal: null, error: new Error(message) })
+      }
+      continue
+    }
     if (status === 'completed') {
-      completeClaimSafely(claim)
+      if (completeClaimSafely(claim)) clearBehaviorFailure(behavior)
     } else if (FAILED_AGENT_STATUSES.has(status)) {
-      releaseSeenOwned(claim.key, claim.target, claim.claimId)
+      if (releaseSeenOwned(claim.key, claim.target, claim.claimId)) {
+        recordBehaviorFailure(behavior, 'worker')
+        claudeAuth.observeProcessFailure(String(call.error || status))
+      }
     } else if (RUNNING_AGENT_STATUSES.has(status)) {
       setBehaviorLaunchErrorOwned(claim.key, claim.target, claim.claimId, null)
       renewSeenOwned(
@@ -397,10 +522,14 @@ function settleClaimAfterExit(
 ): (result: { code: number | null, signal: NodeJS.Signals | null, error?: Error }) => void {
   return ({ code, signal, error }) => {
     if (!error && signal === null && code === 0) {
-      completeOwnedClaim(behavior, target, claimId)
+      if (completeOwnedClaim(behavior, target, claimId)) clearBehaviorFailure(behavior)
       return
     }
     const released = releaseOwnedClaim(behavior, target, claimId)
+    if (released) {
+      recordBehaviorFailure(behavior, 'worker')
+      claudeAuth.observeProcessFailure({ code, signal, error })
+    }
     const outcome = error?.message || signal || `exit ${code ?? 'unknown'}`
     console.error(`[behaviors] ${behavior} worker failed for ${target}; ${released ? 'claim released' : 'claim already superseded'} (${outcome})`)
   }
@@ -416,11 +545,14 @@ async function fireReview(
   const m = pr.url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
   if (!m) throw new Error('not a github PR url: ' + pr.url)
   const [, owner, repo, num] = m
+  await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   const pwd = await localCheckoutPath(owner, repo)
   // mkdir the cwd hack dir — agent-interface needs it to exist for
   // --pwd resolution behavior identical to triggerPrReview in agent.ts.
   await mkdir(join(GH_INTERFACE_CWD_ROOT, owner, repo), { recursive: true })
   if (!isEnabled('review-new-prs')) return false
+  await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
+  if (!isEnabled('review-new-prs') || behaviorAborted()) return false
   // Pass the priority ceiling through as `--p`. agent-interface forwards
   // it to github-interface as `--p <value>`; for review-new-prs the
   // possible values are p0 / p1 / p2.
@@ -428,6 +560,7 @@ async function fireReview(
   if (!markLaunchIntent('review-new-prs', pr, claimTarget, claimId)) return false
   await spawnDetached(AGENT_INTERFACE, args, {
     cwd: agentInterfaceCwd(),
+    env: claudeSubscriptionEnvironment(),
     onExit: settleClaimAfterExit('review-new-prs', claimTarget, claimId),
   })
   markClaimLaunched(claimId)
@@ -444,12 +577,19 @@ async function snapshotReviewNewPrs(): Promise<void> {
   try {
     const prs = await listOpenPrsByAuthor(author)
     let complete = true
+    let failure: unknown
     for (const p of prs) {
+      if (behaviorAborted()) {
+        complete = false
+        failure = behaviorSignal()?.reason
+        break
+      }
       try {
-        const sha = await getHeadSha(p.repo, p.number)
+        const sha = await getHeadSha(p.repo, p.number, { signal: behaviorSignal() })
         recordSeen('review-new-prs', `${p.repo}#${p.number}@${sha}`)
       } catch (err) {
         complete = false
+        failure ??= err
         // Couldn't get head_sha right now — skip silently; the next
         // tick will re-attempt and either snapshot or claim. Better
         // to under-stamp the snapshot than to leave an unsuffixed key
@@ -462,10 +602,14 @@ async function snapshotReviewNewPrs(): Promise<void> {
     // an initially empty repository was silently absorbed by a later
     // snapshot instead of triggering the behavior.
     if (complete) recordSeen('review-new-prs', REVIEW_SNAPSHOT_TARGET)
-    else releaseSeen('review-new-prs', REVIEW_SNAPSHOT_TARGET)
+    else {
+      releaseSeen('review-new-prs', REVIEW_SNAPSHOT_TARGET)
+      throw failure ?? new Error('review snapshot did not complete')
+    }
   } catch (err) {
     releaseSeen('review-new-prs', REVIEW_SNAPSHOT_TARGET)
     console.error('[behaviors] snapshot failed:', err)
+    throw err
   }
 }
 
@@ -498,11 +642,12 @@ async function tickReviewNewPrs(): Promise<void> {
   const setting = getSetting('review-new-prs')
   try {
     const prs = await listOpenPrsByAuthor(author)
+    let failure: unknown
     for (const pr of prs) {
-      if (!isEnabled('review-new-prs')) return
+      if (!isEnabled('review-new-prs') || behaviorAborted()) return
       try {
-        const sha = await getHeadSha(pr.repo, pr.number)
-        if (!isEnabled('review-new-prs')) return
+        const sha = await getHeadSha(pr.repo, pr.number, { signal: behaviorSignal() })
+        if (!isEnabled('review-new-prs') || behaviorAborted()) return
         const key = `${pr.repo}#${pr.number}@${sha}`
         // Atomic claim: exactly one caller succeeds for any given key
         // across all concurrent runtimes. Losers skip silently.
@@ -528,6 +673,10 @@ async function tickReviewNewPrs(): Promise<void> {
                 continue
               }
             } catch (err) {
+              if (behaviorAborted()) {
+                releaseOwnedClaim('review-new-prs', key, claimId)
+                return
+              }
               // If the check itself fails (rate-limit / network), fall
               // through and fire — over-reviewing is the safer regression.
               console.warn(`[behaviors] checkChangesAddressed failed for ${pr.repo}#${pr.number}, firing anyway:`, err)
@@ -540,6 +689,9 @@ async function tickReviewNewPrs(): Promise<void> {
             return
           }
           console.log(`[behaviors] review-new-prs fired for ${pr.repo}#${pr.number}@${sha.slice(0, 8)} (p=${setting})`)
+          // Keep one durable in-flight worker per behavior. The next target is
+          // considered only after reconciliation observes completion.
+          return
         } catch (err) {
           // Pre-launch work and spawn acknowledgement are part of the claim.
           // Release on failure so the next tick can retry this exact target.
@@ -547,11 +699,15 @@ async function tickReviewNewPrs(): Promise<void> {
           throw err
         }
       } catch (err) {
+        if (behaviorAborted()) return
         console.error(`[behaviors] review-new-prs step failed for ${pr.repo}#${pr.number}:`, err)
+        failure ??= err
       }
     }
+    if (failure) throw failure
   } catch (err) {
     console.error('[behaviors] tick failed:', err)
+    throw err
   }
 }
 
@@ -603,13 +759,17 @@ async function fireApprove(pr: DatastorePr, claimTarget: string, claimId: string
   const m = pr.url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
   if (!m) throw new Error('not a github PR url: ' + pr.url)
   const [, owner, repo, num] = m
+  await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   const pwd = await localCheckoutPath(owner, repo)
   await mkdir(join(GH_INTERFACE_CWD_ROOT, owner, repo), { recursive: true })
   if (!isEnabled('approve-prs')) return false
+  await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
+  if (!isEnabled('approve-prs') || behaviorAborted()) return false
   const args = ['--pr-approve', `#${num}`, '--pwd', pwd, ...noteArgs('approve-prs')]
   if (!markLaunchIntent('approve-prs', pr, claimTarget, claimId)) return false
   await spawnDetached(AGENT_INTERFACE, args, {
     cwd: agentInterfaceCwd(),
+    env: claudeSubscriptionEnvironment(),
     onExit: settleClaimAfterExit('approve-prs', claimTarget, claimId),
   })
   markClaimLaunched(claimId)
@@ -628,8 +788,9 @@ async function tickApprovePrs(): Promise<void> {
   if (!author || !reviewer) return
   try {
     const prs = await listOpenPrsByAuthor(author)
+    let failure: unknown
     for (const pr of prs) {
-      if (!isEnabled('approve-prs')) return
+      if (!isEnabled('approve-prs') || behaviorAborted()) return
       try {
         const check = await checkChangesAddressed(pr.repo, pr.number, reviewer)
         if (!isEnabled('approve-prs')) return
@@ -665,12 +826,17 @@ async function tickApprovePrs(): Promise<void> {
           throw err
         }
         console.log(`[behaviors] approve-prs fired for ${pr.repo}#${pr.number} (req=${check.latest_request_at}, r=${responses}: ${check.author_commits_after_request}c+${check.author_inline_replies_after_request}reply)`)
+        return
       } catch (err) {
+        if (behaviorAborted()) return
         console.error(`[behaviors] approve-prs check/fire failed for ${pr.repo}#${pr.number}:`, err)
+        failure ??= err
       }
     }
+    if (failure) throw failure
   } catch (err) {
     console.error('[behaviors] approve-prs tick failed:', err)
+    throw err
   }
 }
 
@@ -743,8 +909,9 @@ async function tickResolveUnblocking(): Promise<void> {
   if (!author) return
   try {
     const prs = await listOpenPrsByAuthor(author)
+    let failure: unknown
     for (const pr of prs) {
-      if (!isEnabled('resolve-unblocking')) return
+      if (!isEnabled('resolve-unblocking') || behaviorAborted()) return
       try {
         // This CLI performs the mutation itself. The synchronous flag check
         // immediately before invocation prevents a disabled behavior from
@@ -765,45 +932,59 @@ async function tickResolveUnblocking(): Promise<void> {
           }))
         }
       } catch (err) {
+        if (behaviorAborted()) return
         console.error(`[behaviors] resolve-unblocking failed for ${pr.repo}#${pr.number}:`, err)
+        failure ??= err
       }
     }
+    if (failure) throw failure
   } catch (err) {
     console.error('[behaviors] resolve-unblocking tick failed:', err)
+    throw err
   }
 }
 
 // ── Public API ──────────────────────────────────────────────────────────
 
 export async function setEnabled(key: BehaviorKey, enabled: boolean): Promise<void> {
+  const lifecycle = behaviorAbortController?.signal
   if (!enabled) {
     // Publish the stop flag immediately so an in-flight tick exits at its
     // next await boundary. Waiting on its operation tail below guarantees
     // the API cannot acknowledge disable while a later launch is possible.
     setPersistedEnabled(key, false)
+    clearBehaviorFailure(key)
   }
-  await serializeBehaviorOperation(key, async () => {
-    const update = async () => {
-      setPersistedEnabled(key, enabled)
-      if (key === 'review-new-prs') {
-        if (enabled) {
-          // Snapshot first so an active launch row survives INSERT OR IGNORE;
-          // reconciliation may then release a known failure for the next tick.
-          await snapshotReviewNewPrs()
-          await reconcileBehaviorLaunchClaims(key)
-        } else {
-          clearSeenExceptLaunched(key)
+  try {
+    await serializeBehaviorOperation(key, async () => {
+      const update = async () => {
+        setPersistedEnabled(key, enabled)
+        if (key === 'review-new-prs') {
+          if (enabled) {
+            // Snapshot first so an active launch row survives INSERT OR IGNORE;
+            // reconciliation may then release a known failure for the next tick.
+            await snapshotReviewNewPrs()
+            await reconcileBehaviorLaunchClaims(key)
+          } else {
+            clearSeenExceptLaunched(key)
+          }
+        } else if (key === 'approve-prs') {
+          if (enabled) await reconcileBehaviorLaunchClaims(key)
+          else clearSeenExceptLaunched(key)
         }
-      } else if (key === 'approve-prs') {
-        if (enabled) await reconcileBehaviorLaunchClaims(key)
-        else clearSeenExceptLaunched(key)
+        // resolve-unblocking has no seen ledger — github-interface is
+        // idempotent so the tick handler can safely fire every minute.
       }
-      // resolve-unblocking has no seen ledger — github-interface is
-      // idempotent so the tick handler can safely fire every minute.
-    }
-    if (key === 'resolve-unblocking') await update()
-    else await withBehaviorProcessLock(key, update)
-  })
+      if (key === 'resolve-unblocking') await update()
+      else await withBehaviorProcessLock(key, update)
+    })
+  } catch (error) {
+    if (lifecycle?.aborted === true) throw error
+    if (error instanceof BehaviorProcessLockContentionError) throw error
+    if (!enabled || !isEnabled(key)) throw error
+    recordBehaviorFailure(key, 'operation')
+    console.error(`[behaviors] ${key} enable reconciliation failed:`, error)
+  }
 }
 
 export function setSetting(key: BehaviorKey, setting: BehaviorSetting): void {
@@ -816,20 +997,42 @@ export function setSetting(key: BehaviorKey, setting: BehaviorSetting): void {
 let tickerStarted = false
 let tickTimer: ReturnType<typeof setTimeout> | null = null
 let runtimeGeneration = 0
-const TICK_MS = 60_000
+export const BEHAVIOR_TICK_MS = 60_000
+export const BEHAVIOR_OPERATION_TIMEOUT_MS = 55_000
+const BEHAVIOR_HEALTH_GRACE_MS = 5_000
+let runtimeStartedAtMs: number | null = null
+let lastTickAtMs: number | null = null
+let lastTickCompletedAtMs: number | null = null
 
 // Startup snapshots, enable snapshots, and ticks must not overtake each
 // other. The database marker covers multiple processes; this tail also avoids
 // needless duplicate CLI work inside one process.
 const behaviorOperationTails = new Map<BehaviorKey, Promise<void>>()
+const behaviorOperationStartedAt = new Map<BehaviorKey, number>()
 
-function serializeBehaviorOperation(
+function serializeBehaviorOperation<T>(
   key: BehaviorKey,
-  operation: () => Promise<void>,
-): Promise<void> {
+  operation: () => Promise<T>,
+): Promise<T> {
   const previous = behaviorOperationTails.get(key) || Promise.resolve()
-  const run = previous.then(operation, operation)
-  const tail = run.catch(() => undefined)
+  const execute = async () => {
+    const startedAt = Date.now()
+    behaviorOperationStartedAt.set(key, startedAt)
+    const deadline = AbortSignal.timeout(BEHAVIOR_OPERATION_TIMEOUT_MS)
+    const lifecycle = behaviorAbortController?.signal
+    const signal = lifecycle ? AbortSignal.any([lifecycle, deadline]) : deadline
+    try {
+      const result = await behaviorOperationSignal.run(signal, operation)
+      if (signal.aborted) throw signal.reason
+      return result
+    } finally {
+      if (behaviorOperationStartedAt.get(key) === startedAt) {
+        behaviorOperationStartedAt.delete(key)
+      }
+    }
+  }
+  const run = previous.then(execute, execute)
+  const tail = run.then(() => undefined, () => undefined)
   behaviorOperationTails.set(key, tail)
   void tail.finally(() => {
     if (behaviorOperationTails.get(key) === tail) behaviorOperationTails.delete(key)
@@ -846,43 +1049,148 @@ function serializeBehaviorOperation(
 // single source of truth at runtime — set once by startBehaviorsRuntime.
 let reviewAgentUsername = ''
 
-export async function runEnabledBehaviorsOnce(): Promise<void> {
-  if (isEnabled('review-new-prs')) {
-    await serializeBehaviorOperation('review-new-prs', async () => {
-      await withBehaviorProcessLock('review-new-prs', async () => {
+export interface RunEnabledBehaviorsOptions {
+  /** Scheduled ticks coalesce instead of queuing behind a busy behavior. */
+  skipBusy?: boolean
+}
+
+async function runBehaviorCycle(
+  key: BehaviorKey,
+  operation: () => Promise<boolean>,
+): Promise<void> {
+  if (!behaviorRetryDue(key)) return
+  const lifecycle = behaviorAbortController?.signal
+  try {
+    const recovered = await serializeBehaviorOperation(key, operation)
+    if (recovered) clearBehaviorFailure(key)
+  } catch (error) {
+    if (error instanceof BehaviorProcessLockContentionError) return
+    if (lifecycle?.aborted !== true) {
+      recordBehaviorFailure(key, 'operation')
+      console.error(`[behaviors] ${key} operation failed:`, error)
+    }
+  }
+}
+
+export async function runEnabledBehaviorsOnce(
+  options: RunEnabledBehaviorsOptions = {},
+): Promise<void> {
+  const operations: Promise<void>[] = []
+  if (isEnabled('review-new-prs')
+    && (!options.skipBusy || !behaviorOperationTails.has('review-new-prs'))) {
+    operations.push(runBehaviorCycle('review-new-prs', async () => {
+      return await withBehaviorProcessLock('review-new-prs', async () => {
         await reconcileBehaviorLaunchClaims('review-new-prs')
+        if (!behaviorRetryDue('review-new-prs')) return false
+        if (listBehaviorLaunchClaims('review-new-prs').length > 0) return false
+        if (claudeAuth.snapshot().status !== 'authenticated') return false
         await tickReviewNewPrs()
+        return listBehaviorLaunchClaims('review-new-prs').length === 0
       })
-    })
+    }))
   }
-  if (isEnabled('approve-prs')) {
-    await serializeBehaviorOperation('approve-prs', async () => {
-      await withBehaviorProcessLock('approve-prs', async () => {
+  if (isEnabled('approve-prs')
+    && (!options.skipBusy || !behaviorOperationTails.has('approve-prs'))) {
+    operations.push(runBehaviorCycle('approve-prs', async () => {
+      return await withBehaviorProcessLock('approve-prs', async () => {
         await reconcileBehaviorLaunchClaims('approve-prs')
+        if (!behaviorRetryDue('approve-prs')) return false
+        if (listBehaviorLaunchClaims('approve-prs').length > 0) return false
+        if (claudeAuth.snapshot().status !== 'authenticated') return false
         await tickApprovePrs()
+        return listBehaviorLaunchClaims('approve-prs').length === 0
       })
-    })
+    }))
   }
-  if (isEnabled('resolve-unblocking')) {
-    await serializeBehaviorOperation('resolve-unblocking', tickResolveUnblocking)
+  if (isEnabled('resolve-unblocking')
+    && (!options.skipBusy || !behaviorOperationTails.has('resolve-unblocking'))) {
+    operations.push(runBehaviorCycle('resolve-unblocking', async () => {
+      await tickResolveUnblocking()
+      return true
+    }))
   }
+  await Promise.all(operations)
 }
 
 function scheduleNextTick(generation: number) {
   if (!tickerStarted || generation !== runtimeGeneration) return
   if (tickTimer) clearTimeout(tickTimer)
   const now = Date.now()
-  const nextBoundary = Math.ceil((now + 1) / TICK_MS) * TICK_MS
-  tickTimer = setTimeout(async () => {
+  const nextBoundary = Math.ceil((now + 1) / BEHAVIOR_TICK_MS) * BEHAVIOR_TICK_MS
+  tickTimer = setTimeout(() => {
     tickTimer = null
     if (!tickerStarted || generation !== runtimeGeneration) return
-    try {
-      await runEnabledBehaviorsOnce()
-    } catch (err) {
-      console.error('[behaviors] tick handler error:', err)
-    }
+    lastTickAtMs = Date.now()
+    // Rearm before external work. One slow scan can no longer silence the
+    // scheduler; the next tick skips only behaviors that are still busy.
     scheduleNextTick(generation)
+    void runEnabledBehaviorsOnce({ skipBusy: true }).then(
+      () => {
+        if (tickerStarted && generation === runtimeGeneration) {
+          lastTickCompletedAtMs = Date.now()
+        }
+      },
+      (err) => {
+        if (tickerStarted && generation === runtimeGeneration) {
+          lastTickCompletedAtMs = Date.now()
+        }
+        console.error('[behaviors] tick handler error:', err)
+      },
+    )
   }, Math.max(0, nextBoundary - now))
+}
+
+export interface BehaviorsRuntimeHealth {
+  status: 'ok' | 'degraded'
+  running: boolean
+  startedAt: string | null
+  lastTickAt: string | null
+  lastTickCompletedAt: string | null
+  busy: Array<{ behavior: BehaviorKey, since: string }>
+  failures: Array<{
+    behavior: BehaviorKey
+    kind: BehaviorFailureKind
+    consecutiveFailures: number
+    lastFailureAt: string
+    nextRetryAt: string
+  }>
+}
+
+export function getBehaviorsRuntimeHealth(): BehaviorsRuntimeHealth {
+  const now = Date.now()
+  const busy = [...behaviorOperationStartedAt.entries()].map(([behavior, since]) => ({
+    behavior,
+    since: new Date(since).toISOString(),
+  }))
+  const heartbeatAt = lastTickAtMs ?? runtimeStartedAtMs
+  const heartbeatStale = heartbeatAt === null
+    || now - heartbeatAt > (2 * BEHAVIOR_TICK_MS) + BEHAVIOR_HEALTH_GRACE_MS
+  const operationStale = [...behaviorOperationStartedAt.values()]
+    .some((startedAt) => now - startedAt > BEHAVIOR_OPERATION_TIMEOUT_MS + BEHAVIOR_HEALTH_GRACE_MS)
+  const failures = BEHAVIOR_KEYS.flatMap((behavior) => {
+    if (!isEnabled(behavior)) return []
+    const failure = readBehaviorFailure(behavior)
+    return failure ? [{
+      behavior,
+      kind: failure.kind,
+      consecutiveFailures: failure.consecutiveFailures,
+      lastFailureAt: new Date(failure.lastFailureAtMs).toISOString(),
+      nextRetryAt: new Date(failure.nextRetryAtMs).toISOString(),
+    }] : []
+  })
+  return {
+    status: tickerStarted && !heartbeatStale && !operationStale && failures.length === 0
+      ? 'ok'
+      : 'degraded',
+    running: tickerStarted,
+    startedAt: runtimeStartedAtMs === null ? null : new Date(runtimeStartedAtMs).toISOString(),
+    lastTickAt: lastTickAtMs === null ? null : new Date(lastTickAtMs).toISOString(),
+    lastTickCompletedAt: lastTickCompletedAtMs === null
+      ? null
+      : new Date(lastTickCompletedAtMs).toISOString(),
+    busy,
+    failures,
+  }
 }
 
 export interface BehaviorsRuntimeConfig {
@@ -895,21 +1203,32 @@ export function startBehaviorsRuntime(config: BehaviorsRuntimeConfig = {}): void
   behaviorAbortController = new AbortController()
   runtimeGeneration += 1
   const generation = runtimeGeneration
+  runtimeStartedAtMs = Date.now()
+  lastTickAtMs = null
+  lastTickCompletedAtMs = null
   reviewAgentUsername = String(config.reviewAgentUsername || '')
-  // If a behavior was on from a prior dev-server run, take a fresh
-  // snapshot so PRs that opened during downtime aren't auto-reviewed.
+  // Preserve an existing completed ledger across restart. Otherwise a PR
+  // opened while Poise was down is absorbed into a new snapshot and never
+  // reviewed. A genuinely missing marker still takes the anti-flood snapshot.
   if (isEnabled('review-new-prs')) {
-    void serializeBehaviorOperation('review-new-prs', async () => {
-      await withBehaviorProcessLock('review-new-prs', async () => {
-        await snapshotReviewNewPrs()
+    void runBehaviorCycle('review-new-prs', async () => {
+      return await withBehaviorProcessLock('review-new-prs', async () => {
+        if (!hasSeen('review-new-prs', REVIEW_SNAPSHOT_TARGET)) {
+          await snapshotReviewNewPrs()
+        }
         await reconcileBehaviorLaunchClaims('review-new-prs')
+        // Startup reconciliation can clear a breaker only by observing an
+        // owned worker completion. An empty claim list does not prove that a
+        // previously failing model has recovered.
+        return false
       })
     })
   }
   if (isEnabled('approve-prs')) {
-    void serializeBehaviorOperation('approve-prs', async () => {
-      await withBehaviorProcessLock('approve-prs', async () => {
+    void runBehaviorCycle('approve-prs', async () => {
+      return await withBehaviorProcessLock('approve-prs', async () => {
         await reconcileBehaviorLaunchClaims('approve-prs')
+        return false
       })
     })
   }
@@ -932,6 +1251,9 @@ export async function stopBehaviorsRuntime(): Promise<void> {
     if (claim.launched) activeClaims.delete(claimId)
     else releaseOwnedClaim(claim.behavior, claim.target, claimId)
   }
+  runtimeStartedAtMs = null
+  lastTickAtMs = null
+  lastTickCompletedAtMs = null
 }
 
 // Snapshot for read-only callers (the GET /api/behaviors endpoint).

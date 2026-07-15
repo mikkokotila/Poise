@@ -3,6 +3,7 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createAuthenticatedClaudeAuth } from './claude-auth-fixture'
 
 let root = ''
 
@@ -150,7 +151,9 @@ describe('snippet persistence', () => {
     vi.resetModules()
 
     const { createPoiseMiddleware } = await import('../server/cache-plugin')
-    const middleware = createPoiseMiddleware()
+    const middleware = createPoiseMiddleware({
+      claudeAuth: createAuthenticatedClaudeAuth(),
+    })
     const server = createServer((req, res) => {
       void middleware(req, res, () => {
         res.statusCode = 404

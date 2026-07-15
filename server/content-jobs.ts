@@ -17,6 +17,7 @@ import {
   db,
   getMeta,
 } from './db'
+import { claudeAuth } from './claude-auth'
 import { HttpError } from './http'
 import { withProcessLock } from './process-lock'
 
@@ -105,6 +106,7 @@ export interface ContentFinalizerDependencies {
     error?: string
   }>
   readResponse(callId: string): Promise<string>
+  observeProcessFailure(failure: unknown): void
 }
 
 export interface ContentFinalizerOptions {
@@ -368,6 +370,9 @@ const defaultDependencies: ContentFinalizerDependencies = {
   async readResponse(callId: string): Promise<string> {
     return (await fetchAgentResponse(callId)).body
   },
+  observeProcessFailure(failure: unknown): void {
+    claudeAuth.observeProcessFailure(failure)
+  },
 }
 
 interface LegacyContentMapping {
@@ -516,7 +521,9 @@ async function reconcileClaimedJob(
     }
 
     if (['failed', 'error', 'cancelled', 'canceled', 'timed_out', 'timeout'].includes(status)) {
-      failOwned(job.call_id, owner, observed.error || `author-content ended with status ${status}`, responseHash)
+      const message = observed.error || `author-content ended with status ${status}`
+      dependencies.observeProcessFailure({ code: 1, signal: null, error: new Error(message) })
+      failOwned(job.call_id, owner, message, responseHash)
       return
     }
 
@@ -754,6 +761,9 @@ export async function launchAndEnqueueContentJob(
   const normalizedTopic = normalizeAuthorContentTopic(topic)
   const normalizedSessionId = String(sessionId || '').trim()
   if (!normalizedSessionId) throw new HttpError(400, 'session is required')
+  // Tests and recovery tools can inject a non-agent launcher. Production's
+  // default path and the launcher itself are both guarded.
+  if (launch === startAuthorContent) await claudeAuth.requireReady()
 
   return withProcessLock({ path: launchLockPath() }, async () => {
     // Commit intent before spawn so a crash anywhere after this point is

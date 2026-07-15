@@ -251,6 +251,83 @@ body {
   position: relative;
 }
 
+/* Claude subscription health is global rather than view-owned. The single
+   fixed banner stays visible without blocking navigation or the working
+   surface; #app's existing bottom padding leaves room for it at page end. */
+#claude-auth-banner {
+  position: fixed;
+  left: 50%;
+  bottom: var(--sp-4);
+  transform: translateX(-50%);
+  z-index: 100;
+  width: min(720px, calc(100vw - 32px));
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--surface);
+  color: var(--text);
+  border: var(--b-base);
+  border-left: 3px solid var(--a4);
+  border-radius: var(--r-md);
+  box-shadow: var(--e-2);
+}
+
+#claude-auth-banner[data-status="reauth_required"] {
+  border-left-color: var(--a5);
+}
+
+.claude-auth-copy {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.claude-auth-title {
+  color: var(--text);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.claude-auth-message {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.claude-auth-login {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--n0);
+  background: var(--n5);
+  border: 1px solid var(--n5);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: background var(--t-base) ease, border-color var(--t-base) ease;
+}
+
+.claude-auth-login:hover {
+  background: var(--n6);
+  border-color: var(--n6);
+}
+
+@media (max-width: 560px) {
+  #claude-auth-banner {
+    align-items: stretch;
+    flex-direction: column;
+    gap: var(--sp-3);
+  }
+
+  .claude-auth-login { width: 100%; }
+}
+
 /* ── View header (shared across Main / Flow / Trust / Stream / Swarm) ──
    Title text was removed app-wide — every view now centers its filter
    cluster in the header. The burger menu (top-right, fixed) carries the
