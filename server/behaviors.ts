@@ -21,13 +21,14 @@ import { fetchAgentLogs } from './agent'
 import { claudeAuth } from './claude-auth'
 import {
   claimSeenOwned,
-  clearSeen,
   clearSeenExceptLaunched,
   completeSeenOwned,
   getMeta,
+  hasCompletedBehaviorLaunch,
   hasSeen,
   linkBehaviorLaunchCallOwned,
   listBehaviorLaunchClaims,
+  listSeenTargets,
   markBehaviorLaunchIntentOwned,
   recordSeen,
   releaseSeen,
@@ -38,7 +39,6 @@ import {
   type BehaviorAgentLaunch,
   type BehaviorLaunchClaim,
 } from './db'
-import { getHeadSha } from './gh'
 import { HttpError } from './http'
 import { claudeSubscriptionEnvironment, runFile, spawnDetached } from './process'
 import { withProcessLock } from './process-lock'
@@ -46,17 +46,9 @@ import { withProcessLock } from './process-lock'
 const DATASTORE = 'github-datastore'
 const GH_INTERFACE = 'github-interface'
 const AGENT_INTERFACE = 'agent-interface'
-const GH = 'gh'
-const REVIEW_SNAPSHOT_TARGET = '__snapshot_v2__'
+const LEGACY_REVIEW_SNAPSHOT_TARGET = '__snapshot_v2__'
+const REVIEW_SNAPSHOT_TARGET = '__snapshot_v3__'
 const BEHAVIOR_AUTH_FRESHNESS_MS = 60_000
-const REQUESTED_REVIEW_QUERY = `query($owner:String!,$repo:String!,$number:Int!){
-  repository(owner:$owner,name:$repo){pullRequest(number:$number){
-    state isDraft mergeable headRefOid
-    reviewRequests(first:100){pageInfo{hasNextPage} nodes{requestedReviewer{... on User{login}}}}
-    latestReviews(first:100){pageInfo{hasNextPage} nodes{author{login} state}}
-    commits(last:1){nodes{commit{statusCheckRollup{state}}}}
-  }}
-}`
 
 // Same cwd hack agent.ts uses — agent-interface infers the repo from
 // cwd's last two path parts when no git remote is found.
@@ -585,41 +577,42 @@ async function snapshotReviewNewPrs(): Promise<void> {
   if (!author) return
   try {
     const prs = await listOpenPrsByAuthor(author)
-    let complete = true
-    let failure: unknown
     for (const p of prs) {
       if (behaviorAborted()) {
-        complete = false
-        failure = behaviorSignal()?.reason
-        break
+        throw behaviorSignal()?.reason ?? new Error('review snapshot aborted')
       }
-      try {
-        const sha = await getHeadSha(p.repo, p.number, { signal: behaviorSignal() })
-        recordSeen('review-new-prs', `${p.repo}#${p.number}@${sha}`)
-      } catch (err) {
-        complete = false
-        failure ??= err
-        // Couldn't get head_sha right now — skip silently; the next
-        // tick will re-attempt and either snapshot or claim. Better
-        // to under-stamp the snapshot than to leave an unsuffixed key
-        // that would never match the new format.
-        console.warn(`[behaviors] snapshot head_sha failed for ${p.repo}#${p.number}:`, err)
-      }
+      recordSeen('review-new-prs', `${p.repo}#${p.number}`)
     }
     // A real marker distinguishes an intentionally empty snapshot from
     // "snapshot has never completed". Without it, the first PR created in
     // an initially empty repository was silently absorbed by a later
     // snapshot instead of triggering the behavior.
-    if (complete) recordSeen('review-new-prs', REVIEW_SNAPSHOT_TARGET)
-    else {
-      releaseSeen('review-new-prs', REVIEW_SNAPSHOT_TARGET)
-      throw failure ?? new Error('review snapshot did not complete')
-    }
+    recordSeen('review-new-prs', REVIEW_SNAPSHOT_TARGET)
   } catch (err) {
     releaseSeen('review-new-prs', REVIEW_SNAPSHOT_TARGET)
     console.error('[behaviors] snapshot failed:', err)
     throw err
   }
+}
+
+function migrateReviewNewPrsLedger(): void {
+  const version = getMeta('behavior_review_new_prs_keyver')
+  if (version === '3') return
+
+  // A completed v2 snapshot is authoritative for what was already known.
+  // Copy its per-head targets to PR-level targets and retain the originals:
+  // launch metadata on those rows is downstream approval evidence.
+  if (version === '2') {
+    const legacyTargets = listSeenTargets('review-new-prs')
+    if (legacyTargets.includes(LEGACY_REVIEW_SNAPSHOT_TARGET)) {
+      for (const target of legacyTargets) {
+        const separator = target.indexOf('@')
+        if (separator > 0) recordSeen('review-new-prs', target.slice(0, separator))
+      }
+      recordSeen('review-new-prs', REVIEW_SNAPSHOT_TARGET)
+    }
+  }
+  setMeta('behavior_review_new_prs_keyver', '3')
 }
 
 async function tickReviewNewPrs(): Promise<void> {
@@ -628,20 +621,10 @@ async function tickReviewNewPrs(): Promise<void> {
   if (!author) return
   const reviewer = reviewAgentUsername
 
-  // The dedupe key shape changed in keyver=2: from `${repo}#${number}`
-  // to `${repo}#${number}@${head_sha}`, so a force-push (or any new
-  // commit) is recognised as a fresh target for re-review. Without
-  // this migration, every currently-open PR would fire on the very
-  // next tick after deploy (their old keys don't match the new
-  // shape). Wipe + re-snapshot brings the ledger in sync with the
-  // current head of each open PR; subsequent ticks then only see new
-  // shas as new work.
-  if (getMeta('behavior_review_new_prs_keyver') !== '2') {
-    clearSeen('review-new-prs')
-    setMeta('behavior_review_new_prs_keyver', '2')
-    await snapshotReviewNewPrs()
-    return
-  }
+  // keyver=3 restores one initial review per PR. Convert a complete v2 ledger
+  // in place so a PR opened during downtime is not absorbed by a deploy-time
+  // snapshot, while historical launch evidence remains available to approval.
+  migrateReviewNewPrsLedger()
 
   // First tick after boot/enable with no snapshot — take one and bail.
   if (!hasSeen('review-new-prs', REVIEW_SNAPSHOT_TARGET)) {
@@ -655,9 +638,7 @@ async function tickReviewNewPrs(): Promise<void> {
     for (const pr of prs) {
       if (!isEnabled('review-new-prs') || behaviorAborted()) return
       try {
-        const sha = await getHeadSha(pr.repo, pr.number, { signal: behaviorSignal() })
-        if (!isEnabled('review-new-prs') || behaviorAborted()) return
-        const key = `${pr.repo}#${pr.number}@${sha}`
+        const key = `${pr.repo}#${pr.number}`
         // Atomic claim: exactly one caller succeeds for any given key
         // across all concurrent runtimes. Losers skip silently.
         const claimId = claimSeenOwned('review-new-prs', key)
@@ -678,7 +659,7 @@ async function tickReviewNewPrs(): Promise<void> {
               }
               if (ch.has_change_request) {
                 completeOwnedClaim('review-new-prs', key, claimId)
-                console.log(`[behaviors] review-new-prs skipped for ${pr.repo}#${pr.number}@${sha.slice(0, 8)} — outstanding CHANGES_REQUESTED, approve-prs owns it`)
+                console.log(`[behaviors] review-new-prs skipped for ${pr.repo}#${pr.number} — outstanding CHANGES_REQUESTED, approve-prs owns it`)
                 continue
               }
             } catch (err) {
@@ -697,7 +678,7 @@ async function tickReviewNewPrs(): Promise<void> {
             releaseOwnedClaim('review-new-prs', key, claimId)
             return
           }
-          console.log(`[behaviors] review-new-prs fired for ${pr.repo}#${pr.number}@${sha.slice(0, 8)} (p=${setting})`)
+          console.log(`[behaviors] review-new-prs fired for ${pr.repo}#${pr.number} (p=${setting})`)
           // Keep one durable in-flight worker per behavior. The next target is
           // considered only after reconciliation observes completion.
           return
@@ -744,98 +725,28 @@ interface ChangesAddressedResult {
 }
 
 interface RequestedReviewResult {
-  requested: boolean
+  ready: boolean
   headSha: string
-}
-
-async function resolveReviewAgentToken(reviewer: string): Promise<string> {
-  const { stdout } = await runFile(
-    GH,
-    ['auth', 'token', '--hostname', 'github.com', '--user', reviewer],
-    {
-      env: {
-        GH_HOST: undefined,
-        GH_TOKEN: undefined,
-        GITHUB_TOKEN: undefined,
-        GH_ENTERPRISE_TOKEN: undefined,
-        GITHUB_ENTERPRISE_TOKEN: undefined,
-      },
-      timeoutMs: 15_000,
-      maxOutputBytes: 1 * 1024 * 1024,
-      signal: behaviorSignal(),
-    },
-  )
-  const token = stdout.trim()
-  if (!token) throw new Error(`gh returned no github.com token for ${reviewer}`)
-  return token
-}
-
-function reviewAgentGhEnvironment(token: string): NodeJS.ProcessEnv {
-  return {
-    GH_HOST: 'github.com',
-    GH_TOKEN: token,
-    GITHUB_TOKEN: undefined,
-    GH_ENTERPRISE_TOKEN: undefined,
-    GITHUB_ENTERPRISE_TOKEN: undefined,
-  }
 }
 
 async function checkRequestedReview(
   repo: string,
   number: number,
   reviewer: string,
-  token: string,
 ): Promise<RequestedReviewResult> {
   const [owner, name] = repo.split('/', 2)
   if (!owner || !name) throw new Error(`invalid GitHub repository: ${repo}`)
-  const env = reviewAgentGhEnvironment(token)
-  try {
-    const { stdout } = await runFile(
-      GH,
-      [
-        'api', 'graphql',
-        '-f', `query=${REQUESTED_REVIEW_QUERY}`,
-        '-f', `owner=${owner}`,
-        '-f', `repo=${name}`,
-        '-F', `number=${number}`,
-      ],
-      {
-        env,
-        timeoutMs: 30_000,
-        maxOutputBytes: 1 * 1024 * 1024,
-        signal: behaviorSignal(),
-      },
-    )
-    const pull = JSON.parse(stdout.trim() || '{}')?.data?.repository?.pullRequest
-    if (!pull) throw new Error(`GitHub returned no pull request for ${repo}#${number}`)
-    const requests = pull.reviewRequests
-    const reviews = pull.latestReviews
-    const reviewerLower = reviewer.toLowerCase()
-    const requested = pull.state === 'OPEN'
-      && pull.isDraft === false
-      && pull.mergeable === 'MERGEABLE'
-      && requests?.pageInfo?.hasNextPage === false
-      && reviews?.pageInfo?.hasNextPage === false
-      && requests.nodes.some((node: any) => String(node?.requestedReviewer?.login || '').toLowerCase() === reviewerLower)
-    const headSha = String(pull.headRefOid || '')
-    if (requested && !headSha) throw new Error('GitHub returned a requested review without a head SHA')
-    if (!requested) return { requested: false, headSha }
-
-    // A request for this identity is a separate trigger; another identity's
-    // CHANGES_REQUESTED must never be treated as this reviewer's feedback.
-    // Fail closed while any other reviewer still has an active blocking
-    // review. Once that review is dismissed/superseded, the explicit request
-    // can progress without inheriting the other account's state.
-    const blockedByOtherReviewer = reviews.nodes.some(
-      (review: any) => String(review?.author?.login || '').toLowerCase() !== reviewerLower
-        && review?.state === 'CHANGES_REQUESTED',
-    )
-    const rollup = pull.commits?.nodes?.[0]?.commit?.statusCheckRollup
-    const ciGreen = !rollup || rollup.state === 'SUCCESS'
-    return { requested: !blockedByOtherReviewer && ciGreen, headSha }
-  } catch (error: any) {
-    const raw = error?.stderr?.toString?.() || error?.message || String(error)
-    throw new Error(String(raw).split(token).join('***'))
+  const cwd = join(GH_INTERFACE_CWD_ROOT, owner, name)
+  await mkdir(cwd, { recursive: true })
+  const { stdout } = await runFile(
+    GH_INTERFACE,
+    ['--requested-review-ready', `#${number}`, '--username', reviewer],
+    { cwd, timeoutMs: 30_000, maxOutputBytes: 1 * 1024 * 1024, signal: behaviorSignal() },
+  )
+  const data = JSON.parse(stdout.trim() || '{}')
+  return {
+    ready: !!data.ready,
+    headSha: String(data.head_sha || ''),
   }
 }
 
@@ -892,7 +803,6 @@ async function tickApprovePrs(): Promise<void> {
   try {
     const prs = await listOpenPrsByAuthor(author)
     let failure: unknown
-    let reviewAgentToken: Promise<string> | null = null
     for (const pr of prs) {
       if (!isEnabled('approve-prs') || behaviorAborted()) return
       try {
@@ -920,18 +830,17 @@ async function tickApprovePrs(): Promise<void> {
           seenTarget = `${pr.repo}#${pr.number}@req=${check.latest_request_at}/r=${responses}`
           firedReason = `req=${check.latest_request_at}, r=${responses}: ${check.author_commits_after_request}c+${check.author_inline_replies_after_request}reply`
         } else {
-          // Initial approval trigger: this exact configured identity must be
-          // explicitly requested. Require a conflict-free head and fully green
-          // CI before spending a model run; the agent still performs the final
-          // correctness review and owns the approve/request-changes decision.
-          reviewAgentToken ??= resolveReviewAgentToken(reviewer)
-          const requested = await checkRequestedReview(
+          // Initial approval is downstream of Poise's completed initial review.
+          // Snapshot/skip/in-flight rows do not qualify, preventing review and
+          // approval from launching against the same PR concurrently.
+          if (!hasCompletedBehaviorLaunch(
+            'review-new-prs',
+            'pr_review',
             pr.repo,
             pr.number,
-            reviewer,
-            await reviewAgentToken,
-          )
-          if (!requested.requested) continue
+          )) continue
+          const requested = await checkRequestedReview(pr.repo, pr.number, reviewer)
+          if (!requested.ready) continue
           seenTarget = `${pr.repo}#${pr.number}@requested=${reviewer.toLowerCase()}/head=${requested.headSha}`
           firedReason = `requested=${reviewer}, head=${requested.headSha.slice(0, 8)}, ci=green`
         }
@@ -1336,6 +1245,7 @@ export function startBehaviorsRuntime(config: BehaviorsRuntimeConfig = {}): void
   if (isEnabled('review-new-prs')) {
     void runBehaviorCycle('review-new-prs', async () => {
       return await withBehaviorProcessLock('review-new-prs', async () => {
+        migrateReviewNewPrsLedger()
         if (!hasSeen('review-new-prs', REVIEW_SNAPSHOT_TARGET)) {
           await snapshotReviewNewPrs()
         }
