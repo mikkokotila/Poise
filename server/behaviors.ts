@@ -46,8 +46,17 @@ import { withProcessLock } from './process-lock'
 const DATASTORE = 'github-datastore'
 const GH_INTERFACE = 'github-interface'
 const AGENT_INTERFACE = 'agent-interface'
+const GH = 'gh'
 const REVIEW_SNAPSHOT_TARGET = '__snapshot_v2__'
 const BEHAVIOR_AUTH_FRESHNESS_MS = 60_000
+const REQUESTED_REVIEW_QUERY = `query($owner:String!,$repo:String!,$number:Int!){
+  repository(owner:$owner,name:$repo){pullRequest(number:$number){
+    state isDraft mergeable headRefOid
+    reviewRequests(first:100){pageInfo{hasNextPage} nodes{requestedReviewer{... on User{login}}}}
+    latestReviews(first:100){pageInfo{hasNextPage} nodes{author{login} state}}
+    commits(last:1){nodes{commit{statusCheckRollup{state}}}}
+  }}
+}`
 
 // Same cwd hack agent.ts uses — agent-interface infers the repo from
 // cwd's last two path parts when no git remote is found.
@@ -713,16 +722,14 @@ async function tickReviewNewPrs(): Promise<void> {
 
 // ── approve-prs implementation ──────────────────────────────────────────
 //
-// For each open PR by the configured user, ask github-interface whether
-// the review-agent's request-for-changes has been addressed since it was
-// left. If yes, kick off `agent-interface --pr-approve` so the agent
-// re-evaluates and (if happy) actually approves on GitHub.
+// For each open PR by the configured user, re-evaluate either an addressed
+// change request left by the configured review agent or a clean PR that
+// explicitly requests that identity's initial approval.
 //
-// Dedupe target is `${repo}#${num}@${latest_request_at}` — the agent
-// can leave a fresh round of change requests at any time, which bumps
-// the timestamp and re-arms the behavior. We do NOT take a snapshot on
-// enable: the user explicitly wants approval to fire for any
-// already-addressed PR right away. claimSeen prevents repeats.
+// Follow-ups dedupe by request timestamp + response count; initial requests
+// dedupe by configured reviewer + head SHA. We do NOT take a snapshot on
+// enable: already-eligible PRs should fire immediately. claimSeen prevents
+// repeats and the runtime permits only one durable worker at a time.
 
 interface ChangesAddressedResult {
   has_change_request: boolean
@@ -734,6 +741,102 @@ interface ChangesAddressedResult {
   // worth re-evaluating, so the dedupe key keys off the sum.
   author_commits_after_request: number
   author_inline_replies_after_request: number
+}
+
+interface RequestedReviewResult {
+  requested: boolean
+  headSha: string
+}
+
+async function resolveReviewAgentToken(reviewer: string): Promise<string> {
+  const { stdout } = await runFile(
+    GH,
+    ['auth', 'token', '--hostname', 'github.com', '--user', reviewer],
+    {
+      env: {
+        GH_HOST: undefined,
+        GH_TOKEN: undefined,
+        GITHUB_TOKEN: undefined,
+        GH_ENTERPRISE_TOKEN: undefined,
+        GITHUB_ENTERPRISE_TOKEN: undefined,
+      },
+      timeoutMs: 15_000,
+      maxOutputBytes: 1 * 1024 * 1024,
+      signal: behaviorSignal(),
+    },
+  )
+  const token = stdout.trim()
+  if (!token) throw new Error(`gh returned no github.com token for ${reviewer}`)
+  return token
+}
+
+function reviewAgentGhEnvironment(token: string): NodeJS.ProcessEnv {
+  return {
+    GH_HOST: 'github.com',
+    GH_TOKEN: token,
+    GITHUB_TOKEN: undefined,
+    GH_ENTERPRISE_TOKEN: undefined,
+    GITHUB_ENTERPRISE_TOKEN: undefined,
+  }
+}
+
+async function checkRequestedReview(
+  repo: string,
+  number: number,
+  reviewer: string,
+  token: string,
+): Promise<RequestedReviewResult> {
+  const [owner, name] = repo.split('/', 2)
+  if (!owner || !name) throw new Error(`invalid GitHub repository: ${repo}`)
+  const env = reviewAgentGhEnvironment(token)
+  try {
+    const { stdout } = await runFile(
+      GH,
+      [
+        'api', 'graphql',
+        '-f', `query=${REQUESTED_REVIEW_QUERY}`,
+        '-f', `owner=${owner}`,
+        '-f', `repo=${name}`,
+        '-F', `number=${number}`,
+      ],
+      {
+        env,
+        timeoutMs: 30_000,
+        maxOutputBytes: 1 * 1024 * 1024,
+        signal: behaviorSignal(),
+      },
+    )
+    const pull = JSON.parse(stdout.trim() || '{}')?.data?.repository?.pullRequest
+    if (!pull) throw new Error(`GitHub returned no pull request for ${repo}#${number}`)
+    const requests = pull.reviewRequests
+    const reviews = pull.latestReviews
+    const reviewerLower = reviewer.toLowerCase()
+    const requested = pull.state === 'OPEN'
+      && pull.isDraft === false
+      && pull.mergeable === 'MERGEABLE'
+      && requests?.pageInfo?.hasNextPage === false
+      && reviews?.pageInfo?.hasNextPage === false
+      && requests.nodes.some((node: any) => String(node?.requestedReviewer?.login || '').toLowerCase() === reviewerLower)
+    const headSha = String(pull.headRefOid || '')
+    if (requested && !headSha) throw new Error('GitHub returned a requested review without a head SHA')
+    if (!requested) return { requested: false, headSha }
+
+    // A request for this identity is a separate trigger; another identity's
+    // CHANGES_REQUESTED must never be treated as this reviewer's feedback.
+    // Fail closed while any other reviewer still has an active blocking
+    // review. Once that review is dismissed/superseded, the explicit request
+    // can progress without inheriting the other account's state.
+    const blockedByOtherReviewer = reviews.nodes.some(
+      (review: any) => String(review?.author?.login || '').toLowerCase() !== reviewerLower
+        && review?.state === 'CHANGES_REQUESTED',
+    )
+    const rollup = pull.commits?.nodes?.[0]?.commit?.statusCheckRollup
+    const ciGreen = !rollup || rollup.state === 'SUCCESS'
+    return { requested: !blockedByOtherReviewer && ciGreen, headSha }
+  } catch (error: any) {
+    const raw = error?.stderr?.toString?.() || error?.message || String(error)
+    throw new Error(String(raw).split(token).join('***'))
+  }
 }
 
 async function checkChangesAddressed(repo: string, number: number, reviewer: string): Promise<ChangesAddressedResult> {
@@ -789,12 +892,13 @@ async function tickApprovePrs(): Promise<void> {
   try {
     const prs = await listOpenPrsByAuthor(author)
     let failure: unknown
+    let reviewAgentToken: Promise<string> | null = null
     for (const pr of prs) {
       if (!isEnabled('approve-prs') || behaviorAborted()) return
       try {
         const check = await checkChangesAddressed(pr.repo, pr.number, reviewer)
         if (!isEnabled('approve-prs')) return
-        // Trigger: reviewer has at least one CHANGES_REQUESTED review
+        // Follow-up trigger: reviewer has at least one CHANGES_REQUESTED review
         // on the PR, AND the author has engaged with it at least once
         // since — either by pushing a commit OR by replying inline
         // on a review thread. A refutation reply ("FTL is internal,
@@ -808,10 +912,29 @@ async function tickApprovePrs(): Promise<void> {
         // another CHANGES_REQUESTED (latest_request_at advances),
         // both counters reset to 0 and a fresh round begins on the
         // next author response.
-        if (!check.has_change_request) continue
-        const responses = check.author_commits_after_request + check.author_inline_replies_after_request
-        if (responses < 1) continue
-        const seenTarget = `${pr.repo}#${pr.number}@req=${check.latest_request_at}/r=${responses}`
+        let seenTarget = ''
+        let firedReason = ''
+        if (check.has_change_request) {
+          const responses = check.author_commits_after_request + check.author_inline_replies_after_request
+          if (responses < 1) continue
+          seenTarget = `${pr.repo}#${pr.number}@req=${check.latest_request_at}/r=${responses}`
+          firedReason = `req=${check.latest_request_at}, r=${responses}: ${check.author_commits_after_request}c+${check.author_inline_replies_after_request}reply`
+        } else {
+          // Initial approval trigger: this exact configured identity must be
+          // explicitly requested. Require a conflict-free head and fully green
+          // CI before spending a model run; the agent still performs the final
+          // correctness review and owns the approve/request-changes decision.
+          reviewAgentToken ??= resolveReviewAgentToken(reviewer)
+          const requested = await checkRequestedReview(
+            pr.repo,
+            pr.number,
+            reviewer,
+            await reviewAgentToken,
+          )
+          if (!requested.requested) continue
+          seenTarget = `${pr.repo}#${pr.number}@requested=${reviewer.toLowerCase()}/head=${requested.headSha}`
+          firedReason = `requested=${reviewer}, head=${requested.headSha.slice(0, 8)}, ci=green`
+        }
         const claimId = claimSeenOwned('approve-prs', seenTarget)
         if (!claimId) continue
         trackClaim('approve-prs', seenTarget, claimId)
@@ -825,7 +948,7 @@ async function tickApprovePrs(): Promise<void> {
           releaseOwnedClaim('approve-prs', seenTarget, claimId)
           throw err
         }
-        console.log(`[behaviors] approve-prs fired for ${pr.repo}#${pr.number} (req=${check.latest_request_at}, r=${responses}: ${check.author_commits_after_request}c+${check.author_inline_replies_after_request}reply)`)
+        console.log(`[behaviors] approve-prs fired for ${pr.repo}#${pr.number} (${firedReason})`)
         return
       } catch (err) {
         if (behaviorAborted()) return
