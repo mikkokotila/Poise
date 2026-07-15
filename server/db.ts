@@ -535,20 +535,48 @@ export function hasSeen(key: string, target: string): boolean {
   return !!row
 }
 
+export function listSeenTargets(key: string): string[] {
+  return (db.prepare(
+    'SELECT target FROM behavior_seen WHERE key = ? ORDER BY target',
+  ).all(key) as Array<{ target: string }>).map((row) => row.target)
+}
+
+// A completed behavior launch is stronger than a snapshot/skip marker: it
+// proves the detached agent worker exited successfully for this PR.
+export function hasCompletedBehaviorLaunch(
+  key: string,
+  launchBehavior: BehaviorAgentLaunch,
+  repo: string,
+  pr: number,
+): boolean {
+  const row = db.prepare(`
+    SELECT 1 AS x
+    FROM behavior_seen
+    WHERE key = ?
+      AND claim_id = ''
+      AND launch_behavior = ?
+      AND launch_repo = ?
+      AND launch_pr = ?
+      AND launch_requested_at IS NOT NULL
+    LIMIT 1
+  `).get(key, launchBehavior, repo, pr) as { x: number } | undefined
+  return !!row
+}
+
 // Wipe the ledger for a key — used when the user disables the
 // behavior. Re-enabling will trigger a fresh snapshot.
 export function clearSeen(key: string): void {
   db.prepare('DELETE FROM behavior_seen WHERE key = ?').run(key)
 }
 
-// Disabling re-arms terminal targets but must retain accepted detached work.
-// Otherwise disable/re-enable could erase the only identity that prevents a
-// second review or approval while the first process is still running.
+// Disabling removes snapshots/skips but retains every accepted detached launch.
+// Otherwise disable/re-enable could duplicate completed work or erase the proof
+// that approval must wait for a successful initial review.
 export function clearSeenExceptLaunched(key: string): void {
   db.prepare(`
     DELETE FROM behavior_seen
     WHERE key = ?
-      AND NOT (claim_id <> '' AND launch_requested_at IS NOT NULL)
+      AND launch_requested_at IS NULL
   `).run(key)
 }
 
