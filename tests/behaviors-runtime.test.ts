@@ -78,7 +78,21 @@ async function restartModules() {
   return loadModules()
 }
 
-function arrangeCli(changesAddressed = false, failCheckout = false): void {
+interface ReviewRequestFixture {
+  requestedReviewers?: string[]
+  reviews?: Array<{ login: string, state: string }>
+  headSha?: string
+  state?: string
+  draft?: boolean
+  mergeable?: boolean
+  ciState?: string | null
+}
+
+function arrangeCli(
+  changesAddressed = false,
+  failCheckout = false,
+  reviewRequest: ReviewRequestFixture = {},
+): void {
   mocks.runFile.mockImplementation(async (command: string, args: string[]) => {
     if (command === 'github-datastore') {
       return { stdout: JSON.stringify(listedPrs), stderr: '' }
@@ -94,6 +108,39 @@ function arrangeCli(changesAddressed = false, failCheckout = false): void {
           latest_request_at: '2026-07-10T10:00:00Z',
           author_commits_after_request: changesAddressed ? 1 : 0,
           author_inline_replies_after_request: 0,
+        }),
+        stderr: '',
+      }
+    }
+    if (command === 'gh' && args[0] === 'auth' && args[1] === 'token') {
+      return { stdout: 'review-agent-token\n', stderr: '' }
+    }
+    if (command === 'gh' && args[0] === 'api' && args[1] === 'graphql') {
+      return {
+        stdout: JSON.stringify({
+          data: { repository: { pullRequest: {
+            state: (reviewRequest.state ?? 'open').toUpperCase(),
+            isDraft: reviewRequest.draft ?? false,
+            mergeable: (reviewRequest.mergeable ?? true) ? 'MERGEABLE' : 'CONFLICTING',
+            headRefOid: reviewRequest.headSha ?? 'abc123',
+            reviewRequests: {
+              pageInfo: { hasNextPage: false },
+              nodes: (reviewRequest.requestedReviewers || []).map((login) => ({
+                requestedReviewer: { login },
+              })),
+            },
+            latestReviews: {
+              pageInfo: { hasNextPage: false },
+              nodes: (reviewRequest.reviews || []).map((review) => ({
+                author: { login: review.login }, state: review.state,
+              })),
+            },
+            commits: { nodes: [{ commit: {
+              statusCheckRollup: reviewRequest.ciState === null
+                ? null
+                : { state: reviewRequest.ciState || 'SUCCESS' },
+            } }] },
+          } } },
         }),
         stderr: '',
       }
@@ -221,6 +268,125 @@ describe('behavior launch claims', () => {
     expect(mocks.spawnDetached).not.toHaveBeenCalled()
 
     mocks.authStatus = 'authenticated'
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+  })
+
+  it('approves an explicitly requested green head once under the configured identity', async () => {
+    arrangeCli(false, false, {
+      requestedReviewers: ['other-reviewer', 'REVIEW-BOT'],
+      headSha: 'def456',
+    })
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_approve_prs_enabled', '1')
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).toHaveBeenCalledWith(
+      'agent-interface',
+      expect.arrayContaining(['--pr-approve', `#${pr.number}`]),
+      expect.any(Object),
+    )
+    const tokenCall = mocks.runFile.mock.calls.find(
+      ([command, args]) => command === 'gh' && args[0] === 'auth',
+    )
+    expect(tokenCall?.[1]).toEqual([
+      'auth', 'token', '--hostname', 'github.com', '--user', 'review-bot',
+    ])
+    expect(tokenCall?.[2]?.env).toEqual({
+      GH_HOST: undefined,
+      GH_TOKEN: undefined,
+      GITHUB_TOKEN: undefined,
+      GH_ENTERPRISE_TOKEN: undefined,
+      GITHUB_ENTERPRISE_TOKEN: undefined,
+    })
+    const apiCall = mocks.runFile.mock.calls.find(
+      ([command, args]) => command === 'gh' && args[0] === 'api',
+    )
+    expect(apiCall?.[2]?.env).toEqual({
+      GH_HOST: 'github.com',
+      GH_TOKEN: 'review-agent-token',
+      GITHUB_TOKEN: undefined,
+      GH_ENTERPRISE_TOKEN: undefined,
+      GITHUB_ENTERPRISE_TOKEN: undefined,
+    })
+
+    const onExit = (mocks.spawnDetached.mock.calls[0][2] as {
+      onExit: (result: { code: number | null, signal: NodeJS.Signals | null }) => void
+    }).onExit
+    onExit({ code: 0, signal: null })
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(db.claimSeen(
+      'approve-prs',
+      `${pr.repo}#${pr.number}@requested=review-bot/head=def456`,
+    )).toBe(false)
+  })
+
+  it('does not inherit another reviewer change request', async () => {
+    const reviewRequest: ReviewRequestFixture = {
+      requestedReviewers: ['review-bot'],
+      reviews: [{ login: 'zero-bang', state: 'CHANGES_REQUESTED' }],
+    }
+    arrangeCli(false, false, reviewRequest)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_approve_prs_enabled', '1')
+
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+
+    reviewRequest.reviews![0].state = 'DISMISSED'
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+  })
+
+  it('requires the configured review request and a conflict-free head', async () => {
+    const reviewRequest: ReviewRequestFixture = {
+      requestedReviewers: ['other-reviewer'],
+    }
+    arrangeCli(false, false, reviewRequest)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_approve_prs_enabled', '1')
+
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+
+    reviewRequest.requestedReviewers = ['review-bot']
+    reviewRequest.mergeable = false
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+
+    reviewRequest.mergeable = true
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+  })
+
+  it('waits for requested-review CI to be fully green', async () => {
+    const reviewRequest: ReviewRequestFixture = {
+      requestedReviewers: ['review-bot'],
+      ciState: 'PENDING',
+    }
+    arrangeCli(false, false, reviewRequest)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_approve_prs_enabled', '1')
+
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+
+    reviewRequest.ciState = 'SUCCESS'
     await runtime.runEnabledBehaviorsOnce()
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
   })
