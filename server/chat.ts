@@ -22,7 +22,8 @@ import { fetchAgentLogs, type LogEntry } from './agent'
 import { db } from './db'
 import { readDoc, slugFromEditorSession } from './editor'
 import { HttpError } from './http'
-import { MAX_PROCESS_ARG_BYTES, runFile, spawnDetached } from './process'
+import { claudeAuth } from './claude-auth'
+import { MAX_PROCESS_ARG_BYTES, claudeSubscriptionEnvironment, runFile, spawnDetached } from './process'
 
 const AGENT_INTERFACE = 'agent-interface'
 
@@ -412,6 +413,7 @@ export async function sendChat(
   const chosen: ChatModel = (VALID_MODELS as readonly string[]).includes(model)
     ? (model as ChatModel)
     : DEFAULT_MODEL
+  if (chosen === 'opus') await claudeAuth.requireReady()
 
   await ensureLegacyAttachmentMigration()
   const pwd = chatPwd(sessionId)
@@ -490,12 +492,19 @@ export async function sendChat(
 
   try {
     assertHttpArgumentSize(prompt, 'chat prompt')
+    if (chosen === 'opus') await claudeAuth.requireReady()
     await spawnDetached(
       AGENT_INTERFACE,
       ['--chat', prompt, '--model', chosen, '--session', sessionId, '--pwd', pwd],
       {
         cwd: agentInterfaceCwd(),
-        ...(contextPath ? { onExit: () => unlink(contextPath!).catch(() => undefined) } : {}),
+        ...(chosen === 'opus' ? { env: claudeSubscriptionEnvironment() } : {}),
+        ...((contextPath || chosen === 'opus') ? {
+          onExit: async (result: { code: number | null, signal: NodeJS.Signals | null, error?: Error }) => {
+            if (contextPath) await unlink(contextPath).catch(() => undefined)
+            if (chosen === 'opus') claudeAuth.observeProcessFailure(result)
+          },
+        } : {}),
       },
     )
   } catch (error) {
@@ -552,6 +561,7 @@ export async function runDebate(topic: string, rounds: number = 1): Promise<Deba
   const t = String(topic || '').trim()
   if (!t) throw new Error('topic is required')
   assertHttpArgumentSize(t, 'debate topic')
+  await claudeAuth.requireReady()
   const r = Math.min(Math.max(Number.isFinite(rounds) ? rounds : 1, 1), DEBATE_MAX_ROUNDS)
   let stdout: string
   try {
@@ -562,9 +572,11 @@ export async function runDebate(topic: string, rounds: number = 1): Promise<Deba
         cwd: agentInterfaceCwd(),
         timeoutMs: DEBATE_TIMEOUT_MS,
         maxOutputBytes: DEBATE_MAX_OUTPUT_BYTES,
+        env: claudeSubscriptionEnvironment(),
       },
     ))
   } catch (err: any) {
+    claudeAuth.observeProcessFailure(err)
     const detail = String(err?.stderr || err?.stdout || '').trim()
     if (detail) throw new Error(detail)
     throw err
@@ -652,6 +664,7 @@ export async function startAuthorContent(topic: string, sessionId: string): Prom
   const normalizedSessionId = String(sessionId || '').trim()
   if (!normalizedSessionId) throw new HttpError(400, 'session is required')
   assertHttpArgumentSize(normalizedSessionId, 'session')
+  await claudeAuth.requireReady()
   // Snapshot every existing id in this session. Exact topic matching prevents
   // an unrelated delayed call from being attributed to this launch.
   const beforeIds = new Set((await fetchAgentLogs())
@@ -661,10 +674,15 @@ export async function startAuthorContent(topic: string, sessionId: string): Prom
   // --session-id ties this call to the chat session, so the chat
   // history can include this turn (listChatHistory filters by
   // session_id across both behaviors).
+  await claudeAuth.requireReady()
   await spawnDetached(
     AGENT_INTERFACE,
     ['--author-content', trimmed, '--session-id', normalizedSessionId],
-    { cwd: agentInterfaceCwd() },
+    {
+      cwd: agentInterfaceCwd(),
+      env: claudeSubscriptionEnvironment(),
+      onExit: (result) => { claudeAuth.observeProcessFailure(result) },
+    },
   )
 
   const deadline = Date.now() + 3000

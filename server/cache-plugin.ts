@@ -1,13 +1,14 @@
 import type { Plugin, Connect } from 'vite'
 import type { ServerResponse } from 'node:http'
 import { getSettings, setSettings } from './settings'
+import { claudeAuth, type ClaudeAuthSnapshot } from './claude-auth'
 import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, type Lane } from './current'
 import { handleGhBody, listOrgRepos, setReviewAgentUsername } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, triggerPrReview, replayAgentJob } from './agent'
 import { listChatHistory, sendChat, saveAttachment, runDebate } from './chat'
 import { listDocs, readDoc, writeDoc, deleteDoc, newSlug, readAnnotations, writeAnnotations, getOrCreateChatSession, MAX_DOC_BYTES, MAX_ANNOTATIONS_BYTES, EditorConflictError } from './editor'
 import { readSnippetState, saveSnippets, addSnippet, espansoDetected, SnippetConflictError } from './snippets'
-import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, setScratchpad as setBehaviorScratchpad, getEnabledMap, getSettingMap, getScratchpadMap, isValidSetting, startBehaviorsRuntime, stopBehaviorsRuntime, getResolveUnblockingLastFired, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
+import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, setScratchpad as setBehaviorScratchpad, getEnabledMap, getSettingMap, getScratchpadMap, getBehaviorsRuntimeHealth, isValidSetting, startBehaviorsRuntime, stopBehaviorsRuntime, getResolveUnblockingLastFired, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
 import { ContentLaunchPendingError, getContentJobResponse, launchAndEnqueueContentJob, startContentFinalizer, stopContentFinalizer } from './content-jobs'
 import { ProcessLockError } from './process-lock'
 import { ATTACHMENT_MAX_BYTES, enforceApiRequest, httpStatus, readBuffer, readJson, setApiHeaders } from './http'
@@ -25,20 +26,37 @@ export interface CachePluginOptions {
   reviewAgentUsername?: string
   /** Additional hostnames allowed to access the local API. */
   allowedHosts?: string[]
+  /** Auth runtime override for isolated integration tests. */
+  claudeAuth?: ClaudeAuthRuntime
 }
 
+export interface ClaudeAuthRuntime {
+  start(): void
+  stop(): Promise<void>
+  snapshot(): ClaudeAuthSnapshot
+  startLogin(): ClaudeAuthSnapshot
+}
+
+const activeClaudeAuthRuntimes = new Set<ClaudeAuthRuntime>()
+
 export function startPoiseRuntime(opts: CachePluginOptions = {}): void {
+  const auth = opts.claudeAuth ?? claudeAuth
+  activeClaudeAuthRuntimes.add(auth)
+  auth.start()
   startBehaviorsRuntime({ reviewAgentUsername: opts.reviewAgentUsername })
   startContentFinalizer()
   setReviewAgentUsername(opts.reviewAgentUsername || '')
 }
 
 export async function stopPoiseRuntime(): Promise<void> {
-  await Promise.all([stopBehaviorsRuntime(), stopContentFinalizer()])
+  const authStops = [...activeClaudeAuthRuntimes].map((auth) => auth.stop())
+  activeClaudeAuthRuntimes.clear()
+  await Promise.all([stopBehaviorsRuntime(), stopContentFinalizer(), ...authStops])
 }
 
 export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.NextHandleFunction {
       startPoiseRuntime(opts)
+      const auth = opts.claudeAuth ?? claudeAuth
       return async (req, res, next) => {
         const url = req.url || ''
 
@@ -53,7 +71,23 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
           return json(res, 405, { error: 'cross-origin preflight is not supported' })
         }
         if (url === '/api/health' && req.method === 'GET') {
-          return json(res, 200, { status: 'ok' })
+          const scheduler = getBehaviorsRuntimeHealth()
+          return json(res, scheduler.status === 'ok' ? 200 : 503, {
+            status: scheduler.status,
+            scheduler,
+          })
+        }
+
+        // Claude Code owns credentials. Poise exposes only sanitized health
+        // metadata and can start the subscription login flow; no token or
+        // provider output crosses this API boundary.
+        if (url === '/api/claude-auth' && req.method === 'GET') {
+          return json(res, 200, auth.snapshot())
+        }
+        if (url === '/api/claude-auth/login' && req.method === 'POST') {
+          const before = auth.snapshot()
+          const state = auth.startLogin()
+          return json(res, before.status === 'authenticated' ? 200 : 202, state)
         }
 
         // ── Settings ──

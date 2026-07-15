@@ -10,6 +10,7 @@ import { initSnippetsView } from './views/snippets-view'
 import { initEditorView, stopEditorRefresh } from './views/editor-view'
 import { toggle as toggleChat } from './views/chat-pane'
 import { loadSettings, startRefreshTicker, applyTheme, getTheme } from './config'
+import { initClaudeAuth } from './claude-auth'
 
 const viewMainEl = document.getElementById('view-main')!
 const viewCurrentEl = document.getElementById('view-current')!
@@ -72,6 +73,7 @@ function showView(v: ViewSlug) {
 // Apply the saved theme as early as possible so the first paint matches
 // the user's preference (no light → dark flash on dark-mode boots).
 applyTheme(getTheme())
+initClaudeAuth()
 
 // Init order: typography → settings → menu → initial view
 initTypography()

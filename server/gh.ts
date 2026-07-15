@@ -208,7 +208,11 @@ export async function localCheckoutPath(owner: string, repo: string): Promise<st
 // the review-new-prs dedupe key so a force-push (or any new commit)
 // is recognised as a fresh target for re-review rather than treated
 // as the already-reviewed PR. Single GitHub call, no pagination.
-export async function getHeadSha(repo: string, number: number): Promise<string> {
+export async function getHeadSha(
+  repo: string,
+  number: number,
+  options: { signal?: AbortSignal } = {},
+): Promise<string> {
   if (!repo.includes('/')) throw new Error('repo must be owner/name')
   const [owner, name] = repo.split('/', 2)
   const cwd = join(GH_INTERFACE_CWD_ROOT, owner, name)
@@ -217,6 +221,7 @@ export async function getHeadSha(repo: string, number: number): Promise<string> 
     cwd,
     timeoutMs: 30_000,
     maxOutputBytes: 1 * 1024 * 1024,
+    signal: options.signal,
   })
   const result = JSON.parse(stdout)
   if (!result.head_sha) throw new Error('github-interface --head-sha returned no head_sha')

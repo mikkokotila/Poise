@@ -1,10 +1,15 @@
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { basename } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 export const DEFAULT_EXEC_TIMEOUT_MS = 30_000
 export const DEFAULT_MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 export const MAX_PROCESS_ARG_BYTES = 64 * 1024
+export const CLAUDE_SUBSCRIPTION_CLI = fileURLToPath(new URL(
+  '../scripts/claude-subscription.mjs',
+  import.meta.url,
+))
 
 export function assertProcessArgSize(value: string, label = 'argument'): void {
   if (Buffer.byteLength(value, 'utf8') > MAX_PROCESS_ARG_BYTES) {
@@ -81,6 +86,25 @@ const NETWORK_ENV = [
   'NO_PROXY',
 ]
 
+// A Claude subscription is resolved from Claude Code's own credential store
+// (the macOS Keychain on macOS). Explicit provider credentials can override
+// that account and route work through metered API billing, so subscription-
+// backed calls remove every such override at the process boundary and force
+// the monitored wrapper, which also neutralizes provider settings loaded by
+// Claude Code itself.
+export function claudeSubscriptionEnvironment(): NodeJS.ProcessEnv {
+  if (process.platform === 'win32') {
+    throw new Error('Claude subscription isolation requires macOS, Linux, or WSL')
+  }
+  return {
+    ANTHROPIC_API_KEY: undefined,
+    ANTHROPIC_AUTH_TOKEN: undefined,
+    ANTHROPIC_BASE_URL: undefined,
+    CLAUDE_CODE_OAUTH_TOKEN: undefined,
+    CLAUDE_CLI: CLAUDE_SUBSCRIPTION_CLI,
+  }
+}
+
 const GITHUB_ENV = [
   'GH_TOKEN',
   'GITHUB_TOKEN',
@@ -141,24 +165,72 @@ const MODEL_ENV = [
   ...NETWORK_ENV,
 ]
 
+// Direct Claude Code invocations need their configured credential location,
+// command guard, and network route, but never inherit provider credentials.
+// Callers additionally pass claudeSubscriptionEnvironment() to make that
+// subscription-only intent explicit and resilient to future allowlist edits.
+const CLAUDE_ENV = [
+  'CLAUDE_CONFIG_DIR',
+  'CLAUDE_CODE_SHELL_PREFIX',
+  ...NETWORK_ENV,
+]
+
+// Browser launchers on Linux and WSL rely on these non-secret desktop/session
+// coordinates. Keep them out of ordinary status/model workers and inherit them
+// only for Poise's exact Claude.ai login command.
+const CLAUDE_LOGIN_ENV = new Set([
+  'DISPLAY',
+  'WAYLAND_DISPLAY',
+  'XAUTHORITY',
+  'DBUS_SESSION_BUS_ADDRESS',
+  'XDG_SESSION_TYPE',
+  'XDG_CURRENT_DESKTOP',
+  'DESKTOP_SESSION',
+  'WSL_DISTRO_NAME',
+  'WSL_INTEROP',
+])
+
 // Credentials are inherited only by the binaries that intentionally consume
 // them. A caller can still pass a one-off value explicitly through options.env.
 const COMMAND_ENV = new Map<string, ReadonlySet<string>>([
   ['gh', new Set(GITHUB_ENV)],
   ['github-interface', new Set(GITHUB_ENV)],
   ['agent-interface', new Set([...GITHUB_ENV, ...MODEL_ENV])],
+  ['claude', new Set(CLAUDE_ENV)],
+  ['claude-subscription', new Set(CLAUDE_ENV)],
+  ['claude-subscription.mjs', new Set(CLAUDE_ENV)],
 ])
 
 function commandName(command: string): string {
   return basename(command).replace(/\.(?:exe|cmd|bat|com)$/i, '').toLowerCase()
 }
 
-function childEnvironment(command: string, overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+function isClaudeSubscriptionLogin(command: string, args: readonly string[]): boolean {
+  const name = commandName(command)
+  return (name === 'claude-subscription' || name === 'claude-subscription.mjs')
+    && args.length === 3
+    && args[0] === 'auth'
+    && args[1] === 'login'
+    && args[2] === '--claudeai'
+}
+
+function childEnvironment(
+  command: string,
+  overrides: NodeJS.ProcessEnv = {},
+  args: readonly string[] = [],
+): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {}
   const commandEnv = COMMAND_ENV.get(commandName(command))
+  const loginEnvironment = isClaudeSubscriptionLogin(command, args)
+    ? CLAUDE_LOGIN_ENV
+    : undefined
   for (const [key, value] of Object.entries(process.env)) {
     const normalized = key.toUpperCase()
-    if (SAFE_BASE_ENV.has(normalized) || commandEnv?.has(normalized)) {
+    if (
+      SAFE_BASE_ENV.has(normalized)
+      || commandEnv?.has(normalized)
+      || loginEnvironment?.has(normalized)
+    ) {
       env[key] = value
     }
   }
@@ -250,7 +322,7 @@ export function runFile(
   return new Promise((resolve, reject) => {
     const child = spawn(command, [...args], {
       cwd: options.cwd,
-      env: childEnvironment(command, options.env),
+      env: childEnvironment(command, options.env, args),
       detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,

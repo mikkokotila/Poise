@@ -4,6 +4,7 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createAuthenticatedClaudeAuth } from './claude-auth-fixture'
 
 type DatabaseModule = typeof import('../server/db')
 type ContentJobsModule = typeof import('../server/content-jobs')
@@ -155,18 +156,24 @@ describe('durable author-content finalization', () => {
     expect(first.slug).not.toBe(second.slug)
     expect(first.slug).toMatch(/^content-[a-f0-9]{64}$/)
 
+    const observeProcessFailure = vi.fn()
     await jobs.runContentFinalizerOnce({
       workerId: 'failure-worker',
       maxJobsPerRun: 1,
       dependencies: {
         inspectCall: vi.fn().mockResolvedValue({ status: 'failed', error: 'model backend failed' }),
         readResponse: vi.fn(),
+        observeProcessFailure,
       },
     })
     expect(jobs.getContentJobResponse(first.call_id)).toMatchObject({
       status: 'failed',
       error: 'model backend failed',
     })
+    expect(observeProcessFailure).toHaveBeenCalledWith(expect.objectContaining({
+      code: 1,
+      error: expect.objectContaining({ message: 'model backend failed' }),
+    }))
 
     await restartModules()
     expect(jobs.getContentJobResponse(first.call_id)).toMatchObject({
@@ -795,7 +802,9 @@ describe('durable author-content finalization', () => {
 
   it('returns 413 before /content spawn and exposes only durable status records', async () => {
     const cache = await import('../server/cache-plugin')
-    const middleware = cache.createPoiseMiddleware()
+    const middleware = cache.createPoiseMiddleware({
+      claudeAuth: createAuthenticatedClaudeAuth(),
+    })
     const server = createServer((req, res) => {
       void middleware(req, res, () => {
         res.statusCode = 404

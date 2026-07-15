@@ -5,6 +5,7 @@ import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { HttpError, readBuffer, setApiHeaders } from './http'
 import { assertSecureDotenv, loadSecureDotenv, validateConfabUrl } from './runtime-config'
+import type { ClaudeAuthRuntime } from './cache-plugin'
 
 // Security validation must run before dotenv reads the file and before modules
 // that derive database/runtime paths from process.env are evaluated.
@@ -42,6 +43,8 @@ export interface ProductionServerOptions {
   confabUrl?: string
   confabApiKey?: string
   reviewAgentUsername?: string
+  /** Auth runtime override for isolated integration tests. */
+  claudeAuth?: ClaudeAuthRuntime
 }
 
 function isLoopbackHost(host: string): boolean {
@@ -344,6 +347,7 @@ export function createProductionServer(options: ProductionServerOptions = {}): S
   runtimeStopPromise = null
   const api = createPoiseMiddleware({
     reviewAgentUsername: options.reviewAgentUsername ?? process.env.REVIEW_AGENT_USERNAME ?? '',
+    claudeAuth: options.claudeAuth,
   })
 
   const server = createServer((req, res) => {

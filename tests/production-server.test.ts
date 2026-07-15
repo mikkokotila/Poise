@@ -3,12 +3,14 @@ import { createServer as createHttpServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { createAuthenticatedClaudeAuth } from './claude-auth-fixture'
 
 let root = ''
 let staticDir = ''
 let server: Server
 let baseUrl = ''
 let production: typeof import('../server/production')
+const auth = createAuthenticatedClaudeAuth()
 
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), 'poise-production-test-'))
@@ -25,7 +27,7 @@ beforeAll(async () => {
   process.env.AGENT_INTERFACE_ROOT = join(root, 'agent')
   vi.resetModules()
   production = await import('../server/production')
-  server = production.createProductionServer({ staticDir })
+  server = production.createProductionServer({ staticDir, claudeAuth: auth })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
   if (!address || typeof address === 'string') throw new Error('test server did not bind')
@@ -97,8 +99,72 @@ describe('production server', () => {
   it('serves health and rejects unknown APIs', async () => {
     const health = await fetch(`${baseUrl}/api/health`)
     expect(health.status).toBe(200)
-    await expect(health.json()).resolves.toEqual({ status: 'ok' })
+    await expect(health.json()).resolves.toMatchObject({
+      status: 'ok',
+      scheduler: {
+        status: 'ok',
+        running: true,
+        startedAt: expect.any(String),
+        busy: [],
+        failures: [],
+      },
+    })
     expect((await fetch(`${baseUrl}/api/unknown`)).status).toBe(404)
+  })
+
+  it('returns 503 while an enabled behavior is backing off after failure', async () => {
+    const { setMeta } = await import('../server/db')
+    const now = Date.now()
+    setMeta('behavior_resolve_unblocking_enabled', '1')
+    setMeta('behavior_resolve_unblocking_failure', JSON.stringify({
+      kind: 'operation',
+      consecutiveFailures: 3,
+      lastFailureAtMs: now,
+      nextRetryAtMs: now + 60_000,
+    }))
+    try {
+      const health = await fetch(`${baseUrl}/api/health`)
+      expect(health.status).toBe(503)
+      await expect(health.json()).resolves.toMatchObject({
+        status: 'degraded',
+        scheduler: {
+          failures: [{
+            behavior: 'resolve-unblocking',
+            kind: 'operation',
+            consecutiveFailures: 3,
+          }],
+        },
+      })
+    } finally {
+      setMeta('behavior_resolve_unblocking_enabled', '0')
+      setMeta('behavior_resolve_unblocking_failure', '')
+    }
+  })
+
+  it('exposes sanitized auth health and starts one subscription login', async () => {
+    auth.setStatus('reauth_required')
+    const status = await fetch(`${baseUrl}/api/claude-auth`)
+    expect(status.status).toBe(200)
+    await expect(status.json()).resolves.toEqual({
+      status: 'reauth_required',
+      reason: 'Claude subscription sign-in is required.',
+      checkedAt: '2026-07-15T09:00:00.000Z',
+      verifiedAt: '2026-07-15T09:00:00.000Z',
+      authMethod: 'claude.ai',
+      subscriptionType: 'max',
+      loginInProgress: false,
+    })
+
+    const first = await fetch(`${baseUrl}/api/claude-auth/login`, { method: 'POST' })
+    const second = await fetch(`${baseUrl}/api/claude-auth/login`, { method: 'POST' })
+    expect(first.status).toBe(202)
+    expect(second.status).toBe(202)
+    expect(auth.logins).toBe(1)
+    await expect(second.json()).resolves.toMatchObject({
+      status: 'signing_in',
+      loginInProgress: true,
+    })
+    auth.setStatus('authenticated')
   })
 
   it('rejects cross-origin mutation attempts', async () => {
