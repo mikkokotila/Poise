@@ -16,17 +16,21 @@
 //
 // Reference: see Vaquum GitHub Datastore Consumer Contract.
 
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
 import { mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { getMeta } from './db'
+import { MAX_PROCESS_ARG_BYTES, runFile } from './process'
 
-const execFileP = promisify(execFile)
 const CLI = 'github-datastore'
 const GH_INTERFACE = 'github-interface'
 const GH = 'gh'
+const ISSUE_TITLE_PREFIX = 'title='
+const ISSUE_BODY_PREFIX = 'body='
+
+function fitsProcessArgument(prefix: string, value: string): boolean {
+  return Buffer.byteLength(prefix + value, 'utf8') <= MAX_PROCESS_ARG_BYTES
+}
 
 // The GitHub identity the review-agent acts as — threaded through from
 // cachePlugin's opts (Vite's loadEnv populates the plugin options object
@@ -112,7 +116,10 @@ interface GhRecord {
 }
 
 async function runCli(args: string[]): Promise<DatastoreRecord[]> {
-  const { stdout } = await execFileP(CLI, args, { maxBuffer: 32 * 1024 * 1024 })
+  const { stdout } = await runFile(CLI, args, {
+    timeoutMs: 30_000,
+    maxOutputBytes: 32 * 1024 * 1024,
+  })
   const trimmed = stdout.trim()
   if (!trimmed) return []
   return JSON.parse(trimmed)
@@ -169,8 +176,9 @@ export async function listOrgRepos(): Promise<string[]> {
     return []
   }
 
-  const { stdout } = await execFileP(GH_INTERFACE, ['--view-repos', org], {
-    maxBuffer: 32 * 1024 * 1024,
+  const { stdout } = await runFile(GH_INTERFACE, ['--view-repos', org], {
+    timeoutMs: 30_000,
+    maxOutputBytes: 32 * 1024 * 1024,
   })
   const data = JSON.parse(stdout)
   const fullNames: string[] = (data.repos || [])
@@ -187,8 +195,9 @@ export async function listOrgRepos(): Promise<string[]> {
 // since the underlying claude run needs the repo's files to read.
 export async function localCheckoutPath(owner: string, repo: string): Promise<string> {
   if (!owner || !repo) throw new Error('owner and repo required')
-  const { stdout } = await execFileP(GH_INTERFACE, ['--local-checkout-path', owner, repo], {
-    maxBuffer: 1 * 1024 * 1024,
+  const { stdout } = await runFile(GH_INTERFACE, ['--local-checkout-path', owner, repo], {
+    timeoutMs: 30_000,
+    maxOutputBytes: 1 * 1024 * 1024,
   })
   const result = JSON.parse(stdout)
   if (!result.path) throw new Error('github-interface --local-checkout-path returned no path')
@@ -204,9 +213,10 @@ export async function getHeadSha(repo: string, number: number): Promise<string> 
   const [owner, name] = repo.split('/', 2)
   const cwd = join(GH_INTERFACE_CWD_ROOT, owner, name)
   await mkdir(cwd, { recursive: true })
-  const { stdout } = await execFileP(GH_INTERFACE, ['--head-sha', `#${number}`], {
+  const { stdout } = await runFile(GH_INTERFACE, ['--head-sha', `#${number}`], {
     cwd,
-    maxBuffer: 1 * 1024 * 1024,
+    timeoutMs: 30_000,
+    maxOutputBytes: 1 * 1024 * 1024,
   })
   const result = JSON.parse(stdout)
   if (!result.head_sha) throw new Error('github-interface --head-sha returned no head_sha')
@@ -229,9 +239,10 @@ async function checkMergeable(owner: string, repo: string, number: number): Prom
   const cwd = join(GH_INTERFACE_CWD_ROOT, owner, repo)
   try {
     await mkdir(cwd, { recursive: true })
-    const { stdout } = await execFileP(GH_INTERFACE, ['--mergeable', `#${number}`], {
+    const { stdout } = await runFile(GH_INTERFACE, ['--mergeable', `#${number}`], {
       cwd,
-      maxBuffer: 1 * 1024 * 1024,
+      timeoutMs: 30_000,
+      maxOutputBytes: 1 * 1024 * 1024,
     })
     const result = JSON.parse(stdout)
     const green = !!result.mergeable
@@ -408,14 +419,32 @@ export async function handleGhBody(body: any): Promise<{ status: number, body: u
     const issueBody = String(body.body || '').trim()
     if (!repoFull.includes('/')) return { status: 400, body: { error: 'repository_full_name required (org/repo)' } }
     if (!title)                  return { status: 400, body: { error: 'title is required' } }
+    if (!fitsProcessArgument(ISSUE_TITLE_PREFIX, title)) {
+      return { status: 413, body: { error: `title exceeds ${MAX_PROCESS_ARG_BYTES - ISSUE_TITLE_PREFIX.length} UTF-8 bytes` } }
+    }
+    if (issueBody && !fitsProcessArgument(ISSUE_BODY_PREFIX, issueBody)) {
+      return { status: 413, body: { error: `body exceeds ${MAX_PROCESS_ARG_BYTES - ISSUE_BODY_PREFIX.length} UTF-8 bytes` } }
+    }
     const [owner, repo] = repoFull.split('/', 2)
 
     // Resolve `me`'s gh credential. With no `me` configured, fall back to
     // gh's active account.
     let token = ''
     try {
-      const tokenArgs = ['auth', 'token', ...(me ? ['--user', me] : [])]
-      token = (await execFileP(GH, tokenArgs, { maxBuffer: 1 * 1024 * 1024 })).stdout.trim()
+      const tokenArgs = ['auth', 'token', '--hostname', 'github.com', ...(me ? ['--user', me] : [])]
+      token = (await runFile(GH, tokenArgs, {
+        // Resolve the stored github.com credential selected above. Inherited
+        // token variables and GH_HOST must not redirect identity selection.
+        env: {
+          GH_HOST: undefined,
+          GH_TOKEN: undefined,
+          GITHUB_TOKEN: undefined,
+          GH_ENTERPRISE_TOKEN: undefined,
+          GITHUB_ENTERPRISE_TOKEN: undefined,
+        },
+        timeoutMs: 15_000,
+        maxOutputBytes: 1 * 1024 * 1024,
+      })).stdout.trim()
       if (!token) throw new Error('empty token')
     } catch (err: any) {
       const msg = err?.stderr?.toString?.() || err?.message || String(err)
@@ -429,9 +458,16 @@ export async function handleGhBody(body: any): Promise<{ status: number, body: u
       // issue is created with no body (GitHub allows that).
       const apiArgs = ['api', `repos/${owner}/${repo}/issues`, '-f', `title=${title}`]
       if (issueBody) apiArgs.push('-f', `body=${issueBody}`)
-      const { stdout } = await execFileP(GH, apiArgs, {
-        env: { ...process.env, GH_TOKEN: token, GH_HOST: 'github.com' },
-        maxBuffer: 4 * 1024 * 1024,
+      const { stdout } = await runFile(GH, apiArgs, {
+        env: {
+          GH_HOST: 'github.com',
+          GH_TOKEN: token,
+          GITHUB_TOKEN: undefined,
+          GH_ENTERPRISE_TOKEN: undefined,
+          GITHUB_ENTERPRISE_TOKEN: undefined,
+        },
+        timeoutMs: 60_000,
+        maxOutputBytes: 4 * 1024 * 1024,
       })
       // gh api returns the full GitHub issue payload at top level. Normalize
       // to a GhRecord so the frontend can splice the new issue straight into

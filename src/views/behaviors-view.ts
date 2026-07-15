@@ -333,14 +333,41 @@ function attachHandlers() {
     if (target.matches('input[type="checkbox"][data-behavior]')) {
       const cb = target as HTMLInputElement
       const key = cb.dataset.behavior as BehaviorKey
-      setEnabled(key, cb.checked)
+      const requested = cb.checked
+      cb.disabled = true
+      void setEnabled(key, requested).catch((err: unknown) => {
+        alert(`Could not update behavior: ${(err as Error).message}`)
+      }).finally(() => {
+        // On failure setEnabled restores its local mirror. On success the
+        // change event may have rebuilt this row, so repaint whichever input
+        // is currently attached instead of trusting the stale element.
+        const current = viewEl.querySelector<HTMLInputElement>(
+          `input[type="checkbox"][data-behavior="${key}"]`,
+        )
+        if (current) {
+          current.checked = isEnabled(key)
+          current.disabled = false
+        }
+      })
       return
     }
     // Setting dropdown
     if (target.matches('select.behavior-setting[data-behavior]')) {
       const sel = target as HTMLSelectElement
       const key = sel.dataset.behavior as BehaviorKey
-      setSetting(key, sel.value as BehaviorSetting)
+      const requested = sel.value as BehaviorSetting
+      sel.disabled = true
+      void setSetting(key, requested).catch((err: unknown) => {
+        alert(`Could not update behavior setting: ${(err as Error).message}`)
+      }).finally(() => {
+        const current = viewEl.querySelector<HTMLSelectElement>(
+          `select.behavior-setting[data-behavior="${key}"]`,
+        )
+        if (current) {
+          current.value = getSetting(key)
+          current.disabled = false
+        }
+      })
       return
     }
   })
@@ -371,11 +398,9 @@ function attachHandlers() {
 }
 
 // In-place cell refresh — pulls fresh state from /api/behaviors and
-// updates only the time-sensitive cells (last-triggered) without
-// wiping the table. Toggle / setting / owner cells are user-driven
-// (poise:behaviors-changed handles those) so they don't need to
-// repaint on every tick. Same calm rhythm as Current's FLIP — no
-// flicker, no rebuild.
+// updates cells in place without wiping the table. The server remains
+// authoritative for controls: another tab or a rejected request must be
+// reflected on the next tick instead of leaving a dangerous false state.
 async function tickRefresh() {
   await refreshState()
   for (const meta of BEHAVIORS) {
@@ -383,6 +408,10 @@ async function tickRefresh() {
     if (!tr) continue
     const cell = tr.querySelector<HTMLElement>('.behavior-last-cell')
     if (cell) cell.innerHTML = lastTriggeredCell(meta.key)
+    const toggle = tr.querySelector<HTMLInputElement>('input[type="checkbox"][data-behavior]')
+    if (toggle && !toggle.disabled) toggle.checked = isEnabled(meta.key)
+    const setting = tr.querySelector<HTMLSelectElement>('select.behavior-setting[data-behavior]')
+    if (setting && !setting.disabled) setting.value = getSetting(meta.key)
   }
 }
 

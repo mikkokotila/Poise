@@ -1,20 +1,55 @@
 {
   "name": "poise",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.1.0",
+  "description": "A local engineering dashboard for GitHub work, agent runs, automation, snippets, and writing.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mikkokotila/Poise.git"
+  },
+  "packageManager": "npm@10.9.2",
   "type": "module",
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || ^24.0.0"
+  },
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview"
+    "clean": "node scripts/clean-dist.mjs",
+    "build": "npm run clean && npm run typecheck && npm run build:client && npm run build:server",
+    "build:client": "vite build",
+    "build:server": "esbuild server/production.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/server.js",
+    "start": "node dist/server.js",
+    "preview": "npm run build && npm run start",
+    "typecheck": "npm run typecheck:client && npm run typecheck:server && npm run typecheck:tests",
+    "typecheck:client": "tsc -p tsconfig.json --noEmit",
+    "typecheck:server": "tsc -p tsconfig.server.json --noEmit",
+    "typecheck:tests": "tsc -p tsconfig.tests.json --noEmit",
+    "lint": "eslint src server tests scripts vite.config.ts playwright.config.ts vitest.config.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepare:e2e": "node scripts/prepare-e2e.mjs",
+    "test:e2e": "npm run prepare:e2e && playwright test",
+    "test:e2e:update": "npm run prepare:e2e && playwright test --update-snapshots",
+    "doctor": "node scripts/check-external-clis.mjs",
+    "check": "npm run lint && npm test && npm run build",
+    "verify": "npm run check && npm run test:e2e"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
-    "vite": "^6.0.0"
+    "@playwright/test": "^1.61.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.13.3",
+    "esbuild": "^0.28.1",
+    "eslint": "^10.6.0",
+    "globals": "^17.7.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.63.0",
+    "vite": "^8.1.4",
+    "vitest": "^4.1.10"
   },
   "dependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "better-sqlite3": "^12.9.0",
+    "dotenv": "^17.4.2",
     "yaml": "^2.9.0"
   }
 }

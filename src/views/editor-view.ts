@@ -60,6 +60,8 @@ let viewEl: HTMLElement
 let initialized = false
 let docs: DocSummary[] = []
 let currentSlug: string | null = null
+let loadRequestId = 0
+let deletingSlug: string | null = null
 let docEl: HTMLElement | null = null
 let triggerEl: HTMLButtonElement | null = null
 let triggerTitleEl: HTMLElement | null = null
@@ -67,7 +69,6 @@ let menuEl: HTMLElement | null = null
 let metaEl: HTMLElement | null = null
 let copyBtnEl: HTMLButtonElement | null = null
 let saveTimer: ReturnType<typeof setTimeout> | null = null
-let saveInFlight = false
 
 // Annotation state. The list is the source of truth in memory; the
 // overlay layer below the editor renders one or more thin underline
@@ -77,6 +78,9 @@ let saveInFlight = false
 // the panel for it. The panel is a single floating element shared
 // across annotations — only one is visible at a time.
 let annotations: Annotation[] = []
+let annotationsReadySlug: string | null = null
+const documentVersions = new Map<string, string>()
+const annotationsVersions = new Map<string, string>()
 let overlayEl: HTMLElement | null = null
 let commentBtnEl: HTMLButtonElement | null = null
 let issueBtnEl: HTMLButtonElement | null = null
@@ -84,7 +88,6 @@ let snippetBtnEl: HTMLButtonElement | null = null
 let panelEl: HTMLElement | null = null
 let panelForId: string | null = null
 let annotationsSaveTimer: ReturnType<typeof setTimeout> | null = null
-let annotationsSaveInFlight = false
 
 // Issue composer state. When the user clicks the floating Issue
 // trigger after making a selection, we mount a floating .composer
@@ -106,6 +109,132 @@ let allRepos: string[] = []
 const SAVE_DEBOUNCE_MS = 500
 const ANNOTATIONS_SAVE_DEBOUNCE_MS = 400
 const LAST_OPEN_KEY = 'poise-editor-last'
+
+// A debounced save can fire while its previous request is still in
+// flight. Keep the newest immutable snapshot dirty until it has
+// actually persisted, and drain snapshots one at a time. Updates that
+// arrive during a request are picked up by the same drain loop.
+export interface SerializedSaveQueue<T> {
+  enqueue(snapshot: T): void
+  flush(): Promise<boolean>
+  discard(): Promise<void>
+  isDirty(): boolean
+  pending(): T | null
+}
+
+export function createSerializedSaveQueue<T>(
+  persist: (snapshot: T) => Promise<void>,
+  onError?: (error: unknown, snapshot: T) => void,
+): SerializedSaveQueue<T> {
+  let queuedRevision = 0
+  let persistedRevision = 0
+  let latest: T | null = null
+  let draining: Promise<boolean> | null = null
+
+  async function drain(): Promise<boolean> {
+    while (persistedRevision < queuedRevision) {
+      const revision = queuedRevision
+      const snapshot = latest
+      if (snapshot === null) {
+        persistedRevision = revision
+        continue
+      }
+      try {
+        await persist(snapshot)
+      } catch (error) {
+        try { onError?.(error, snapshot) } catch { /* reporting must not break the queue */ }
+        return false
+      }
+      persistedRevision = Math.max(persistedRevision, revision)
+    }
+    return true
+  }
+
+  return {
+    enqueue(snapshot: T): void {
+      latest = snapshot
+      queuedRevision += 1
+    },
+    flush(): Promise<boolean> {
+      if (draining) return draining
+      const run = drain()
+      let tracked: Promise<boolean>
+      tracked = run.finally(() => {
+        if (draining === tracked) draining = null
+      })
+      draining = tracked
+      return tracked
+    },
+    async discard(): Promise<void> {
+      persistedRevision = queuedRevision
+      latest = null
+      if (draining) await draining
+    },
+    isDirty(): boolean {
+      return persistedRevision < queuedRevision
+    },
+    pending(): T | null {
+      return persistedRevision < queuedRevision ? latest : null
+    },
+  }
+}
+
+interface DocumentSaveSnapshot {
+  slug: string
+  content: string
+  clientId: string
+  revision: number
+}
+
+interface AnnotationsSaveSnapshot {
+  slug: string
+  annotationsJson: string
+  clientId: string
+  revision: number
+}
+
+const EDITOR_CLIENT_ID = typeof globalThis.crypto?.randomUUID === 'function'
+  ? globalThis.crypto.randomUUID()
+  : `client-${Date.now()}-${Math.random().toString(36).slice(2)}`
+let documentSaveRevision = 0
+let annotationsSaveRevision = 0
+
+const documentSaveQueue = createSerializedSaveQueue(
+  persistDocumentSnapshot,
+  (error, snapshot) => {
+    console.error('[editor] save failed:', error)
+    if (currentSlug === snapshot.slug) {
+      setMeta((error as Error)?.message?.includes('changed since') ? 'Conflict — reload' : 'Save failed')
+    }
+  },
+)
+
+const annotationsSaveQueue = createSerializedSaveQueue(
+  persistAnnotationsSnapshot,
+  (error) => {
+    console.error('[editor] save annotations failed:', error)
+    setMeta((error as Error)?.message?.includes('changed since') ? 'Conflict — reload' : 'Annotation save failed')
+  },
+)
+
+function isEditorVersion(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
+}
+
+function requiredVersion(versions: Map<string, string>, slug: string, label: string): string {
+  const version = versions.get(slug)
+  if (!isEditorVersion(version)) throw new Error(`${label} version is unavailable; reload before saving`)
+  return version
+}
+
+async function throwSaveResponseError(res: Response): Promise<never> {
+  let message = `HTTP ${res.status}`
+  try {
+    const body = await res.json() as { error?: unknown }
+    if (typeof body.error === 'string' && body.error) message = body.error
+  } catch { /* retain the status fallback */ }
+  throw new Error(message)
+}
 
 function escapeHtml(s: string): string {
   return String(s).replace(/[&<>"']/g, (c) => (
@@ -1294,14 +1423,25 @@ function placeCaretAtEnd() {
 
 async function loadDoc(slug: string) {
   if (!docEl) return
-  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; await flushSave() }
+  const requestId = ++loadRequestId
+  if (!(await flushEditorSaves()) || requestId !== loadRequestId) return
   closePanel()
   try {
     const res = await fetch(`/api/editor/doc/${encodeURIComponent(slug)}`)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
-    currentSlug = String(data.slug || slug)
-    loadIntoEditor(String(data.content || ''))
+    if (requestId !== loadRequestId) return
+    const nextSlug = String(data.slug || slug)
+    if (typeof data.content !== 'string' || !isEditorVersion(data.version)) {
+      throw new Error('malformed editor document response')
+    }
+    // The current document remains editable while the target request is
+    // in flight. Drain once more so keystrokes made during that request
+    // cannot be stranded when currentSlug changes below.
+    if (!(await flushEditorSaves()) || requestId !== loadRequestId) return
+    currentSlug = nextSlug
+    documentVersions.set(currentSlug, data.version)
+    loadIntoEditor(data.content)
     try { localStorage.setItem(LAST_OPEN_KEY, currentSlug) } catch { /* ignore */ }
     setTriggerTitle()
     setMetaForCurrent()
@@ -1310,6 +1450,7 @@ async function loadDoc(slug: string) {
     // Annotations live alongside the doc — load and render in parallel
     // with the markdown so the underlines appear when the doc does.
     await fetchAnnotations(currentSlug)
+    if (requestId !== loadRequestId) return
     renderAnnotationOverlay()
   } catch (err) {
     console.error('[editor] loadDoc failed:', err)
@@ -1317,7 +1458,7 @@ async function loadDoc(slug: string) {
 }
 
 async function newDoc() {
-  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; await flushSave() }
+  if (!(await flushEditorSaves())) return
   try {
     const res = await fetch('/api/editor/docs', { method: 'POST' })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -1373,20 +1514,48 @@ async function deleteCurrent() {
   if (!d) return
   const ok = window.confirm(`Delete "${d.title}"? This cannot be undone.`)
   if (!ok) return
-  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
+  deletingSlug = d.slug
+  await discardEditorSaves()
+  loadRequestId += 1
   try {
     const res = await fetch(`/api/editor/doc/${encodeURIComponent(d.slug)}`, { method: 'DELETE' })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
   } catch (err) {
     console.error('[editor] delete failed:', err)
+    deletingSlug = null
+    if (currentSlug === d.slug) {
+      scheduleSave()
+      scheduleAnnotationsSave()
+    }
     return
+  }
+  // The deleted document must stop being an editable current target before
+  // the replacement's async fetches begin. Otherwise keystrokes during that
+  // gap can enqueue the old slug and recreate the file we just removed.
+  documentVersions.delete(d.slug)
+  annotationsVersions.delete(d.slug)
+  currentSlug = null
+  annotations = []
+  annotationsReadySlug = null
+  if (docEl) {
+    docEl.contentEditable = 'false'
+    loadIntoEditor('')
   }
   docs = docs.filter((x) => x.slug !== d.slug)
   try { localStorage.removeItem(LAST_OPEN_KEY) } catch { /* ignore */ }
-  if (docs.length) {
-    await loadDoc(docs[0].slug)
-  } else {
-    await newDoc()
+  try {
+    if (docs.length) {
+      await loadDoc(docs[0].slug)
+    } else {
+      await newDoc()
+    }
+  } finally {
+    deletingSlug = null
+    if (docEl) {
+      docEl.contentEditable = 'true'
+      docEl.focus()
+      placeCaretAtEnd()
+    }
   }
 }
 
@@ -1649,46 +1818,68 @@ function applyEditToDoc(edit: EditCardData): 'applied' | 'conflict' {
   return 'applied'
 }
 
-async function flushSave() {
-  if (!docEl || !currentSlug || saveInFlight) return
-  saveInFlight = true
-  setMeta('Saving…')
-  const slug = currentSlug
-  const content = serializeDoc()
-  try {
-    const res = await fetch(`/api/editor/doc/${encodeURIComponent(slug)}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = await res.json()
-    const idx = docs.findIndex((d) => d.slug === slug)
-    if (idx >= 0) {
-      docs[idx] = {
-        slug,
-        title: String(data.title || docs[idx].title),
-        updated_at: String(data.updated_at || new Date().toISOString()),
-        size: Number(data.size || content.length),
-      }
-      const [moved] = docs.splice(idx, 1)
-      docs.unshift(moved)
+async function persistDocumentSnapshot(snapshot: DocumentSaveSnapshot): Promise<void> {
+  if (currentSlug === snapshot.slug) setMeta('Saving…')
+  const baseVersion = requiredVersion(documentVersions, snapshot.slug, 'document')
+  const res = await fetch(`/api/editor/doc/${encodeURIComponent(snapshot.slug)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      content: snapshot.content,
+      client_id: snapshot.clientId,
+      revision: snapshot.revision,
+      base_version: baseVersion,
+    }),
+  })
+  if (!res.ok) await throwSaveResponseError(res)
+  const data = await res.json()
+  if (!isEditorVersion(data.version)) throw new Error('save response omitted document version')
+  // A stale acknowledgement may describe a version written later by another
+  // tab. Advancing our base from that response would let unchanged local DOM
+  // overwrite the other tab on its next edit. Same-client continuation is
+  // tracked server-side, so stale responses never need to advance this base.
+  if (data.stale !== true) documentVersions.set(snapshot.slug, data.version)
+  const idx = docs.findIndex((d) => d.slug === snapshot.slug)
+  if (idx >= 0 && data.stale !== true) {
+    docs[idx] = {
+      slug: snapshot.slug,
+      title: String(data.title || docs[idx].title),
+      updated_at: String(data.updated_at || new Date().toISOString()),
+      size: Number(data.size || snapshot.content.length),
     }
-    setTriggerTitle()
-    setMetaForCurrent()
-  } catch (err) {
-    console.error('[editor] save failed:', err)
-    setMeta('Save failed')
-  } finally {
-    saveInFlight = false
+    const [moved] = docs.splice(idx, 1)
+    docs.unshift(moved)
   }
+  setTriggerTitle()
 }
 
-function scheduleSave() {
-  if (!docEl || !currentSlug) return
+function clearSaveTimer(): void {
+  if (!saveTimer) return
+  clearTimeout(saveTimer)
+  saveTimer = null
+}
+
+async function flushSave(): Promise<boolean> {
+  clearSaveTimer()
+  const ok = await documentSaveQueue.flush()
+  if (ok && !documentSaveQueue.isDirty()) setMetaForCurrent()
+  return ok
+}
+
+function scheduleSave(): void {
+  if (!docEl || !currentSlug || currentSlug === deletingSlug) return
+  documentSaveQueue.enqueue({
+    slug: currentSlug,
+    content: serializeDoc(),
+    clientId: EDITOR_CLIENT_ID,
+    revision: ++documentSaveRevision,
+  })
   setMeta('Editing…')
-  if (saveTimer) clearTimeout(saveTimer)
-  saveTimer = setTimeout(() => { void flushSave() }, SAVE_DEBOUNCE_MS)
+  clearSaveTimer()
+  saveTimer = setTimeout(() => {
+    saveTimer = null
+    void flushSave()
+  }, SAVE_DEBOUNCE_MS)
 }
 
 // ── Annotations ──────────────────────────────────────────────────────
@@ -1704,41 +1895,93 @@ function scheduleSave() {
 // comment text isn't silently lost).
 
 async function fetchAnnotations(slug: string): Promise<void> {
-  annotations = []
+  if (currentSlug === slug) {
+    annotations = []
+    annotationsReadySlug = null
+  }
   try {
     const res = await fetch(`/api/editor/doc/${encodeURIComponent(slug)}/annotations`)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
-    annotations = Array.isArray(data.annotations) ? (data.annotations as Annotation[]) : []
+    if (currentSlug !== slug) return
+    if (!Array.isArray(data.annotations) || !isEditorVersion(data.version)) {
+      throw new Error('malformed annotations response')
+    }
+    annotations = data.annotations as Annotation[]
+    annotationsVersions.set(slug, data.version)
+    annotationsReadySlug = slug
   } catch (err) {
     console.error('[editor] fetchAnnotations failed:', err)
-    annotations = []
+    if (currentSlug === slug) setMeta('Annotations unavailable')
   }
 }
 
-async function flushAnnotationsSave(): Promise<void> {
-  if (!currentSlug || annotationsSaveInFlight) return
-  annotationsSaveInFlight = true
-  const slug = currentSlug
-  const body = JSON.stringify({ annotations })
-  try {
-    const res = await fetch(`/api/editor/doc/${encodeURIComponent(slug)}/annotations`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  } catch (err) {
-    console.error('[editor] save annotations failed:', err)
-  } finally {
-    annotationsSaveInFlight = false
-  }
+async function persistAnnotationsSnapshot(snapshot: AnnotationsSaveSnapshot): Promise<void> {
+  const baseVersion = requiredVersion(annotationsVersions, snapshot.slug, 'annotations')
+  const res = await fetch(`/api/editor/doc/${encodeURIComponent(snapshot.slug)}/annotations`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      annotations: JSON.parse(snapshot.annotationsJson),
+      client_id: snapshot.clientId,
+      revision: snapshot.revision,
+      base_version: baseVersion,
+    }),
+  })
+  if (!res.ok) await throwSaveResponseError(res)
+  const data = await res.json()
+  if (!isEditorVersion(data.version)) throw new Error('save response omitted annotations version')
+  if (data.stale !== true) annotationsVersions.set(snapshot.slug, data.version)
+}
+
+function clearAnnotationsSaveTimer(): void {
+  if (!annotationsSaveTimer) return
+  clearTimeout(annotationsSaveTimer)
+  annotationsSaveTimer = null
+}
+
+async function flushAnnotationsSave(): Promise<boolean> {
+  clearAnnotationsSaveTimer()
+  return annotationsSaveQueue.flush()
 }
 
 function scheduleAnnotationsSave(): void {
-  if (!currentSlug) return
-  if (annotationsSaveTimer) clearTimeout(annotationsSaveTimer)
-  annotationsSaveTimer = setTimeout(() => { void flushAnnotationsSave() }, ANNOTATIONS_SAVE_DEBOUNCE_MS)
+  if (!currentSlug || currentSlug === deletingSlug) return
+  // Never turn a transient/corrupt read into a destructive replacement with
+  // an empty in-memory list. Reloading the document retries the side-car.
+  if (annotationsReadySlug !== currentSlug) {
+    console.error('[editor] annotations are read-only until their side-car loads')
+    setMeta('Annotations unavailable')
+    return
+  }
+  annotationsSaveQueue.enqueue({
+    slug: currentSlug,
+    annotationsJson: JSON.stringify(annotations),
+    clientId: EDITOR_CLIENT_ID,
+    revision: ++annotationsSaveRevision,
+  })
+  clearAnnotationsSaveTimer()
+  annotationsSaveTimer = setTimeout(() => {
+    annotationsSaveTimer = null
+    void flushAnnotationsSave()
+  }, ANNOTATIONS_SAVE_DEBOUNCE_MS)
+}
+
+async function flushEditorSaves(): Promise<boolean> {
+  const [docSaved, annotationsSaved] = await Promise.all([
+    flushSave(),
+    flushAnnotationsSave(),
+  ])
+  return docSaved && annotationsSaved
+}
+
+async function discardEditorSaves(): Promise<void> {
+  clearSaveTimer()
+  clearAnnotationsSaveTimer()
+  await Promise.all([
+    documentSaveQueue.discard(),
+    annotationsSaveQueue.discard(),
+  ])
 }
 
 // Build a DOM Range from an annotation's stored line + char-offset
@@ -1966,7 +2209,10 @@ function updateCommentButtonForSelection(): void {
 // list, persist, and immediately open the panel for it so the user
 // can type a comment.
 function createAnnotationFromSelection(): void {
-  if (!currentSlug) return
+  if (!currentSlug || annotationsReadySlug !== currentSlug) {
+    setMeta('Annotations unavailable')
+    return
+  }
   const got = selectionAsAnnotationRange()
   if (!got) return
   const id = 'ann-' + Math.random().toString(36).slice(2, 10)
@@ -2317,8 +2563,8 @@ let panelPollInflight = false
 const PANEL_FAST_POLL_MS = 1500    // matches chat-pane's running cadence
 const PANEL_SLOW_POLL_MS = 8000    // idle cadence
 
-async function fetchPanelReply(hash: string): Promise<string> {
-  const res = await fetch(`/api/agent-response/${encodeURIComponent(hash)}`)
+async function fetchPanelReply(callId: string): Promise<string> {
+  const res = await fetch(`/api/agent-response/${encodeURIComponent(callId)}`)
   if (!res.ok) throw new Error(`agent-response ${res.status}`)
   const data = await res.json()
   return String(data.body || '')
@@ -2336,7 +2582,7 @@ async function refreshPanelChat(sessionId: string): Promise<void> {
     // haven't cached yet. Tiny payloads, fire in parallel.
     const toFetch = panelMessages.filter((m) => m.status === 'completed' && m.response && !panelReplies.has(m.id))
     await Promise.all(toFetch.map(async (m) => {
-      try { panelReplies.set(m.id, await fetchPanelReply(m.response)) } catch { /* leave missing */ }
+      try { panelReplies.set(m.id, await fetchPanelReply(m.id)) } catch { /* leave missing */ }
     }))
     renderPanelChat()
   } finally {
@@ -2839,8 +3085,8 @@ function attachHandlers() {
   docEl!.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 's') {
       e.preventDefault()
-      if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
-      void flushSave()
+      clearSaveTimer()
+      void flushEditorSaves()
     }
     if ((e.metaKey || e.ctrlKey) && (e.key === 'n' || e.key === 'N')) {
       e.preventDefault()
@@ -2987,14 +3233,70 @@ function attachHandlers() {
     // whether or not the editor has focus.
   })
 
-  window.addEventListener('pagehide', () => {
-    if (!docEl || !currentSlug) return
-    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
+  window.addEventListener('pagehide', onEditorPageHide)
+}
+
+function onEditorPageHide(event: PageTransitionEvent): void {
+  // A bfcache entry can later be evicted without a second pagehide event, so
+  // persist on every transition. Per-client revisions make a beacon safe even
+  // when an older fetch is still in flight.
+  void event
+  sendPendingEditorBeacons()
+}
+
+// sendBeacon always issues POST. The server exposes POST aliases for
+// these two PUT routes and accepts the same JSON bodies. Only dirty,
+// immutable queue snapshots are sent; a false return means the browser
+// declined to queue the payload (typically because its keepalive budget
+// is exhausted).
+function sendPendingEditorBeacons(): void {
+  clearSaveTimer()
+  clearAnnotationsSaveTimer()
+  if (typeof navigator.sendBeacon !== 'function') return
+
+  const doc = documentSaveQueue.pending()
+  if (doc) {
     try {
-      const blob = new Blob([JSON.stringify({ content: serializeDoc() })], { type: 'application/json' })
-      navigator.sendBeacon(`/api/editor/doc/${encodeURIComponent(currentSlug)}`, blob)
-    } catch { /* best-effort */ }
-  })
+      const baseVersion = requiredVersion(documentVersions, doc.slug, 'document')
+      const body = new Blob(
+        [JSON.stringify({
+          content: doc.content,
+          client_id: doc.clientId,
+          revision: doc.revision,
+          base_version: baseVersion,
+        })],
+        { type: 'application/json' },
+      )
+      if (!navigator.sendBeacon(
+        `/api/editor/doc/${encodeURIComponent(doc.slug)}`,
+        body,
+      )) {
+        console.warn('[editor] document unload save was not queued')
+      }
+    } catch { /* best-effort during unload */ }
+  }
+
+  const annotationsSnapshot = annotationsSaveQueue.pending()
+  if (annotationsSnapshot) {
+    try {
+      const baseVersion = requiredVersion(annotationsVersions, annotationsSnapshot.slug, 'annotations')
+      const body = new Blob(
+        [JSON.stringify({
+          annotations: JSON.parse(annotationsSnapshot.annotationsJson),
+          client_id: annotationsSnapshot.clientId,
+          revision: annotationsSnapshot.revision,
+          base_version: baseVersion,
+        })],
+        { type: 'application/json' },
+      )
+      if (!navigator.sendBeacon(
+        `/api/editor/doc/${encodeURIComponent(annotationsSnapshot.slug)}/annotations`,
+        body,
+      )) {
+        console.warn('[editor] annotations unload save was not queued')
+      }
+    } catch { /* best-effort during unload */ }
+  }
 }
 
 // External slug-load: any code anywhere in the app can fire
@@ -3004,19 +3306,21 @@ function attachHandlers() {
 // switches the view + re-dispatches the load event for us. We need
 // to refresh the doc list first (the new article won't be in our
 // in-memory `docs` array yet).
-window.addEventListener('poise:editor-load-doc', (ev) => {
-  const slug = (ev as CustomEvent<{ slug: string }>).detail?.slug
-  if (!slug) return
-  void (async () => {
-    if (!initialized) {
-      // initEditorView hasn't run yet — main.ts switchTo('editor')
-      // triggers it. Wait one tick.
-      await new Promise((r) => setTimeout(r, 100))
-    }
-    await fetchDocs()
-    await loadDoc(slug)
-  })()
-})
+if (typeof window !== 'undefined') {
+  window.addEventListener('poise:editor-load-doc', (ev) => {
+    const slug = (ev as CustomEvent<{ slug: string }>).detail?.slug
+    if (!slug) return
+    void (async () => {
+      if (!initialized) {
+        // initEditorView hasn't run yet — main.ts switchTo('editor')
+        // triggers it. Wait one tick.
+        await new Promise((r) => setTimeout(r, 100))
+      }
+      await fetchDocs()
+      await loadDoc(slug)
+    })()
+  })
+}
 
 export async function initEditorView() {
   viewEl = document.getElementById('view-editor')!
@@ -3044,11 +3348,9 @@ export async function initEditorView() {
 }
 
 export function stopEditorRefresh() {
-  if (saveTimer) {
-    clearTimeout(saveTimer)
-    saveTimer = null
-    void flushSave()
-  }
+  clearSaveTimer()
+  clearAnnotationsSaveTimer()
+  void flushEditorSaves()
   closeMenu()
   // Strip the writer-mode body class on view leave — otherwise the
   // hidden top nav stays hidden once you come back from another view

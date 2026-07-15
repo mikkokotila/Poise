@@ -1,25 +1,21 @@
 import type { Plugin, Connect } from 'vite'
+import type { ServerResponse } from 'node:http'
 import { getSettings, setSettings } from './settings'
 import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, type Lane } from './current'
 import { handleGhBody, listOrgRepos, setReviewAgentUsername } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, triggerPrReview, replayAgentJob } from './agent'
-import { listChatHistory, sendChat, saveAttachment, startAuthorContent, authorContentStatus, contentSlugForCallId, runDebate } from './chat'
-import { listDocs, readDoc, writeDoc, deleteDoc, newSlug, readAnnotations, writeAnnotations, getOrCreateChatSession } from './editor'
-import { listSnippets, saveSnippets, addSnippet, espansoDetected } from './snippets'
-import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, setScratchpad as setBehaviorScratchpad, getEnabledMap, getSettingMap, getScratchpadMap, isValidSetting, startBehaviorsRuntime, getResolveUnblockingLastFired, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
+import { listChatHistory, sendChat, saveAttachment, runDebate } from './chat'
+import { listDocs, readDoc, writeDoc, deleteDoc, newSlug, readAnnotations, writeAnnotations, getOrCreateChatSession, MAX_DOC_BYTES, MAX_ANNOTATIONS_BYTES, EditorConflictError } from './editor'
+import { readSnippetState, saveSnippets, addSnippet, espansoDetected, SnippetConflictError } from './snippets'
+import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, setScratchpad as setBehaviorScratchpad, getEnabledMap, getSettingMap, getScratchpadMap, isValidSetting, startBehaviorsRuntime, stopBehaviorsRuntime, getResolveUnblockingLastFired, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
+import { ContentLaunchPendingError, getContentJobResponse, launchAndEnqueueContentJob, startContentFinalizer, stopContentFinalizer } from './content-jobs'
+import { ProcessLockError } from './process-lock'
+import { ATTACHMENT_MAX_BYTES, enforceApiRequest, httpStatus, readBuffer, readJson, setApiHeaders } from './http'
 
-function json(res: any, status: number, body: unknown) {
+function json(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status
   res.setHeader('Content-Type', 'application/json')
   res.end(JSON.stringify(body))
-}
-
-async function readBody(req: any): Promise<string> {
-  return new Promise((resolve) => {
-    let data = ''
-    req.on('data', (chunk: Buffer) => { data += chunk.toString() })
-    req.on('end', () => resolve(data))
-  })
 }
 
 export interface CachePluginOptions {
@@ -27,38 +23,38 @@ export interface CachePluginOptions {
    *  Surfaced through /api/behaviors so the Behaviors view can show who
    *  the "Review New Pull Requests" automation will speak as. */
   reviewAgentUsername?: string
+  /** Additional hostnames allowed to access the local API. */
+  allowedHosts?: string[]
 }
 
-export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
-  return {
-    name: 'poise-cache',
-    configureServer(server) {
-      // Server-side behavior runtime — wall-clock-aligned ticker that
-      // runs whether the browser tab is open or not. See
-      // server/behaviors.ts for details. The reviewAgentUsername is
-      // threaded through here (via Vite's loadEnv at config time) so
-      // approve-prs can pass it as `--username` to github-interface;
-      // process.env is unreliable inside Vite plugins.
-      startBehaviorsRuntime({ reviewAgentUsername: opts.reviewAgentUsername })
+export function startPoiseRuntime(opts: CachePluginOptions = {}): void {
+  startBehaviorsRuntime({ reviewAgentUsername: opts.reviewAgentUsername })
+  startContentFinalizer()
+  setReviewAgentUsername(opts.reviewAgentUsername || '')
+}
 
-      // Same identity, threaded into the /api/gh bridge: the involvement
-      // scope in server/gh.ts unions the review-agent's footprint with
-      // the user's so Current shows issues/PRs the agent opened. Like the
-      // behaviors runtime, this must come from the plugin opts — process.env
-      // is empty for this var inside the Vite plugin.
-      setReviewAgentUsername(opts.reviewAgentUsername || '')
+export async function stopPoiseRuntime(): Promise<void> {
+  await Promise.all([stopBehaviorsRuntime(), stopContentFinalizer()])
+}
 
-      // /content finalization marker — set of call_ids we've already
-      // written articles for, so repeated status polls don't re-write
-      // the same file. The slug is derived from the call_id (see
-      // contentSlugForCallId in chat.ts) so no mapping is stored —
-      // this is purely a "have we already done it" guard. Server
-      // restart clears it; the next poll just safely re-writes the
-      // file at the same slug (idempotent overwrite of identical
-      // content).
-      const contentFinalizedCalls = new Set<string>()
-      const mw: Connect.NextHandleFunction = async (req, res, next) => {
+export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.NextHandleFunction {
+      startPoiseRuntime(opts)
+      return async (req, res, next) => {
         const url = req.url || ''
+
+        if (!url.startsWith('/api/')) return next()
+        setApiHeaders(res)
+        try {
+          enforceApiRequest(req, { allowedHosts: opts.allowedHosts })
+        } catch (err) {
+          return json(res, httpStatus(err, 403), { error: (err as Error).message })
+        }
+        if (req.method === 'OPTIONS') {
+          return json(res, 405, { error: 'cross-origin preflight is not supported' })
+        }
+        if (url === '/api/health' && req.method === 'GET') {
+          return json(res, 200, { status: 'ok' })
+        }
 
         // ── Settings ──
         // Org / username / timezone (the few user-facing knobs Poise still
@@ -68,12 +64,11 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
         }
         if (url.startsWith('/api/settings') && req.method === 'POST') {
           try {
-            const body = await readBody(req)
-            const parsed = body ? JSON.parse(body) : {}
-            const next = setSettings(parsed)
-            return json(res, 200, next)
+            const body = await readJson<any>(req)
+            const settings = setSettings(body)
+            return json(res, 200, settings)
           } catch (err: any) {
-            return json(res, 500, { error: err.message || String(err) })
+            return json(res, httpStatus(err, 400), { error: err.message || String(err) })
           }
         }
 
@@ -85,12 +80,11 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
         // user-footprint scoping logic.
         if (url === '/api/gh' && req.method === 'POST') {
           try {
-            const raw = await readBody(req)
-            const body = raw ? JSON.parse(raw) : {}
+            const body = await readJson<any>(req)
             const { status, body: respBody } = await handleGhBody(body)
             return json(res, status, respBody)
           } catch (err: any) {
-            return json(res, 502, { error: 'github-datastore call failed: ' + (err.message || String(err)) })
+            return json(res, httpStatus(err, 502), { error: 'github-datastore call failed: ' + (err.message || String(err)) })
           }
         }
 
@@ -179,21 +173,31 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
             return json(res, 400, { error: 'unknown behavior: ' + key })
           }
           try {
-            const raw = await readBody(req)
-            const body = raw ? JSON.parse(raw) : {}
-            if ('enabled' in body) await setBehaviorEnabled(key, !!body.enabled)
+            const body = await readJson<any>(req)
+            if (!body || typeof body !== 'object' || Array.isArray(body)) {
+              return json(res, 400, { error: 'behavior update must be an object' })
+            }
+            // Validate the complete update before applying any field. A bad
+            // setting must never leave an automation enabled as a partial
+            // side effect, and string values are not booleans.
+            if ('enabled' in body && typeof body.enabled !== 'boolean') {
+              return json(res, 400, { error: 'enabled must be a boolean' })
+            }
             if ('setting' in body) {
               if (!isValidSetting(body.setting)) {
                 return json(res, 400, { error: 'invalid setting: ' + String(body.setting) })
               }
-              setBehaviorSetting(key, body.setting)
             }
             if ('scratchpad' in body) {
               if (typeof body.scratchpad !== 'string') {
                 return json(res, 400, { error: 'scratchpad must be a string' })
               }
-              setBehaviorScratchpad(key, body.scratchpad)
             }
+            // Persist passive configuration first; enabling last guarantees
+            // the first tick observes the submitted setting and memory.
+            if ('setting' in body) setBehaviorSetting(key, body.setting)
+            if ('scratchpad' in body) setBehaviorScratchpad(key, body.scratchpad)
+            if ('enabled' in body) await setBehaviorEnabled(key, body.enabled)
             return json(res, 200, {
               ok: true,
               enabled: getEnabledMap()[key],
@@ -201,7 +205,7 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
               scratchpad: getScratchpadMap()[key],
             })
           } catch (err: any) {
-            return json(res, 400, { error: err.message || String(err) })
+            return json(res, httpStatus(err, 400), { error: err.message || String(err) })
           }
         }
 
@@ -240,8 +244,7 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
         }
         if (url === '/api/chat' && req.method === 'POST') {
           try {
-            const raw = await readBody(req)
-            const body = raw ? JSON.parse(raw) : {}
+            const body = await readJson<any>(req)
             const result = await sendChat(
               String(body.session || ''),
               String(body.message || ''),
@@ -250,7 +253,7 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
             )
             return json(res, 200, result)
           } catch (err: any) {
-            return json(res, 400, { error: err.message || String(err) })
+            return json(res, httpStatus(err, 400), { error: err.message || String(err) })
           }
         }
 
@@ -265,41 +268,34 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
             const qs = new URLSearchParams(url.split('?')[1] || '')
             const session = qs.get('session') || ''
             const filename = qs.get('filename') || ''
-            const chunks: Buffer[] = []
-            await new Promise<void>((resolve, reject) => {
-              req.on('data', (c: Buffer) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)))
-              req.on('end', () => resolve())
-              req.on('error', reject)
-            })
-            const body = Buffer.concat(chunks)
+            const body = await readBuffer(req, ATTACHMENT_MAX_BYTES)
             const result = await saveAttachment(session, filename, body)
             return json(res, 200, result)
           } catch (err: any) {
-            return json(res, 400, { error: err.message || String(err) })
+            return json(res, httpStatus(err, 400), { error: err.message || String(err) })
           }
         }
 
         // ── /api/chat-content — /content slash command bridge ──
-        // POST starts agent-interface --author-content --session-id
-        // <session> and returns the freshly-minted call_id once the
-        // row shows up in --logs. GET /api/chat-content/status?call_id=…
-        // polls for completion; when the call lands, the server
-        // fetches the response body and writes a new editor article
-        // at slug `content-<8charCallId>`. Because the slug derives
-        // from the call_id, NO mapping ledger is needed: the chat
-        // history (filtered to behavior='author_content' for this
-        // session) tells us which call_ids exist, and the slug is a
-        // pure function of each.
+        // POST launches agent-interface and commits a durable pending job
+        // before returning. A leased server-side reconciler owns completion,
+        // so browser polling is observational only and restart-safe.
         if (url === '/api/chat-content' && req.method === 'POST') {
           try {
-            const raw = await readBody(req)
-            const body = raw ? JSON.parse(raw) : {}
+            const body = await readJson<any>(req)
             const topic   = String(body.topic   || '')
             const session = String(body.session || '')
-            const result = await startAuthorContent(topic, session)
-            return json(res, 200, result)
+            const job = await launchAndEnqueueContentJob(topic, session)
+            return json(res, 200, job)
           } catch (err: any) {
-            return json(res, 502, { error: '/content trigger failed: ' + (err.message || String(err)) })
+            const status = err instanceof ProcessLockError
+              ? 503
+              : err instanceof ContentLaunchPendingError
+                ? 409
+                : httpStatus(err, 502)
+            return json(res, status, {
+              error: '/content trigger failed: ' + (err.message || String(err)),
+            })
           }
         }
         if (url?.startsWith('/api/chat-content/status') && req.method === 'GET') {
@@ -307,25 +303,11 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
             const qs = new URLSearchParams(url.split('?')[1] || '')
             const callId = qs.get('call_id') || ''
             if (!callId) return json(res, 400, { error: 'call_id is required' })
-            const slug = contentSlugForCallId(callId)
-            // Already written? Return without re-fetching.
-            if (contentFinalizedCalls.has(callId)) {
-              return json(res, 200, { status: 'completed', slug })
-            }
-            const status = await authorContentStatus(callId)
-            if (status.status === 'completed' && status.response_hash) {
-              try {
-                const { body: contentBody } = await fetchAgentResponse(status.response_hash)
-                const written = await writeDoc(slug, String(contentBody || ''))
-                contentFinalizedCalls.add(callId)
-                return json(res, 200, { status: 'completed', slug: written.slug })
-              } catch (err: any) {
-                return json(res, 500, { error: 'finalize failed: ' + (err.message || String(err)) })
-              }
-            }
-            return json(res, 200, status)
+            const job = getContentJobResponse(callId)
+            if (!job) return json(res, 404, { error: 'author-content job not found' })
+            return json(res, 200, job)
           } catch (err: any) {
-            return json(res, 502, { error: 'status check failed: ' + (err.message || String(err)) })
+            return json(res, 500, { error: 'status check failed: ' + (err.message || String(err)) })
           }
         }
 
@@ -336,12 +318,11 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
         // agent-interface logs the call so it appears in Swarm.
         if (url === '/api/debate' && req.method === 'POST') {
           try {
-            const raw = await readBody(req)
-            const body = raw ? JSON.parse(raw) : {}
+            const body = await readJson<any>(req)
             const result = await runDebate(String(body.topic || ''), Number(body.rounds || 1))
             return json(res, 200, result)
           } catch (err: any) {
-            return json(res, 500, { error: err?.message || String(err) })
+            return json(res, httpStatus(err, 500), { error: err?.message || String(err) })
           }
         }
 
@@ -352,14 +333,13 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
         // run lands in Swarm as a new agent-interface log entry.
         if (url === '/api/pr-review' && req.method === 'POST') {
           try {
-            const raw = await readBody(req)
-            const body = raw ? JSON.parse(raw) : {}
+            const body = await readJson<any>(req)
             const result = await triggerPrReview(String(body.url || ''))
             return json(res, 200, result)
           } catch (err: any) {
             const stderr = err?.stderr?.toString?.() || ''
             const msg = stderr || err?.message || String(err)
-            return json(res, 502, { error: 'pr-review trigger failed: ' + msg })
+            return json(res, httpStatus(err, 502), { error: 'pr-review trigger failed: ' + msg })
           }
         }
 
@@ -370,14 +350,13 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
         // untouched. Used by the Swarm view's Replay column.
         if (url === '/api/agent-replay' && req.method === 'POST') {
           try {
-            const raw = await readBody(req)
-            const body = raw ? JSON.parse(raw) : {}
+            const body = await readJson<any>(req)
             const result = await replayAgentJob(body)
             return json(res, 200, result)
           } catch (err: any) {
             const stderr = err?.stderr?.toString?.() || ''
             const msg = stderr || err?.message || String(err)
-            return json(res, 400, { error: 'agent-replay failed: ' + msg })
+            return json(res, httpStatus(err, 400), { error: 'agent-replay failed: ' + msg })
           }
         }
 
@@ -412,14 +391,35 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
             return json(res, 500, { error: err.message || String(err) })
           }
         }
-        if (editorDocMatch && req.method === 'PUT') {
+        if (editorDocMatch && (req.method === 'PUT' || req.method === 'POST')) {
           try {
-            const raw = await readBody(req)
-            const body = raw ? JSON.parse(raw) : {}
-            const result = await writeDoc(editorDocMatch[1], String(body.content || ''))
+            // JSON string escaping can expand control-heavy Markdown by up to
+            // six bytes per decoded byte. writeDoc still enforces 5 MiB after
+            // parsing; this envelope cap preserves that domain limit.
+            const body = await readJson<any>(req, MAX_DOC_BYTES * 6 + 1024)
+            if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.content !== 'string') {
+              return json(res, 400, { error: 'content must be a string' })
+            }
+            if (body.client_id === undefined && body.revision === undefined && body.base_version === undefined) {
+              return json(res, 428, { error: 'editor write precondition is required; reload the document' })
+            }
+            const writeContext = body.client_id === undefined
+                && body.revision === undefined
+                && body.base_version === undefined
+              ? undefined
+              : {
+                  clientId: body.client_id,
+                  revision: body.revision,
+                  baseVersion: body.base_version,
+                }
+            const result = await writeDoc(editorDocMatch[1], body.content, writeContext)
             return json(res, 200, result)
           } catch (err: any) {
-            return json(res, 400, { error: err.message || String(err) })
+            const conflict = err instanceof EditorConflictError
+            return json(res, conflict ? 409 : httpStatus(err, 400), {
+              error: err.message || String(err),
+              ...(conflict ? { current_version: err.currentVersion } : {}),
+            })
           }
         }
         if (editorDocMatch && req.method === 'DELETE') {
@@ -443,15 +443,33 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
             return json(res, 500, { error: err.message || String(err) })
           }
         }
-        if (editorAnnMatch && req.method === 'PUT') {
+        if (editorAnnMatch && (req.method === 'PUT' || req.method === 'POST')) {
           try {
-            const raw = await readBody(req)
-            const body = raw ? JSON.parse(raw) : {}
-            const annotations = Array.isArray(body.annotations) ? body.annotations : []
-            const result = await writeAnnotations(editorAnnMatch[1], { annotations })
+            const body = await readJson<any>(req, MAX_ANNOTATIONS_BYTES + 1024)
+            if (!body || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.annotations)) {
+              return json(res, 400, { error: 'annotations must be an array' })
+            }
+            if (body.client_id === undefined && body.revision === undefined && body.base_version === undefined) {
+              return json(res, 428, { error: 'editor write precondition is required; reload annotations' })
+            }
+            const annotations = body.annotations
+            const writeContext = body.client_id === undefined
+                && body.revision === undefined
+                && body.base_version === undefined
+              ? undefined
+              : {
+                  clientId: body.client_id,
+                  revision: body.revision,
+                  baseVersion: body.base_version,
+                }
+            const result = await writeAnnotations(editorAnnMatch[1], { annotations }, writeContext)
             return json(res, 200, result)
           } catch (err: any) {
-            return json(res, 400, { error: err.message || String(err) })
+            const conflict = err instanceof EditorConflictError
+            return json(res, conflict ? 409 : httpStatus(err, 400), {
+              error: err.message || String(err),
+              ...(conflict ? { current_version: err.currentVersion } : {}),
+            })
           }
         }
 
@@ -472,15 +490,14 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
           }
         }
 
-        // ── /api/agent-response/:hash — body of one agent call ──
-        // Hash is the 8-char `response` value from --logs;
-        // agent-interface --read-response resolves it back to the full
-        // body. On demand (only when the user clicks View on a row).
-        const agentRespMatch = url.match(/^\/api\/agent-response\/([0-9a-fA-F]+)(?:\?|$)/)
+        // ── /api/agent-response/:id — body of one agent call ──
+        // Only a full 32-hex call id is accepted. The short `response` marker
+        // from --logs is not an identity and can become ambiguous.
+        const agentRespMatch = url.match(/^\/api\/agent-response\/([0-9a-fA-F]{32})(?:\?|$)/)
         if (agentRespMatch && req.method === 'GET') {
-          const hash = agentRespMatch[1]
+          const callId = agentRespMatch[1]
           try {
-            const result = await fetchAgentResponse(hash)
+            const result = await fetchAgentResponse(callId)
             return json(res, 200, result)
           } catch (err: any) {
             const stderr = err?.stderr?.toString?.() || ''
@@ -496,12 +513,11 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
         }
         if (url === '/api/current' && req.method === 'POST') {
           try {
-            const body = await readBody(req)
-            const parsed = body ? JSON.parse(body) : {}
+            const parsed = await readJson<any>(req)
             const card = createCard(String(parsed.text ?? ''), parsed.lane as Lane, parsed.repo)
             return json(res, 200, card)
           } catch (err: any) {
-            return json(res, 400, { error: err.message || String(err) })
+            return json(res, httpStatus(err, 400), { error: err.message || String(err) })
           }
         }
         const currentMatch = url.match(/^\/api\/current\/(\d+)(?:\?|$)/)
@@ -509,8 +525,7 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
           const id = Number(currentMatch[1])
           if (req.method === 'PATCH') {
             try {
-              const body = await readBody(req)
-              const parsed = body ? JSON.parse(body) : {}
+              const parsed = await readJson<any>(req)
               // PATCH accepts any combination of {text}, {repo}, or
               // {lane, position}. Multiple fields in one call apply in
               // order so the edit form can save text + repo together.
@@ -523,7 +538,7 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
               if (card) return json(res, 200, card)
               return json(res, 400, { error: 'Provide one or more of { text }, { repo }, { lane, position }' })
             } catch (err: any) {
-              return json(res, 400, { error: err.message || String(err) })
+              return json(res, httpStatus(err, 400), { error: err.message || String(err) })
             }
           }
           if (req.method === 'DELETE') {
@@ -538,45 +553,60 @@ export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
 
         // ── /api/snippets — espanso text-expansion pairs ──
         // Poise manages one espanso match file (<match>/poise.yml) as the
-        // single source of truth. GET returns the current pairs plus
-        // whether espanso looks installed (drives a UI hint). PUT replaces
+        // single source of truth. GET returns the current pairs, their
+        // source-byte version, and whether espanso looks installed (drives a
+        // UI hint). PUT conditionally replaces
         // the whole set. See server/snippets.ts. espanso hot-reloads the
         // file, so a successful PUT makes the `;trigger` expansions live
         // immediately — no restart.
         if (url === '/api/snippets' && req.method === 'GET') {
           try {
-            const snippets = await listSnippets()
-            return json(res, 200, { snippets, espansoDetected: espansoDetected() })
+            const state = await readSnippetState()
+            return json(res, 200, { ...state, espansoDetected: espansoDetected() })
           } catch (err: any) {
             return json(res, 500, { error: err.message || String(err) })
           }
         }
         if (url === '/api/snippets' && req.method === 'PUT') {
           try {
-            const raw = await readBody(req)
-            const body = raw ? JSON.parse(raw) : {}
-            const snippets = await saveSnippets(body.snippets)
-            return json(res, 200, { snippets })
+            const body = await readJson<any>(req)
+            if (body?.base_version === undefined) {
+              return json(res, 428, { error: 'snippet write precondition is required; reload snippets' })
+            }
+            const state = await saveSnippets(body.snippets, body.base_version)
+            return json(res, 200, state)
           } catch (err: any) {
-            return json(res, 400, { error: err.message || String(err) })
+            const conflict = err instanceof SnippetConflictError
+            const lockUnavailable = err instanceof ProcessLockError
+            return json(res, conflict ? 409 : lockUnavailable ? 503 : httpStatus(err, 400), {
+              error: err.message || String(err),
+              ...(conflict ? { current_version: err.currentVersion } : {}),
+            })
           }
         }
         // POST appends a single pair — used by the editor's "save
         // selection as snippet" action so it needn't hold the full list.
         if (url === '/api/snippets' && req.method === 'POST') {
           try {
-            const raw = await readBody(req)
-            const body = raw ? JSON.parse(raw) : {}
-            const snippet = await addSnippet(body)
-            return json(res, 200, { snippet })
+            const body = await readJson<any>(req)
+            const result = await addSnippet(body)
+            return json(res, 200, result)
           } catch (err: any) {
-            return json(res, 400, { error: err.message || String(err) })
+            return json(res, err instanceof ProcessLockError ? 503 : httpStatus(err, 400), {
+              error: err.message || String(err),
+            })
           }
         }
 
-        next()
+        return next()
       }
-      server.middlewares.use(mw)
+}
+
+export function cachePlugin(opts: CachePluginOptions = {}): Plugin {
+  return {
+    name: 'poise-cache',
+    configureServer(server) {
+      server.middlewares.use(createPoiseMiddleware(opts))
     },
   }
 }

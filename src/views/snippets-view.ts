@@ -11,11 +11,15 @@
 // on each save and espanso hot-reloads, so a `;trigger` goes live at once.
 
 interface Snippet { trigger: string; replace: string }
+interface SnippetState { snippets: Snippet[]; version: string }
+
+class SnippetConflictError extends Error {}
 
 let viewEl: HTMLElement
 let tbodyEl: HTMLTableSectionElement
 let initialized = false
 let snippets: Snippet[] = []
+let snippetVersion = ''
 let espansoOk = true
 
 // Chevron — identical to Swarm's (src/views/swarm-view.ts). Points right
@@ -166,15 +170,31 @@ function onTbodyClick(e: MouseEvent) {
   ;(editRow.querySelector(focusSel) as HTMLElement | null)?.focus()
 }
 
-async function putSnippets(list: Snippet[]): Promise<Snippet[]> {
+async function putSnippets(list: Snippet[]): Promise<SnippetState> {
+  if (!snippetVersion) throw new Error('Snippets must be reloaded before saving.')
   const res = await fetch('/api/snippets', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ snippets: list }),
+    body: JSON.stringify({ snippets: list, base_version: snippetVersion }),
   })
-  const data = await res.json()
+  const data = await res.json().catch(() => ({})) as {
+    snippets?: unknown
+    version?: unknown
+    error?: string
+  }
+  if (res.status === 409) throw new SnippetConflictError(data.error || 'Snippets changed elsewhere.')
   if (!res.ok) throw new Error(data.error || 'request failed')
-  return data.snippets as Snippet[]
+  if (!Array.isArray(data.snippets) || typeof data.version !== 'string') {
+    throw new Error('server returned an invalid snippet state')
+  }
+  return { snippets: data.snippets as Snippet[], version: data.version }
+}
+
+async function preserveEditAfterConflict(status: HTMLElement | null): Promise<void> {
+  const refreshed = await fetchSnippets()
+  setStatus(status, refreshed
+    ? 'Snippets changed elsewhere. Latest data loaded; your unsaved edit is preserved. Review and save again.'
+    : 'Snippets changed elsewhere. Your unsaved edit is preserved; reload before saving.', 'error')
 }
 
 async function save(editRow: HTMLTableRowElement) {
@@ -188,6 +208,10 @@ async function save(editRow: HTMLTableRowElement) {
   const replace = bodyInput.value
   if (!trigger) { setStatus(status, 'Trigger is required.', 'error'); triggerInput.focus(); return }
   if (!replace.trim()) { setStatus(status, 'Snippet body is required.', 'error'); bodyInput.focus(); return }
+  if (editingTrigger != null && !snippets.some((s) => s.trigger === editingTrigger)) {
+    setStatus(status, 'This snippet was removed or renamed elsewhere. Your edit is preserved; copy it before reloading.', 'error')
+    return
+  }
   // Preserve order: edit replaces in place, add appends.
   const next = editingTrigger != null
     ? snippets.map((s) => (s.trigger === editingTrigger ? { trigger, replace } : s))
@@ -200,10 +224,13 @@ async function save(editRow: HTMLTableRowElement) {
   saveBtn.disabled = true
   saveBtn.textContent = 'Saving…'
   try {
-    snippets = await putSnippets(next)
+    const saved = await putSnippets(next)
+    snippets = saved.snippets
+    snippetVersion = saved.version
     renderRows()                                       // rebuild collapses the (transient) edit row
   } catch (err) {
-    setStatus(status, (err as Error).message || 'Failed to save.', 'error')
+    if (err instanceof SnippetConflictError) await preserveEditAfterConflict(status)
+    else setStatus(status, (err as Error).message || 'Failed to save.', 'error')
     saveBtn.disabled = false
     saveBtn.textContent = 'Save'
   }
@@ -218,10 +245,14 @@ async function del(editRow: HTMLTableRowElement) {
   const delBtn = editRow.querySelector<HTMLButtonElement>('.snip-delete')!
   delBtn.disabled = true
   try {
-    snippets = await putSnippets(next)
+    const saved = await putSnippets(next)
+    snippets = saved.snippets
+    snippetVersion = saved.version
     renderRows()
   } catch (err) {
-    setStatus(editRow.querySelector<HTMLElement>('.snip-status'), (err as Error).message || 'Failed to delete.', 'error')
+    const status = editRow.querySelector<HTMLElement>('.snip-status')
+    if (err instanceof SnippetConflictError) await preserveEditAfterConflict(status)
+    else setStatus(status, (err as Error).message || 'Failed to delete.', 'error')
     delBtn.disabled = false
   }
 }
@@ -256,14 +287,19 @@ function attachHandlers() {
   tbodyEl.addEventListener('click', onTbodyClick)
 }
 
-async function fetchSnippets() {
+async function fetchSnippets(): Promise<boolean> {
   try {
     const res = await fetch('/api/snippets')
-    if (!res.ok) return
+    if (!res.ok) return false
     const data = await res.json()
+    if (!Array.isArray(data.snippets) || typeof data.version !== 'string') return false
     snippets = Array.isArray(data.snippets) ? data.snippets : []
+    snippetVersion = data.version
     espansoOk = data.espansoDetected !== false
-  } catch { /* leave list empty — the view still renders */ }
+    return true
+  } catch {
+    return false // leave the current list intact; a stale save will conflict safely
+  }
 }
 
 export async function initSnippetsView() {

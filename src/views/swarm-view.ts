@@ -24,7 +24,7 @@ interface LogEntry {
                             // which emits the system-local datetime without an offset).
   time_elapsed: string
   status: string
-  response: string        // 8-char hash; pass to /api/agent-response/<hash> to fetch body
+  response: string        // upstream availability marker; fetch body by full id
   error: string
 }
 
@@ -110,7 +110,8 @@ function targetCell(e: LogEntry): string {
   const short = repo ? (repo.includes('/') ? repo.split('/')[1] : repo) : ''
   const label = short && pr ? `${short}#${pr}` : (short || `#${pr}`)
   if (repo && pr) {
-    const href = `https://github.com/${repo}/pull/${pr}`
+    const safeRepo = repo.split('/').map(encodeURIComponent).join('/')
+    const href = `https://github.com/${safeRepo}/pull/${encodeURIComponent(pr)}`
     return `<a class="agent-target" href="${href}" target="_blank" rel="noopener">${escapeHtml(label)}</a>`
   }
   return `<span class="agent-target">${escapeHtml(label)}</span>`
@@ -224,7 +225,7 @@ function buildMainRow(e: LogEntry): HTMLTableRowElement {
   const tr = document.createElement('tr')
   tr.className = 'agent-row'
   tr.dataset.id = e.id
-  tr.dataset.hash = e.response || ''
+  tr.dataset.callId = e.response ? e.id : ''
   tr.innerHTML = mainRowInnerHTML(e)
   return tr
 }
@@ -286,9 +287,9 @@ function applySwarmFlip(nextEntries: LogEntry[]) {
       // this the row keeps its first-render values forever (Started
       // frozen, status stuck at 'running'). The <tr> element identity
       // is preserved, so the FLIP slide animation is unaffected — only
-      // the innards are swapped. dataset.hash too: a row going
-      // running→completed gains a response hash.
-      main.dataset.hash = e.response || ''
+      // the innards are swapped. dataset.callId too: a row going
+      // running→completed becomes eligible for a full-id response read.
+      main.dataset.callId = e.response ? e.id : ''
       main.innerHTML = mainRowInnerHTML(e)
       fragment.appendChild(main)
     } else {
@@ -372,7 +373,7 @@ function render() {
   applySwarmFlip(list)
 }
 
-async function loadResponse(id: string, hash: string) {
+async function loadResponse(id: string) {
   expanded.set(id, { body: null, loading: true })
 
   // Optimistically insert the expand row right after its main row so
@@ -390,7 +391,7 @@ async function loadResponse(id: string, hash: string) {
   }
 
   try {
-    const res = await fetch(`/api/agent-response/${encodeURIComponent(hash)}`)
+    const res = await fetch(`/api/agent-response/${encodeURIComponent(id)}`)
     if (!res.ok) {
       const text = await res.text().catch(() => '')
       throw new Error(text ? `/api/agent-response ${res.status}: ${text.slice(0, 200)}` : `/api/agent-response ${res.status}`)
@@ -454,8 +455,8 @@ function attachClicks() {
     if (!expandBtn) return
     const tr = expandBtn.closest<HTMLTableRowElement>('tr')!
     const id = tr.dataset.id || ''
-    const hash = tr.dataset.hash || ''
-    if (!id || !hash) return
+    const callId = tr.dataset.callId || ''
+    if (!id || !callId) return
     if (expanded.has(id)) {
       // Hide — surgical: remove the expand row, rotate the chevron back.
       expanded.delete(id)
@@ -464,7 +465,7 @@ function attachClicks() {
       expandBtn.classList.remove('open')
     } else {
       expandBtn.classList.add('open')
-      loadResponse(id, hash)
+      loadResponse(id)
     }
   })
 }
@@ -496,7 +497,7 @@ export async function focusRow(repo: string, pr_id: string): Promise<void> {
   if (match.status === 'completed' && match.response && !expanded.has(match.id)) {
     const btn = row.querySelector<HTMLButtonElement>('.expand-btn')
     if (btn) btn.classList.add('open')
-    loadResponse(match.id, match.response)
+    loadResponse(match.id)
   }
 }
 
