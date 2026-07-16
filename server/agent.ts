@@ -36,8 +36,12 @@ export interface LogEntry {
   session_id: string | null
   prompt: string
   started_at: string
+  started_at_precise?: string | null
+  completed_at?: string | null
   time_elapsed: string
   status: string
+  outcome?: 'clean' | 'changes_requested' | null
+  head_sha?: string | null
   response: string | null // upstream 8-char availability marker; read by full `id`
   error: string
 }

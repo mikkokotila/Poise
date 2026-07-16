@@ -22,10 +22,11 @@ import { claudeAuth } from './claude-auth'
 import {
   claimSeenOwned,
   clearSeenExceptLaunched,
+  completeReviewLaunchOwned,
   completeSeenOwned,
   getMeta,
-  hasCompletedBehaviorLaunch,
   hasSeen,
+  latestCleanReviewLaunch,
   linkBehaviorLaunchCallOwned,
   listBehaviorLaunchClaims,
   listSeenTargets,
@@ -358,7 +359,13 @@ function retainClaimSafely(claim: BehaviorLaunchClaim, error: string): void {
 
 function completeClaimSafely(claim: BehaviorLaunchClaim, error: string | null = null): boolean {
   setBehaviorLaunchErrorOwned(claim.key, claim.target, claim.claimId, error)
-  return completeSeenOwned(claim.key, claim.target, claim.claimId)
+  const completed = completeSeenOwned(claim.key, claim.target, claim.claimId)
+  if (completed) activeClaims.delete(claim.claimId)
+  return completed
+}
+
+function agentCallStartedAt(call: Awaited<ReturnType<typeof fetchAgentLogs>>[number]): string {
+  return String(call.started_at_precise || call.started_at || '')
 }
 
 async function reconcileBehaviorLaunchClaims(
@@ -399,7 +406,7 @@ async function reconcileBehaviorLaunchClaims(
       continue
     }
     if (call) {
-      const linkedStartedAtMs = Date.parse(String(call.started_at || ''))
+      const linkedStartedAtMs = Date.parse(agentCallStartedAt(call))
       if (call.behavior !== claim.launchBehavior
         || call.repo !== claim.launchRepo
         || String(call.pr_id || '') !== String(claim.launchPr)
@@ -414,7 +421,7 @@ async function reconcileBehaviorLaunchClaims(
       const candidates = new Map<string, (typeof logs)[number]>()
       for (const row of logs) {
         const callId = String(row.id || '').toLowerCase()
-        const startedAtMs = Date.parse(String(row.started_at || ''))
+        const startedAtMs = Date.parse(agentCallStartedAt(row))
         if (row.behavior !== claim.launchBehavior
           || row.repo !== claim.launchRepo
           || String(row.pr_id || '') !== String(claim.launchPr)
@@ -464,7 +471,33 @@ async function reconcileBehaviorLaunchClaims(
       continue
     }
     if (status === 'completed') {
-      if (completeClaimSafely(claim)) clearBehaviorFailure(behavior)
+      if (behavior === 'review-new-prs') {
+        const outcome = String(call.outcome || '')
+        const completedAt = String(call.completed_at || '')
+        const headSha = String(call.head_sha || '')
+        if ((outcome !== 'clean' && outcome !== 'changes_requested')
+          || !Number.isFinite(Date.parse(completedAt))
+          || !/^[0-9a-fA-F]{7,64}$/.test(headSha)) {
+          const error = 'completed review is missing authoritative outcome metadata; retained to prevent duplicate review'
+          if (completeClaimSafely(claim, error)) recordBehaviorFailure(behavior, 'worker')
+          console.error(`[behaviors] ${error} for ${claim.launchRepo}#${claim.launchPr}`)
+          continue
+        }
+        const completed = completeReviewLaunchOwned({
+          key: claim.key,
+          target: claim.target,
+          claimId: claim.claimId,
+          outcome,
+          completedAt,
+          headSha,
+        })
+        if (completed) {
+          activeClaims.delete(claim.claimId)
+          clearBehaviorFailure(behavior)
+        }
+      } else if (completeClaimSafely(claim)) {
+        clearBehaviorFailure(behavior)
+      }
     } else if (FAILED_AGENT_STATUSES.has(status)) {
       if (releaseSeenOwned(claim.key, claim.target, claim.claimId)) {
         recordBehaviorFailure(behavior, 'worker')
@@ -523,7 +556,14 @@ function settleClaimAfterExit(
 ): (result: { code: number | null, signal: NodeJS.Signals | null, error?: Error }) => void {
   return ({ code, signal, error }) => {
     if (!error && signal === null && code === 0) {
-      if (completeOwnedClaim(behavior, target, claimId)) clearBehaviorFailure(behavior)
+      activeClaims.delete(claimId)
+      setBehaviorLaunchErrorOwned(
+        behavior,
+        target,
+        claimId,
+        'worker exited successfully; awaiting durable agent result',
+      )
+      renewSeenOwned(behavior, target, claimId, BEHAVIOR_CLAIM_RENEWAL_MS)
       return
     }
     const released = releaseOwnedClaim(behavior, target, claimId)
@@ -707,10 +747,11 @@ async function tickReviewNewPrs(): Promise<void> {
 // change request left by the configured review agent or a clean PR that
 // explicitly requests that identity's initial approval.
 //
-// Follow-ups dedupe by request timestamp + response count; initial requests
-// dedupe by configured reviewer + head SHA. We do NOT take a snapshot on
-// enable: already-eligible PRs should fire immediately. claimSeen prevents
-// repeats and the runtime permits only one durable worker at a time.
+// Follow-ups dedupe by request timestamp + response count. A clean initial
+// review starts a ten-minute quiet window; later PR activity moves that window
+// forward, and the approval generation dedupes by its final anchor + head SHA.
+
+export const APPROVAL_QUIET_WINDOW_MS = 10 * 60_000
 
 interface ChangesAddressedResult {
   has_change_request: boolean
@@ -724,29 +765,63 @@ interface ChangesAddressedResult {
   author_inline_replies_after_request: number
 }
 
-interface RequestedReviewResult {
-  ready: boolean
+interface ReviewActivityResult {
+  state: string
+  draft: boolean
   headSha: string
+  reviewerRequested: boolean
+  activeChangeRequestAuthors: string[]
+  reviewerLatestState: string | null
+  reviewerLatestCommit: string | null
+  latestActivityAt: string | null
 }
 
-async function checkRequestedReview(
+async function checkReviewActivity(
   repo: string,
   number: number,
   reviewer: string,
-): Promise<RequestedReviewResult> {
+  since: string,
+): Promise<ReviewActivityResult> {
   const [owner, name] = repo.split('/', 2)
   if (!owner || !name) throw new Error(`invalid GitHub repository: ${repo}`)
   const cwd = join(GH_INTERFACE_CWD_ROOT, owner, name)
   await mkdir(cwd, { recursive: true })
   const { stdout } = await runFile(
     GH_INTERFACE,
-    ['--requested-review-ready', `#${number}`, '--username', reviewer],
-    { cwd, timeoutMs: 30_000, maxOutputBytes: 1 * 1024 * 1024, signal: behaviorSignal() },
+    ['--review-activity-since', `#${number}`, '--username', reviewer, '--since', since],
+    { cwd, timeoutMs: 30_000, maxOutputBytes: 4 * 1024 * 1024, signal: behaviorSignal() },
   )
   const data = JSON.parse(stdout.trim() || '{}')
+  if (data.action !== 'review_activity_since'
+    || typeof data.state !== 'string'
+    || typeof data.draft !== 'boolean'
+    || typeof data.reviewer_requested !== 'boolean'
+    || !Array.isArray(data.active_change_request_authors)) {
+    throw new Error('github-interface --review-activity-since returned malformed state')
+  }
+  const headSha = String(data.head_sha || '')
+  if (!/^[0-9a-fA-F]{7,64}$/.test(headSha)) {
+    throw new Error('github-interface --review-activity-since returned invalid head SHA')
+  }
+  const latestActivityAt = data.latest_activity_at === null
+    ? null
+    : String(data.latest_activity_at || '')
+  if (latestActivityAt !== null && !Number.isFinite(Date.parse(latestActivityAt))) {
+    throw new Error('github-interface --review-activity-since returned invalid activity timestamp')
+  }
   return {
-    ready: !!data.ready,
-    headSha: String(data.head_sha || ''),
+    state: data.state,
+    draft: data.draft,
+    headSha: headSha.toLowerCase(),
+    reviewerRequested: data.reviewer_requested,
+    activeChangeRequestAuthors: data.active_change_request_authors.map(String),
+    reviewerLatestState: data.reviewer_latest_state === null
+      ? null
+      : String(data.reviewer_latest_state || ''),
+    reviewerLatestCommit: data.reviewer_latest_commit === null
+      ? null
+      : String(data.reviewer_latest_commit || '').toLowerCase(),
+    latestActivityAt,
   }
 }
 
@@ -830,19 +905,35 @@ async function tickApprovePrs(): Promise<void> {
           seenTarget = `${pr.repo}#${pr.number}@req=${check.latest_request_at}/r=${responses}`
           firedReason = `req=${check.latest_request_at}, r=${responses}: ${check.author_commits_after_request}c+${check.author_inline_replies_after_request}reply`
         } else {
-          // Initial approval is downstream of Poise's completed initial review.
-          // Snapshot/skip/in-flight rows do not qualify, preventing review and
-          // approval from launching against the same PR concurrently.
-          if (!hasCompletedBehaviorLaunch(
-            'review-new-prs',
-            'pr_review',
+          const review = latestCleanReviewLaunch(pr.repo, pr.number)
+          if (!review) continue
+          const completedAtMs = Date.parse(review.completedAt)
+          if (!Number.isFinite(completedAtMs)) {
+            throw new Error(`invalid completed review timestamp for ${pr.repo}#${pr.number}`)
+          }
+          const activity = await checkReviewActivity(
             pr.repo,
             pr.number,
-          )) continue
-          const requested = await checkRequestedReview(pr.repo, pr.number, reviewer)
-          if (!requested.ready) continue
-          seenTarget = `${pr.repo}#${pr.number}@requested=${reviewer.toLowerCase()}/head=${requested.headSha}`
-          firedReason = `requested=${reviewer}, head=${requested.headSha.slice(0, 8)}, ci=green`
+            reviewer,
+            review.completedAt,
+          )
+          if (activity.state !== 'OPEN'
+            || activity.draft
+            || !activity.reviewerRequested
+            || activity.activeChangeRequestAuthors.length > 0
+            || (activity.reviewerLatestState === 'APPROVED'
+              && activity.reviewerLatestCommit === activity.headSha)) continue
+          if (activity.headSha !== review.headSha && activity.latestActivityAt === null) {
+            throw new Error(`head changed without an activity watermark for ${pr.repo}#${pr.number}`)
+          }
+          const latestActivityAtMs = activity.latestActivityAt === null
+            ? completedAtMs
+            : Date.parse(activity.latestActivityAt)
+          const quietAnchorMs = Math.max(completedAtMs, latestActivityAtMs)
+          if (Date.now() - quietAnchorMs < APPROVAL_QUIET_WINDOW_MS) continue
+          const quietAnchor = new Date(quietAnchorMs).toISOString()
+          seenTarget = `${pr.repo}#${pr.number}@quiet=${quietAnchor}/head=${activity.headSha}`
+          firedReason = `clean review ${review.callId.slice(0, 8)}, quiet since ${quietAnchor}, head=${activity.headSha.slice(0, 8)}`
         }
         const claimId = claimSeenOwned('approve-prs', seenTarget)
         if (!claimId) continue

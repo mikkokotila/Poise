@@ -74,6 +74,9 @@ db.exec(`
     launch_requested_at TEXT,
     launch_call_id TEXT,
     launch_error TEXT,
+    launch_outcome TEXT,
+    launch_completed_at TEXT,
+    launch_head_sha TEXT,
     PRIMARY KEY (key, target)
   );
 
@@ -173,6 +176,9 @@ const migrateSchema = db.transaction(() => {
   ensureColumn('behavior_seen', 'launch_requested_at', 'launch_requested_at TEXT')
   ensureColumn('behavior_seen', 'launch_call_id', 'launch_call_id TEXT')
   ensureColumn('behavior_seen', 'launch_error', 'launch_error TEXT')
+  ensureColumn('behavior_seen', 'launch_outcome', 'launch_outcome TEXT')
+  ensureColumn('behavior_seen', 'launch_completed_at', 'launch_completed_at TEXT')
+  ensureColumn('behavior_seen', 'launch_head_sha', 'launch_head_sha TEXT')
   const behaviorLaunchTrackingMigrated = db.prepare(
     'SELECT 1 FROM meta WHERE key = ?',
   ).get(BEHAVIOR_LAUNCH_TRACKING_MIGRATION_KEY)
@@ -357,7 +363,10 @@ export function claimSeenOwned(
        launch_pr = NULL,
        launch_requested_at = NULL,
        launch_call_id = NULL,
-       launch_error = NULL
+       launch_error = NULL,
+       launch_outcome = NULL,
+       launch_completed_at = NULL,
+       launch_head_sha = NULL
      WHERE behavior_seen.claim_id <> ''
        AND behavior_seen.lease_until IS NOT NULL
        AND behavior_seen.lease_until <= ?
@@ -388,6 +397,7 @@ export function markBehaviorLaunchIntentOwned(input: {
     UPDATE behavior_seen
     SET launch_behavior = ?, launch_repo = ?, launch_pr = ?,
         launch_requested_at = ?, launch_call_id = NULL, launch_error = NULL,
+        launch_outcome = NULL, launch_completed_at = NULL, launch_head_sha = NULL,
         lease_until = ?
     WHERE key = ? AND target = ? AND claim_id = ? AND claim_id <> ''
   `).run(
@@ -517,6 +527,39 @@ export function completeSeenOwned(key: string, target: string, claimId: string):
   return info.changes === 1
 }
 
+export type ReviewLaunchOutcome = 'clean' | 'changes_requested'
+
+export function completeReviewLaunchOwned(input: {
+  key: string
+  target: string
+  claimId: string
+  outcome: ReviewLaunchOutcome
+  completedAt: string
+  headSha: string
+}): boolean {
+  if (!Number.isFinite(Date.parse(input.completedAt))) {
+    throw new Error('invalid review completion timestamp')
+  }
+  if (!/^[0-9a-fA-F]{7,64}$/.test(input.headSha)) {
+    throw new Error('invalid review completion head SHA')
+  }
+  const info = db.prepare(`
+    UPDATE behavior_seen
+    SET claim_id = '', lease_until = NULL, seen_at = ?, launch_error = NULL,
+        launch_outcome = ?, launch_completed_at = ?, launch_head_sha = ?
+    WHERE key = ? AND target = ? AND claim_id = ? AND claim_id <> ''
+  `).run(
+    new Date().toISOString(),
+    input.outcome,
+    input.completedAt,
+    input.headSha.toLowerCase(),
+    input.key,
+    input.target,
+    input.claimId,
+  )
+  return info.changes === 1
+}
+
 // Whether any rows exist for this behavior — proxy for "snapshot has
 // been taken at least once". Used to differentiate a fresh enable
 // (no rows yet → take snapshot, don't fire on first tick) from a
@@ -541,26 +584,41 @@ export function listSeenTargets(key: string): string[] {
   ).all(key) as Array<{ target: string }>).map((row) => row.target)
 }
 
-// A completed behavior launch is stronger than a snapshot/skip marker: it
-// proves the detached agent worker exited successfully for this PR.
-export function hasCompletedBehaviorLaunch(
-  key: string,
-  launchBehavior: BehaviorAgentLaunch,
+export interface CompletedReviewLaunch {
+  callId: string
+  completedAt: string
+  headSha: string
+}
+
+export function latestCleanReviewLaunch(
   repo: string,
   pr: number,
-): boolean {
+): CompletedReviewLaunch | null {
   const row = db.prepare(`
-    SELECT 1 AS x
+    SELECT launch_call_id, launch_completed_at, launch_head_sha
     FROM behavior_seen
-    WHERE key = ?
+    WHERE key = 'review-new-prs'
       AND claim_id = ''
-      AND launch_behavior = ?
+      AND launch_behavior = 'pr_review'
       AND launch_repo = ?
       AND launch_pr = ?
-      AND launch_requested_at IS NOT NULL
+      AND launch_error IS NULL
+      AND launch_outcome = 'clean'
+      AND launch_call_id IS NOT NULL
+      AND launch_completed_at IS NOT NULL
+      AND launch_head_sha IS NOT NULL
+    ORDER BY launch_completed_at DESC
     LIMIT 1
-  `).get(key, launchBehavior, repo, pr) as { x: number } | undefined
-  return !!row
+  `).get(repo, pr) as {
+    launch_call_id: string
+    launch_completed_at: string
+    launch_head_sha: string
+  } | undefined
+  return row ? {
+    callId: row.launch_call_id,
+    completedAt: row.launch_completed_at,
+    headSha: row.launch_head_sha,
+  } : null
 }
 
 // Wipe the ledger for a key — used when the user disables the
