@@ -21,13 +21,15 @@ import { fetchAgentLogs } from './agent'
 import { claudeAuth } from './claude-auth'
 import {
   claimSeenOwned,
-  clearSeen,
   clearSeenExceptLaunched,
+  completeReviewLaunchOwned,
   completeSeenOwned,
   getMeta,
   hasSeen,
+  latestCleanReviewLaunch,
   linkBehaviorLaunchCallOwned,
   listBehaviorLaunchClaims,
+  listSeenTargets,
   markBehaviorLaunchIntentOwned,
   recordSeen,
   releaseSeen,
@@ -38,7 +40,6 @@ import {
   type BehaviorAgentLaunch,
   type BehaviorLaunchClaim,
 } from './db'
-import { getHeadSha } from './gh'
 import { HttpError } from './http'
 import { claudeSubscriptionEnvironment, runFile, spawnDetached } from './process'
 import { withProcessLock } from './process-lock'
@@ -46,7 +47,8 @@ import { withProcessLock } from './process-lock'
 const DATASTORE = 'github-datastore'
 const GH_INTERFACE = 'github-interface'
 const AGENT_INTERFACE = 'agent-interface'
-const REVIEW_SNAPSHOT_TARGET = '__snapshot_v2__'
+const LEGACY_REVIEW_SNAPSHOT_TARGET = '__snapshot_v2__'
+const REVIEW_SNAPSHOT_TARGET = '__snapshot_v3__'
 const BEHAVIOR_AUTH_FRESHNESS_MS = 60_000
 
 // Same cwd hack agent.ts uses — agent-interface infers the repo from
@@ -357,7 +359,13 @@ function retainClaimSafely(claim: BehaviorLaunchClaim, error: string): void {
 
 function completeClaimSafely(claim: BehaviorLaunchClaim, error: string | null = null): boolean {
   setBehaviorLaunchErrorOwned(claim.key, claim.target, claim.claimId, error)
-  return completeSeenOwned(claim.key, claim.target, claim.claimId)
+  const completed = completeSeenOwned(claim.key, claim.target, claim.claimId)
+  if (completed) activeClaims.delete(claim.claimId)
+  return completed
+}
+
+function agentCallStartedAt(call: Awaited<ReturnType<typeof fetchAgentLogs>>[number]): string {
+  return String(call.started_at_precise || call.started_at || '')
 }
 
 async function reconcileBehaviorLaunchClaims(
@@ -398,7 +406,7 @@ async function reconcileBehaviorLaunchClaims(
       continue
     }
     if (call) {
-      const linkedStartedAtMs = Date.parse(String(call.started_at || ''))
+      const linkedStartedAtMs = Date.parse(agentCallStartedAt(call))
       if (call.behavior !== claim.launchBehavior
         || call.repo !== claim.launchRepo
         || String(call.pr_id || '') !== String(claim.launchPr)
@@ -413,7 +421,7 @@ async function reconcileBehaviorLaunchClaims(
       const candidates = new Map<string, (typeof logs)[number]>()
       for (const row of logs) {
         const callId = String(row.id || '').toLowerCase()
-        const startedAtMs = Date.parse(String(row.started_at || ''))
+        const startedAtMs = Date.parse(agentCallStartedAt(row))
         if (row.behavior !== claim.launchBehavior
           || row.repo !== claim.launchRepo
           || String(row.pr_id || '') !== String(claim.launchPr)
@@ -463,7 +471,33 @@ async function reconcileBehaviorLaunchClaims(
       continue
     }
     if (status === 'completed') {
-      if (completeClaimSafely(claim)) clearBehaviorFailure(behavior)
+      if (behavior === 'review-new-prs') {
+        const outcome = String(call.outcome || '')
+        const completedAt = String(call.completed_at || '')
+        const headSha = String(call.head_sha || '')
+        if ((outcome !== 'clean' && outcome !== 'changes_requested')
+          || !Number.isFinite(Date.parse(completedAt))
+          || !/^[0-9a-fA-F]{7,64}$/.test(headSha)) {
+          const error = 'completed review is missing authoritative outcome metadata; retained to prevent duplicate review'
+          if (completeClaimSafely(claim, error)) recordBehaviorFailure(behavior, 'worker')
+          console.error(`[behaviors] ${error} for ${claim.launchRepo}#${claim.launchPr}`)
+          continue
+        }
+        const completed = completeReviewLaunchOwned({
+          key: claim.key,
+          target: claim.target,
+          claimId: claim.claimId,
+          outcome,
+          completedAt,
+          headSha,
+        })
+        if (completed) {
+          activeClaims.delete(claim.claimId)
+          clearBehaviorFailure(behavior)
+        }
+      } else if (completeClaimSafely(claim)) {
+        clearBehaviorFailure(behavior)
+      }
     } else if (FAILED_AGENT_STATUSES.has(status)) {
       if (releaseSeenOwned(claim.key, claim.target, claim.claimId)) {
         recordBehaviorFailure(behavior, 'worker')
@@ -522,7 +556,14 @@ function settleClaimAfterExit(
 ): (result: { code: number | null, signal: NodeJS.Signals | null, error?: Error }) => void {
   return ({ code, signal, error }) => {
     if (!error && signal === null && code === 0) {
-      if (completeOwnedClaim(behavior, target, claimId)) clearBehaviorFailure(behavior)
+      activeClaims.delete(claimId)
+      setBehaviorLaunchErrorOwned(
+        behavior,
+        target,
+        claimId,
+        'worker exited successfully; awaiting durable agent result',
+      )
+      renewSeenOwned(behavior, target, claimId, BEHAVIOR_CLAIM_RENEWAL_MS)
       return
     }
     const released = releaseOwnedClaim(behavior, target, claimId)
@@ -576,41 +617,42 @@ async function snapshotReviewNewPrs(): Promise<void> {
   if (!author) return
   try {
     const prs = await listOpenPrsByAuthor(author)
-    let complete = true
-    let failure: unknown
     for (const p of prs) {
       if (behaviorAborted()) {
-        complete = false
-        failure = behaviorSignal()?.reason
-        break
+        throw behaviorSignal()?.reason ?? new Error('review snapshot aborted')
       }
-      try {
-        const sha = await getHeadSha(p.repo, p.number, { signal: behaviorSignal() })
-        recordSeen('review-new-prs', `${p.repo}#${p.number}@${sha}`)
-      } catch (err) {
-        complete = false
-        failure ??= err
-        // Couldn't get head_sha right now — skip silently; the next
-        // tick will re-attempt and either snapshot or claim. Better
-        // to under-stamp the snapshot than to leave an unsuffixed key
-        // that would never match the new format.
-        console.warn(`[behaviors] snapshot head_sha failed for ${p.repo}#${p.number}:`, err)
-      }
+      recordSeen('review-new-prs', `${p.repo}#${p.number}`)
     }
     // A real marker distinguishes an intentionally empty snapshot from
     // "snapshot has never completed". Without it, the first PR created in
     // an initially empty repository was silently absorbed by a later
     // snapshot instead of triggering the behavior.
-    if (complete) recordSeen('review-new-prs', REVIEW_SNAPSHOT_TARGET)
-    else {
-      releaseSeen('review-new-prs', REVIEW_SNAPSHOT_TARGET)
-      throw failure ?? new Error('review snapshot did not complete')
-    }
+    recordSeen('review-new-prs', REVIEW_SNAPSHOT_TARGET)
   } catch (err) {
     releaseSeen('review-new-prs', REVIEW_SNAPSHOT_TARGET)
     console.error('[behaviors] snapshot failed:', err)
     throw err
   }
+}
+
+function migrateReviewNewPrsLedger(): void {
+  const version = getMeta('behavior_review_new_prs_keyver')
+  if (version === '3') return
+
+  // A completed v2 snapshot is authoritative for what was already known.
+  // Copy its per-head targets to PR-level targets and retain the originals:
+  // launch metadata on those rows is downstream approval evidence.
+  if (version === '2') {
+    const legacyTargets = listSeenTargets('review-new-prs')
+    if (legacyTargets.includes(LEGACY_REVIEW_SNAPSHOT_TARGET)) {
+      for (const target of legacyTargets) {
+        const separator = target.indexOf('@')
+        if (separator > 0) recordSeen('review-new-prs', target.slice(0, separator))
+      }
+      recordSeen('review-new-prs', REVIEW_SNAPSHOT_TARGET)
+    }
+  }
+  setMeta('behavior_review_new_prs_keyver', '3')
 }
 
 async function tickReviewNewPrs(): Promise<void> {
@@ -619,20 +661,10 @@ async function tickReviewNewPrs(): Promise<void> {
   if (!author) return
   const reviewer = reviewAgentUsername
 
-  // The dedupe key shape changed in keyver=2: from `${repo}#${number}`
-  // to `${repo}#${number}@${head_sha}`, so a force-push (or any new
-  // commit) is recognised as a fresh target for re-review. Without
-  // this migration, every currently-open PR would fire on the very
-  // next tick after deploy (their old keys don't match the new
-  // shape). Wipe + re-snapshot brings the ledger in sync with the
-  // current head of each open PR; subsequent ticks then only see new
-  // shas as new work.
-  if (getMeta('behavior_review_new_prs_keyver') !== '2') {
-    clearSeen('review-new-prs')
-    setMeta('behavior_review_new_prs_keyver', '2')
-    await snapshotReviewNewPrs()
-    return
-  }
+  // keyver=3 restores one initial review per PR. Convert a complete v2 ledger
+  // in place so a PR opened during downtime is not absorbed by a deploy-time
+  // snapshot, while historical launch evidence remains available to approval.
+  migrateReviewNewPrsLedger()
 
   // First tick after boot/enable with no snapshot — take one and bail.
   if (!hasSeen('review-new-prs', REVIEW_SNAPSHOT_TARGET)) {
@@ -646,9 +678,7 @@ async function tickReviewNewPrs(): Promise<void> {
     for (const pr of prs) {
       if (!isEnabled('review-new-prs') || behaviorAborted()) return
       try {
-        const sha = await getHeadSha(pr.repo, pr.number, { signal: behaviorSignal() })
-        if (!isEnabled('review-new-prs') || behaviorAborted()) return
-        const key = `${pr.repo}#${pr.number}@${sha}`
+        const key = `${pr.repo}#${pr.number}`
         // Atomic claim: exactly one caller succeeds for any given key
         // across all concurrent runtimes. Losers skip silently.
         const claimId = claimSeenOwned('review-new-prs', key)
@@ -669,7 +699,7 @@ async function tickReviewNewPrs(): Promise<void> {
               }
               if (ch.has_change_request) {
                 completeOwnedClaim('review-new-prs', key, claimId)
-                console.log(`[behaviors] review-new-prs skipped for ${pr.repo}#${pr.number}@${sha.slice(0, 8)} — outstanding CHANGES_REQUESTED, approve-prs owns it`)
+                console.log(`[behaviors] review-new-prs skipped for ${pr.repo}#${pr.number} — outstanding CHANGES_REQUESTED, approve-prs owns it`)
                 continue
               }
             } catch (err) {
@@ -688,7 +718,7 @@ async function tickReviewNewPrs(): Promise<void> {
             releaseOwnedClaim('review-new-prs', key, claimId)
             return
           }
-          console.log(`[behaviors] review-new-prs fired for ${pr.repo}#${pr.number}@${sha.slice(0, 8)} (p=${setting})`)
+          console.log(`[behaviors] review-new-prs fired for ${pr.repo}#${pr.number} (p=${setting})`)
           // Keep one durable in-flight worker per behavior. The next target is
           // considered only after reconciliation observes completion.
           return
@@ -713,16 +743,15 @@ async function tickReviewNewPrs(): Promise<void> {
 
 // ── approve-prs implementation ──────────────────────────────────────────
 //
-// For each open PR by the configured user, ask github-interface whether
-// the review-agent's request-for-changes has been addressed since it was
-// left. If yes, kick off `agent-interface --pr-approve` so the agent
-// re-evaluates and (if happy) actually approves on GitHub.
+// For each open PR by the configured user, re-evaluate either an addressed
+// change request left by the configured review agent or a clean PR that
+// explicitly requests that identity's initial approval.
 //
-// Dedupe target is `${repo}#${num}@${latest_request_at}` — the agent
-// can leave a fresh round of change requests at any time, which bumps
-// the timestamp and re-arms the behavior. We do NOT take a snapshot on
-// enable: the user explicitly wants approval to fire for any
-// already-addressed PR right away. claimSeen prevents repeats.
+// Follow-ups dedupe by request timestamp + response count. A clean initial
+// review starts a ten-minute quiet window; later PR activity moves that window
+// forward, and the approval generation dedupes by its final anchor + head SHA.
+
+export const APPROVAL_QUIET_WINDOW_MS = 10 * 60_000
 
 interface ChangesAddressedResult {
   has_change_request: boolean
@@ -734,6 +763,66 @@ interface ChangesAddressedResult {
   // worth re-evaluating, so the dedupe key keys off the sum.
   author_commits_after_request: number
   author_inline_replies_after_request: number
+}
+
+interface ReviewActivityResult {
+  state: string
+  draft: boolean
+  headSha: string
+  reviewerRequested: boolean
+  activeChangeRequestAuthors: string[]
+  reviewerLatestState: string | null
+  reviewerLatestCommit: string | null
+  latestActivityAt: string | null
+}
+
+async function checkReviewActivity(
+  repo: string,
+  number: number,
+  reviewer: string,
+  since: string,
+): Promise<ReviewActivityResult> {
+  const [owner, name] = repo.split('/', 2)
+  if (!owner || !name) throw new Error(`invalid GitHub repository: ${repo}`)
+  const cwd = join(GH_INTERFACE_CWD_ROOT, owner, name)
+  await mkdir(cwd, { recursive: true })
+  const { stdout } = await runFile(
+    GH_INTERFACE,
+    ['--review-activity-since', `#${number}`, '--username', reviewer, '--since', since],
+    { cwd, timeoutMs: 30_000, maxOutputBytes: 4 * 1024 * 1024, signal: behaviorSignal() },
+  )
+  const data = JSON.parse(stdout.trim() || '{}')
+  if (data.action !== 'review_activity_since'
+    || typeof data.state !== 'string'
+    || typeof data.draft !== 'boolean'
+    || typeof data.reviewer_requested !== 'boolean'
+    || !Array.isArray(data.active_change_request_authors)) {
+    throw new Error('github-interface --review-activity-since returned malformed state')
+  }
+  const headSha = String(data.head_sha || '')
+  if (!/^[0-9a-fA-F]{7,64}$/.test(headSha)) {
+    throw new Error('github-interface --review-activity-since returned invalid head SHA')
+  }
+  const latestActivityAt = data.latest_activity_at === null
+    ? null
+    : String(data.latest_activity_at || '')
+  if (latestActivityAt !== null && !Number.isFinite(Date.parse(latestActivityAt))) {
+    throw new Error('github-interface --review-activity-since returned invalid activity timestamp')
+  }
+  return {
+    state: data.state,
+    draft: data.draft,
+    headSha: headSha.toLowerCase(),
+    reviewerRequested: data.reviewer_requested,
+    activeChangeRequestAuthors: data.active_change_request_authors.map(String),
+    reviewerLatestState: data.reviewer_latest_state === null
+      ? null
+      : String(data.reviewer_latest_state || ''),
+    reviewerLatestCommit: data.reviewer_latest_commit === null
+      ? null
+      : String(data.reviewer_latest_commit || '').toLowerCase(),
+    latestActivityAt,
+  }
 }
 
 async function checkChangesAddressed(repo: string, number: number, reviewer: string): Promise<ChangesAddressedResult> {
@@ -794,7 +883,7 @@ async function tickApprovePrs(): Promise<void> {
       try {
         const check = await checkChangesAddressed(pr.repo, pr.number, reviewer)
         if (!isEnabled('approve-prs')) return
-        // Trigger: reviewer has at least one CHANGES_REQUESTED review
+        // Follow-up trigger: reviewer has at least one CHANGES_REQUESTED review
         // on the PR, AND the author has engaged with it at least once
         // since — either by pushing a commit OR by replying inline
         // on a review thread. A refutation reply ("FTL is internal,
@@ -808,10 +897,44 @@ async function tickApprovePrs(): Promise<void> {
         // another CHANGES_REQUESTED (latest_request_at advances),
         // both counters reset to 0 and a fresh round begins on the
         // next author response.
-        if (!check.has_change_request) continue
-        const responses = check.author_commits_after_request + check.author_inline_replies_after_request
-        if (responses < 1) continue
-        const seenTarget = `${pr.repo}#${pr.number}@req=${check.latest_request_at}/r=${responses}`
+        let seenTarget = ''
+        let firedReason = ''
+        if (check.has_change_request) {
+          const responses = check.author_commits_after_request + check.author_inline_replies_after_request
+          if (responses < 1) continue
+          seenTarget = `${pr.repo}#${pr.number}@req=${check.latest_request_at}/r=${responses}`
+          firedReason = `req=${check.latest_request_at}, r=${responses}: ${check.author_commits_after_request}c+${check.author_inline_replies_after_request}reply`
+        } else {
+          const review = latestCleanReviewLaunch(pr.repo, pr.number)
+          if (!review) continue
+          const completedAtMs = Date.parse(review.completedAt)
+          if (!Number.isFinite(completedAtMs)) {
+            throw new Error(`invalid completed review timestamp for ${pr.repo}#${pr.number}`)
+          }
+          const activity = await checkReviewActivity(
+            pr.repo,
+            pr.number,
+            reviewer,
+            review.completedAt,
+          )
+          if (activity.state !== 'OPEN'
+            || activity.draft
+            || !activity.reviewerRequested
+            || activity.activeChangeRequestAuthors.length > 0
+            || (activity.reviewerLatestState === 'APPROVED'
+              && activity.reviewerLatestCommit === activity.headSha)) continue
+          if (activity.headSha !== review.headSha && activity.latestActivityAt === null) {
+            throw new Error(`head changed without an activity watermark for ${pr.repo}#${pr.number}`)
+          }
+          const latestActivityAtMs = activity.latestActivityAt === null
+            ? completedAtMs
+            : Date.parse(activity.latestActivityAt)
+          const quietAnchorMs = Math.max(completedAtMs, latestActivityAtMs)
+          if (Date.now() - quietAnchorMs < APPROVAL_QUIET_WINDOW_MS) continue
+          const quietAnchor = new Date(quietAnchorMs).toISOString()
+          seenTarget = `${pr.repo}#${pr.number}@quiet=${quietAnchor}/head=${activity.headSha}`
+          firedReason = `clean review ${review.callId.slice(0, 8)}, quiet since ${quietAnchor}, head=${activity.headSha.slice(0, 8)}`
+        }
         const claimId = claimSeenOwned('approve-prs', seenTarget)
         if (!claimId) continue
         trackClaim('approve-prs', seenTarget, claimId)
@@ -825,7 +948,7 @@ async function tickApprovePrs(): Promise<void> {
           releaseOwnedClaim('approve-prs', seenTarget, claimId)
           throw err
         }
-        console.log(`[behaviors] approve-prs fired for ${pr.repo}#${pr.number} (req=${check.latest_request_at}, r=${responses}: ${check.author_commits_after_request}c+${check.author_inline_replies_after_request}reply)`)
+        console.log(`[behaviors] approve-prs fired for ${pr.repo}#${pr.number} (${firedReason})`)
         return
       } catch (err) {
         if (behaviorAborted()) return
@@ -1213,6 +1336,7 @@ export function startBehaviorsRuntime(config: BehaviorsRuntimeConfig = {}): void
   if (isEnabled('review-new-prs')) {
     void runBehaviorCycle('review-new-prs', async () => {
       return await withBehaviorProcessLock('review-new-prs', async () => {
+        migrateReviewNewPrsLedger()
         if (!hasSeen('review-new-prs', REVIEW_SNAPSHOT_TARGET)) {
           await snapshotReviewNewPrs()
         }

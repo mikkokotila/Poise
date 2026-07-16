@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
   runFile: vi.fn(),
   spawnDetached: vi.fn(),
-  getHeadSha: vi.fn(),
   authStatus: 'authenticated',
   requireAuth: vi.fn(),
   observeAuthFailure: vi.fn(),
@@ -24,7 +23,6 @@ vi.mock('../server/process', () => ({
     CLAUDE_CLI: '/poise/claude-subscription',
   }),
 }))
-vi.mock('../server/gh', () => ({ getHeadSha: mocks.getHeadSha }))
 vi.mock('../server/claude-auth', () => ({
   claudeAuth: {
     snapshot: () => ({ status: mocks.authStatus }),
@@ -78,7 +76,22 @@ async function restartModules() {
   return loadModules()
 }
 
-function arrangeCli(changesAddressed = false, failCheckout = false): void {
+interface ReviewActivityFixture {
+  requestedReviewers?: string[]
+  activeChangeRequestAuthors?: string[]
+  headSha?: string
+  state?: string
+  draft?: boolean
+  latestActivityAt?: string | null
+  reviewerLatestState?: string | null
+  reviewerLatestCommit?: string | null
+}
+
+function arrangeCli(
+  changesAddressed = false,
+  failCheckout = false,
+  reviewActivity: ReviewActivityFixture = {},
+): void {
   mocks.runFile.mockImplementation(async (command: string, args: string[]) => {
     if (command === 'github-datastore') {
       return { stdout: JSON.stringify(listedPrs), stderr: '' }
@@ -94,6 +107,25 @@ function arrangeCli(changesAddressed = false, failCheckout = false): void {
           latest_request_at: '2026-07-10T10:00:00Z',
           author_commits_after_request: changesAddressed ? 1 : 0,
           author_inline_replies_after_request: 0,
+        }),
+        stderr: '',
+      }
+    }
+    if (command === 'github-interface' && args[0] === '--review-activity-since') {
+      const reviewer = args[args.indexOf('--username') + 1].toLowerCase()
+      const requested = (reviewActivity.requestedReviewers || [])
+        .some((login) => login.toLowerCase() === reviewer)
+      return {
+        stdout: JSON.stringify({
+          action: 'review_activity_since',
+          state: reviewActivity.state ?? 'OPEN',
+          draft: reviewActivity.draft ?? false,
+          head_sha: reviewActivity.headSha ?? 'abc1234',
+          reviewer_requested: requested,
+          active_change_request_authors: reviewActivity.activeChangeRequestAuthors ?? [],
+          reviewer_latest_state: reviewActivity.reviewerLatestState ?? null,
+          reviewer_latest_commit: reviewActivity.reviewerLatestCommit ?? null,
+          latest_activity_at: reviewActivity.latestActivityAt ?? null,
         }),
         stderr: '',
       }
@@ -121,17 +153,55 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
+function recordCompletedInitialReview(
+  db: typeof import('../server/db'),
+  options: {
+    target?: string
+    completedAt?: string
+    headSha?: string
+    outcome?: 'clean' | 'changes_requested'
+    callId?: string
+  } = {},
+): void {
+  const target = options.target ?? `${pr.repo}#${pr.number}`
+  const claimId = db.claimSeenOwned('review-new-prs', target)
+  if (!claimId) throw new Error('could not arrange initial review claim')
+  const marked = db.markBehaviorLaunchIntentOwned({
+    key: 'review-new-prs',
+    target,
+    claimId,
+    launchBehavior: 'pr_review',
+    repo: pr.repo,
+    pr: pr.number,
+    requestedAt: new Date().toISOString(),
+  })
+  const callId = options.callId ?? 'c'.repeat(32)
+  const linked = db.linkBehaviorLaunchCallOwned('review-new-prs', target, claimId, callId)
+  const completed = db.completeReviewLaunchOwned({
+    key: 'review-new-prs',
+    target,
+    claimId,
+    outcome: options.outcome ?? 'clean',
+    completedAt: options.completedAt
+      ?? new Date(Date.now() - (10 * 60_000) - 1).toISOString(),
+    headSha: options.headSha ?? 'abc1234',
+  })
+  if (!marked || !linked || !completed) {
+    throw new Error('could not arrange completed initial review')
+  }
+}
+
 async function launchReviewBeforeCrash() {
   arrangeCli(false)
   mocks.spawnDetached.mockResolvedValue(undefined)
   const loaded = await loadModules()
   loaded.database.setMeta('me', 'poise-user')
-  loaded.database.setMeta('behavior_review_new_prs_keyver', '2')
+  loaded.database.setMeta('behavior_review_new_prs_keyver', '3')
   loaded.database.setMeta('behavior_review_new_prs_enabled', '1')
-  loaded.database.recordSeen('review-new-prs', '__snapshot_v2__')
+  loaded.database.recordSeen('review-new-prs', '__snapshot_v3__')
   await loaded.behaviors.runEnabledBehaviorsOnce()
 
-  const target = `${pr.repo}#${pr.number}@abc123`
+  const target = `${pr.repo}#${pr.number}`
   const requestedAt = new Date(Date.now() - 10_000).toISOString()
   loaded.database.db.prepare(`
     UPDATE behavior_seen SET launch_requested_at = ?, lease_until = ?
@@ -162,7 +232,6 @@ beforeEach(async () => {
   tempRoot = await mkdtemp(join(tmpdir(), 'poise-behavior-test-'))
   mocks.runFile.mockReset()
   mocks.spawnDetached.mockReset()
-  mocks.getHeadSha.mockReset().mockResolvedValue('abc123')
   mocks.authStatus = 'authenticated'
   mocks.requireAuth.mockReset().mockImplementation(() => {
     if (mocks.authStatus !== 'authenticated') throw new Error('Claude authentication required')
@@ -192,14 +261,13 @@ describe('behavior launch claims', () => {
     mocks.spawnDetached.mockResolvedValue(undefined)
     const { database: db, behaviors: runtime } = await loadModules()
     db.setMeta('me', 'poise-user')
-    db.setMeta('behavior_review_new_prs_keyver', '2')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
     db.setMeta('behavior_review_new_prs_enabled', '1')
-    db.recordSeen('review-new-prs', '__snapshot_v2__')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
 
     mocks.authStatus = 'reauth_required'
     await runtime.runEnabledBehaviorsOnce()
     expect(mocks.runFile).not.toHaveBeenCalled()
-    expect(mocks.getHeadSha).not.toHaveBeenCalled()
     expect(mocks.spawnDetached).not.toHaveBeenCalled()
 
     mocks.authStatus = 'authenticated'
@@ -225,14 +293,234 @@ describe('behavior launch claims', () => {
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
   })
 
+  it('approves a requested clean review after ten quiet minutes without a CI gate', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
+    const completedAt = '2026-07-15T11:49:59.000Z'
+    arrangeCli(false, false, {
+      requestedReviewers: ['other-reviewer', 'REVIEW-BOT'],
+      headSha: 'def4567',
+    })
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_approve_prs_enabled', '1')
+    recordCompletedInitialReview(db, { completedAt, headSha: 'def4567' })
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).toHaveBeenCalledWith(
+      'agent-interface',
+      expect.arrayContaining(['--pr-approve', `#${pr.number}`]),
+      expect.any(Object),
+    )
+    expect(mocks.runFile).toHaveBeenCalledWith(
+      'github-interface',
+      ['--review-activity-since', `#${pr.number}`, '--username', 'review-bot', '--since', completedAt],
+      expect.objectContaining({ cwd: expect.stringContaining('Vaquum/poise-test') }),
+    )
+    expect(mocks.runFile.mock.calls.some(([command]) => command === 'gh')).toBe(false)
+
+    const onExit = (mocks.spawnDetached.mock.calls[0][2] as {
+      onExit: (result: { code: number | null, signal: NodeJS.Signals | null }) => void
+    }).onExit
+    onExit({ code: 0, signal: null })
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(db.claimSeen(
+      'approve-prs',
+      `${pr.repo}#${pr.number}@quiet=2026-07-15T11:49:59.000Z/head=def4567`,
+    )).toBe(false)
+  })
+
+  it('moves the quiet window forward when new PR activity appears', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
+    const activity: ReviewActivityFixture = {
+      requestedReviewers: ['review-bot'],
+      latestActivityAt: '2026-07-15T11:55:00.000Z',
+    }
+    arrangeCli(false, false, activity)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_approve_prs_enabled', '1')
+    recordCompletedInitialReview(db, { completedAt: '2026-07-15T11:40:00.000Z' })
+
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+
+    vi.setSystemTime(new Date('2026-07-15T12:05:00.000Z'))
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+  })
+
+  it('waits ten minutes after another reviewer dismisses a change request', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
+    const activity: ReviewActivityFixture = {
+      requestedReviewers: ['review-bot'],
+      activeChangeRequestAuthors: ['zero-bang'],
+      latestActivityAt: '2026-07-15T11:45:00.000Z',
+    }
+    arrangeCli(false, false, activity)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_approve_prs_enabled', '1')
+    recordCompletedInitialReview(db, { completedAt: '2026-07-15T11:40:00.000Z' })
+
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+
+    activity.activeChangeRequestAuthors = []
+    activity.latestActivityAt = '2026-07-15T12:00:00.000Z'
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+
+    vi.setSystemTime(new Date('2026-07-15T12:10:00.000Z'))
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+  })
+
+  it('requires the configured request on an open non-draft PR', async () => {
+    const activity: ReviewActivityFixture = {
+      requestedReviewers: ['other-reviewer'],
+    }
+    arrangeCli(false, false, activity)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_approve_prs_enabled', '1')
+    recordCompletedInitialReview(db)
+
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+
+    activity.requestedReviewers = ['review-bot']
+    activity.draft = true
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+
+    activity.draft = false
+    activity.state = 'CLOSED'
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+
+    activity.state = 'OPEN'
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+  })
+
+  it('does not treat a changes-requested review outcome as clean', async () => {
+    arrangeCli(false, false, { requestedReviewers: ['review-bot'] })
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_approve_prs_enabled', '1')
+    recordCompletedInitialReview(db, { outcome: 'changes_requested' })
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+    expect(mocks.runFile.mock.calls.some(
+      ([command, args]) => command === 'github-interface'
+        && args[0] === '--review-activity-since',
+    )).toBe(false)
+  })
+
+  it('never overlaps initial review and approval for the same PR', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-15T11:40:00.000Z'))
+    arrangeCli(false, false, { requestedReviewers: ['review-bot'] })
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
+    db.setMeta('behavior_review_new_prs_enabled', '1')
+    db.setMeta('behavior_approve_prs_enabled', '1')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(mocks.spawnDetached.mock.calls[0][1]).toContain('--pr-review')
+    expect(mocks.runFile.mock.calls.some(
+      ([command, args]) => command === 'github-interface'
+        && args[0] === '--review-activity-since',
+    )).toBe(false)
+
+    const reviewRow = db.db.prepare(`
+      SELECT launch_requested_at FROM behavior_seen
+      WHERE key = 'review-new-prs' AND target = ?
+    `).get(`${pr.repo}#${pr.number}`) as { launch_requested_at: string }
+    const reviewExit = (mocks.spawnDetached.mock.calls[0][2] as {
+      onExit: (result: { code: number | null, signal: NodeJS.Signals | null }) => void
+    }).onExit
+    reviewExit({ code: 0, signal: null })
+    agentLogs = [{
+      id: 'd'.repeat(32),
+      behavior: 'pr_review',
+      repo: pr.repo,
+      pr_id: String(pr.number),
+      started_at: reviewRow.launch_requested_at,
+      started_at_precise: new Date(Date.parse(reviewRow.launch_requested_at) + 1).toISOString(),
+      completed_at: '2026-07-15T11:45:00.000Z',
+      status: 'completed',
+      outcome: 'clean',
+      head_sha: 'abc1234',
+    }]
+    vi.setSystemTime(new Date('2026-07-15T11:45:00.000Z'))
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+
+    vi.setSystemTime(new Date('2026-07-15T11:55:00.000Z'))
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+    expect(mocks.spawnDetached.mock.calls[1][1]).toContain('--pr-approve')
+  })
+
+  it('does not infer a clean outcome from a legacy process exit', async () => {
+    arrangeCli(false, false, { requestedReviewers: ['review-bot'] })
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_approve_prs_enabled', '1')
+    const target = `${pr.repo}#${pr.number}@legacy-head`
+    const claimId = db.claimSeenOwned('review-new-prs', target)!
+    db.markBehaviorLaunchIntentOwned({
+      key: 'review-new-prs',
+      target,
+      claimId,
+      launchBehavior: 'pr_review',
+      repo: pr.repo,
+      pr: pr.number,
+      requestedAt: new Date(Date.now() - 20 * 60_000).toISOString(),
+    })
+    db.completeSeenOwned('review-new-prs', target, claimId)
+
+    await runtime.setEnabled('review-new-prs', false)
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+  })
+
   it('coalesces sibling-process lock contention without opening a breaker', async () => {
     arrangeCli(false)
     mocks.spawnDetached.mockResolvedValue(undefined)
     const { database: db, behaviors: runtime } = await loadModules()
     db.setMeta('me', 'poise-user')
-    db.setMeta('behavior_review_new_prs_keyver', '2')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
     db.setMeta('behavior_review_new_prs_enabled', '1')
-    db.recordSeen('review-new-prs', '__snapshot_v2__')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
     mocks.lockContention = true
 
     await runtime.runEnabledBehaviorsOnce()
@@ -250,9 +538,9 @@ describe('behavior launch claims', () => {
     mocks.spawnDetached.mockResolvedValue(undefined)
     const { database: db, behaviors: runtime } = await loadModules()
     db.setMeta('me', 'poise-user')
-    db.setMeta('behavior_review_new_prs_keyver', '2')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
     db.setMeta('behavior_review_new_prs_enabled', '1')
-    db.recordSeen('review-new-prs', '__snapshot_v2__')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
     mocks.requireAuth.mockImplementation((options?: { liveWithinMs?: number }) => {
       if (options?.liveWithinMs === 60_000) {
         mocks.authStatus = 'degraded'
@@ -278,9 +566,9 @@ describe('behavior launch claims', () => {
     mocks.spawnDetached.mockResolvedValue(undefined)
     const { database: db, behaviors: runtime } = await loadModules()
     db.setMeta('me', 'poise-user')
-    db.setMeta('behavior_review_new_prs_keyver', '2')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
     db.setMeta('behavior_review_new_prs_enabled', '1')
-    db.recordSeen('review-new-prs', '__snapshot_v2__')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
 
     await runtime.runEnabledBehaviorsOnce()
     await runtime.runEnabledBehaviorsOnce()
@@ -314,37 +602,62 @@ describe('behavior launch claims', () => {
     arrangeCli(false)
     const { database: db, behaviors: runtime } = await loadModules()
     db.setMeta('me', 'poise-user')
-    db.setMeta('behavior_review_new_prs_keyver', '2')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
     db.setMeta('behavior_review_new_prs_enabled', '1')
-    db.recordSeen('review-new-prs', '__snapshot_v2__')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
     mocks.authStatus = 'reauth_required'
 
     runtime.startBehaviorsRuntime()
     await runtime.runEnabledBehaviorsOnce()
-    expect(mocks.getHeadSha).not.toHaveBeenCalled()
+    expect(mocks.runFile).not.toHaveBeenCalled()
 
     mocks.authStatus = 'authenticated'
     await runtime.runEnabledBehaviorsOnce()
 
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
-    expect(db.claimSeen('review-new-prs', `${pr.repo}#${pr.number}@abc123`)).toBe(false)
+    expect(db.claimSeen('review-new-prs', `${pr.repo}#${pr.number}`)).toBe(false)
+  })
+
+  it('migrates v2 in place and reviews a PR first seen during downtime', async () => {
+    const downtimePr = {
+      repo: 'Vaquum/downtime-test',
+      number: 18,
+      url: 'https://github.com/Vaquum/downtime-test/pull/18',
+    }
+    listedPrs = [pr, downtimePr]
+    arrangeCli(false)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_review_new_prs_keyver', '2')
+    db.setMeta('behavior_review_new_prs_enabled', '1')
+    db.recordSeen('review-new-prs', `${pr.repo}#${pr.number}@legacy-head`)
+    db.recordSeen('review-new-prs', '__snapshot_v2__')
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(db.getMeta('behavior_review_new_prs_keyver')).toBe('3')
+    expect(db.hasSeen('review-new-prs', '__snapshot_v3__')).toBe(true)
+    expect(db.hasSeen('review-new-prs', `${pr.repo}#${pr.number}`)).toBe(true)
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(mocks.spawnDetached.mock.calls[0][1]).toContain(`#${downtimePr.number}`)
   })
 
   it('takes the anti-flood snapshot only when the startup ledger is missing', async () => {
     arrangeCli(false)
     const { database: db, behaviors: runtime } = await loadModules()
     db.setMeta('me', 'poise-user')
-    db.setMeta('behavior_review_new_prs_keyver', '2')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
     db.setMeta('behavior_review_new_prs_enabled', '1')
     mocks.authStatus = 'reauth_required'
 
     runtime.startBehaviorsRuntime()
-    await vi.waitFor(() => expect(mocks.getHeadSha).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(db.hasSeen('review-new-prs', '__snapshot_v3__')).toBe(true))
     mocks.authStatus = 'authenticated'
     await runtime.runEnabledBehaviorsOnce()
 
     expect(mocks.spawnDetached).not.toHaveBeenCalled()
-    expect(db.claimSeen('review-new-prs', `${pr.repo}#${pr.number}@abc123`)).toBe(false)
+    expect(db.claimSeen('review-new-prs', `${pr.repo}#${pr.number}`)).toBe(false)
   })
 
   it('rearms the scheduler while a behavior scan is still busy', async () => {
@@ -455,14 +768,14 @@ describe('behavior launch claims', () => {
     mocks.spawnDetached.mockRejectedValue(new Error('missing agent-interface'))
     const { database: db, behaviors: runtime } = await loadModules()
     db.setMeta('me', 'poise-user')
-    db.setMeta('behavior_review_new_prs_keyver', '2')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
     db.setMeta('behavior_review_new_prs_enabled', '1')
-    db.recordSeen('review-new-prs', '__snapshot_v2__')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
 
     await runtime.runEnabledBehaviorsOnce()
 
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
-    expect(db.claimSeen('review-new-prs', `${pr.repo}#${pr.number}@abc123`)).toBe(true)
+    expect(db.claimSeen('review-new-prs', `${pr.repo}#${pr.number}`)).toBe(true)
   })
 
   it('retains the claim for an intentional review skip', async () => {
@@ -470,14 +783,14 @@ describe('behavior launch claims', () => {
     const { database: db, behaviors: runtime } = await loadModules()
     runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
     db.setMeta('me', 'poise-user')
-    db.setMeta('behavior_review_new_prs_keyver', '2')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
     db.setMeta('behavior_review_new_prs_enabled', '1')
-    db.recordSeen('review-new-prs', '__snapshot_v2__')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
 
     await runtime.runEnabledBehaviorsOnce()
 
     expect(mocks.spawnDetached).not.toHaveBeenCalled()
-    expect(db.claimSeen('review-new-prs', `${pr.repo}#${pr.number}@abc123`)).toBe(false)
+    expect(db.claimSeen('review-new-prs', `${pr.repo}#${pr.number}`)).toBe(false)
   })
 
   it('releases a review claim when an accepted worker later exits non-zero', async () => {
@@ -487,13 +800,13 @@ describe('behavior launch claims', () => {
     mocks.spawnDetached.mockResolvedValue(undefined)
     const { database: db, behaviors: runtime } = await loadModules()
     db.setMeta('me', 'poise-user')
-    db.setMeta('behavior_review_new_prs_keyver', '2')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
     db.setMeta('behavior_review_new_prs_enabled', '1')
-    db.recordSeen('review-new-prs', '__snapshot_v2__')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
 
     await runtime.runEnabledBehaviorsOnce()
 
-    const target = `${pr.repo}#${pr.number}@abc123`
+    const target = `${pr.repo}#${pr.number}`
     expect(db.claimSeen('review-new-prs', target)).toBe(false)
     const options = mocks.spawnDetached.mock.calls[0][2] as {
       onExit: (result: { code: number | null, signal: NodeJS.Signals | null }) => void
@@ -548,13 +861,13 @@ describe('behavior launch claims', () => {
     mocks.spawnDetached.mockResolvedValue(undefined)
     const { database: db, behaviors: runtime } = await loadModules()
     db.setMeta('me', 'poise-user')
-    db.setMeta('behavior_review_new_prs_keyver', '2')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
     db.setMeta('behavior_review_new_prs_enabled', '1')
-    db.recordSeen('review-new-prs', '__snapshot_v2__')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
 
     await runtime.runEnabledBehaviorsOnce()
 
-    const target = `${pr.repo}#${pr.number}@abc123`
+    const target = `${pr.repo}#${pr.number}`
     const oldExit = (mocks.spawnDetached.mock.calls[0][2] as {
       onExit: (result: { code: number | null, signal: NodeJS.Signals | null }) => void
     }).onExit
@@ -573,19 +886,21 @@ describe('behavior launch claims', () => {
     mocks.spawnDetached.mockResolvedValue(undefined)
     const { database: db, behaviors: runtime } = await loadModules()
     db.setMeta('me', 'poise-user')
-    db.setMeta('behavior_review_new_prs_keyver', '2')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
     db.setMeta('behavior_review_new_prs_enabled', '1')
-    db.recordSeen('review-new-prs', '__snapshot_v2__')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
 
     await runtime.runEnabledBehaviorsOnce()
 
-    const target = `${pr.repo}#${pr.number}@abc123`
+    const target = `${pr.repo}#${pr.number}`
     const onExit = (mocks.spawnDetached.mock.calls[0][2] as {
       onExit: (result: { code: number | null, signal: NodeJS.Signals | null }) => void
     }).onExit
     onExit({ code: 0, signal: null })
 
     expect(db.claimSeenOwned('review-new-prs', target, 1)).toBeNull()
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
   })
 
   it('releases an approval claim when pre-launch work fails', async () => {
@@ -607,10 +922,10 @@ describe('behavior launch claims', () => {
     mocks.spawnDetached.mockResolvedValue(undefined)
     const { database: db, behaviors: runtime } = await loadModules()
     db.setMeta('me', 'poise-user')
-    db.setMeta('behavior_review_new_prs_keyver', '2')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
 
     await runtime.setEnabled('review-new-prs', true)
-    expect(db.hasSeen('review-new-prs', '__snapshot_v2__')).toBe(true)
+    expect(db.hasSeen('review-new-prs', '__snapshot_v3__')).toBe(true)
 
     arrangeCli(false)
     await runtime.runEnabledBehaviorsOnce()
@@ -618,36 +933,23 @@ describe('behavior launch claims', () => {
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
   })
 
-  it('retries a partial snapshot without firing the missing existing PR', async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
+  it('snapshots every existing PR without per-head source calls', async () => {
     const secondPr = {
       repo: 'Vaquum/second-test',
       number: 18,
       url: 'https://github.com/Vaquum/second-test/pull/18',
     }
     mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([pr, secondPr]), stderr: '' })
-    mocks.getHeadSha
-      .mockResolvedValueOnce('abc123')
-      .mockRejectedValueOnce(new Error('temporary lookup failure'))
-      .mockResolvedValueOnce('abc123')
-      .mockResolvedValueOnce('def456')
     const { database: db, behaviors: runtime } = await loadModules()
     db.setMeta('me', 'poise-user')
-    db.setMeta('behavior_review_new_prs_keyver', '2')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
 
     await runtime.setEnabled('review-new-prs', true)
-    expect(db.hasSeen('review-new-prs', '__snapshot_v2__')).toBe(false)
-
-    await runtime.runEnabledBehaviorsOnce()
-    expect(db.hasSeen('review-new-prs', '__snapshot_v2__')).toBe(false)
-
-    vi.setSystemTime(new Date(Date.now() + runtime.BEHAVIOR_RETRY_BASE_MS))
-    await runtime.runEnabledBehaviorsOnce()
-
-    expect(db.hasSeen('review-new-prs', '__snapshot_v2__')).toBe(true)
+    expect(db.hasSeen('review-new-prs', '__snapshot_v3__')).toBe(true)
     expect(mocks.spawnDetached).not.toHaveBeenCalled()
-    expect(db.claimSeen('review-new-prs', `${secondPr.repo}#${secondPr.number}@def456`)).toBe(false)
+    expect(db.claimSeen('review-new-prs', `${pr.repo}#${pr.number}`)).toBe(false)
+    expect(db.claimSeen('review-new-prs', `${secondPr.repo}#${secondPr.number}`)).toBe(false)
+    expect(mocks.runFile).toHaveBeenCalledOnce()
   })
 
   it('links a unique running review call after restart and renews without duplicate launch', async () => {
@@ -833,29 +1135,31 @@ describe('behavior launch claims', () => {
   })
 
   it('waits for an in-flight tick to stop before acknowledging disable', async () => {
-    arrangeCli(false)
-    const head = deferred<string>()
-    mocks.getHeadSha.mockReturnValue(head.promise)
+    const scan = deferred<{ stdout: string, stderr: string }>()
+    mocks.runFile.mockImplementation((command: string, args: string[]) => {
+      if (command === 'github-datastore') return scan.promise
+      throw new Error(`unexpected CLI call: ${command} ${args.join(' ')}`)
+    })
     const { database: db, behaviors: runtime } = await loadModules()
     db.setMeta('me', 'poise-user')
-    db.setMeta('behavior_review_new_prs_keyver', '2')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
     db.setMeta('behavior_review_new_prs_enabled', '1')
-    db.recordSeen('review-new-prs', '__snapshot_v2__')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
 
     const tick = runtime.runEnabledBehaviorsOnce()
-    await vi.waitFor(() => expect(mocks.getHeadSha).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(mocks.runFile).toHaveBeenCalledOnce())
     const disable = runtime.setEnabled('review-new-prs', false)
     let disabled = false
     void disable.then(() => { disabled = true })
     await Promise.resolve()
     expect(disabled).toBe(false)
 
-    head.resolve('abc123')
+    scan.resolve({ stdout: JSON.stringify(listedPrs), stderr: '' })
     await Promise.all([tick, disable])
 
     expect(mocks.spawnDetached).not.toHaveBeenCalled()
     expect(runtime.isEnabled('review-new-prs')).toBe(false)
-    expect(db.hasSeen('review-new-prs', '__snapshot_v2__')).toBe(false)
+    expect(db.hasSeen('review-new-prs', '__snapshot_v3__')).toBe(false)
   })
 
   it('does not launch after disable during the final auth gate', async () => {
@@ -867,9 +1171,9 @@ describe('behavior launch claims', () => {
       .mockReturnValueOnce(finalGate.promise)
     const { database: db, behaviors: runtime } = await loadModules()
     db.setMeta('me', 'poise-user')
-    db.setMeta('behavior_review_new_prs_keyver', '2')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
     db.setMeta('behavior_review_new_prs_enabled', '1')
-    db.recordSeen('review-new-prs', '__snapshot_v2__')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
 
     const tick = runtime.runEnabledBehaviorsOnce()
     await vi.waitFor(() => expect(mocks.requireAuth).toHaveBeenCalledTimes(2))
