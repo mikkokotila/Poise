@@ -882,22 +882,14 @@ describe('behavior launch claims', () => {
     runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
 
     try {
-      for (let i = 0; i < 10 && mocks.runFile.mock.calls.length === 0; i += 1) {
-        await vi.advanceTimersToNextTimerAsync()
-      }
-      expect(mocks.runFile).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(runtime.BEHAVIOR_TICK_MS)
+      await vi.waitFor(() => expect(mocks.runFile).toHaveBeenCalledTimes(2))
       const firstTick = runtime.getBehaviorsRuntimeHealth().lastTickAt
       expect(runtime.getBehaviorsRuntimeHealth().busy).toEqual([
         expect.objectContaining({ behavior: 'resolve-unblocking' }),
       ])
 
-      for (
-        let i = 0;
-        i < 10 && runtime.getBehaviorsRuntimeHealth().lastTickAt === firstTick;
-        i += 1
-      ) {
-        await vi.advanceTimersToNextTimerAsync()
-      }
+      await vi.advanceTimersByTimeAsync(runtime.BEHAVIOR_TICK_MS)
       expect(runtime.getBehaviorsRuntimeHealth().lastTickAt).not.toBe(firstTick)
       expect(mocks.runFile).toHaveBeenCalledTimes(2)
       await vi.advanceTimersByTimeAsync(1)
