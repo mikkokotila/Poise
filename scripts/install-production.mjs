@@ -258,6 +258,44 @@ async function bootout(label) {
   }
 }
 
+function delay(ms) {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms))
+}
+
+async function bootstrap(path) {
+  let lastError
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    try {
+      await run('/bin/launchctl', ['bootstrap', domain, path], { capture: true })
+      return
+    } catch (error) {
+      // bootout returns before launchd has always finished tearing down the
+      // old job. Only bootstrap's own success is authoritative: `print` can
+      // briefly expose that stale, unloading registration.
+      lastError = error
+      if (attempt < 15) await delay(Math.min(250 * (2 ** attempt), 2_000))
+    }
+  }
+  throw lastError
+}
+
+async function waitForHealthyProduction() {
+  const url = `http://127.0.0.1:${process.env.POISE_PORT || '5555'}/api/health`
+  let lastError = 'service did not respond'
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(2_000) })
+      const body = await response.json()
+      if (response.ok && body?.status === 'ok') return
+      lastError = `health returned HTTP ${response.status}`
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error)
+    }
+    if (attempt < 29) await delay(1_000)
+  }
+  throw new Error(`Production service did not become healthy: ${lastError}`)
+}
+
 async function main() {
   if (process.platform !== 'darwin') {
     throw new Error('The supervised production installer currently supports macOS launchd')
@@ -348,12 +386,11 @@ async function main() {
   ])
   await bootout(monitorLabel)
   await bootout(serviceLabel)
-  await run('/bin/launchctl', ['bootstrap', domain, servicePlist])
   await run('/bin/launchctl', ['enable', `${domain}/${serviceLabel}`])
-  await run('/bin/launchctl', ['kickstart', '-k', `${domain}/${serviceLabel}`])
-  await run('/bin/launchctl', ['bootstrap', domain, monitorPlist])
   await run('/bin/launchctl', ['enable', `${domain}/${monitorLabel}`])
-  await run('/bin/launchctl', ['kickstart', '-k', `${domain}/${monitorLabel}`])
+  await bootstrap(servicePlist)
+  await bootstrap(monitorPlist)
+  await waitForHealthyProduction()
   console.log(`Installed ${serviceLabel} with Caller ${manifest.commit}`)
 }
 
