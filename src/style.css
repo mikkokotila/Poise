@@ -2649,6 +2649,17 @@ tr:hover .replay-btn { opacity: 1; }
 .col-last       { width: 130px; }
 .col-active     { width: 120px; }
 
+.behavior-diagnostics {
+  margin: var(--sp-4) var(--sp-6);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--danger-border, #8b3a3a);
+  border-radius: var(--radius-sm);
+  color: var(--danger, #d86b6b);
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
 /* The universal `td:nth-last-child(2) { text-align: right }` rule is
    meant for Archive's "Updated" column — it shouldn't apply here.
    Force-left for behaviors' nth-last-child(2) cell (Last triggered)

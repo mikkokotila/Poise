@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { createServer as createHttpServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -108,8 +108,39 @@ describe('production server', () => {
         busy: [],
         failures: [],
       },
+      claudeAuth: {
+        status: 'authenticated',
+        authMethod: 'claude.ai',
+        subscriptionType: 'max',
+      },
+      callerRelease: {
+        status: 'unmanaged',
+        required: false,
+        expectedCommit: '4a7dde6f1e60d33ef6a919b6f1e3a4c768b85520',
+      },
     })
     expect((await fetch(`${baseUrl}/api/unknown`)).status).toBe(404)
+  })
+
+  it('returns 503 when Claude-backed behavior work is enabled without authentication', async () => {
+    const { setMeta } = await import('../server/db')
+    setMeta('behavior_review_new_prs_enabled', '1')
+    auth.setStatus('reauth_required')
+    try {
+      const health = await fetch(`${baseUrl}/api/health`)
+      expect(health.status).toBe(503)
+      await expect(health.json()).resolves.toMatchObject({
+        status: 'degraded',
+        scheduler: { status: 'ok' },
+        claudeAuth: {
+          status: 'reauth_required',
+          reason: 'Claude subscription sign-in is required.',
+        },
+      })
+    } finally {
+      setMeta('behavior_review_new_prs_enabled', '0')
+      auth.setStatus('authenticated')
+    }
   })
 
   it('returns 503 while an enabled behavior is backing off after failure', async () => {
@@ -253,6 +284,11 @@ describe('production server', () => {
     await expect(production.startProductionServer({ staticDir, port })).rejects.toThrow(/POISE_PORT/)
   })
 
+  it('fails closed when production has no pinned Caller release', async () => {
+    await expect(production.startProductionServer({ staticDir, port: 5556 }))
+      .rejects.toThrow(/POISE_ENFORCE_CALLER_RELEASE/)
+  })
+
   it('validates Confab URLs before creating or starting a server', async () => {
     expect(() => production.createProductionServer({
       staticDir,
@@ -270,6 +306,30 @@ describe('production server', () => {
     await new Promise<void>((resolve) => blocker.listen(0, '127.0.0.1', resolve))
     const address = blocker.address()
     if (!address || typeof address === 'string') throw new Error('blocker did not bind')
+    const releaseRoot = join(root, 'caller-release')
+    const binRoot = join(releaseRoot, 'venv', 'bin')
+    const agentRoot = join(releaseRoot, 'source', 'agent_interface')
+    await mkdir(binRoot, { recursive: true })
+    await mkdir(agentRoot, { recursive: true })
+    for (const command of ['agent-interface', 'github-datastore', 'github-interface']) {
+      const path = join(binRoot, command)
+      await writeFile(path, '#!/bin/sh\nexit 0\n')
+      await chmod(path, 0o700)
+    }
+    await writeFile(join(releaseRoot, 'release.json'), JSON.stringify({
+      repository: 'mikkokotila/caller',
+      commit: '4a7dde6f1e60d33ef6a919b6f1e3a4c768b85520',
+      packages: {
+        'agent-interface': '0.2.0',
+        'github-datastore': '0.2.0',
+        'github-interface': '0.2.0',
+      },
+    }))
+    process.env.POISE_ENFORCE_CALLER_RELEASE = '1'
+    process.env.CALLER_RELEASE_SHA = '4a7dde6f1e60d33ef6a919b6f1e3a4c768b85520'
+    process.env.CALLER_RELEASE_ROOT = releaseRoot
+    process.env.CALLER_BIN_ROOT = binRoot
+    process.env.AGENT_INTERFACE_ROOT = agentRoot
 
     const { stopBehaviorsRuntime } = await import('../server/behaviors')
     await stopBehaviorsRuntime()
@@ -282,6 +342,13 @@ describe('production server', () => {
     } finally {
       vi.useRealTimers()
       await new Promise<void>((resolve) => blocker.close(() => resolve()))
+      for (const key of [
+        'POISE_ENFORCE_CALLER_RELEASE',
+        'CALLER_RELEASE_SHA',
+        'CALLER_RELEASE_ROOT',
+        'CALLER_BIN_ROOT',
+      ]) delete process.env[key]
+      process.env.AGENT_INTERFACE_ROOT = join(root, 'agent')
     }
   })
 })

@@ -77,7 +77,26 @@ db.exec(`
     launch_outcome TEXT,
     launch_completed_at TEXT,
     launch_head_sha TEXT,
+    launch_expected_head TEXT,
+    launch_actor TEXT,
+    launch_source TEXT,
+    launch_correlation_id TEXT,
+    launch_action TEXT,
     PRIMARY KEY (key, target)
+  );
+
+  CREATE TABLE IF NOT EXISTS behavior_dead_letters (
+    id TEXT PRIMARY KEY,
+    behavior TEXT NOT NULL,
+    target TEXT NOT NULL,
+    repo TEXT,
+    pr INTEGER,
+    actor TEXT,
+    source TEXT,
+    correlation_id TEXT,
+    call_id TEXT,
+    error TEXT NOT NULL,
+    created_at TEXT NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS content_jobs (
@@ -179,6 +198,11 @@ const migrateSchema = db.transaction(() => {
   ensureColumn('behavior_seen', 'launch_outcome', 'launch_outcome TEXT')
   ensureColumn('behavior_seen', 'launch_completed_at', 'launch_completed_at TEXT')
   ensureColumn('behavior_seen', 'launch_head_sha', 'launch_head_sha TEXT')
+  ensureColumn('behavior_seen', 'launch_expected_head', 'launch_expected_head TEXT')
+  ensureColumn('behavior_seen', 'launch_actor', 'launch_actor TEXT')
+  ensureColumn('behavior_seen', 'launch_source', 'launch_source TEXT')
+  ensureColumn('behavior_seen', 'launch_correlation_id', 'launch_correlation_id TEXT')
+  ensureColumn('behavior_seen', 'launch_action', 'launch_action TEXT')
   const behaviorLaunchTrackingMigrated = db.prepare(
     'SELECT 1 FROM meta WHERE key = ?',
   ).get(BEHAVIOR_LAUNCH_TRACKING_MIGRATION_KEY)
@@ -259,6 +283,8 @@ const migrateSchema = db.transaction(() => {
     CREATE INDEX IF NOT EXISTS idx_behavior_seen_launch_claims
       ON behavior_seen(key, launch_requested_at)
       WHERE claim_id <> '' AND launch_requested_at IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_behavior_dead_letters_created
+      ON behavior_dead_letters(created_at DESC);
   `)
   // Recovery may inspect agent-interface logs, but it must never claim calls
   // predating the feature installation. The first migration timestamp is a
@@ -341,6 +367,10 @@ export interface BehaviorLaunchClaim {
   launchRequestedAt: string
   launchCallId: string | null
   launchError: string | null
+  launchExpectedHead: string
+  launchActor: string
+  launchSource: string
+  launchCorrelationId: string
 }
 
 export function claimSeenOwned(
@@ -366,7 +396,12 @@ export function claimSeenOwned(
        launch_error = NULL,
        launch_outcome = NULL,
        launch_completed_at = NULL,
-       launch_head_sha = NULL
+       launch_head_sha = NULL,
+       launch_expected_head = NULL,
+       launch_actor = NULL,
+       launch_source = NULL,
+       launch_correlation_id = NULL,
+       launch_action = NULL
      WHERE behavior_seen.claim_id <> ''
        AND behavior_seen.lease_until IS NOT NULL
        AND behavior_seen.lease_until <= ?
@@ -383,6 +418,10 @@ export function markBehaviorLaunchIntentOwned(input: {
   repo: string
   pr: number
   requestedAt: string
+  expectedHead: string
+  actor: string
+  source: string
+  correlationId: string
   leaseMs?: number
 }): boolean {
   const leaseMs = input.leaseMs ?? DEFAULT_CLAIM_LEASE_MS
@@ -393,11 +432,23 @@ export function markBehaviorLaunchIntentOwned(input: {
   if (!input.repo || input.repo.length > 512) throw new Error('invalid behavior launch repo')
   if (!Number.isSafeInteger(input.pr) || input.pr <= 0) throw new Error('invalid behavior launch PR')
   if (!Number.isFinite(Date.parse(input.requestedAt))) throw new Error('invalid behavior launch timestamp')
+  if (!/^[0-9a-f]{40}$/.test(input.expectedHead)) throw new Error('invalid behavior expected head')
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?$/.test(input.actor)) {
+    throw new Error('invalid behavior actor')
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(input.source)) {
+    throw new Error('invalid behavior source')
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.correlationId)) {
+    throw new Error('invalid behavior correlation id')
+  }
   const info = db.prepare(`
     UPDATE behavior_seen
     SET launch_behavior = ?, launch_repo = ?, launch_pr = ?,
         launch_requested_at = ?, launch_call_id = NULL, launch_error = NULL,
         launch_outcome = NULL, launch_completed_at = NULL, launch_head_sha = NULL,
+        launch_expected_head = ?, launch_actor = ?, launch_source = ?,
+        launch_correlation_id = ?, launch_action = NULL,
         lease_until = ?
     WHERE key = ? AND target = ? AND claim_id = ? AND claim_id <> ''
   `).run(
@@ -405,6 +456,10 @@ export function markBehaviorLaunchIntentOwned(input: {
     input.repo,
     input.pr,
     input.requestedAt,
+    input.expectedHead,
+    input.actor,
+    input.source,
+    input.correlationId,
     Date.now() + leaseMs,
     input.key,
     input.target,
@@ -416,7 +471,8 @@ export function markBehaviorLaunchIntentOwned(input: {
 export function listBehaviorLaunchClaims(key: string): BehaviorLaunchClaim[] {
   const rows = db.prepare(`
     SELECT key, target, seen_at, claim_id, lease_until, launch_behavior,
-           launch_repo, launch_pr, launch_requested_at, launch_call_id, launch_error
+           launch_repo, launch_pr, launch_requested_at, launch_call_id, launch_error,
+           launch_expected_head, launch_actor, launch_source, launch_correlation_id
     FROM behavior_seen
     WHERE key = ? AND claim_id <> '' AND launch_requested_at IS NOT NULL
     ORDER BY launch_requested_at, target
@@ -432,6 +488,10 @@ export function listBehaviorLaunchClaims(key: string): BehaviorLaunchClaim[] {
     launch_requested_at: string
     launch_call_id: string | null
     launch_error: string | null
+    launch_expected_head: string
+    launch_actor: string
+    launch_source: string
+    launch_correlation_id: string
   }>
   return rows.map((row) => ({
     key: row.key,
@@ -445,6 +505,10 @@ export function listBehaviorLaunchClaims(key: string): BehaviorLaunchClaim[] {
     launchRequestedAt: row.launch_requested_at,
     launchCallId: row.launch_call_id,
     launchError: row.launch_error,
+    launchExpectedHead: row.launch_expected_head,
+    launchActor: row.launch_actor,
+    launchSource: row.launch_source,
+    launchCorrelationId: row.launch_correlation_id,
   }))
 }
 
@@ -528,6 +592,52 @@ export function completeSeenOwned(key: string, target: string, claimId: string):
 }
 
 export type ReviewLaunchOutcome = 'clean' | 'changes_requested'
+export type BehaviorLaunchOutcome = ReviewLaunchOutcome | 'approved'
+export type BehaviorLaunchAction = 'reviewed_clean' | 'requested_changes' | 'approved'
+
+export function completeBehaviorLaunchOwned(input: {
+  key: string
+  target: string
+  claimId: string
+  outcome: BehaviorLaunchOutcome
+  action: BehaviorLaunchAction
+  completedAt: string
+  headSha: string
+}): boolean {
+  if (!Number.isFinite(Date.parse(input.completedAt))) {
+    throw new Error('invalid review completion timestamp')
+  }
+  if (!/^[0-9a-f]{40}$/.test(input.headSha)) {
+    throw new Error('invalid review completion head SHA')
+  }
+  const expectedPair: Record<BehaviorLaunchAction, BehaviorLaunchOutcome> = {
+    reviewed_clean: 'clean',
+    requested_changes: 'changes_requested',
+    approved: 'approved',
+  }
+  if (expectedPair[input.action] !== input.outcome) {
+    throw new Error('behavior completion action/outcome mismatch')
+  }
+  const info = db.prepare(`
+    UPDATE behavior_seen
+    SET claim_id = '', lease_until = NULL, seen_at = ?, launch_error = NULL,
+        launch_outcome = ?, launch_completed_at = ?, launch_head_sha = ?,
+        launch_action = ?
+    WHERE key = ? AND target = ? AND claim_id = ? AND claim_id <> ''
+      AND launch_expected_head = ?
+  `).run(
+    new Date().toISOString(),
+    input.outcome,
+    input.completedAt,
+    input.headSha,
+    input.action,
+    input.key,
+    input.target,
+    input.claimId,
+    input.headSha,
+  )
+  return info.changes === 1
+}
 
 export function completeReviewLaunchOwned(input: {
   key: string
@@ -537,27 +647,91 @@ export function completeReviewLaunchOwned(input: {
   completedAt: string
   headSha: string
 }): boolean {
-  if (!Number.isFinite(Date.parse(input.completedAt))) {
-    throw new Error('invalid review completion timestamp')
-  }
-  if (!/^[0-9a-fA-F]{7,64}$/.test(input.headSha)) {
-    throw new Error('invalid review completion head SHA')
-  }
-  const info = db.prepare(`
-    UPDATE behavior_seen
-    SET claim_id = '', lease_until = NULL, seen_at = ?, launch_error = NULL,
-        launch_outcome = ?, launch_completed_at = ?, launch_head_sha = ?
-    WHERE key = ? AND target = ? AND claim_id = ? AND claim_id <> ''
+  return completeBehaviorLaunchOwned({
+    ...input,
+    headSha: input.headSha.toLowerCase(),
+    action: input.outcome === 'clean' ? 'reviewed_clean' : 'requested_changes',
+  })
+}
+
+export interface BehaviorDeadLetter {
+  id: string
+  behavior: string
+  target: string
+  repo: string | null
+  pr: number | null
+  actor: string | null
+  source: string | null
+  correlationId: string | null
+  callId: string | null
+  error: string
+  createdAt: string
+}
+
+export function recordBehaviorDeadLetter(
+  claim: BehaviorLaunchClaim,
+  error: string,
+  callId: string | null = claim.launchCallId,
+): string {
+  const id = randomUUID()
+  const createdAt = new Date().toISOString()
+  db.prepare(`
+    INSERT INTO behavior_dead_letters(
+      id, behavior, target, repo, pr, actor, source, correlation_id,
+      call_id, error, created_at
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
-    new Date().toISOString(),
-    input.outcome,
-    input.completedAt,
-    input.headSha.toLowerCase(),
-    input.key,
-    input.target,
-    input.claimId,
+    id,
+    claim.key,
+    claim.target,
+    claim.launchRepo || null,
+    claim.launchPr || null,
+    claim.launchActor || null,
+    claim.launchSource || null,
+    claim.launchCorrelationId || null,
+    callId,
+    String(error).slice(0, 4_000),
+    createdAt,
   )
-  return info.changes === 1
+  return id
+}
+
+export function listBehaviorDeadLetters(limit = 50): BehaviorDeadLetter[] {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+    throw new Error('dead-letter limit must be between 1 and 500')
+  }
+  const rows = db.prepare(`
+    SELECT id, behavior, target, repo, pr, actor, source, correlation_id,
+           call_id, error, created_at
+    FROM behavior_dead_letters
+    ORDER BY created_at DESC, id DESC
+    LIMIT ?
+  `).all(limit) as Array<{
+    id: string
+    behavior: string
+    target: string
+    repo: string | null
+    pr: number | null
+    actor: string | null
+    source: string | null
+    correlation_id: string | null
+    call_id: string | null
+    error: string
+    created_at: string
+  }>
+  return rows.map((row) => ({
+    id: row.id,
+    behavior: row.behavior,
+    target: row.target,
+    repo: row.repo,
+    pr: row.pr,
+    actor: row.actor,
+    source: row.source,
+    correlationId: row.correlation_id,
+    callId: row.call_id,
+    error: row.error,
+    createdAt: row.created_at,
+  }))
 }
 
 // Whether any rows exist for this behavior — proxy for "snapshot has
@@ -603,6 +777,7 @@ export function latestCleanReviewLaunch(
       AND launch_repo = ?
       AND launch_pr = ?
       AND launch_error IS NULL
+      AND launch_action = 'reviewed_clean'
       AND launch_outcome = 'clean'
       AND launch_call_id IS NOT NULL
       AND launch_completed_at IS NOT NULL

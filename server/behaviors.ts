@@ -14,7 +14,7 @@
 // directly — no HTTP roundtrip, no /api/pr-review hop.
 
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { mkdir } from 'node:fs/promises'
 import { fetchAgentLogs } from './agent'
@@ -22,15 +22,17 @@ import { claudeAuth } from './claude-auth'
 import {
   claimSeenOwned,
   clearSeenExceptLaunched,
-  completeReviewLaunchOwned,
+  completeBehaviorLaunchOwned,
   completeSeenOwned,
   getMeta,
   hasSeen,
   latestCleanReviewLaunch,
   linkBehaviorLaunchCallOwned,
   listBehaviorLaunchClaims,
+  listBehaviorDeadLetters,
   listSeenTargets,
   markBehaviorLaunchIntentOwned,
+  recordBehaviorDeadLetter,
   recordSeen,
   releaseSeen,
   releaseSeenOwned,
@@ -43,6 +45,7 @@ import {
 import { HttpError } from './http'
 import { claudeSubscriptionEnvironment, runFile, spawnDetached } from './process'
 import { withProcessLock } from './process-lock'
+import { getReviewAgentUsername, setReviewAgentUsername } from './gh'
 
 const DATASTORE = 'github-datastore'
 const GH_INTERFACE = 'github-interface'
@@ -50,6 +53,9 @@ const AGENT_INTERFACE = 'agent-interface'
 const LEGACY_REVIEW_SNAPSHOT_TARGET = '__snapshot_v2__'
 const REVIEW_SNAPSHOT_TARGET = '__snapshot_v3__'
 const BEHAVIOR_AUTH_FRESHNESS_MS = 60_000
+const DATASTORE_MAX_AGE_SECONDS = 120
+const SHA_PATTERN = /^[0-9a-f]{40}$/
+const GITHUB_USERNAME_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?$/
 
 // Same cwd hack agent.ts uses — agent-interface infers the repo from
 // cwd's last two path parts when no git remote is found.
@@ -59,7 +65,7 @@ function agentInterfaceCwd(): string {
     || join(homedir(), 'dev', 'caller', 'agent_interface')
 }
 
-function behaviorProcessLockPath(behavior: 'review-new-prs' | 'approve-prs'): string {
+function behaviorProcessLockPath(behavior: BehaviorKey): string {
   const configuredDb = process.env.POISE_DB
   const directory = configuredDb && configuredDb !== ':memory:'
     ? dirname(resolve(configuredDb))
@@ -79,7 +85,7 @@ class BehaviorProcessLockContentionError extends HttpError {
 }
 
 async function withBehaviorProcessLock<T>(
-  behavior: 'review-new-prs' | 'approve-prs',
+  behavior: BehaviorKey,
   operation: () => Promise<T>,
 ): Promise<T> {
   return await withProcessLock({
@@ -335,7 +341,10 @@ function markLaunchIntent(
   pr: DatastorePr,
   target: string,
   claimId: string,
+  expectedHead: string,
+  actor: string,
 ): boolean {
+  const source = `poise:${behavior}`
   return markBehaviorLaunchIntentOwned({
     key: behavior,
     target,
@@ -344,6 +353,10 @@ function markLaunchIntent(
     repo: pr.repo,
     pr: pr.number,
     requestedAt: new Date().toISOString(),
+    expectedHead,
+    actor,
+    source,
+    correlationId: claimId,
   })
 }
 
@@ -362,6 +375,11 @@ function completeClaimSafely(claim: BehaviorLaunchClaim, error: string | null = 
   const completed = completeSeenOwned(claim.key, claim.target, claim.claimId)
   if (completed) activeClaims.delete(claim.claimId)
   return completed
+}
+
+function deadLetterClaim(claim: BehaviorLaunchClaim, error: string): boolean {
+  recordBehaviorDeadLetter(claim, error)
+  return completeClaimSafely(claim, error)
 }
 
 function agentCallStartedAt(call: Awaited<ReturnType<typeof fetchAgentLogs>>[number]): string {
@@ -388,120 +406,133 @@ async function reconcileBehaviorLaunchClaims(
       || !claim.launchRepo
       || !Number.isSafeInteger(claim.launchPr)
       || claim.launchPr <= 0
+      || !SHA_PATTERN.test(claim.launchExpectedHead)
+      || !GITHUB_USERNAME_PATTERN.test(claim.launchActor)
+      || claim.launchSource !== `poise:${behavior}`
+      || claim.launchCorrelationId !== claim.claimId
       || (claim.launchCallId !== null && !/^[0-9a-f]{32}$/.test(claim.launchCallId))) {
-      completeClaimSafely(claim, 'launch correlation metadata is invalid; retained to prevent duplicate launch')
+      deadLetterClaim(claim, 'launch correlation metadata is invalid; retained to prevent duplicate launch')
       continue
     }
     const requestedAtMs = Date.parse(claim.launchRequestedAt)
     if (!Number.isFinite(requestedAtMs)) {
-      completeClaimSafely(claim, 'launch watermark is invalid; retained to prevent duplicate launch')
+      deadLetterClaim(claim, 'launch watermark is invalid; retained to prevent duplicate launch')
       continue
     }
+
+    const candidates = logs.filter(
+      (row) => row.correlation_id === claim.launchCorrelationId,
+    )
     let call = claim.launchCallId
-      ? logs.find((row) => String(row.id || '').toLowerCase() === claim.launchCallId)
+      ? candidates.find((row) => row.id.toLowerCase() === claim.launchCallId)
       : undefined
 
-    if (claim.launchCallId && !call) {
-      completeClaimSafely(claim, 'linked agent call is missing from the durable log; retained to prevent duplicate launch')
-      continue
-    }
-    if (call) {
-      const linkedStartedAtMs = Date.parse(agentCallStartedAt(call))
-      if (call.behavior !== claim.launchBehavior
-        || call.repo !== claim.launchRepo
-        || String(call.pr_id || '') !== String(claim.launchPr)
-        || !Number.isFinite(linkedStartedAtMs)
-        || linkedStartedAtMs < requestedAtMs) {
-        completeClaimSafely(claim, 'linked agent call no longer matches launch correlation; retained to prevent duplicate launch')
-        continue
-      }
-    }
-
     if (!call) {
-      const candidates = new Map<string, (typeof logs)[number]>()
-      for (const row of logs) {
-        const callId = String(row.id || '').toLowerCase()
-        const startedAtMs = Date.parse(agentCallStartedAt(row))
-        if (row.behavior !== claim.launchBehavior
-          || row.repo !== claim.launchRepo
-          || String(row.pr_id || '') !== String(claim.launchPr)
-          || !/^[0-9a-f]{32}$/.test(callId)
-          || !Number.isFinite(startedAtMs)
-          || startedAtMs < requestedAtMs) continue
-        candidates.set(callId, row)
-      }
-
-      if (candidates.size > 1) {
-        completeClaimSafely(
+      if (claim.launchCallId) {
+        deadLetterClaim(
           claim,
-          `ambiguous agent call registration (${candidates.size} exact post-launch candidates); retained to prevent duplicate launch`,
+          'linked agent call is missing from the durable log; retained to prevent duplicate launch',
         )
         continue
       }
-      if (candidates.size === 0) {
+      if (candidates.length > 1) {
+        deadLetterClaim(
+          claim,
+          `ambiguous correlation id matched ${candidates.length} agent calls; retained to prevent duplicate launch`,
+        )
+        continue
+      }
+      if (candidates.length === 0) {
         const ageMs = Date.now() - requestedAtMs
         if (ageMs < BEHAVIOR_REGISTRATION_GRACE_MS) {
           retainClaimSafely(claim, 'awaiting agent call registration')
         } else {
-          if (releaseSeenOwned(claim.key, claim.target, claim.claimId)) {
+          const message = 'agent call did not register before the launch deadline'
+          recordBehaviorDeadLetter(claim, message)
+          if (releaseOwnedClaim(behavior, claim.target, claim.claimId)) {
             recordBehaviorFailure(behavior, 'worker')
           }
         }
         continue
       }
 
-      const [callId, candidate] = candidates.entries().next().value as [
-        string,
-        (typeof logs)[number],
-      ]
-      if (!linkBehaviorLaunchCallOwned(claim.key, claim.target, claim.claimId, callId)) {
+      call = candidates[0]
+      if (!linkBehaviorLaunchCallOwned(claim.key, claim.target, claim.claimId, call.id)) {
         continue
       }
-      call = candidate
     }
 
-    const status = String(call.status || '').toLowerCase()
+    const linkedStartedAtMs = Date.parse(agentCallStartedAt(call))
+    if (call.behavior !== claim.launchBehavior
+      || call.repo !== claim.launchRepo
+      || String(call.pr_id || '') !== String(claim.launchPr)
+      || String(call.actor || '').toLowerCase() !== claim.launchActor.toLowerCase()
+      || call.source !== claim.launchSource
+      || call.correlation_id !== claim.launchCorrelationId
+      || call.expected_head !== claim.launchExpectedHead
+      || !Number.isFinite(linkedStartedAtMs)
+      || linkedStartedAtMs < requestedAtMs) {
+      deadLetterClaim(
+        claim,
+        'linked agent call does not match the persisted launch contract; retained to prevent duplicate launch',
+      )
+      continue
+    }
+
+    const status = call.status.toLowerCase()
     const terminal = status === 'completed' || FAILED_AGENT_STATUSES.has(status)
     if (!terminal && Date.now() - requestedAtMs >= BEHAVIOR_CLAIM_RENEWAL_MS) {
       const message = `behavior launch exceeded ${BEHAVIOR_CLAIM_RENEWAL_MS}ms running limit`
-      if (releaseSeenOwned(claim.key, claim.target, claim.claimId)) {
+      if (deadLetterClaim(claim, message)) {
         recordBehaviorFailure(behavior, 'worker')
         claudeAuth.observeProcessFailure({ code: 1, signal: null, error: new Error(message) })
       }
       continue
     }
     if (status === 'completed') {
-      if (behavior === 'review-new-prs') {
-        const outcome = String(call.outcome || '')
-        const completedAt = String(call.completed_at || '')
-        const headSha = String(call.head_sha || '')
-        if ((outcome !== 'clean' && outcome !== 'changes_requested')
-          || !Number.isFinite(Date.parse(completedAt))
-          || !/^[0-9a-fA-F]{7,64}$/.test(headSha)) {
-          const error = 'completed review is missing authoritative outcome metadata; retained to prevent duplicate review'
-          if (completeClaimSafely(claim, error)) recordBehaviorFailure(behavior, 'worker')
-          console.error(`[behaviors] ${error} for ${claim.launchRepo}#${claim.launchPr}`)
-          continue
-        }
-        const completed = completeReviewLaunchOwned({
-          key: claim.key,
-          target: claim.target,
-          claimId: claim.claimId,
-          outcome,
-          completedAt,
-          headSha,
-        })
-        if (completed) {
-          activeClaims.delete(claim.claimId)
-          clearBehaviorFailure(behavior)
-        }
-      } else if (completeClaimSafely(claim)) {
+      const expectedActions = behavior === 'review-new-prs'
+        ? new Map([['reviewed_clean', 'clean'], ['requested_changes', 'changes_requested']])
+        : new Map([['approved', 'approved'], ['requested_changes', 'changes_requested']])
+      const action = String(call.action || '')
+      const outcome = String(call.outcome || '')
+      const completedAt = String(call.completed_at || '')
+      const headSha = String(call.head_sha || '').toLowerCase()
+      if (expectedActions.get(action) !== outcome
+        || !Number.isFinite(Date.parse(completedAt))
+        || headSha !== claim.launchExpectedHead) {
+        const error = 'completed agent call is missing authoritative action/outcome/head metadata'
+        if (deadLetterClaim(claim, error)) recordBehaviorFailure(behavior, 'worker')
+        console.error(`[behaviors] ${error} for ${claim.launchRepo}#${claim.launchPr}`)
+        continue
+      }
+      const completed = completeBehaviorLaunchOwned({
+        key: claim.key,
+        target: claim.target,
+        claimId: claim.claimId,
+        action: action as 'reviewed_clean' | 'requested_changes' | 'approved',
+        outcome: outcome as 'clean' | 'changes_requested' | 'approved',
+        completedAt,
+        headSha,
+      })
+      if (completed) {
+        activeClaims.delete(claim.claimId)
         clearBehaviorFailure(behavior)
+      } else {
+        activeClaims.delete(claim.claimId)
+        const current = listBehaviorLaunchClaims(behavior).find(
+          (candidate) => candidate.target === claim.target
+            && candidate.claimId === claim.claimId,
+        )
+        if (current) {
+          const error = 'terminal agent outcome could not complete its owned launch claim'
+          if (deadLetterClaim(current, error)) recordBehaviorFailure(behavior, 'worker')
+        }
       }
     } else if (FAILED_AGENT_STATUSES.has(status)) {
-      if (releaseSeenOwned(claim.key, claim.target, claim.claimId)) {
+      const message = call.error || `agent call terminated with status ${status}`
+      if (deadLetterClaim(claim, message)) {
         recordBehaviorFailure(behavior, 'worker')
-        claudeAuth.observeProcessFailure(String(call.error || status))
+        claudeAuth.observeProcessFailure(message)
       }
     } else if (RUNNING_AGENT_STATUSES.has(status)) {
       setBehaviorLaunchErrorOwned(claim.key, claim.target, claim.claimId, null)
@@ -512,7 +543,11 @@ async function reconcileBehaviorLaunchClaims(
         BEHAVIOR_CLAIM_RENEWAL_MS,
       )
     } else {
-      retainClaimSafely(claim, `unrecognized agent call status "${status || 'missing'}"`)
+      const message = `unrecognized agent call status "${status || 'missing'}"`
+      if (deadLetterClaim(claim, message)) {
+        recordBehaviorFailure(behavior, 'worker')
+        claudeAuth.observeProcessFailure(message)
+      }
     }
   }
 }
@@ -525,17 +560,117 @@ interface DatastorePr {
   url: string
 }
 
+interface DatastoreFreshness {
+  status: 'unchecked' | 'healthy' | 'unavailable'
+  checkedAt: string
+  ageSeconds: number | null
+  lastSuccessAt: string | null
+  error: string | null
+}
+
+let datastoreFreshness: DatastoreFreshness = {
+  status: 'unchecked',
+  checkedAt: new Date(0).toISOString(),
+  ageSeconds: null,
+  lastSuccessAt: null,
+  error: null,
+}
+
+function configuredReviewer(): string {
+  return getReviewAgentUsername()
+}
+
+function parseJson(value: string, operation: string): unknown {
+  if (!value.trim()) throw new Error(`${operation} returned empty output`)
+  try {
+    return JSON.parse(value)
+  } catch (error) {
+    throw new Error(`${operation} returned invalid JSON`, { cause: error })
+  }
+}
+
+function objectValue(value: unknown, operation: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${operation} returned a non-object`)
+  }
+  return value as Record<string, unknown>
+}
+
+function safeInteger(value: unknown, field: string): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new Error(`${field} must be a non-negative safe integer`)
+  }
+  return Number(value)
+}
+
+async function requireFreshDatastore(): Promise<void> {
+  const checkedAt = new Date().toISOString()
+  try {
+    const { stdout } = await runFile(
+      DATASTORE,
+      ['health', '--max-age-seconds', String(DATASTORE_MAX_AGE_SECONDS)],
+      { timeoutMs: 30_000, maxOutputBytes: 1 * 1024 * 1024, signal: behaviorSignal() },
+    )
+    const data = objectValue(parseJson(stdout, 'github-datastore health'), 'github-datastore health')
+    if (data.action !== 'health'
+      || data.status !== 'healthy'
+      || data.healthy !== true
+      || safeInteger(data.max_age_seconds, 'datastore max_age_seconds') !== DATASTORE_MAX_AGE_SECONDS) {
+      throw new Error('github-datastore health returned a malformed or stale result')
+    }
+    const ageSeconds = safeInteger(data.age_seconds, 'datastore age_seconds')
+    const lastSuccessAt = String(data.last_success_at || '')
+    if (ageSeconds > DATASTORE_MAX_AGE_SECONDS || !Number.isFinite(Date.parse(lastSuccessAt))) {
+      throw new Error('github-datastore health returned invalid freshness metadata')
+    }
+    datastoreFreshness = {
+      status: 'healthy',
+      checkedAt,
+      ageSeconds,
+      lastSuccessAt,
+      error: null,
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    datastoreFreshness = {
+      status: 'unavailable',
+      checkedAt,
+      ageSeconds: null,
+      lastSuccessAt: null,
+      error: message,
+    }
+    throw new Error(`github-datastore freshness gate failed: ${message}`, { cause: error })
+  }
+}
+
 async function listOpenPrsByAuthor(author: string): Promise<DatastorePr[]> {
   if (!author) return []
+  await requireFreshDatastore()
   const { stdout } = await runFile(
     DATASTORE,
-    ['view', 'pr', '--status', 'open', '--author', author, '--limit', '500', '--format', 'json'],
+    ['view', 'pr', '--status', 'open', '--author', author, '--format', 'json'],
     { timeoutMs: 30_000, maxOutputBytes: 32 * 1024 * 1024, signal: behaviorSignal() },
   )
-  const trimmed = stdout.trim()
-  if (!trimmed) return []
-  const list = JSON.parse(trimmed) as Array<{ repo: string, number: number, url: string }>
-  return list.map((r) => ({ repo: r.repo, number: r.number, url: r.url }))
+  const parsed = parseJson(stdout, 'github-datastore view pr')
+  if (!Array.isArray(parsed)) throw new Error('github-datastore view pr returned a non-array')
+  const seen = new Set<string>()
+  return parsed.map((row, index) => {
+    const value = objectValue(row, `github-datastore PR row ${index}`)
+    const repo = String(value.repo || '')
+    const number = safeInteger(value.number, `github-datastore PR row ${index} number`)
+    const url = String(value.url || '')
+    if (!/^[^/\s]+\/[^/\s]+$/.test(repo)
+      || number < 1
+      || value.status !== 'open'
+      || value.author !== author
+      || url !== `https://github.com/${repo}/pull/${number}`) {
+      throw new Error(`github-datastore PR row ${index} violates the candidate contract`)
+    }
+    const key = `${repo}#${number}`
+    if (seen.has(key)) throw new Error(`github-datastore returned duplicate PR ${key}`)
+    seen.add(key)
+    return { repo, number, url }
+  })
 }
 
 async function localCheckoutPath(owner: string, repo: string): Promise<string> {
@@ -544,9 +679,48 @@ async function localCheckoutPath(owner: string, repo: string): Promise<string> {
     maxOutputBytes: 1 * 1024 * 1024,
     signal: behaviorSignal(),
   })
-  const result = JSON.parse(stdout)
-  if (!result.path) throw new Error('github-interface --local-checkout-path returned no path')
-  return String(result.path)
+  const result = objectValue(
+    parseJson(stdout, 'github-interface --local-checkout-path'),
+    'github-interface --local-checkout-path',
+  )
+  const repository = `${owner}/${repo}`
+  const path = String(result.path || '')
+  if (result.action !== 'local_checkout_path'
+    || result.repository !== repository
+    || !isAbsolute(path)) {
+    throw new Error('github-interface --local-checkout-path returned malformed state')
+  }
+  return path
+}
+
+async function currentHeadSha(
+  repo: string,
+  number: number,
+  actor: string,
+): Promise<string> {
+  const [owner, name] = repo.split('/', 2)
+  if (!owner || !name || !Number.isSafeInteger(number) || number < 1) {
+    throw new Error(`invalid GitHub PR identity: ${repo}#${number}`)
+  }
+  const cwd = join(GH_INTERFACE_CWD_ROOT, owner, name)
+  await mkdir(cwd, { recursive: true })
+  const { stdout } = await runFile(
+    GH_INTERFACE,
+    ['--head-sha', `#${number}`, '--token-user', actor],
+    { cwd, timeoutMs: 30_000, maxOutputBytes: 1 * 1024 * 1024, signal: behaviorSignal() },
+  )
+  const data = objectValue(
+    parseJson(stdout, 'github-interface --head-sha'),
+    'github-interface --head-sha',
+  )
+  const headSha = String(data.head_sha || '').toLowerCase()
+  if (data.action !== 'head_sha'
+    || data.repository !== repo
+    || data.pull_number !== number
+    || !SHA_PATTERN.test(headSha)) {
+    throw new Error('github-interface --head-sha returned malformed state')
+  }
+  return headSha
 }
 
 function settleClaimAfterExit(
@@ -586,6 +760,7 @@ async function fireReview(
   const m = pr.url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
   if (!m) throw new Error('not a github PR url: ' + pr.url)
   const [, owner, repo, num] = m
+  const actor = configuredReviewer()
   await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   const pwd = await localCheckoutPath(owner, repo)
   // mkdir the cwd hack dir — agent-interface needs it to exist for
@@ -594,11 +769,36 @@ async function fireReview(
   if (!isEnabled('review-new-prs')) return false
   await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   if (!isEnabled('review-new-prs') || behaviorAborted()) return false
+  const expectedHead = await currentHeadSha(pr.repo, pr.number, actor)
   // Pass the priority ceiling through as `--p`. agent-interface forwards
   // it to github-interface as `--p <value>`; for review-new-prs the
   // possible values are p0 / p1 / p2.
-  const args = ['--pr-review', `#${num}`, '--pwd', pwd, '--p', setting, ...noteArgs('review-new-prs')]
-  if (!markLaunchIntent('review-new-prs', pr, claimTarget, claimId)) return false
+  const source = 'poise:review-new-prs'
+  const args = [
+    '--pr-review',
+    `#${num}`,
+    '--actor',
+    actor,
+    '--expected-head',
+    expectedHead,
+    '--source',
+    source,
+    '--correlation-id',
+    claimId,
+    '--pwd',
+    pwd,
+    '--p',
+    setting,
+    ...noteArgs('review-new-prs'),
+  ]
+  if (!markLaunchIntent(
+    'review-new-prs',
+    pr,
+    claimTarget,
+    claimId,
+    expectedHead,
+    actor,
+  )) return false
   await spawnDetached(AGENT_INTERFACE, args, {
     cwd: agentInterfaceCwd(),
     env: claudeSubscriptionEnvironment(),
@@ -659,7 +859,7 @@ async function tickReviewNewPrs(): Promise<void> {
   if (!isEnabled('review-new-prs')) return
   const author = getMeta('me') || ''
   if (!author) return
-  const reviewer = reviewAgentUsername
+  const reviewer = configuredReviewer()
 
   // keyver=3 restores one initial review per PR. Convert a complete v2 ledger
   // in place so a PR opened during downtime is not absorbed by a deploy-time
@@ -697,7 +897,7 @@ async function tickReviewNewPrs(): Promise<void> {
                 releaseOwnedClaim('review-new-prs', key, claimId)
                 return
               }
-              if (ch.has_change_request) {
+              if (ch.hasChangeRequest) {
                 completeOwnedClaim('review-new-prs', key, claimId)
                 console.log(`[behaviors] review-new-prs skipped for ${pr.repo}#${pr.number} — outstanding CHANGES_REQUESTED, approve-prs owns it`)
                 continue
@@ -707,9 +907,8 @@ async function tickReviewNewPrs(): Promise<void> {
                 releaseOwnedClaim('review-new-prs', key, claimId)
                 return
               }
-              // If the check itself fails (rate-limit / network), fall
-              // through and fire — over-reviewing is the safer regression.
-              console.warn(`[behaviors] checkChangesAddressed failed for ${pr.repo}#${pr.number}, firing anyway:`, err)
+              releaseOwnedClaim('review-new-prs', key, claimId)
+              throw err
             }
           }
 
@@ -754,15 +953,12 @@ async function tickReviewNewPrs(): Promise<void> {
 export const APPROVAL_QUIET_WINDOW_MS = 10 * 60_000
 
 interface ChangesAddressedResult {
-  has_change_request: boolean
-  latest_request_at: string
-  // Both counters reset to 0 whenever the reviewer posts another
-  // review (latest_request_at advances) and strictly increase as the
-  // author engages — either by pushing a commit or by replying to a
-  // review thread. Either kind of engagement counts as a "response"
-  // worth re-evaluating, so the dedupe key keys off the sum.
-  author_commits_after_request: number
-  author_inline_replies_after_request: number
+  hasChangeRequest: boolean
+  latestRequestAt: string | null
+  headSha: string
+  commitsAfterRequest: number
+  authorInlineRepliesAfterRequest: number
+  responseCount: number
 }
 
 interface ReviewActivityResult {
@@ -788,19 +984,35 @@ async function checkReviewActivity(
   await mkdir(cwd, { recursive: true })
   const { stdout } = await runFile(
     GH_INTERFACE,
-    ['--review-activity-since', `#${number}`, '--username', reviewer, '--since', since],
+    [
+      '--review-activity-since',
+      `#${number}`,
+      '--username',
+      reviewer,
+      '--since',
+      since,
+      '--token-user',
+      reviewer,
+    ],
     { cwd, timeoutMs: 30_000, maxOutputBytes: 4 * 1024 * 1024, signal: behaviorSignal() },
   )
-  const data = JSON.parse(stdout.trim() || '{}')
+  const data = objectValue(
+    parseJson(stdout, 'github-interface --review-activity-since'),
+    'github-interface --review-activity-since',
+  )
   if (data.action !== 'review_activity_since'
+    || data.repository !== repo
+    || data.pull_number !== number
+    || String(data.username || '').toLowerCase() !== reviewer.toLowerCase()
     || typeof data.state !== 'string'
     || typeof data.draft !== 'boolean'
     || typeof data.reviewer_requested !== 'boolean'
-    || !Array.isArray(data.active_change_request_authors)) {
+    || !Array.isArray(data.active_change_request_authors)
+    || data.active_change_request_authors.some((value) => typeof value !== 'string')) {
     throw new Error('github-interface --review-activity-since returned malformed state')
   }
-  const headSha = String(data.head_sha || '')
-  if (!/^[0-9a-fA-F]{7,64}$/.test(headSha)) {
+  const headSha = String(data.head_sha || '').toLowerCase()
+  if (!SHA_PATTERN.test(headSha)) {
     throw new Error('github-interface --review-activity-since returned invalid head SHA')
   }
   const latestActivityAt = data.latest_activity_at === null
@@ -809,18 +1021,27 @@ async function checkReviewActivity(
   if (latestActivityAt !== null && !Number.isFinite(Date.parse(latestActivityAt))) {
     throw new Error('github-interface --review-activity-since returned invalid activity timestamp')
   }
+  const reviewerLatestState = data.reviewer_latest_state === null
+    ? null
+    : String(data.reviewer_latest_state || '')
+  if (reviewerLatestState !== null
+    && !['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(reviewerLatestState)) {
+    throw new Error('github-interface --review-activity-since returned invalid latest review state')
+  }
+  const reviewerLatestCommit = data.reviewer_latest_commit === null
+    ? null
+    : String(data.reviewer_latest_commit || '').toLowerCase()
+  if (reviewerLatestCommit !== null && !SHA_PATTERN.test(reviewerLatestCommit)) {
+    throw new Error('github-interface --review-activity-since returned invalid latest review head')
+  }
   return {
     state: data.state,
     draft: data.draft,
     headSha: headSha.toLowerCase(),
     reviewerRequested: data.reviewer_requested,
     activeChangeRequestAuthors: data.active_change_request_authors.map(String),
-    reviewerLatestState: data.reviewer_latest_state === null
-      ? null
-      : String(data.reviewer_latest_state || ''),
-    reviewerLatestCommit: data.reviewer_latest_commit === null
-      ? null
-      : String(data.reviewer_latest_commit || '').toLowerCase(),
+    reviewerLatestState,
+    reviewerLatestCommit,
     latestActivityAt,
   }
 }
@@ -831,31 +1052,113 @@ async function checkChangesAddressed(repo: string, number: number, reviewer: str
   await mkdir(cwd, { recursive: true })
   const { stdout } = await runFile(
     GH_INTERFACE,
-    ['--requested-changes-addressed', `#${number}`, '--username', reviewer],
+    [
+      '--requested-changes-addressed',
+      `#${number}`,
+      '--username',
+      reviewer,
+      '--token-user',
+      reviewer,
+    ],
     { cwd, timeoutMs: 30_000, maxOutputBytes: 4 * 1024 * 1024, signal: behaviorSignal() },
   )
-  const data = JSON.parse(stdout.trim() || '{}')
+  const data = objectValue(
+    parseJson(stdout, 'github-interface --requested-changes-addressed'),
+    'github-interface --requested-changes-addressed',
+  )
+  const hasChangeRequest = data.has_change_request
+  const status = data.status
+  const headSha = String(data.head_sha || '').toLowerCase()
+  const commitsAfterRequest = safeInteger(
+    data.commits_after_request,
+    'requested-changes-addressed commits_after_request',
+  )
+  const authorInlineRepliesAfterRequest = safeInteger(
+    data.author_inline_replies_after_request,
+    'requested-changes-addressed author_inline_replies_after_request',
+  )
+  const responseCount = safeInteger(
+    data.response_count,
+    'requested-changes-addressed response_count',
+  )
+  const latestRequestAt = data.latest_request_at === null
+    ? null
+    : String(data.latest_request_at || '')
+  const latestState = data.reviewer_latest_state === null
+    ? null
+    : String(data.reviewer_latest_state || '')
+  if (data.action !== 'requested_changes_addressed'
+    || data.repository !== repo
+    || data.pull_number !== number
+    || String(data.username || '').toLowerCase() !== reviewer.toLowerCase()
+    || typeof hasChangeRequest !== 'boolean'
+    || typeof status !== 'boolean'
+    || !SHA_PATTERN.test(headSha)
+    || responseCount !== commitsAfterRequest + authorInlineRepliesAfterRequest
+    || (hasChangeRequest
+      ? latestState !== 'CHANGES_REQUESTED'
+        || latestRequestAt === null
+        || !Number.isFinite(Date.parse(latestRequestAt))
+      : latestRequestAt !== null)) {
+    throw new Error('github-interface --requested-changes-addressed returned malformed state')
+  }
   return {
-    has_change_request: !!data.has_change_request,
-    latest_request_at: String(data.latest_request_at || ''),
-    author_commits_after_request: Number(data.author_commits_after_request || 0),
-    author_inline_replies_after_request: Number(data.author_inline_replies_after_request || 0),
+    hasChangeRequest,
+    latestRequestAt,
+    headSha,
+    commitsAfterRequest,
+    authorInlineRepliesAfterRequest,
+    responseCount,
   }
 }
 
-async function fireApprove(pr: DatastorePr, claimTarget: string, claimId: string): Promise<boolean> {
+async function fireApprove(
+  pr: DatastorePr,
+  claimTarget: string,
+  claimId: string,
+  expectedHead: string,
+): Promise<boolean> {
   if (!isEnabled('approve-prs')) return false
   const m = pr.url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
   if (!m) throw new Error('not a github PR url: ' + pr.url)
   const [, owner, repo, num] = m
+  const actor = configuredReviewer()
   await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   const pwd = await localCheckoutPath(owner, repo)
   await mkdir(join(GH_INTERFACE_CWD_ROOT, owner, repo), { recursive: true })
   if (!isEnabled('approve-prs')) return false
   await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   if (!isEnabled('approve-prs') || behaviorAborted()) return false
-  const args = ['--pr-approve', `#${num}`, '--pwd', pwd, ...noteArgs('approve-prs')]
-  if (!markLaunchIntent('approve-prs', pr, claimTarget, claimId)) return false
+  const currentHead = await currentHeadSha(pr.repo, pr.number, actor)
+  if (currentHead !== expectedHead) {
+    throw new Error(
+      `approval head changed before launch: expected ${expectedHead}, got ${currentHead}`,
+    )
+  }
+  const source = 'poise:approve-prs'
+  const args = [
+    '--pr-approve',
+    `#${num}`,
+    '--actor',
+    actor,
+    '--expected-head',
+    expectedHead,
+    '--source',
+    source,
+    '--correlation-id',
+    claimId,
+    '--pwd',
+    pwd,
+    ...noteArgs('approve-prs'),
+  ]
+  if (!markLaunchIntent(
+    'approve-prs',
+    pr,
+    claimTarget,
+    claimId,
+    expectedHead,
+    actor,
+  )) return false
   await spawnDetached(AGENT_INTERFACE, args, {
     cwd: agentInterfaceCwd(),
     env: claudeSubscriptionEnvironment(),
@@ -873,8 +1176,8 @@ async function tickApprovePrs(): Promise<void> {
   // cachePlugin.opts.reviewAgentUsername. Reading process.env here is
   // a trap: Vite's loadEnv populates the config-time options object
   // but doesn't propagate to process.env at runtime.
-  const reviewer = reviewAgentUsername
-  if (!author || !reviewer) return
+  if (!author) return
+  const reviewer = configuredReviewer()
   try {
     const prs = await listOpenPrsByAuthor(author)
     let failure: unknown
@@ -899,11 +1202,12 @@ async function tickApprovePrs(): Promise<void> {
         // next author response.
         let seenTarget = ''
         let firedReason = ''
-        if (check.has_change_request) {
-          const responses = check.author_commits_after_request + check.author_inline_replies_after_request
-          if (responses < 1) continue
-          seenTarget = `${pr.repo}#${pr.number}@req=${check.latest_request_at}/r=${responses}`
-          firedReason = `req=${check.latest_request_at}, r=${responses}: ${check.author_commits_after_request}c+${check.author_inline_replies_after_request}reply`
+        let expectedHead = ''
+        if (check.hasChangeRequest) {
+          if (check.responseCount < 1 || check.latestRequestAt === null) continue
+          expectedHead = check.headSha
+          seenTarget = `${pr.repo}#${pr.number}@req=${check.latestRequestAt}/r=${check.responseCount}/head=${check.headSha}`
+          firedReason = `req=${check.latestRequestAt}, r=${check.responseCount}: ${check.commitsAfterRequest}c+${check.authorInlineRepliesAfterRequest}reply, head=${check.headSha.slice(0, 8)}`
         } else {
           const review = latestCleanReviewLaunch(pr.repo, pr.number)
           if (!review) continue
@@ -919,7 +1223,6 @@ async function tickApprovePrs(): Promise<void> {
           )
           if (activity.state !== 'OPEN'
             || activity.draft
-            || !activity.reviewerRequested
             || activity.activeChangeRequestAuthors.length > 0
             || (activity.reviewerLatestState === 'APPROVED'
               && activity.reviewerLatestCommit === activity.headSha)) continue
@@ -932,6 +1235,7 @@ async function tickApprovePrs(): Promise<void> {
           const quietAnchorMs = Math.max(completedAtMs, latestActivityAtMs)
           if (Date.now() - quietAnchorMs < APPROVAL_QUIET_WINDOW_MS) continue
           const quietAnchor = new Date(quietAnchorMs).toISOString()
+          expectedHead = activity.headSha
           seenTarget = `${pr.repo}#${pr.number}@quiet=${quietAnchor}/head=${activity.headSha}`
           firedReason = `clean review ${review.callId.slice(0, 8)}, quiet since ${quietAnchor}, head=${activity.headSha.slice(0, 8)}`
         }
@@ -939,7 +1243,7 @@ async function tickApprovePrs(): Promise<void> {
         if (!claimId) continue
         trackClaim('approve-prs', seenTarget, claimId)
         try {
-          const launched = await fireApprove(pr, seenTarget, claimId)
+          const launched = await fireApprove(pr, seenTarget, claimId, expectedHead)
           if (!launched) {
             releaseOwnedClaim('approve-prs', seenTarget, claimId)
             return
@@ -983,6 +1287,7 @@ async function tickApprovePrs(): Promise<void> {
 
 interface ResolveResult {
   ready_except_conversations: boolean
+  headSha: string
   resolved_count: number
   unresolved_count: number
 }
@@ -1013,16 +1318,56 @@ async function resolveNonblockingIfReady(repo: string, number: number): Promise<
   const [owner, name] = repo.split('/', 2)
   const cwd = join(GH_INTERFACE_CWD_ROOT, owner, name)
   await mkdir(cwd, { recursive: true })
+  const reviewer = configuredReviewer()
+  const expectedHead = await currentHeadSha(repo, number, reviewer)
   const { stdout } = await runFile(
     GH_INTERFACE,
-    ['--resolve-nonblocking-conversations-if-ready', `#${number}`],
+    [
+      '--resolve-nonblocking-conversations-if-ready',
+      `#${number}`,
+      '--username',
+      reviewer,
+      '--expected-head',
+      expectedHead,
+      '--token-user',
+      reviewer,
+    ],
     { cwd, timeoutMs: 30_000, maxOutputBytes: 4 * 1024 * 1024, signal: behaviorSignal() },
   )
-  const data = JSON.parse(stdout.trim() || '{}')
+  const data = objectValue(
+    parseJson(stdout, 'github-interface --resolve-nonblocking-conversations-if-ready'),
+    'github-interface --resolve-nonblocking-conversations-if-ready',
+  )
+  const headSha = String(data.head_sha || '').toLowerCase()
+  const resolvedCount = safeInteger(data.resolved_count, 'resolve resolved_count')
+  const unresolvedCount = safeInteger(data.unresolved_count, 'resolve unresolved_count')
+  if (data.action !== 'resolved_nonblocking_conversations_if_ready'
+    || data.repository !== repo
+    || data.pull_number !== number
+    || headSha !== expectedHead
+    || typeof data.ready_except_conversations !== 'boolean'
+    || typeof data.reviewer_approved_current_head !== 'boolean'
+    || typeof data.changes_requested !== 'boolean'
+    || typeof data.statuses_green !== 'boolean'
+    || typeof data.checks_green !== 'boolean'
+    || typeof data.checks_present !== 'boolean'
+    || !Array.isArray(data.conversations)
+    || data.conversations.length !== resolvedCount
+    || (resolvedCount > 0
+      && (data.ready_except_conversations !== true
+        || data.reviewer_approved_current_head !== true
+        || data.changes_requested !== false
+        || data.statuses_green !== true
+        || data.checks_green !== true
+        || data.checks_present !== true
+        || unresolvedCount !== 0))) {
+    throw new Error('github-interface resolution returned malformed or unsafe state')
+  }
   return {
-    ready_except_conversations: !!data.ready_except_conversations,
-    resolved_count: Number(data.resolved_count || 0),
-    unresolved_count: Number(data.unresolved_count || 0),
+    ready_except_conversations: data.ready_except_conversations,
+    headSha,
+    resolved_count: resolvedCount,
+    unresolved_count: unresolvedCount,
   }
 }
 
@@ -1098,8 +1443,7 @@ export async function setEnabled(key: BehaviorKey, enabled: boolean): Promise<vo
         // resolve-unblocking has no seen ledger — github-interface is
         // idempotent so the tick handler can safely fire every minute.
       }
-      if (key === 'resolve-unblocking') await update()
-      else await withBehaviorProcessLock(key, update)
+      await withBehaviorProcessLock(key, update)
     })
   } catch (error) {
     if (lifecycle?.aborted === true) throw error
@@ -1163,15 +1507,6 @@ function serializeBehaviorOperation<T>(
   return run
 }
 
-// Identity the bot uses on GitHub — passed through from cachePlugin's
-// opts (which read it via Vite's loadEnv at config time). We can NOT
-// pull it from process.env here: Vite's loadEnv populates the plugin
-// options object but does not inject the var into process.env, so a
-// tickApprovePrs reading process.env.REVIEW_AGENT_USERNAME silently
-// finds it empty and never fires. This module-level slot is the
-// single source of truth at runtime — set once by startBehaviorsRuntime.
-let reviewAgentUsername = ''
-
 export interface RunEnabledBehaviorsOptions {
   /** Scheduled ticks coalesce instead of queuing behind a busy behavior. */
   skipBusy?: boolean
@@ -1228,8 +1563,10 @@ export async function runEnabledBehaviorsOnce(
   if (isEnabled('resolve-unblocking')
     && (!options.skipBusy || !behaviorOperationTails.has('resolve-unblocking'))) {
     operations.push(runBehaviorCycle('resolve-unblocking', async () => {
-      await tickResolveUnblocking()
-      return true
+      return await withBehaviorProcessLock('resolve-unblocking', async () => {
+        await tickResolveUnblocking()
+        return true
+      })
     }))
   }
   await Promise.all(operations)
@@ -1277,6 +1614,13 @@ export interface BehaviorsRuntimeHealth {
     lastFailureAt: string
     nextRetryAt: string
   }>
+  datastore: DatastoreFreshness
+  identity: {
+    status: 'valid' | 'invalid'
+    actor: string | null
+    error: string | null
+  }
+  deadLetters: ReturnType<typeof listBehaviorDeadLetters>
 }
 
 export function getBehaviorsRuntimeHealth(): BehaviorsRuntimeHealth {
@@ -1301,8 +1645,27 @@ export function getBehaviorsRuntimeHealth(): BehaviorsRuntimeHealth {
       nextRetryAt: new Date(failure.nextRetryAtMs).toISOString(),
     }] : []
   })
+  const anyEnabled = BEHAVIOR_KEYS.some(isEnabled)
+  let reviewer: string | null = null
+  try {
+    reviewer = getReviewAgentUsername()
+  } catch {
+    reviewer = null
+  }
+  const identityValid = reviewer !== null
+  const identity = {
+    status: identityValid ? 'valid' as const : 'invalid' as const,
+    actor: reviewer,
+    error: identityValid ? null : 'REVIEW_AGENT_USERNAME is missing or invalid',
+  }
+  const datastoreUnavailable = anyEnabled && datastoreFreshness.status === 'unavailable'
   return {
-    status: tickerStarted && !heartbeatStale && !operationStale && failures.length === 0
+    status: tickerStarted
+      && !heartbeatStale
+      && !operationStale
+      && failures.length === 0
+      && (!anyEnabled || identityValid)
+      && !datastoreUnavailable
       ? 'ok'
       : 'degraded',
     running: tickerStarted,
@@ -1313,6 +1676,9 @@ export function getBehaviorsRuntimeHealth(): BehaviorsRuntimeHealth {
       : new Date(lastTickCompletedAtMs).toISOString(),
     busy,
     failures,
+    datastore: { ...datastoreFreshness },
+    identity,
+    deadLetters: listBehaviorDeadLetters(),
   }
 }
 
@@ -1321,6 +1687,9 @@ export interface BehaviorsRuntimeConfig {
 }
 
 export function startBehaviorsRuntime(config: BehaviorsRuntimeConfig = {}): void {
+  if (config.reviewAgentUsername !== undefined) {
+    setReviewAgentUsername(config.reviewAgentUsername)
+  }
   if (tickerStarted) return
   tickerStarted = true
   behaviorAbortController = new AbortController()
@@ -1329,7 +1698,6 @@ export function startBehaviorsRuntime(config: BehaviorsRuntimeConfig = {}): void
   runtimeStartedAtMs = Date.now()
   lastTickAtMs = null
   lastTickCompletedAtMs = null
-  reviewAgentUsername = String(config.reviewAgentUsername || '')
   // Preserve an existing completed ledger across restart. Otherwise a PR
   // opened while Poise was down is absorbed into a new snapshot and never
   // reviewed. A genuinely missing marker still takes the anti-flood snapshot.

@@ -9,7 +9,7 @@
 // runtime — the view is just a UI for state, not the place where
 // agent automations actually run.
 
-import { BEHAVIORS, isEnabled, setEnabled, getSetting, setSetting, getScratchpad, setScratchpad, getLastTriggered, refreshState, type BehaviorKey, type BehaviorSetting } from '../behaviors'
+import { BEHAVIORS, isEnabled, setEnabled, getSetting, setSetting, getScratchpad, setScratchpad, getLastTriggered, getBehaviorDiagnostics, refreshState, type BehaviorKey, type BehaviorSetting } from '../behaviors'
 
 let viewEl: HTMLElement
 let initialized = false
@@ -271,6 +271,7 @@ function renderShell(): string {
       <div class="filter-cluster" id="behaviors-filters"></div>
     </header>
     <main>
+      <div id="behavior-diagnostics" class="behavior-diagnostics" hidden></div>
       <table id="behaviors-table">
         <thead>
           <tr>
@@ -308,13 +309,35 @@ async function fetchBehaviorOwners() {
     const res = await fetch('/api/behaviors')
     if (!res.ok) return
     const data = await res.json()
-    for (const key of Object.keys(data)) {
+    for (const key of BEHAVIORS.map((behavior) => behavior.key)) {
       behaviorOwners[key as BehaviorKey] = data[key]?.owner ?? null
     }
   } catch { /* leave owners null — cell will show a dash */ }
   // Same call also pulls enabled flags into the client mirror so the
   // toggle reflects server truth at first render.
   await refreshState()
+}
+
+function renderDiagnostics() {
+  const el = viewEl.querySelector<HTMLElement>('#behavior-diagnostics')
+  if (!el) return
+  const diagnostics = getBehaviorDiagnostics()
+  if (!diagnostics || diagnostics.status === 'ok') {
+    el.hidden = true
+    el.textContent = ''
+    return
+  }
+  const messages = [
+    diagnostics.agentLogsError ? `Agent log: ${diagnostics.agentLogsError}` : '',
+    diagnostics.datastore.error ? `Datastore: ${diagnostics.datastore.error}` : '',
+    diagnostics.identity.error ? `Identity: ${diagnostics.identity.error}` : '',
+    ...diagnostics.failures.map((failure) =>
+      `${failure.behavior}: ${failure.consecutiveFailures} consecutive ${failure.kind} failure(s)`),
+    ...diagnostics.deadLetters.slice(0, 5).map((letter) =>
+      `${letter.behavior} ${letter.target}: ${letter.error}`),
+  ].filter(Boolean)
+  el.textContent = messages.join(' · ') || 'Behavior runtime is degraded.'
+  el.hidden = false
 }
 
 function renderRows() {
@@ -403,6 +426,7 @@ function attachHandlers() {
 // reflected on the next tick instead of leaving a dangerous false state.
 async function tickRefresh() {
   await refreshState()
+  renderDiagnostics()
   for (const meta of BEHAVIORS) {
     const tr = viewEl.querySelector<HTMLTableRowElement>(`tr[data-behavior="${meta.key}"]`)
     if (!tr) continue
@@ -435,6 +459,7 @@ export async function initBehaviorsView() {
   // Fetch the server-provided owner map first so the very first paint
   // shows the right username/avatar instead of a flash of "—".
   await fetchBehaviorOwners()
+  renderDiagnostics()
   renderRows()
   // Subscribe to the wall-clock-aligned ticker so the relative-time
   // strings ("2h", "5m") stay accurate and any newly-fired behavior

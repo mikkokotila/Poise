@@ -32,6 +32,36 @@ export const BEHAVIORS: BehaviorMeta[] = [
 
 export type BehaviorSetting = 'p0' | 'p1' | 'p2' | 'p3' | 'p4'
 export interface LastTriggered { at: string; target: string }
+export interface BehaviorDiagnostics {
+  status: 'ok' | 'degraded'
+  agentLogsError: string | null
+  datastore: {
+    status: 'unchecked' | 'healthy' | 'unavailable'
+    checkedAt: string
+    ageSeconds: number | null
+    lastSuccessAt: string | null
+    error: string | null
+  }
+  identity: {
+    status: 'valid' | 'invalid'
+    actor: string | null
+    error: string | null
+  }
+  failures: Array<{
+    behavior: BehaviorKey
+    kind: string
+    consecutiveFailures: number
+    lastFailureAt: string
+    nextRetryAt: string
+  }>
+  deadLetters: Array<{
+    id: string
+    behavior: string
+    target: string
+    error: string
+    createdAt: string
+  }>
+}
 
 // In-memory mirror of the server's state, kept in sync via
 // /api/behaviors GET on view init and every successful POST.
@@ -39,6 +69,7 @@ const enabledByKey: Partial<Record<BehaviorKey, boolean>> = {}
 const settingByKey: Partial<Record<BehaviorKey, BehaviorSetting>> = {}
 const lastByKey: Partial<Record<BehaviorKey, LastTriggered | null>> = {}
 const scratchpadByKey: Partial<Record<BehaviorKey, string>> = {}
+let diagnostics: BehaviorDiagnostics | null = null
 
 export function isEnabled(key: BehaviorKey): boolean {
   return !!enabledByKey[key]
@@ -54,6 +85,10 @@ export function getLastTriggered(key: BehaviorKey): LastTriggered | null {
 
 export function getScratchpad(key: BehaviorKey): string {
   return scratchpadByKey[key] || ''
+}
+
+export function getBehaviorDiagnostics(): BehaviorDiagnostics | null {
+  return diagnostics
 }
 
 async function postBehavior(key: BehaviorKey, body: { enabled?: boolean, setting?: BehaviorSetting, scratchpad?: string }) {
@@ -109,13 +144,29 @@ export async function setScratchpad(key: BehaviorKey, text: string): Promise<voi
 export async function refreshState(): Promise<void> {
   try {
     const res = await fetch('/api/behaviors')
-    if (!res.ok) return
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
-    for (const k of Object.keys(data) as BehaviorKey[]) {
+    for (const k of BEHAVIORS.map((behavior) => behavior.key)) {
       enabledByKey[k] = !!data[k]?.enabled
       if (data[k]?.setting) settingByKey[k] = data[k].setting
       scratchpadByKey[k] = typeof data[k]?.scratchpad === 'string' ? data[k].scratchpad : ''
       lastByKey[k] = data[k]?.lastTriggered ?? null
     }
-  } catch { /* leave as-is */ }
+    diagnostics = data.diagnostics ?? null
+  } catch (error) {
+    diagnostics = {
+      status: 'degraded',
+      agentLogsError: error instanceof Error ? error.message : String(error),
+      datastore: {
+        status: 'unavailable',
+        checkedAt: new Date().toISOString(),
+        ageSeconds: null,
+        lastSuccessAt: null,
+        error: 'Behaviors API unavailable',
+      },
+      identity: { status: 'invalid', actor: null, error: 'Behaviors API unavailable' },
+      failures: [],
+      deadLetters: [],
+    }
+  }
 }
