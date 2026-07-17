@@ -27,7 +27,11 @@ beforeAll(async () => {
   process.env.AGENT_INTERFACE_ROOT = join(root, 'agent')
   vi.resetModules()
   production = await import('../server/production')
-  server = production.createProductionServer({ staticDir, claudeAuth: auth })
+  server = production.createProductionServer({
+    staticDir,
+    claudeAuth: auth,
+    reviewAgentUsername: 'bit-mis',
+  })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
   if (!address || typeof address === 'string') throw new Error('test server did not bind')
