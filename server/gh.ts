@@ -42,7 +42,14 @@ function fitsProcessArgument(prefix: string, value: string): boolean {
 // so work the user's own agent opened surfaces in Current as the user's.
 let reviewAgentUsername = ''
 export function setReviewAgentUsername(name: string): void {
-  reviewAgentUsername = String(name || '')
+  reviewAgentUsername = String(name || '').trim()
+}
+
+export function getReviewAgentUsername(): string {
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?$/.test(reviewAgentUsername)) {
+    throw new Error('REVIEW_AGENT_USERNAME must be a valid GitHub username')
+  }
+  return reviewAgentUsername
 }
 
 // github-interface resolves the repo from cwd's last two path parts when
@@ -217,15 +224,31 @@ export async function getHeadSha(
   const [owner, name] = repo.split('/', 2)
   const cwd = join(GH_INTERFACE_CWD_ROOT, owner, name)
   await mkdir(cwd, { recursive: true })
-  const { stdout } = await runFile(GH_INTERFACE, ['--head-sha', `#${number}`], {
+  const actor = getReviewAgentUsername()
+  const { stdout } = await runFile(GH_INTERFACE, [
+    '--head-sha',
+    `#${number}`,
+    '--token-user',
+    actor,
+  ], {
     cwd,
     timeoutMs: 30_000,
     maxOutputBytes: 1 * 1024 * 1024,
     signal: options.signal,
   })
-  const result = JSON.parse(stdout)
-  if (!result.head_sha) throw new Error('github-interface --head-sha returned no head_sha')
-  return String(result.head_sha)
+  const result: unknown = JSON.parse(stdout)
+  if (result === null || typeof result !== 'object' || Array.isArray(result)) {
+    throw new Error('github-interface --head-sha returned a non-object')
+  }
+  const data = result as Record<string, unknown>
+  const headSha = String(data.head_sha || '').toLowerCase()
+  if (data.action !== 'head_sha'
+    || data.repository !== repo
+    || data.pull_number !== number
+    || !/^[0-9a-f]{40}$/.test(headSha)) {
+    throw new Error('github-interface --head-sha returned malformed state')
+  }
+  return headSha
 }
 
 // Ask github-interface whether a single PR is "green" (mergeable, open,

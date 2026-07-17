@@ -79,17 +79,24 @@ timezone, refresh interval, and theme in Settings.
 ## Production
 
 ```bash
+brew install node@22 python@3.13
 npm ci
-npm run build
-npm start
+npm run install:production
 ```
+
+The macOS installer builds Poise, installs the exact Caller commit in
+`config/caller-release.json`, and registers two per-user launchd services:
+one keeps the application alive and the other checks `/api/health` every
+minute. A transition to degraded health produces a desktop notification;
+expired Claude authentication also opens Poise's subscription sign-in prompt.
 
 The production build emits the browser client under `dist/client` and the Node
 entrypoint at `dist/server.js`. The server binds `127.0.0.1:5555` by default.
 Poise intentionally refuses non-loopback bindings: its API can create GitHub
 issues, launch agents, and modify local files, so it is not a network service.
 Keep `.env` owner-readable only (`chmod 600 .env`) because it may contain the
-Confab API credential; `npm run doctor` rejects broader permissions.
+Confab API credential; production startup rejects broader permissions and any
+unmanaged or mismatched Caller release.
 
 ## Configuration
 
@@ -102,6 +109,7 @@ Confab API credential; `npm run doctor` rejects broader permissions.
 | `POISE_CHAT_ATTACHMENTS_DIR` | Durable chat attachments | `~/.poise/chat-attachments` |
 | `POISE_ESPANSO_MATCH_DIR` | Espanso match directory override | macOS Espanso default |
 | `AGENT_INTERFACE_ROOT` | `agent-interface` working directory | `~/dev/caller/agent_interface` |
+| `AGENT_INTERFACE_DATA_DIR` | Durable agent-interface calls and responses | package default |
 | `POISE_VOICE_GUIDE_PATH` | Optional editor-chat voice guide | unset |
 | `REVIEW_AGENT_USERNAME` | GitHub identity used by review automation | unset |
 | `CONFAB_URL` | Optional Confab service | `http://localhost:8000` |

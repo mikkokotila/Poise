@@ -21,6 +21,8 @@
     "build:server": "esbuild server/production.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/server.js",
     "start": "node dist/server.js",
     "preview": "npm run build && npm run start",
+    "install:production": "node scripts/install-production.mjs",
+    "monitor:production": "node scripts/monitor-production.mjs",
     "typecheck": "npm run typecheck:client && npm run typecheck:server && npm run typecheck:tests",
     "typecheck:client": "tsc -p tsconfig.json --noEmit",
     "typecheck:server": "tsc -p tsconfig.server.json --noEmit",

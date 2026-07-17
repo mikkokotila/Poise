@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { HttpError, readBuffer, setApiHeaders } from './http'
+import { assertCallerRelease } from './caller-release'
 import { assertSecureDotenv, loadSecureDotenv, validateConfabUrl } from './runtime-config'
 import type { ClaudeAuthRuntime } from './cache-plugin'
 
@@ -394,6 +395,7 @@ export async function startProductionServer(options: ProductionServerOptions = {
   const confabUrl = validateConfabUrl(
     options.confabUrl ?? process.env.CONFAB_URL ?? 'http://localhost:8000',
   )
+  await assertCallerRelease()
   const staticDir = resolve(options.staticDir || resolve(process.cwd(), 'dist/client'))
   await stat(resolve(staticDir, 'index.html'))
   let server: Server

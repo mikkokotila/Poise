@@ -1,7 +1,14 @@
 import { defineConfig, devices } from '@playwright/test'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 const port = 5566
 const baseURL = `http://127.0.0.1:${port}`
+const e2eRoot = resolve('test-results/e2e')
+const callerRelease = JSON.parse(
+  readFileSync(new URL('./config/caller-release.json', import.meta.url), 'utf8'),
+) as { commit: string }
+const callerReleaseRoot = resolve(e2eRoot, 'caller-release')
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -36,13 +43,17 @@ export default defineConfig({
   webServer: {
     command: 'npm run preview',
     env: {
-      POISE_DB: 'test-results/e2e/cache.db',
+      POISE_DB: resolve(e2eRoot, 'cache.db'),
       POISE_PORT: String(port),
-      POISE_EDITOR_DIR: 'test-results/e2e/editor',
-      POISE_CHAT_ATTACHMENTS_DIR: 'test-results/e2e/chat-attachments',
-      POISE_ESPANSO_MATCH_DIR: 'test-results/e2e/espanso-match',
-      AGENT_INTERFACE_ROOT: 'test-results/e2e/agent-interface',
-      TMPDIR: 'test-results/e2e/tmp',
+      POISE_EDITOR_DIR: resolve(e2eRoot, 'editor'),
+      POISE_CHAT_ATTACHMENTS_DIR: resolve(e2eRoot, 'chat-attachments'),
+      POISE_ESPANSO_MATCH_DIR: resolve(e2eRoot, 'espanso-match'),
+      POISE_ENFORCE_CALLER_RELEASE: '1',
+      CALLER_RELEASE_SHA: callerRelease.commit,
+      CALLER_RELEASE_ROOT: callerReleaseRoot,
+      CALLER_BIN_ROOT: resolve(callerReleaseRoot, 'venv/bin'),
+      AGENT_INTERFACE_ROOT: resolve(callerReleaseRoot, 'source/agent_interface'),
+      TMPDIR: resolve(e2eRoot, 'tmp'),
     },
     url: baseURL,
     reuseExistingServer: false,

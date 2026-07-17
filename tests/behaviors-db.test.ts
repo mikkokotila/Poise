@@ -136,6 +136,7 @@ describe('behavior database lifecycle', () => {
     const launchedOwner = claimSeenOwned('review-new-prs', launchedTarget, 60_000)
     expect(launchedOwner).toEqual(expect.any(String))
     const requestedAt = new Date().toISOString()
+    const expectedHead = 'b'.repeat(40)
     expect(markBehaviorLaunchIntentOwned({
       key: 'review-new-prs',
       target: launchedTarget,
@@ -144,6 +145,10 @@ describe('behavior database lifecycle', () => {
       repo: 'owner/repo',
       pr: 2,
       requestedAt,
+      expectedHead,
+      actor: 'bit-mis',
+      source: 'poise:review-new-prs',
+      correlationId: launchedOwner!,
     })).toBe(true)
     db.prepare('UPDATE behavior_seen SET lease_until = ? WHERE key = ? AND target = ?')
       .run(Date.now() - 1, 'review-new-prs', launchedTarget)
@@ -157,6 +162,10 @@ describe('behavior database lifecycle', () => {
         launchPr: 2,
         launchRequestedAt: requestedAt,
         launchCallId: null,
+        launchExpectedHead: expectedHead,
+        launchActor: 'bit-mis',
+        launchSource: 'poise:review-new-prs',
+        launchCorrelationId: launchedOwner,
       }),
     ])
     expect(linkBehaviorLaunchCallOwned(

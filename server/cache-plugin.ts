@@ -2,6 +2,7 @@ import type { Plugin, Connect } from 'vite'
 import type { ServerResponse } from 'node:http'
 import { getSettings, setSettings } from './settings'
 import { claudeAuth, type ClaudeAuthSnapshot } from './claude-auth'
+import { getCallerReleaseHealth } from './caller-release'
 import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, type Lane } from './current'
 import { handleGhBody, listOrgRepos, setReviewAgentUsername } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, triggerPrReview, replayAgentJob } from './agent'
@@ -43,9 +44,9 @@ export function startPoiseRuntime(opts: CachePluginOptions = {}): void {
   const auth = opts.claudeAuth ?? claudeAuth
   activeClaudeAuthRuntimes.add(auth)
   auth.start()
+  setReviewAgentUsername(opts.reviewAgentUsername || '')
   startBehaviorsRuntime({ reviewAgentUsername: opts.reviewAgentUsername })
   startContentFinalizer()
-  setReviewAgentUsername(opts.reviewAgentUsername || '')
 }
 
 export async function stopPoiseRuntime(): Promise<void> {
@@ -72,9 +73,18 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
         }
         if (url === '/api/health' && req.method === 'GET') {
           const scheduler = getBehaviorsRuntimeHealth()
-          return json(res, scheduler.status === 'ok' ? 200 : 503, {
-            status: scheduler.status,
+          const claudeAuthState = auth.snapshot()
+          const callerRelease = await getCallerReleaseHealth()
+          const enabled = getEnabledMap()
+          const claudeBackedEnabled = enabled['review-new-prs'] || enabled['approve-prs']
+          const healthy = scheduler.status === 'ok'
+            && (!claudeBackedEnabled || claudeAuthState.status === 'authenticated')
+            && callerRelease.status !== 'invalid'
+          return json(res, healthy ? 200 : 503, {
+            status: healthy ? 'ok' : 'degraded',
             scheduler,
+            claudeAuth: claudeAuthState,
+            callerRelease,
           })
         }
 
@@ -155,21 +165,33 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
           const settings = getSettingMap()
           const scratch = getScratchpadMap()
           let logs: Awaited<ReturnType<typeof fetchAgentLogs>> = []
-          try { logs = await fetchAgentLogs() } catch { /* logs unavailable — lastTriggered nulls */ }
+          let agentLogsError: string | null = null
+          try { logs = await fetchAgentLogs() }
+          catch (error) {
+            agentLogsError = error instanceof Error ? error.message : String(error)
+          }
           // fetchAgentLogs returns newest-first, so .find() picks the
           // most recent matching row. We only consider rows that have
           // both a repo and pr_id so the link to Swarm works.
-          const lastFor = (cliBehavior: string) => {
-            const r = logs.find((e) => e.behavior === cliBehavior && e.repo && e.pr_id)
-            return r ? { at: r.started_at, target: `${r.repo}#${r.pr_id}` } : null
+          const lastFor = (cliBehavior: string, source: string) => {
+            const r = logs.find((e) =>
+              e.behavior === cliBehavior
+              && e.source === source
+              && e.repo
+              && e.pr_id)
+            return r ? {
+              at: r.started_at_precise || r.started_at,
+              target: `${r.repo}#${r.pr_id}`,
+            } : null
           }
+          const runtime = getBehaviorsRuntimeHealth()
           return json(res, 200, {
             'review-new-prs': {
               owner: opts.reviewAgentUsername || null,
               enabled: enabled['review-new-prs'],
               setting: settings['review-new-prs'],
               scratchpad: scratch['review-new-prs'],
-              lastTriggered: lastFor('pr_review'),
+              lastTriggered: lastFor('pr_review', 'poise:review-new-prs'),
             },
             // approve-prs has no priority setting — `setting: null` so
             // the Behaviors view can render an em dash instead of a
@@ -179,7 +201,7 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
               enabled: enabled['approve-prs'],
               setting: null,
               scratchpad: scratch['approve-prs'],
-              lastTriggered: lastFor('pr_approve'),
+              lastTriggered: lastFor('pr_approve', 'poise:approve-prs'),
             },
             // resolve-unblocking calls github-interface directly (no
             // agent), so it has no agent-interface log surface. Its
@@ -194,6 +216,14 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
               setting: null,
               scratchpad: null,
               lastTriggered: getResolveUnblockingLastFired(),
+            },
+            diagnostics: {
+              status: runtime.status,
+              agentLogsError,
+              datastore: runtime.datastore,
+              identity: runtime.identity,
+              failures: runtime.failures,
+              deadLetters: runtime.deadLetters,
             },
           })
         }

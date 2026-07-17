@@ -10,7 +10,8 @@
 
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { localCheckoutPath } from './gh'
+import { randomUUID } from 'node:crypto'
+import { getHeadSha, getReviewAgentUsername, localCheckoutPath } from './gh'
 import { claudeAuth } from './claude-auth'
 import { claudeSubscriptionEnvironment, runFile, spawnDetached } from './process'
 
@@ -40,8 +41,12 @@ export interface LogEntry {
   completed_at?: string | null
   time_elapsed: string
   status: string
-  outcome?: 'clean' | 'changes_requested' | null
-  head_sha?: string | null
+  outcome: 'clean' | 'changes_requested' | 'approved' | null
+  head_sha: string | null
+  expected_head: string | null
+  source: string | null
+  correlation_id: string | null
+  action: 'reviewed_clean' | 'requested_changes' | 'approved' | null
   response: string | null // upstream 8-char availability marker; read by full `id`
   error: string
 }
@@ -56,12 +61,106 @@ export async function fetchAgentLogs(
     signal: options.signal,
   })
   const trimmed = stdout.trim()
-  if (!trimmed) return []
+  if (!trimmed) throw new Error('agent-interface --logs returned empty output')
   // agent-interface returns oldest-first (`order by started_at`).
   // Surface newest-first so the front-end doesn't carry the convention.
-  const list: unknown = JSON.parse(trimmed)
+  let list: unknown
+  try { list = JSON.parse(trimmed) }
+  catch (error) {
+    throw new Error('agent-interface --logs returned invalid JSON', { cause: error })
+  }
   if (!Array.isArray(list)) throw new Error('agent-interface --logs returned non-array JSON')
-  return list.reverse()
+  return list.map(validateLogEntry).reverse()
+}
+
+function validateLogEntry(value: unknown, index: number): LogEntry {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`agent-interface log row ${index} is not an object`)
+  }
+  const row = value as Record<string, unknown>
+  const optionalString = (field: string): string | null => {
+    const item = row[field]
+    if (item === null) return null
+    if (typeof item !== 'string') {
+      throw new Error(`agent-interface log row ${index} has invalid ${field}`)
+    }
+    return item
+  }
+  const requiredString = (field: string): string => {
+    const item = row[field]
+    if (typeof item !== 'string') {
+      throw new Error(`agent-interface log row ${index} has invalid ${field}`)
+    }
+    return item
+  }
+  const id = requiredString('id').toLowerCase()
+  const prId = optionalString('pr_id')
+  const repo = optionalString('repo')
+  const actor = optionalString('actor')
+  const behavior = optionalString('behavior')
+  const sessionId = optionalString('session_id')
+  const startedAt = requiredString('started_at')
+  const startedAtPrecise = optionalString('started_at_precise')
+  const completedAt = optionalString('completed_at')
+  const status = requiredString('status')
+  const outcome = optionalString('outcome')
+  const headSha = optionalString('head_sha')
+  const expectedHead = optionalString('expected_head')
+  const source = optionalString('source')
+  const correlationId = optionalString('correlation_id')
+  const action = optionalString('action')
+  const error = optionalString('error') || ''
+  if (!/^[0-9a-f]{32}$/.test(id)
+    || (prId !== null && !/^[1-9][0-9]*$/.test(prId))
+    || (repo !== null && !/^[^/\s]+(?:\/[^/\s]+)?$/.test(repo))
+    || (actor !== null
+      && !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?$/.test(actor))
+    || !Number.isFinite(Date.parse(startedAt))
+    || (startedAtPrecise !== null && !Number.isFinite(Date.parse(startedAtPrecise)))
+    || (completedAt !== null && !Number.isFinite(Date.parse(completedAt)))
+    || !['clean', 'changes_requested', 'approved', null].includes(outcome)
+    || (headSha !== null && !/^[0-9a-f]{40}$/.test(headSha))
+    || (expectedHead !== null && !/^[0-9a-f]{40}$/.test(expectedHead))
+    || !['reviewed_clean', 'requested_changes', 'approved', null].includes(action)
+    || (source !== null && !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(source))
+    || (correlationId !== null && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(correlationId))) {
+    throw new Error(`agent-interface log row ${index} violates the schema`)
+  }
+  if (source?.startsWith('poise:')) {
+    if (!actor || !expectedHead || !correlationId || !behavior
+      || !repo || !/^[^/\s]+\/[^/\s]+$/.test(repo) || !prId) {
+      throw new Error(`agent-interface log row ${index} has incomplete Poise provenance`)
+    }
+    if (status === 'completed' && (!completedAt || !action || !outcome || !headSha)) {
+      throw new Error(`agent-interface log row ${index} has incomplete terminal outcome`)
+    }
+    if (status === 'failed' && !error) {
+      throw new Error(`agent-interface log row ${index} has no terminal error`)
+    }
+  }
+  return {
+    id,
+    pr_id: prId,
+    repo,
+    actor,
+    model: requiredString('model'),
+    behavior,
+    session_id: sessionId,
+    prompt: requiredString('prompt'),
+    started_at: startedAt,
+    started_at_precise: startedAtPrecise,
+    completed_at: completedAt,
+    time_elapsed: requiredString('time_elapsed'),
+    status,
+    outcome: outcome as LogEntry['outcome'],
+    head_sha: headSha,
+    expected_head: expectedHead,
+    source,
+    correlation_id: correlationId,
+    action: action as LogEntry['action'],
+    response: optionalString('response'),
+    error,
+  }
 }
 
 // Fetch one response body by the full 32-hex call id. agent-interface also
@@ -83,20 +182,40 @@ export async function fetchAgentResponse(callId: string): Promise<{ id: string, 
 // immediately. The user watches progress in the Swarm view (the agent
 // call lands as a new entry with status='running' the moment track()
 // fires upstream, then settles to completed/failed).
-export async function triggerPrReview(prUrl: string): Promise<{ ok: true }> {
+export async function triggerPrReview(
+  prUrl: string,
+): Promise<{ ok: true, source: string, correlationId: string }> {
   const m = String(prUrl || '').match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
   if (!m) throw new Error('not a github PR url')
   const [, owner, repo, num] = m
+  const actor = getReviewAgentUsername()
+  const repoFullName = `${owner}/${repo}`
   await claudeAuth.requireReady()
   const pwd = await localCheckoutPath(owner, repo)
+  const expectedHead = await getHeadSha(repoFullName, Number(num))
+  const source = 'poise:manual-review'
+  const correlationId = randomUUID()
 
   await claudeAuth.requireReady()
-  await spawnDetached(CLI, ['--pr-review', `#${num}`, '--pwd', pwd], {
+  await spawnDetached(CLI, [
+    '--pr-review',
+    `#${num}`,
+    '--actor',
+    actor,
+    '--expected-head',
+    expectedHead,
+    '--source',
+    source,
+    '--correlation-id',
+    correlationId,
+    '--pwd',
+    pwd,
+  ], {
     cwd: agentCwd(),
     env: claudeSubscriptionEnvironment(),
     onExit: (result) => { claudeAuth.observeProcessFailure(result) },
   })
-  return { ok: true }
+  return { ok: true, source, correlationId }
 }
 
 // Replay an existing agent-interface job — used by the Swarm view's
@@ -111,7 +230,7 @@ export async function replayAgentJob(input: {
   behavior?: string,
   repo?: string,
   pr_id?: string | number,
-}): Promise<{ ok: true }> {
+}): Promise<{ ok: true, source: string, correlationId: string }> {
   const behavior = String(input.behavior || '')
   const repo = String(input.repo || '')
   const prId = String(input.pr_id || '')
@@ -126,11 +245,28 @@ export async function replayAgentJob(input: {
   await claudeAuth.requireReady()
   const [owner, repoName] = repo.split('/', 2)
   const pwd = await localCheckoutPath(owner, repoName)
+  const actor = getReviewAgentUsername()
+  const expectedHead = await getHeadSha(repo, Number(prId))
+  const source = 'poise:replay'
+  const correlationId = randomUUID()
   await claudeAuth.requireReady()
-  await spawnDetached(CLI, [flag, `#${prId}`, '--pwd', pwd], {
+  await spawnDetached(CLI, [
+    flag,
+    `#${prId}`,
+    '--actor',
+    actor,
+    '--expected-head',
+    expectedHead,
+    '--source',
+    source,
+    '--correlation-id',
+    correlationId,
+    '--pwd',
+    pwd,
+  ], {
     cwd: agentCwd(),
     env: claudeSubscriptionEnvironment(),
     onExit: (result) => { claudeAuth.observeProcessFailure(result) },
   })
-  return { ok: true }
+  return { ok: true, source, correlationId }
 }
