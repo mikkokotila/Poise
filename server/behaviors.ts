@@ -985,6 +985,7 @@ interface ReviewActivityResult {
   headSha: string
   reviewerRequested: boolean
   activeChangeRequestAuthors: string[]
+  unresolvedConversationCount: number
   reviewerLatestState: string | null
   reviewerLatestCommit: string | null
   latestActivityAt: string | null
@@ -1017,6 +1018,10 @@ async function checkReviewActivity(
   const data = objectValue(
     parseJson(stdout, 'github-interface --review-activity-since'),
     'github-interface --review-activity-since',
+  )
+  const unresolvedConversationCount = safeInteger(
+    data.unresolved_conversation_count,
+    'review-activity-since unresolved_conversation_count',
   )
   if (data.action !== 'review_activity_since'
     || data.repository !== repo
@@ -1058,6 +1063,7 @@ async function checkReviewActivity(
     headSha: headSha.toLowerCase(),
     reviewerRequested: data.reviewer_requested,
     activeChangeRequestAuthors: data.active_change_request_authors.map(String),
+    unresolvedConversationCount,
     reviewerLatestState,
     reviewerLatestCommit,
     latestActivityAt,
@@ -1242,6 +1248,7 @@ async function tickApprovePrs(): Promise<void> {
           if (activity.state !== 'OPEN'
             || activity.draft
             || activity.activeChangeRequestAuthors.length > 0
+            || activity.unresolvedConversationCount > 0
             || (activity.reviewerLatestState === 'APPROVED'
               && activity.reviewerLatestCommit === activity.headSha)) continue
           if (activity.headSha !== review.headSha && activity.latestActivityAt === null) {

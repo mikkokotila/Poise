@@ -83,6 +83,7 @@ async function restartModules() {
 interface ReviewActivityFixture {
   requestedReviewers?: string[]
   activeChangeRequestAuthors?: string[]
+  unresolvedConversationCount?: number
   headSha?: string
   state?: string
   draft?: boolean
@@ -188,6 +189,7 @@ function arrangeCli(
           head_sha: reviewActivity.headSha ?? HEAD_SHA,
           reviewer_requested: requested,
           active_change_request_authors: reviewActivity.activeChangeRequestAuthors ?? [],
+          unresolved_conversation_count: reviewActivity.unresolvedConversationCount ?? 0,
           reviewer_latest_state: reviewActivity.reviewerLatestState ?? null,
           reviewer_latest_commit: reviewActivity.reviewerLatestCommit ?? null,
           reviewer_change_requests_since: 0,
@@ -523,6 +525,22 @@ describe('behavior launch claims', () => {
     vi.setSystemTime(new Date('2026-07-15T12:05:00.000Z'))
     await runtime.runEnabledBehaviorsOnce()
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+  })
+
+  it('does not approve a clean review while a review conversation is unresolved', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
+    arrangeCli(false, false, { unresolvedConversationCount: 1 })
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_approve_prs_enabled', '1')
+    recordCompletedInitialReview(db, { completedAt: '2026-07-15T11:40:00.000Z' })
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
   })
 
   it('waits ten minutes after another reviewer dismisses a change request', async () => {
