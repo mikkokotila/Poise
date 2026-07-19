@@ -98,4 +98,23 @@ describe('agent log compatibility', () => {
       source: 'poise:review-new-prs',
     }])
   })
+
+  it('accepts a typed superseded Poise call', async () => {
+    mocks.runFile.mockResolvedValue({
+      stdout: JSON.stringify([logRow({
+        status: 'superseded',
+        outcome: 'superseded',
+        head_sha: 'c'.repeat(40),
+        source: 'poise:review-new-prs',
+        expected_head: 'b'.repeat(40),
+        correlation_id: 'correlation-1',
+      })]),
+      stderr: '',
+    })
+    await expect(fetchAgentLogs()).resolves.toMatchObject([{
+      status: 'superseded',
+      outcome: 'superseded',
+      head_sha: 'c'.repeat(40),
+    }])
+  })
 })

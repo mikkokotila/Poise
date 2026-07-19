@@ -41,7 +41,7 @@ export interface LogEntry {
   completed_at?: string | null
   time_elapsed: string
   status: string
-  outcome: 'clean' | 'changes_requested' | 'approved' | null
+  outcome: 'clean' | 'changes_requested' | 'approved' | 'superseded' | null
   head_sha: string | null
   expected_head: string | null
   source: string | null
@@ -118,7 +118,7 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
     || !Number.isFinite(Date.parse(startedAt))
     || (startedAtPrecise !== null && !Number.isFinite(Date.parse(startedAtPrecise)))
     || (completedAt !== null && !Number.isFinite(Date.parse(completedAt)))
-    || !['clean', 'changes_requested', 'approved', null].includes(outcome)
+    || !['clean', 'changes_requested', 'approved', 'superseded', null].includes(outcome)
     || (headSha !== null && !/^[0-9a-f]{40}$/.test(headSha))
     || (expectedHead !== null && !/^[0-9a-f]{40}$/.test(expectedHead))
     || !['reviewed_clean', 'requested_changes', 'approved', null].includes(action)
@@ -136,6 +136,10 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
     }
     if (status === 'failed' && !error) {
       throw new Error(`agent-interface log row ${index} has no terminal error`)
+    }
+    if (status === 'superseded'
+      && (!completedAt || outcome !== 'superseded' || !headSha || action !== null)) {
+      throw new Error(`agent-interface log row ${index} has incomplete superseded outcome`)
     }
   }
   return {
