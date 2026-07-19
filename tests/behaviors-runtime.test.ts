@@ -84,6 +84,7 @@ interface ReviewActivityFixture {
   requestedReviewers?: string[]
   activeChangeRequestAuthors?: string[]
   unresolvedConversationCount?: number
+  unresolvedConversationAuthors?: string[]
   headSha?: string
   state?: string
   draft?: boolean
@@ -190,6 +191,7 @@ function arrangeCli(
           reviewer_requested: requested,
           active_change_request_authors: reviewActivity.activeChangeRequestAuthors ?? [],
           unresolved_conversation_count: reviewActivity.unresolvedConversationCount ?? 0,
+          unresolved_conversation_authors: reviewActivity.unresolvedConversationAuthors ?? [],
           reviewer_latest_state: reviewActivity.reviewerLatestState ?? null,
           reviewer_latest_commit: reviewActivity.reviewerLatestCommit ?? null,
           reviewer_change_requests_since: 0,
@@ -537,6 +539,22 @@ describe('behavior launch claims', () => {
     db.setMeta('me', 'poise-user')
     db.setMeta('behavior_approve_prs_enabled', '1')
     recordCompletedInitialReview(db, { completedAt: '2026-07-15T11:40:00.000Z' })
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+  })
+
+  it('does not approve addressed changes while another reviewer owns an unresolved conversation', async () => {
+    arrangeCli(true, false, {
+      unresolvedConversationCount: 2,
+      unresolvedConversationAuthors: ['review-bot', 'other-reviewer'],
+    })
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_approve_prs_enabled', '1')
 
     await runtime.runEnabledBehaviorsOnce()
 

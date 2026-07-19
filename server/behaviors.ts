@@ -986,6 +986,7 @@ interface ReviewActivityResult {
   reviewerRequested: boolean
   activeChangeRequestAuthors: string[]
   unresolvedConversationCount: number
+  unresolvedConversationAuthors: string[]
   reviewerLatestState: string | null
   reviewerLatestCommit: string | null
   latestActivityAt: string | null
@@ -1031,7 +1032,9 @@ async function checkReviewActivity(
     || typeof data.draft !== 'boolean'
     || typeof data.reviewer_requested !== 'boolean'
     || !Array.isArray(data.active_change_request_authors)
-    || data.active_change_request_authors.some((value) => typeof value !== 'string')) {
+    || data.active_change_request_authors.some((value) => typeof value !== 'string')
+    || !Array.isArray(data.unresolved_conversation_authors)
+    || data.unresolved_conversation_authors.some((value) => typeof value !== 'string')) {
     throw new Error('github-interface --review-activity-since returned malformed state')
   }
   const headSha = String(data.head_sha || '').toLowerCase()
@@ -1064,6 +1067,7 @@ async function checkReviewActivity(
     reviewerRequested: data.reviewer_requested,
     activeChangeRequestAuthors: data.active_change_request_authors.map(String),
     unresolvedConversationCount,
+    unresolvedConversationAuthors: data.unresolved_conversation_authors.map(String),
     reviewerLatestState,
     reviewerLatestCommit,
     latestActivityAt,
@@ -1229,6 +1233,18 @@ async function tickApprovePrs(): Promise<void> {
         let expectedHead = ''
         if (check.hasChangeRequest) {
           if (check.responseCount < 1 || check.latestRequestAt === null) continue
+          const activity = await checkReviewActivity(
+            pr.repo,
+            pr.number,
+            reviewer,
+            check.latestRequestAt,
+          )
+          if (activity.state !== 'OPEN'
+            || activity.draft
+            || activity.headSha !== check.headSha
+            || activity.unresolvedConversationAuthors.some(
+              (author) => author.toLowerCase() !== reviewer.toLowerCase(),
+            )) continue
           expectedHead = check.headSha
           seenTarget = `${pr.repo}#${pr.number}@req=${check.latestRequestAt}/r=${check.responseCount}/head=${check.headSha}`
           firedReason = `req=${check.latestRequestAt}, r=${check.responseCount}: ${check.commitsAfterRequest}c+${check.authorInlineRepliesAfterRequest}reply, head=${check.headSha.slice(0, 8)}`
