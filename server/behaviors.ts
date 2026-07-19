@@ -1522,7 +1522,9 @@ async function runBehaviorCycle(
   const lifecycle = behaviorAbortController?.signal
   try {
     const recovered = await serializeBehaviorOperation(key, operation)
-    if (recovered) clearBehaviorFailure(key)
+    if (recovered || readBehaviorFailure(key)?.kind === 'operation') {
+      clearBehaviorFailure(key)
+    }
   } catch (error) {
     if (error instanceof BehaviorProcessLockContentionError) return
     if (lifecycle?.aborted !== true) {

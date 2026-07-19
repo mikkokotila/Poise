@@ -932,6 +932,27 @@ describe('behavior launch claims', () => {
     })
   })
 
+  it('clears a recovered scan failure when the scan launches a worker', async () => {
+    arrangeCli(false)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
+    db.setMeta('behavior_review_new_prs_enabled', '1')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
+    db.setMeta('behavior_review_new_prs_failure', JSON.stringify({
+      kind: 'operation',
+      consecutiveFailures: 4,
+      lastFailureAtMs: Date.now(),
+      nextRetryAtMs: Date.now() + 3_600_000,
+    }))
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(runtime.getBehaviorsRuntimeHealth().failures).toEqual([])
+  })
+
   it('preserves an existing breaker when shutdown aborts a behavior scan', async () => {
     mocks.runFile.mockImplementation(async (
       _command: string,
