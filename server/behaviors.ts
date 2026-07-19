@@ -215,7 +215,9 @@ function clearBehaviorFailure(key: BehaviorKey): void {
 
 function behaviorRetryDue(key: BehaviorKey): boolean {
   const failure = readBehaviorFailure(key)
-  return failure === null || Date.now() >= failure.nextRetryAtMs
+  return failure === null
+    || failure.kind === 'operation'
+    || Date.now() >= failure.nextRetryAtMs
 }
 
 // Per-behavior setting (the priority ceiling for review-new-prs:

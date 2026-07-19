@@ -900,7 +900,7 @@ describe('behavior launch claims', () => {
     }
   })
 
-  it('degrades health and backs off after a failed scan until a clean retry', async () => {
+  it('retries a failed scan immediately so dependency recovery clears health', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
     mocks.runFile.mockRejectedValue(new Error('502 Bad Gateway'))
@@ -923,10 +923,6 @@ describe('behavior launch claims', () => {
       }],
     })
 
-    await runtime.runEnabledBehaviorsOnce()
-    expect(mocks.runFile).toHaveBeenCalledOnce()
-
-    vi.setSystemTime(new Date(Date.now() + runtime.BEHAVIOR_RETRY_BASE_MS))
     arrangeCli(false)
     await runtime.runEnabledBehaviorsOnce()
 

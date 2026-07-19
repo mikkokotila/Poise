@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { spawn as spawnProcess } from 'node:child_process'
 import { link, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
@@ -60,6 +61,24 @@ async function namedNode(root: string, name: string): Promise<string> {
   if (process.platform === 'win32') await link(process.execPath, path)
   else await symlink(process.execPath, path)
   return path
+}
+
+async function runWithInput(
+  command: string,
+  args: string[],
+  input: string,
+  env: NodeJS.ProcessEnv,
+): Promise<{ code: number | null, stdout: string, stderr: string }> {
+  return await new Promise((resolve, reject) => {
+    const child = spawnProcess(command, args, { env })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk })
+    child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk })
+    child.once('error', reject)
+    child.once('close', (code) => resolve({ code, stdout, stderr }))
+    child.stdin.end(input)
+  })
 }
 
 describe('bounded process helpers', () => {
@@ -705,6 +724,39 @@ process.exit(1)
       expect((await readFile(attempts, 'utf8')).trim().split('\n')).toHaveLength(1)
     } finally {
       await rm(failureMarker, { force: true })
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('streams a large print-mode prompt through the subscription wrapper', async () => {
+    if (process.platform === 'win32') return
+    const root = await mkdtemp(join(tmpdir(), 'poise-claude-stdin-'))
+    const rawClaude = join(root, 'claude')
+    const source = `#!/usr/bin/env node
+const args = process.argv.slice(2)
+if (args.includes('auth') && args.includes('status')) {
+  process.stdout.write(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }))
+} else {
+  let input = ''
+  process.stdin.setEncoding('utf8')
+  process.stdin.on('data', (chunk) => { input += chunk })
+  process.stdin.on('end', () => process.stdout.write(JSON.stringify({ args, input })))
+}
+`
+    try {
+      await writeFile(rawClaude, source, { mode: 0o700 })
+      const prompt = 'x'.repeat(2 * 1024 * 1024)
+      const result = await runWithInput(
+        CLAUDE_SUBSCRIPTION_CLI,
+        ['--print', '--model', 'haiku', '--system-prompt', 'system'],
+        prompt,
+        { ...process.env, PATH: `${root}${delimiter}${process.env.PATH || ''}` },
+      )
+      expect(result).toMatchObject({ code: 0, stderr: '' })
+      const observed = JSON.parse(result.stdout)
+      expect(observed.input).toBe(prompt)
+      expect(observed.args.slice(-2)).toEqual(['--system-prompt', 'system'])
+    } finally {
       await rm(root, { recursive: true, force: true })
     }
   })
