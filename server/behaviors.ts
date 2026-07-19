@@ -333,6 +333,7 @@ const FAILED_AGENT_STATUSES = new Set([
   'timed_out',
   'timeout',
 ])
+const SUPERSEDED_AGENT_ERROR = 'pull-request head changed during behavior execution'
 
 function upstreamBehavior(behavior: ActiveClaim['behavior']): BehaviorAgentLaunch {
   return behavior === 'review-new-prs' ? 'pr_review' : 'pr_approve'
@@ -482,6 +483,18 @@ async function reconcileBehaviorLaunchClaims(
     }
 
     const status = call.status.toLowerCase()
+    const superseded = status === 'superseded'
+      || String(call.outcome || '') === 'superseded'
+      || call.error === SUPERSEDED_AGENT_ERROR
+    if (superseded) {
+      if (releaseOwnedClaim(behavior, claim.target, claim.claimId)) {
+        clearBehaviorFailure(behavior)
+      }
+      console.log(
+        `[behaviors] ${behavior} superseded for ${claim.launchRepo}#${claim.launchPr}; current head will be reconsidered`,
+      )
+      continue
+    }
     const terminal = status === 'completed' || FAILED_AGENT_STATUSES.has(status)
     if (!terminal && Date.now() - requestedAtMs >= BEHAVIOR_CLAIM_RENEWAL_MS) {
       const message = `behavior launch exceeded ${BEHAVIOR_CLAIM_RENEWAL_MS}ms running limit`
@@ -742,13 +755,16 @@ function settleClaimAfterExit(
       renewSeenOwned(behavior, target, claimId, BEHAVIOR_CLAIM_RENEWAL_MS)
       return
     }
-    const released = releaseOwnedClaim(behavior, target, claimId)
-    if (released) {
-      recordBehaviorFailure(behavior, 'worker')
-      claudeAuth.observeProcessFailure({ code, signal, error })
-    }
     const outcome = error?.message || signal || `exit ${code ?? 'unknown'}`
-    console.error(`[behaviors] ${behavior} worker failed for ${target}; ${released ? 'claim released' : 'claim already superseded'} (${outcome})`)
+    activeClaims.delete(claimId)
+    setBehaviorLaunchErrorOwned(
+      behavior,
+      target,
+      claimId,
+      `worker exited ${outcome}; awaiting durable agent result`,
+    )
+    renewSeenOwned(behavior, target, claimId, BEHAVIOR_CLAIM_RENEWAL_MS)
+    console.error(`[behaviors] ${behavior} worker exited for ${target}; awaiting durable result (${outcome})`)
   }
 }
 

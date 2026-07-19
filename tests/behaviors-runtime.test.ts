@@ -1021,7 +1021,7 @@ describe('behavior launch claims', () => {
     expect(db.claimSeen('review-new-prs', `${pr.repo}#${pr.number}`)).toBe(false)
   })
 
-  it('releases a review claim when an accepted worker later exits non-zero', async () => {
+  it('retains a review claim when an accepted worker exits until its durable result arrives', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
     arrangeCli(false)
@@ -1041,48 +1041,14 @@ describe('behavior launch claims', () => {
       onExit: (result: { code: number | null, signal: NodeJS.Signals | null }) => void
     }
     options.onExit({ code: 7, signal: null })
-    expect(db.hasSeen('review-new-prs', target)).toBe(false)
-    expect(runtime.getBehaviorsRuntimeHealth().failures).toEqual([
+    expect(db.hasSeen('review-new-prs', target)).toBe(true)
+    expect(db.listBehaviorLaunchClaims('review-new-prs')).toEqual([
       expect.objectContaining({
-        behavior: 'review-new-prs',
-        kind: 'worker',
-        consecutiveFailures: 1,
+        target,
+        launchError: 'worker exited exit 7; awaiting durable agent result',
       }),
     ])
-
-    vi.setSystemTime(new Date(Date.now() + runtime.BEHAVIOR_RETRY_BASE_MS))
-    listedPrs = []
-    const restarted = await restartModules()
-    restarted.behaviors.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
-    // Queue behind startup without snapshotting the failed target. Startup
-    // itself must not clear an expired worker breaker merely because no claim
-    // remains after the failed worker released it.
-    await restarted.behaviors.setEnabled('review-new-prs', true)
-    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
-    expect(restarted.behaviors.getBehaviorsRuntimeHealth().failures).toEqual([
-      expect.objectContaining({
-        behavior: 'review-new-prs',
-        kind: 'worker',
-        consecutiveFailures: 1,
-      }),
-    ])
-
-    listedPrs = [pr]
-    await restarted.behaviors.runEnabledBehaviorsOnce()
-    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
-
-    const retryExit = (mocks.spawnDetached.mock.calls[1][2] as {
-      onExit: (result: { code: number | null, signal: NodeJS.Signals | null }) => void
-    }).onExit
-    retryExit({ code: 7, signal: null })
-    expect(restarted.behaviors.getBehaviorsRuntimeHealth().failures).toEqual([
-      expect.objectContaining({
-        behavior: 'review-new-prs',
-        kind: 'worker',
-        consecutiveFailures: 2,
-        nextRetryAt: '2026-07-15T12:03:00.000Z',
-      }),
-    ])
+    expect(runtime.getBehaviorsRuntimeHealth().failures).toEqual([])
   })
 
   it('does not let an old worker failure release a newer claim generation', async () => {
@@ -1345,6 +1311,29 @@ describe('behavior launch claims', () => {
         error: 'model unavailable',
       }),
     ])
+  })
+
+  it('releases a superseded review without degradation and reviews the current head', async () => {
+    const launched = await launchReviewBeforeCrash()
+    agentLogs = [agentLog({
+      id: 'd'.repeat(32),
+      started_at: new Date(Date.parse(launched.requestedAt) + 1_000).toISOString(),
+      started_at_precise: new Date(Date.parse(launched.requestedAt) + 1_001).toISOString(),
+      status: 'failed',
+      error: 'pull-request head changed during behavior execution',
+      expected_head: launched.expectedHead,
+      actor: launched.actor,
+      source: launched.source,
+      correlation_id: launched.correlationId,
+    })]
+
+    const { database: db, behaviors: runtime } = await restartModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+    expect(runtime.getBehaviorsRuntimeHealth().failures).toEqual([])
+    expect(db.listBehaviorDeadLetters()).toEqual([])
   })
 
   it('waits through bounded registration grace before retrying a missing call', async () => {
