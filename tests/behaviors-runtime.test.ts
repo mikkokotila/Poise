@@ -884,6 +884,35 @@ describe('behavior launch claims', () => {
     expect(mocks.spawnDetached.mock.calls[0][1]).toContain(`#${downtimePr.number}`)
   })
 
+  it('re-arms a snapshot-only PR after a failed reviewer attempt', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
+    arrangeCli(false)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
+    db.setMeta('behavior_review_new_prs_enabled', '1')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
+    db.recordSeen('review-new-prs', `${pr.repo}#${pr.number}`)
+    agentLogs = [agentLog({
+      actor: 'review-bot',
+      source: null,
+      correlation_id: null,
+      status: 'failed',
+      started_at: '2026-07-15T11:59:00.000Z',
+      started_at_precise: '2026-07-15T11:59:00.001Z',
+      error: 'authentication failed',
+    })]
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(db.getMeta('behavior_review_new_prs_failed_snapshot_recovery_v1')).toBe('1')
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(mocks.spawnDetached.mock.calls[0][1]).toContain(`#${pr.number}`)
+  })
+
   it('takes the anti-flood snapshot only when the startup ledger is missing', async () => {
     arrangeCli(false)
     const { database: db, behaviors: runtime } = await loadModules()

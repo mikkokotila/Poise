@@ -31,6 +31,7 @@ import {
   listBehaviorLaunchClaims,
   listBehaviorDeadLetters,
   listSeenTargets,
+  listSnapshotOnlySeen,
   markBehaviorLaunchIntentOwned,
   recordBehaviorDeadLetter,
   recordSeen,
@@ -873,6 +874,39 @@ function migrateReviewNewPrsLedger(): void {
   setMeta('behavior_review_new_prs_keyver', '3')
 }
 
+const FAILED_SNAPSHOT_RECOVERY_META = 'behavior_review_new_prs_failed_snapshot_recovery_v1'
+
+async function recoverFailedSnapshotReviews(
+  prs: DatastorePr[],
+  reviewer: string,
+): Promise<void> {
+  if (getMeta(FAILED_SNAPSHOT_RECOVERY_META) === '1') return
+  const open = new Set(prs.map((pr) => `${pr.repo}#${pr.number}`))
+  const candidates = listSnapshotOnlySeen('review-new-prs')
+    .filter((row) => row.target !== REVIEW_SNAPSHOT_TARGET && open.has(row.target))
+  if (candidates.length > 0) {
+    const logs = await fetchAgentLogs({ signal: behaviorSignal() })
+    for (const candidate of candidates) {
+      const separator = candidate.target.lastIndexOf('#')
+      const repo = candidate.target.slice(0, separator)
+      const prId = candidate.target.slice(separator + 1)
+      const matching = logs.filter((entry) =>
+        entry.behavior === 'pr_review'
+        && entry.repo === repo
+        && entry.pr_id === prId
+        && entry.actor?.toLowerCase() === reviewer.toLowerCase())
+      const completed = matching.some((entry) => entry.status === 'completed')
+      const failedBeforeSnapshot = matching.some((entry) =>
+        entry.status === 'failed'
+        && Date.parse(entry.started_at) <= Date.parse(candidate.seenAt))
+      if (!completed && failedBeforeSnapshot) {
+        releaseSeen('review-new-prs', candidate.target)
+      }
+    }
+  }
+  setMeta(FAILED_SNAPSHOT_RECOVERY_META, '1')
+}
+
 async function tickReviewNewPrs(): Promise<void> {
   if (!isEnabled('review-new-prs')) return
   const author = getMeta('me') || ''
@@ -892,6 +926,7 @@ async function tickReviewNewPrs(): Promise<void> {
   const setting = getSetting('review-new-prs')
   try {
     const prs = await listOpenPrsByAuthor(author)
+    await recoverFailedSnapshotReviews(prs, reviewer)
     let failure: unknown
     for (const pr of prs) {
       if (!isEnabled('review-new-prs') || behaviorAborted()) return

@@ -758,6 +758,20 @@ export function listSeenTargets(key: string): string[] {
   ).all(key) as Array<{ target: string }>).map((row) => row.target)
 }
 
+export function listSnapshotOnlySeen(key: string): Array<{ target: string, seenAt: string }> {
+  return (db.prepare(`
+    SELECT target, seen_at
+    FROM behavior_seen
+    WHERE key = ?
+      AND claim_id = ''
+      AND launch_requested_at IS NULL
+    ORDER BY target
+  `).all(key) as Array<{ target: string, seen_at: string }>).map((row) => ({
+    target: row.target,
+    seenAt: row.seen_at,
+  }))
+}
+
 export interface CompletedReviewLaunch {
   callId: string
   completedAt: string
