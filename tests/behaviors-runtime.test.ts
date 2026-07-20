@@ -1378,6 +1378,49 @@ describe('behavior launch claims', () => {
     ])
   })
 
+  it('retries an approval after Caller reports that preflight failed before any action', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
+    const launched = await launchApprovalBeforeCrash()
+    const callId = 'e'.repeat(32)
+    agentLogs = [agentLog({
+      id: callId,
+      behavior: 'pr_approve',
+      started_at: new Date(Date.parse(launched.requestedAt) + 1_000).toISOString(),
+      started_at_precise: new Date(Date.parse(launched.requestedAt) + 1_001).toISOString(),
+      status: 'failed',
+      action: 'not_started',
+      outcome: 'preflight_failed',
+      error: 'GitHub read timed out',
+      expected_head: launched.expectedHead,
+      actor: launched.actor,
+      source: launched.source,
+      correlation_id: launched.correlationId,
+    })]
+
+    const { database: db, behaviors: runtime } = await restartModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(db.hasSeen('approve-prs', launched.target)).toBe(false)
+    expect(mocks.observeAuthFailure).not.toHaveBeenCalled()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(db.listBehaviorDeadLetters()).toEqual([
+      expect.objectContaining({
+        behavior: 'approve-prs',
+        target: launched.target,
+        callId,
+        error: 'GitHub read timed out',
+      }),
+    ])
+
+    agentLogs = []
+    vi.setSystemTime(new Date(Date.now() + runtime.BEHAVIOR_RETRY_BASE_MS))
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+  })
+
   it('releases a superseded review without degradation and reviews the current head', async () => {
     const launched = await launchReviewBeforeCrash()
     agentLogs = [agentLog({

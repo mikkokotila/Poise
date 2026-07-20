@@ -41,12 +41,12 @@ export interface LogEntry {
   completed_at?: string | null
   time_elapsed: string
   status: string
-  outcome: 'clean' | 'changes_requested' | 'approved' | 'superseded' | null
+  outcome: 'clean' | 'changes_requested' | 'approved' | 'superseded' | 'preflight_failed' | null
   head_sha: string | null
   expected_head: string | null
   source: string | null
   correlation_id: string | null
-  action: 'reviewed_clean' | 'requested_changes' | 'approved' | null
+  action: 'reviewed_clean' | 'requested_changes' | 'approved' | 'not_started' | null
   response: string | null // upstream 8-char availability marker; read by full `id`
   error: string
 }
@@ -110,6 +110,10 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
   const correlationId = optionalString('correlation_id')
   const action = optionalString('action')
   const error = optionalString('error') || ''
+  const preflightFailed = status === 'failed'
+    && action === 'not_started'
+    && outcome === 'preflight_failed'
+    && headSha === null
   if (!/^[0-9a-f]{32}$/.test(id)
     || (prId !== null && !/^[1-9][0-9]*$/.test(prId))
     || (repo !== null && !/^[^/\s]+(?:\/[^/\s]+)?$/.test(repo))
@@ -118,10 +122,11 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
     || !Number.isFinite(Date.parse(startedAt))
     || (startedAtPrecise !== null && !Number.isFinite(Date.parse(startedAtPrecise)))
     || (completedAt !== null && !Number.isFinite(Date.parse(completedAt)))
-    || !['clean', 'changes_requested', 'approved', 'superseded', null].includes(outcome)
+    || !['clean', 'changes_requested', 'approved', 'superseded', 'preflight_failed', null].includes(outcome)
     || (headSha !== null && !/^[0-9a-f]{40}$/.test(headSha))
     || (expectedHead !== null && !/^[0-9a-f]{40}$/.test(expectedHead))
-    || !['reviewed_clean', 'requested_changes', 'approved', null].includes(action)
+    || !['reviewed_clean', 'requested_changes', 'approved', 'not_started', null].includes(action)
+    || ((action === 'not_started' || outcome === 'preflight_failed') && !preflightFailed)
     || (source !== null && !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(source))
     || (correlationId !== null && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(correlationId))) {
     throw new Error(`agent-interface log row ${index} violates the schema`)

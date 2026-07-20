@@ -496,6 +496,18 @@ async function reconcileBehaviorLaunchClaims(
       )
       continue
     }
+    const preflightFailed = FAILED_AGENT_STATUSES.has(status)
+      && call.action === 'not_started'
+      && call.outcome === 'preflight_failed'
+      && !call.head_sha
+    if (preflightFailed) {
+      const message = call.error || 'agent preflight failed before any action'
+      recordBehaviorDeadLetter(claim, message, call.id)
+      if (releaseOwnedClaim(behavior, claim.target, claim.claimId)) {
+        recordBehaviorFailure(behavior, 'worker')
+      }
+      continue
+    }
     const terminal = status === 'completed' || FAILED_AGENT_STATUSES.has(status)
     if (!terminal && Date.now() - requestedAtMs >= BEHAVIOR_CLAIM_RENEWAL_MS) {
       const message = `behavior launch exceeded ${BEHAVIOR_CLAIM_RENEWAL_MS}ms running limit`
