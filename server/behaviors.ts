@@ -24,6 +24,7 @@ import {
   clearSeenExceptLaunched,
   completeBehaviorLaunchOwned,
   completeSeenOwned,
+  getFailedBehaviorLaunch,
   getMeta,
   hasSeen,
   latestCleanReviewLaunch,
@@ -31,11 +32,13 @@ import {
   listBehaviorLaunchClaims,
   listBehaviorDeadLetters,
   listSeenTargets,
+  listSnapshotOnlySeen,
   markBehaviorLaunchIntentOwned,
   recordBehaviorDeadLetter,
   recordSeen,
   releaseSeen,
   releaseSeenOwned,
+  releaseFailedBehaviorLaunch,
   renewSeenOwned,
   setBehaviorLaunchErrorOwned,
   setMeta,
@@ -215,7 +218,9 @@ function clearBehaviorFailure(key: BehaviorKey): void {
 
 function behaviorRetryDue(key: BehaviorKey): boolean {
   const failure = readBehaviorFailure(key)
-  return failure === null || Date.now() >= failure.nextRetryAtMs
+  return failure === null
+    || failure.kind === 'operation'
+    || Date.now() >= failure.nextRetryAtMs
 }
 
 // Per-behavior setting (the priority ceiling for review-new-prs:
@@ -331,6 +336,7 @@ const FAILED_AGENT_STATUSES = new Set([
   'timed_out',
   'timeout',
 ])
+const SUPERSEDED_AGENT_ERROR = 'pull-request head changed during behavior execution'
 
 function upstreamBehavior(behavior: ActiveClaim['behavior']): BehaviorAgentLaunch {
   return behavior === 'review-new-prs' ? 'pr_review' : 'pr_approve'
@@ -480,6 +486,30 @@ async function reconcileBehaviorLaunchClaims(
     }
 
     const status = call.status.toLowerCase()
+    const superseded = status === 'superseded'
+      || String(call.outcome || '') === 'superseded'
+      || call.error === SUPERSEDED_AGENT_ERROR
+    if (superseded) {
+      if (releaseOwnedClaim(behavior, claim.target, claim.claimId)) {
+        clearBehaviorFailure(behavior)
+      }
+      console.log(
+        `[behaviors] ${behavior} superseded for ${claim.launchRepo}#${claim.launchPr}; current head will be reconsidered`,
+      )
+      continue
+    }
+    const preflightFailed = FAILED_AGENT_STATUSES.has(status)
+      && call.action === 'not_started'
+      && call.outcome === 'preflight_failed'
+      && !call.head_sha
+    if (preflightFailed) {
+      const message = call.error || 'agent preflight failed before any action'
+      recordBehaviorDeadLetter(claim, message, call.id)
+      if (releaseOwnedClaim(behavior, claim.target, claim.claimId)) {
+        recordBehaviorFailure(behavior, 'worker')
+      }
+      continue
+    }
     const terminal = status === 'completed' || FAILED_AGENT_STATUSES.has(status)
     if (!terminal && Date.now() - requestedAtMs >= BEHAVIOR_CLAIM_RENEWAL_MS) {
       const message = `behavior launch exceeded ${BEHAVIOR_CLAIM_RENEWAL_MS}ms running limit`
@@ -740,13 +770,16 @@ function settleClaimAfterExit(
       renewSeenOwned(behavior, target, claimId, BEHAVIOR_CLAIM_RENEWAL_MS)
       return
     }
-    const released = releaseOwnedClaim(behavior, target, claimId)
-    if (released) {
-      recordBehaviorFailure(behavior, 'worker')
-      claudeAuth.observeProcessFailure({ code, signal, error })
-    }
     const outcome = error?.message || signal || `exit ${code ?? 'unknown'}`
-    console.error(`[behaviors] ${behavior} worker failed for ${target}; ${released ? 'claim released' : 'claim already superseded'} (${outcome})`)
+    activeClaims.delete(claimId)
+    setBehaviorLaunchErrorOwned(
+      behavior,
+      target,
+      claimId,
+      `worker exited ${outcome}; awaiting durable agent result`,
+    )
+    renewSeenOwned(behavior, target, claimId, BEHAVIOR_CLAIM_RENEWAL_MS)
+    console.error(`[behaviors] ${behavior} worker exited for ${target}; awaiting durable result (${outcome})`)
   }
 }
 
@@ -855,6 +888,39 @@ function migrateReviewNewPrsLedger(): void {
   setMeta('behavior_review_new_prs_keyver', '3')
 }
 
+const FAILED_SNAPSHOT_RECOVERY_META = 'behavior_review_new_prs_failed_snapshot_recovery_v1'
+
+async function recoverFailedSnapshotReviews(
+  prs: DatastorePr[],
+  reviewer: string,
+): Promise<void> {
+  if (getMeta(FAILED_SNAPSHOT_RECOVERY_META) === '1') return
+  const open = new Set(prs.map((pr) => `${pr.repo}#${pr.number}`))
+  const candidates = listSnapshotOnlySeen('review-new-prs')
+    .filter((row) => row.target !== REVIEW_SNAPSHOT_TARGET && open.has(row.target))
+  if (candidates.length > 0) {
+    const logs = await fetchAgentLogs({ signal: behaviorSignal() })
+    for (const candidate of candidates) {
+      const separator = candidate.target.lastIndexOf('#')
+      const repo = candidate.target.slice(0, separator)
+      const prId = candidate.target.slice(separator + 1)
+      const matching = logs.filter((entry) =>
+        entry.behavior === 'pr_review'
+        && entry.repo === repo
+        && entry.pr_id === prId
+        && entry.actor?.toLowerCase() === reviewer.toLowerCase())
+      const completed = matching.some((entry) => entry.status === 'completed')
+      const failedBeforeSnapshot = matching.some((entry) =>
+        entry.status === 'failed'
+        && Date.parse(entry.started_at) <= Date.parse(candidate.seenAt))
+      if (!completed && failedBeforeSnapshot) {
+        releaseSeen('review-new-prs', candidate.target)
+      }
+    }
+  }
+  setMeta(FAILED_SNAPSHOT_RECOVERY_META, '1')
+}
+
 async function tickReviewNewPrs(): Promise<void> {
   if (!isEnabled('review-new-prs')) return
   const author = getMeta('me') || ''
@@ -874,6 +940,7 @@ async function tickReviewNewPrs(): Promise<void> {
   const setting = getSetting('review-new-prs')
   try {
     const prs = await listOpenPrsByAuthor(author)
+    await recoverFailedSnapshotReviews(prs, reviewer)
     let failure: unknown
     for (const pr of prs) {
       if (!isEnabled('review-new-prs') || behaviorAborted()) return
@@ -967,8 +1034,12 @@ interface ReviewActivityResult {
   headSha: string
   reviewerRequested: boolean
   activeChangeRequestAuthors: string[]
+  unresolvedConversationCount: number
+  unresolvedConversationAuthors: string[]
   reviewerLatestState: string | null
   reviewerLatestCommit: string | null
+  reviewerReviewsSince: number
+  reviewerPendingReviews: number
   latestActivityAt: string | null
 }
 
@@ -1000,6 +1071,10 @@ async function checkReviewActivity(
     parseJson(stdout, 'github-interface --review-activity-since'),
     'github-interface --review-activity-since',
   )
+  const unresolvedConversationCount = safeInteger(
+    data.unresolved_conversation_count,
+    'review-activity-since unresolved_conversation_count',
+  )
   if (data.action !== 'review_activity_since'
     || data.repository !== repo
     || data.pull_number !== number
@@ -1008,7 +1083,9 @@ async function checkReviewActivity(
     || typeof data.draft !== 'boolean'
     || typeof data.reviewer_requested !== 'boolean'
     || !Array.isArray(data.active_change_request_authors)
-    || data.active_change_request_authors.some((value) => typeof value !== 'string')) {
+    || data.active_change_request_authors.some((value) => typeof value !== 'string')
+    || !Array.isArray(data.unresolved_conversation_authors)
+    || data.unresolved_conversation_authors.some((value) => typeof value !== 'string')) {
     throw new Error('github-interface --review-activity-since returned malformed state')
   }
   const headSha = String(data.head_sha || '').toLowerCase()
@@ -1034,16 +1111,82 @@ async function checkReviewActivity(
   if (reviewerLatestCommit !== null && !SHA_PATTERN.test(reviewerLatestCommit)) {
     throw new Error('github-interface --review-activity-since returned invalid latest review head')
   }
+  const reviewerReviewsSince = safeInteger(
+    data.reviewer_reviews_since,
+    'review-activity-since reviewer_reviews_since',
+  )
+  const reviewerPendingReviews = safeInteger(
+    data.reviewer_pending_reviews,
+    'review-activity-since reviewer_pending_reviews',
+  )
   return {
     state: data.state,
     draft: data.draft,
     headSha: headSha.toLowerCase(),
     reviewerRequested: data.reviewer_requested,
     activeChangeRequestAuthors: data.active_change_request_authors.map(String),
+    unresolvedConversationCount,
+    unresolvedConversationAuthors: data.unresolved_conversation_authors.map(String),
     reviewerLatestState,
     reviewerLatestCommit,
+    reviewerReviewsSince,
+    reviewerPendingReviews,
     latestActivityAt,
   }
+}
+
+async function releaseFailedApprovalIfNoAction(
+  repo: string,
+  number: number,
+  target: string,
+): Promise<boolean> {
+  const failed = getFailedBehaviorLaunch('approve-prs', target)
+  if (!failed?.launchCallId
+    || failed.launchBehavior !== 'pr_approve'
+    || failed.launchRepo !== repo
+    || failed.launchPr !== number
+    || failed.launchSource !== 'poise:approve-prs') {
+    return false
+  }
+  const logs = await fetchAgentLogs({ signal: behaviorSignal() })
+  const call = logs.find((row) => row.id === failed.launchCallId)
+  if (!call
+    || call.status.toLowerCase() !== 'failed'
+    || call.behavior !== 'pr_approve'
+    || call.repo !== repo
+    || String(call.pr_id || '') !== String(number)
+    || String(call.actor || '').toLowerCase() !== failed.launchActor.toLowerCase()
+    || call.source !== failed.launchSource
+    || call.correlation_id !== failed.launchCorrelationId
+    || call.expected_head !== failed.launchExpectedHead
+    || call.action !== null
+    || call.outcome !== null
+    || call.head_sha !== null) {
+    return false
+  }
+  const startedAt = agentCallStartedAt(call)
+  if (!Number.isFinite(Date.parse(startedAt))) return false
+  const activity = await checkReviewActivity(
+    repo,
+    number,
+    failed.launchActor,
+    startedAt,
+  )
+  if (activity.headSha !== failed.launchExpectedHead
+    || activity.reviewerReviewsSince !== 0
+    || activity.reviewerPendingReviews !== 0) {
+    return false
+  }
+  const released = releaseFailedBehaviorLaunch(
+    'approve-prs',
+    target,
+    failed.launchCallId,
+    failed.launchExpectedHead,
+  )
+  if (released) {
+    console.log(`[behaviors] approve-prs recovered failed no-action launch for ${repo}#${number}`)
+  }
+  return released
 }
 
 async function checkChangesAddressed(repo: string, number: number, reviewer: string): Promise<ChangesAddressedResult> {
@@ -1205,6 +1348,18 @@ async function tickApprovePrs(): Promise<void> {
         let expectedHead = ''
         if (check.hasChangeRequest) {
           if (check.responseCount < 1 || check.latestRequestAt === null) continue
+          const activity = await checkReviewActivity(
+            pr.repo,
+            pr.number,
+            reviewer,
+            check.latestRequestAt,
+          )
+          if (activity.state !== 'OPEN'
+            || activity.draft
+            || activity.headSha !== check.headSha
+            || activity.unresolvedConversationAuthors.some(
+              (author) => author.toLowerCase() !== reviewer.toLowerCase(),
+            )) continue
           expectedHead = check.headSha
           seenTarget = `${pr.repo}#${pr.number}@req=${check.latestRequestAt}/r=${check.responseCount}/head=${check.headSha}`
           firedReason = `req=${check.latestRequestAt}, r=${check.responseCount}: ${check.commitsAfterRequest}c+${check.authorInlineRepliesAfterRequest}reply, head=${check.headSha.slice(0, 8)}`
@@ -1224,6 +1379,7 @@ async function tickApprovePrs(): Promise<void> {
           if (activity.state !== 'OPEN'
             || activity.draft
             || activity.activeChangeRequestAuthors.length > 0
+            || activity.unresolvedConversationCount > 0
             || (activity.reviewerLatestState === 'APPROVED'
               && activity.reviewerLatestCommit === activity.headSha)) continue
           if (activity.headSha !== review.headSha && activity.latestActivityAt === null) {
@@ -1239,7 +1395,16 @@ async function tickApprovePrs(): Promise<void> {
           seenTarget = `${pr.repo}#${pr.number}@quiet=${quietAnchor}/head=${activity.headSha}`
           firedReason = `clean review ${review.callId.slice(0, 8)}, quiet since ${quietAnchor}, head=${activity.headSha.slice(0, 8)}`
         }
-        const claimId = claimSeenOwned('approve-prs', seenTarget)
+        let claimId = claimSeenOwned('approve-prs', seenTarget)
+        if (!claimId) {
+          const recovered = await releaseFailedApprovalIfNoAction(
+            pr.repo,
+            pr.number,
+            seenTarget,
+          )
+          if (!recovered) continue
+          claimId = claimSeenOwned('approve-prs', seenTarget)
+        }
         if (!claimId) continue
         trackClaim('approve-prs', seenTarget, claimId)
         try {
@@ -1520,7 +1685,9 @@ async function runBehaviorCycle(
   const lifecycle = behaviorAbortController?.signal
   try {
     const recovered = await serializeBehaviorOperation(key, operation)
-    if (recovered) clearBehaviorFailure(key)
+    if (recovered || readBehaviorFailure(key)?.kind === 'operation') {
+      clearBehaviorFailure(key)
+    }
   } catch (error) {
     if (error instanceof BehaviorProcessLockContentionError) return
     if (lifecycle?.aborted !== true) {

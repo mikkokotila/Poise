@@ -2,8 +2,10 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import release from '../config/caller-release.json'
 import { getCallerReleaseHealth } from '../server/caller-release'
 
+const EXPECTED_COMMIT = release.commit
 const ENV_KEYS = [
   'POISE_ENFORCE_CALLER_RELEASE',
   'CALLER_RELEASE_SHA',
@@ -24,7 +26,7 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true })
 })
 
-async function configureRelease(commit = '4a7dde6f1e60d33ef6a919b6f1e3a4c768b85520'): Promise<void> {
+async function configureRelease(commit = EXPECTED_COMMIT): Promise<void> {
   const bin = join(root, 'venv', 'bin')
   const agent = join(root, 'source', 'agent_interface')
   await Promise.all([
@@ -38,7 +40,7 @@ async function configureRelease(commit = '4a7dde6f1e60d33ef6a919b6f1e3a4c768b855
   }
   await writeFile(join(root, 'release.json'), JSON.stringify({
     repository: 'mikkokotila/caller',
-    commit: '4a7dde6f1e60d33ef6a919b6f1e3a4c768b85520',
+    commit: EXPECTED_COMMIT,
     packages: {
       'agent-interface': '0.2.0',
       'github-datastore': '0.2.0',
@@ -66,7 +68,7 @@ describe('Caller release health', () => {
     await expect(getCallerReleaseHealth()).resolves.toMatchObject({
       status: 'ready',
       required: true,
-      actualCommit: '4a7dde6f1e60d33ef6a919b6f1e3a4c768b85520',
+      actualCommit: EXPECTED_COMMIT,
       error: null,
     })
   })

@@ -512,6 +512,71 @@ export function listBehaviorLaunchClaims(key: string): BehaviorLaunchClaim[] {
   }))
 }
 
+export function getFailedBehaviorLaunch(
+  key: string,
+  target: string,
+): BehaviorLaunchClaim | null {
+  const row = db.prepare(`
+    SELECT key, target, seen_at, claim_id, lease_until, launch_behavior,
+           launch_repo, launch_pr, launch_requested_at, launch_call_id, launch_error,
+           launch_expected_head, launch_actor, launch_source, launch_correlation_id
+    FROM behavior_seen
+    WHERE key = ? AND target = ? AND claim_id = ''
+      AND launch_requested_at IS NOT NULL
+      AND launch_call_id IS NOT NULL
+      AND launch_error IS NOT NULL
+      AND launch_outcome IS NULL
+  `).get(key, target) as {
+    key: string
+    target: string
+    seen_at: string
+    claim_id: string
+    lease_until: number | null
+    launch_behavior: BehaviorAgentLaunch
+    launch_repo: string
+    launch_pr: number
+    launch_requested_at: string
+    launch_call_id: string
+    launch_error: string
+    launch_expected_head: string
+    launch_actor: string
+    launch_source: string
+    launch_correlation_id: string
+  } | undefined
+  return row ? {
+    key: row.key,
+    target: row.target,
+    seenAt: row.seen_at,
+    claimId: row.claim_id,
+    leaseUntil: row.lease_until,
+    launchBehavior: row.launch_behavior,
+    launchRepo: row.launch_repo,
+    launchPr: row.launch_pr,
+    launchRequestedAt: row.launch_requested_at,
+    launchCallId: row.launch_call_id,
+    launchError: row.launch_error,
+    launchExpectedHead: row.launch_expected_head,
+    launchActor: row.launch_actor,
+    launchSource: row.launch_source,
+    launchCorrelationId: row.launch_correlation_id,
+  } : null
+}
+
+export function releaseFailedBehaviorLaunch(
+  key: string,
+  target: string,
+  callId: string,
+  expectedHead: string,
+): boolean {
+  const info = db.prepare(`
+    DELETE FROM behavior_seen
+    WHERE key = ? AND target = ? AND claim_id = ''
+      AND launch_call_id = ? AND launch_expected_head = ?
+      AND launch_error IS NOT NULL AND launch_outcome IS NULL
+  `).run(key, target, callId, expectedHead)
+  return info.changes === 1
+}
+
 export function linkBehaviorLaunchCallOwned(
   key: string,
   target: string,
@@ -756,6 +821,20 @@ export function listSeenTargets(key: string): string[] {
   return (db.prepare(
     'SELECT target FROM behavior_seen WHERE key = ? ORDER BY target',
   ).all(key) as Array<{ target: string }>).map((row) => row.target)
+}
+
+export function listSnapshotOnlySeen(key: string): Array<{ target: string, seenAt: string }> {
+  return (db.prepare(`
+    SELECT target, seen_at
+    FROM behavior_seen
+    WHERE key = ?
+      AND claim_id = ''
+      AND launch_requested_at IS NULL
+    ORDER BY target
+  `).all(key) as Array<{ target: string, seen_at: string }>).map((row) => ({
+    target: row.target,
+    seenAt: row.seen_at,
+  }))
 }
 
 export interface CompletedReviewLaunch {

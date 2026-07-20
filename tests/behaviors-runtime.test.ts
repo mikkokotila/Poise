@@ -83,12 +83,16 @@ async function restartModules() {
 interface ReviewActivityFixture {
   requestedReviewers?: string[]
   activeChangeRequestAuthors?: string[]
+  unresolvedConversationCount?: number
+  unresolvedConversationAuthors?: string[]
   headSha?: string
   state?: string
   draft?: boolean
   latestActivityAt?: string | null
   reviewerLatestState?: string | null
   reviewerLatestCommit?: string | null
+  reviewerReviewsSince?: number
+  reviewerPendingReviews?: number
 }
 
 function arrangeCli(
@@ -188,10 +192,14 @@ function arrangeCli(
           head_sha: reviewActivity.headSha ?? HEAD_SHA,
           reviewer_requested: requested,
           active_change_request_authors: reviewActivity.activeChangeRequestAuthors ?? [],
+          unresolved_conversation_count: reviewActivity.unresolvedConversationCount ?? 0,
+          unresolved_conversation_authors: reviewActivity.unresolvedConversationAuthors ?? [],
           reviewer_latest_state: reviewActivity.reviewerLatestState ?? null,
           reviewer_latest_commit: reviewActivity.reviewerLatestCommit ?? null,
           reviewer_change_requests_since: 0,
           reviewer_approvals_since: 0,
+          reviewer_reviews_since: reviewActivity.reviewerReviewsSince ?? 0,
+          reviewer_pending_reviews: reviewActivity.reviewerPendingReviews ?? 0,
           latest_activity_at: reviewActivity.latestActivityAt ?? null,
         }),
         stderr: '',
@@ -525,6 +533,38 @@ describe('behavior launch claims', () => {
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
   })
 
+  it('does not approve a clean review while a review conversation is unresolved', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
+    arrangeCli(false, false, { unresolvedConversationCount: 1 })
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_approve_prs_enabled', '1')
+    recordCompletedInitialReview(db, { completedAt: '2026-07-15T11:40:00.000Z' })
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+  })
+
+  it('does not approve addressed changes while another reviewer owns an unresolved conversation', async () => {
+    arrangeCli(true, false, {
+      unresolvedConversationCount: 2,
+      unresolvedConversationAuthors: ['review-bot', 'other-reviewer'],
+    })
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_approve_prs_enabled', '1')
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+  })
+
   it('waits ten minutes after another reviewer dismisses a change request', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
@@ -848,6 +888,35 @@ describe('behavior launch claims', () => {
     expect(mocks.spawnDetached.mock.calls[0][1]).toContain(`#${downtimePr.number}`)
   })
 
+  it('re-arms a snapshot-only PR after a failed reviewer attempt', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
+    arrangeCli(false)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
+    db.setMeta('behavior_review_new_prs_enabled', '1')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
+    db.recordSeen('review-new-prs', `${pr.repo}#${pr.number}`)
+    agentLogs = [agentLog({
+      actor: 'review-bot',
+      source: null,
+      correlation_id: null,
+      status: 'failed',
+      started_at: '2026-07-15T11:59:00.000Z',
+      started_at_precise: '2026-07-15T11:59:00.001Z',
+      error: 'authentication failed',
+    })]
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(db.getMeta('behavior_review_new_prs_failed_snapshot_recovery_v1')).toBe('1')
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(mocks.spawnDetached.mock.calls[0][1]).toContain(`#${pr.number}`)
+  })
+
   it('takes the anti-flood snapshot only when the startup ledger is missing', async () => {
     arrangeCli(false)
     const { database: db, behaviors: runtime } = await loadModules()
@@ -900,7 +969,7 @@ describe('behavior launch claims', () => {
     }
   })
 
-  it('degrades health and backs off after a failed scan until a clean retry', async () => {
+  it('retries a failed scan immediately so dependency recovery clears health', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
     mocks.runFile.mockRejectedValue(new Error('502 Bad Gateway'))
@@ -923,10 +992,6 @@ describe('behavior launch claims', () => {
       }],
     })
 
-    await runtime.runEnabledBehaviorsOnce()
-    expect(mocks.runFile).toHaveBeenCalledOnce()
-
-    vi.setSystemTime(new Date(Date.now() + runtime.BEHAVIOR_RETRY_BASE_MS))
     arrangeCli(false)
     await runtime.runEnabledBehaviorsOnce()
 
@@ -934,6 +999,27 @@ describe('behavior launch claims', () => {
       status: 'ok',
       failures: [],
     })
+  })
+
+  it('clears a recovered scan failure when the scan launches a worker', async () => {
+    arrangeCli(false)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
+    db.setMeta('behavior_review_new_prs_enabled', '1')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
+    db.setMeta('behavior_review_new_prs_failure', JSON.stringify({
+      kind: 'operation',
+      consecutiveFailures: 4,
+      lastFailureAtMs: Date.now(),
+      nextRetryAtMs: Date.now() + 3_600_000,
+    }))
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(runtime.getBehaviorsRuntimeHealth().failures).toEqual([])
   })
 
   it('preserves an existing breaker when shutdown aborts a behavior scan', async () => {
@@ -1004,7 +1090,7 @@ describe('behavior launch claims', () => {
     expect(db.claimSeen('review-new-prs', `${pr.repo}#${pr.number}`)).toBe(false)
   })
 
-  it('releases a review claim when an accepted worker later exits non-zero', async () => {
+  it('retains a review claim when an accepted worker exits until its durable result arrives', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
     arrangeCli(false)
@@ -1024,48 +1110,14 @@ describe('behavior launch claims', () => {
       onExit: (result: { code: number | null, signal: NodeJS.Signals | null }) => void
     }
     options.onExit({ code: 7, signal: null })
-    expect(db.hasSeen('review-new-prs', target)).toBe(false)
-    expect(runtime.getBehaviorsRuntimeHealth().failures).toEqual([
+    expect(db.hasSeen('review-new-prs', target)).toBe(true)
+    expect(db.listBehaviorLaunchClaims('review-new-prs')).toEqual([
       expect.objectContaining({
-        behavior: 'review-new-prs',
-        kind: 'worker',
-        consecutiveFailures: 1,
+        target,
+        launchError: 'worker exited exit 7; awaiting durable agent result',
       }),
     ])
-
-    vi.setSystemTime(new Date(Date.now() + runtime.BEHAVIOR_RETRY_BASE_MS))
-    listedPrs = []
-    const restarted = await restartModules()
-    restarted.behaviors.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
-    // Queue behind startup without snapshotting the failed target. Startup
-    // itself must not clear an expired worker breaker merely because no claim
-    // remains after the failed worker released it.
-    await restarted.behaviors.setEnabled('review-new-prs', true)
-    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
-    expect(restarted.behaviors.getBehaviorsRuntimeHealth().failures).toEqual([
-      expect.objectContaining({
-        behavior: 'review-new-prs',
-        kind: 'worker',
-        consecutiveFailures: 1,
-      }),
-    ])
-
-    listedPrs = [pr]
-    await restarted.behaviors.runEnabledBehaviorsOnce()
-    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
-
-    const retryExit = (mocks.spawnDetached.mock.calls[1][2] as {
-      onExit: (result: { code: number | null, signal: NodeJS.Signals | null }) => void
-    }).onExit
-    retryExit({ code: 7, signal: null })
-    expect(restarted.behaviors.getBehaviorsRuntimeHealth().failures).toEqual([
-      expect.objectContaining({
-        behavior: 'review-new-prs',
-        kind: 'worker',
-        consecutiveFailures: 2,
-        nextRetryAt: '2026-07-15T12:03:00.000Z',
-      }),
-    ])
+    expect(runtime.getBehaviorsRuntimeHealth().failures).toEqual([])
   })
 
   it('does not let an old worker failure release a newer claim generation', async () => {
@@ -1328,6 +1380,107 @@ describe('behavior launch claims', () => {
         error: 'model unavailable',
       }),
     ])
+  })
+
+  it('retries an approval after Caller reports that preflight failed before any action', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
+    const launched = await launchApprovalBeforeCrash()
+    const callId = 'e'.repeat(32)
+    agentLogs = [agentLog({
+      id: callId,
+      behavior: 'pr_approve',
+      started_at: new Date(Date.parse(launched.requestedAt) + 1_000).toISOString(),
+      started_at_precise: new Date(Date.parse(launched.requestedAt) + 1_001).toISOString(),
+      status: 'failed',
+      action: 'not_started',
+      outcome: 'preflight_failed',
+      error: 'GitHub read timed out',
+      expected_head: launched.expectedHead,
+      actor: launched.actor,
+      source: launched.source,
+      correlation_id: launched.correlationId,
+    })]
+
+    const { database: db, behaviors: runtime } = await restartModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(db.hasSeen('approve-prs', launched.target)).toBe(false)
+    expect(mocks.observeAuthFailure).not.toHaveBeenCalled()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(db.listBehaviorDeadLetters()).toEqual([
+      expect.objectContaining({
+        behavior: 'approve-prs',
+        target: launched.target,
+        callId,
+        error: 'GitHub read timed out',
+      }),
+    ])
+
+    agentLogs = []
+    vi.setSystemTime(new Date(Date.now() + runtime.BEHAVIOR_RETRY_BASE_MS))
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+  })
+
+  it('recovers a terminal failed approval only after GitHub proves no reviewer action', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
+    const launched = await launchApprovalBeforeCrash()
+    const callId = '1'.repeat(32)
+    agentLogs = [agentLog({
+      id: callId,
+      behavior: 'pr_approve',
+      started_at: new Date(Date.parse(launched.requestedAt) + 1_000).toISOString(),
+      started_at_precise: new Date(Date.parse(launched.requestedAt) + 1_001).toISOString(),
+      status: 'failed',
+      error: 'legacy preflight timeout',
+      expected_head: launched.expectedHead,
+      actor: launched.actor,
+      source: launched.source,
+      correlation_id: launched.correlationId,
+    })]
+
+    const { database: db, behaviors: runtime } = await restartModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(db.hasSeen('approve-prs', launched.target)).toBe(true)
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+
+    arrangeCli(true, false, { reviewerReviewsSince: 1 })
+    vi.setSystemTime(new Date(Date.now() + runtime.BEHAVIOR_RETRY_BASE_MS))
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+
+    arrangeCli(true, false, { reviewerReviewsSince: 0, reviewerPendingReviews: 0 })
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+  })
+
+  it('releases a superseded review without degradation and reviews the current head', async () => {
+    const launched = await launchReviewBeforeCrash()
+    agentLogs = [agentLog({
+      id: 'd'.repeat(32),
+      started_at: new Date(Date.parse(launched.requestedAt) + 1_000).toISOString(),
+      started_at_precise: new Date(Date.parse(launched.requestedAt) + 1_001).toISOString(),
+      status: 'failed',
+      error: 'pull-request head changed during behavior execution',
+      expected_head: launched.expectedHead,
+      actor: launched.actor,
+      source: launched.source,
+      correlation_id: launched.correlationId,
+    })]
+
+    const { database: db, behaviors: runtime } = await restartModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+    expect(runtime.getBehaviorsRuntimeHealth().failures).toEqual([])
+    expect(db.listBehaviorDeadLetters()).toEqual([])
   })
 
   it('waits through bounded registration grace before retrying a missing call', async () => {

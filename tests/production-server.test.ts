@@ -3,8 +3,10 @@ import { createServer as createHttpServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import release from '../config/caller-release.json'
 import { createAuthenticatedClaudeAuth } from './claude-auth-fixture'
 
+const EXPECTED_CALLER_COMMIT = release.commit
 let root = ''
 let staticDir = ''
 let server: Server
@@ -120,7 +122,7 @@ describe('production server', () => {
       callerRelease: {
         status: 'unmanaged',
         required: false,
-        expectedCommit: '4a7dde6f1e60d33ef6a919b6f1e3a4c768b85520',
+        expectedCommit: EXPECTED_CALLER_COMMIT,
       },
     })
     expect((await fetch(`${baseUrl}/api/unknown`)).status).toBe(404)
@@ -322,7 +324,7 @@ describe('production server', () => {
     }
     await writeFile(join(releaseRoot, 'release.json'), JSON.stringify({
       repository: 'mikkokotila/caller',
-      commit: '4a7dde6f1e60d33ef6a919b6f1e3a4c768b85520',
+      commit: EXPECTED_CALLER_COMMIT,
       packages: {
         'agent-interface': '0.2.0',
         'github-datastore': '0.2.0',
@@ -330,7 +332,7 @@ describe('production server', () => {
       },
     }))
     process.env.POISE_ENFORCE_CALLER_RELEASE = '1'
-    process.env.CALLER_RELEASE_SHA = '4a7dde6f1e60d33ef6a919b6f1e3a4c768b85520'
+    process.env.CALLER_RELEASE_SHA = EXPECTED_CALLER_COMMIT
     process.env.CALLER_RELEASE_ROOT = releaseRoot
     process.env.CALLER_BIN_ROOT = binRoot
     process.env.AGENT_INTERFACE_ROOT = agentRoot

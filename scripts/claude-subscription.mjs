@@ -176,7 +176,9 @@ try {
   const rawArgs = process.argv.slice(2)
   // Poise's print-mode callers place the raw user/model prompt last. Never
   // reinterpret that positional value as a trusted command option.
-  const hasPositionalPrompt = rawArgs.includes('--print') || rawArgs.includes('-p')
+  const printMode = rawArgs.includes('--print') || rawArgs.includes('-p')
+  const promptIsStdin = rawArgs.at(-2) === '--system-prompt'
+  const hasPositionalPrompt = printMode && !promptIsStdin
   command = extractSettings(rawArgs, hasPositionalPrompt)
 } catch {
   console.error('[poise] Invalid Claude settings; launch blocked.')
