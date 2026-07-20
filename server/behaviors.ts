@@ -948,7 +948,17 @@ async function tickReviewNewPrs(): Promise<void> {
         const key = `${pr.repo}#${pr.number}`
         // Atomic claim: exactly one caller succeeds for any given key
         // across all concurrent runtimes. Losers skip silently.
-        const claimId = claimSeenOwned('review-new-prs', key)
+        let claimId = claimSeenOwned('review-new-prs', key)
+        if (!claimId) {
+          const recovered = await releaseFailedBehaviorIfNoAction(
+            'review-new-prs',
+            pr.repo,
+            pr.number,
+            key,
+          )
+          if (!recovered) continue
+          claimId = claimSeenOwned('review-new-prs', key)
+        }
         if (!claimId) continue
         trackClaim('review-new-prs', key, claimId)
 
@@ -1135,24 +1145,27 @@ async function checkReviewActivity(
   }
 }
 
-async function releaseFailedApprovalIfNoAction(
+async function releaseFailedBehaviorIfNoAction(
+  behavior: ActiveClaim['behavior'],
   repo: string,
   number: number,
   target: string,
 ): Promise<boolean> {
-  const failed = getFailedBehaviorLaunch('approve-prs', target)
+  const launchBehavior = upstreamBehavior(behavior)
+  const source = `poise:${behavior}`
+  const failed = getFailedBehaviorLaunch(behavior, target)
   if (!failed?.launchCallId
-    || failed.launchBehavior !== 'pr_approve'
+    || failed.launchBehavior !== launchBehavior
     || failed.launchRepo !== repo
     || failed.launchPr !== number
-    || failed.launchSource !== 'poise:approve-prs') {
+    || failed.launchSource !== source) {
     return false
   }
   const logs = await fetchAgentLogs({ signal: behaviorSignal() })
   const call = logs.find((row) => row.id === failed.launchCallId)
   if (!call
-    || call.status.toLowerCase() !== 'failed'
-    || call.behavior !== 'pr_approve'
+    || !FAILED_AGENT_STATUSES.has(call.status.toLowerCase())
+    || call.behavior !== launchBehavior
     || call.repo !== repo
     || String(call.pr_id || '') !== String(number)
     || String(call.actor || '').toLowerCase() !== failed.launchActor.toLowerCase()
@@ -1172,19 +1185,21 @@ async function releaseFailedApprovalIfNoAction(
     failed.launchActor,
     startedAt,
   )
-  if (activity.headSha !== failed.launchExpectedHead
-    || activity.reviewerReviewsSince !== 0
+  if (activity.reviewerReviewsSince !== 0
     || activity.reviewerPendingReviews !== 0) {
     return false
   }
+  if (behavior === 'approve-prs' && activity.headSha !== failed.launchExpectedHead) {
+    return false
+  }
   const released = releaseFailedBehaviorLaunch(
-    'approve-prs',
+    behavior,
     target,
     failed.launchCallId,
     failed.launchExpectedHead,
   )
   if (released) {
-    console.log(`[behaviors] approve-prs recovered failed no-action launch for ${repo}#${number}`)
+    console.log(`[behaviors] ${behavior} recovered failed no-action launch for ${repo}#${number}`)
   }
   return released
 }
@@ -1397,7 +1412,8 @@ async function tickApprovePrs(): Promise<void> {
         }
         let claimId = claimSeenOwned('approve-prs', seenTarget)
         if (!claimId) {
-          const recovered = await releaseFailedApprovalIfNoAction(
+          const recovered = await releaseFailedBehaviorIfNoAction(
+            'approve-prs',
             pr.repo,
             pr.number,
             seenTarget,

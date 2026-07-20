@@ -1342,7 +1342,7 @@ describe('behavior launch claims', () => {
     })
   })
 
-  it('dead-letters a failed recovered review call without duplicate retry', async () => {
+  it('recovers a failed review only after GitHub proves no reviewer action', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
     const launched = await launchReviewBeforeCrash()
@@ -1359,6 +1359,7 @@ describe('behavior launch claims', () => {
     })]
 
     const { database: db, behaviors: runtime } = await restartModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
     mocks.observeAuthFailure.mockImplementation(() => { mocks.authStatus = 'degraded' })
     await runtime.runEnabledBehaviorsOnce()
 
@@ -1367,12 +1368,22 @@ describe('behavior launch claims', () => {
     expect(db.hasSeen('review-new-prs', launched.target)).toBe(true)
 
     mocks.authStatus = 'authenticated'
-    await runtime.runEnabledBehaviorsOnce()
-    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
-
+    arrangeCli(false, false, { reviewerReviewsSince: 1 })
     vi.setSystemTime(new Date(Date.now() + runtime.BEHAVIOR_RETRY_BASE_MS))
     await runtime.runEnabledBehaviorsOnce()
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+
+    arrangeCli(false, false, {
+      headSha: NEXT_HEAD_SHA,
+      reviewerReviewsSince: 0,
+      reviewerPendingReviews: 0,
+    })
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+    expect(mocks.spawnDetached.mock.calls[1]?.[1]).toEqual(expect.arrayContaining([
+      '--expected-head',
+      NEXT_HEAD_SHA,
+    ]))
     expect(db.listBehaviorDeadLetters()).toEqual([
       expect.objectContaining({
         behavior: 'review-new-prs',
