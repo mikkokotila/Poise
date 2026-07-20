@@ -24,6 +24,7 @@ import {
   clearSeenExceptLaunched,
   completeBehaviorLaunchOwned,
   completeSeenOwned,
+  getFailedBehaviorLaunch,
   getMeta,
   hasSeen,
   latestCleanReviewLaunch,
@@ -37,6 +38,7 @@ import {
   recordSeen,
   releaseSeen,
   releaseSeenOwned,
+  releaseFailedBehaviorLaunch,
   renewSeenOwned,
   setBehaviorLaunchErrorOwned,
   setMeta,
@@ -1036,6 +1038,8 @@ interface ReviewActivityResult {
   unresolvedConversationAuthors: string[]
   reviewerLatestState: string | null
   reviewerLatestCommit: string | null
+  reviewerReviewsSince: number
+  reviewerPendingReviews: number
   latestActivityAt: string | null
 }
 
@@ -1107,6 +1111,14 @@ async function checkReviewActivity(
   if (reviewerLatestCommit !== null && !SHA_PATTERN.test(reviewerLatestCommit)) {
     throw new Error('github-interface --review-activity-since returned invalid latest review head')
   }
+  const reviewerReviewsSince = safeInteger(
+    data.reviewer_reviews_since,
+    'review-activity-since reviewer_reviews_since',
+  )
+  const reviewerPendingReviews = safeInteger(
+    data.reviewer_pending_reviews,
+    'review-activity-since reviewer_pending_reviews',
+  )
   return {
     state: data.state,
     draft: data.draft,
@@ -1117,8 +1129,64 @@ async function checkReviewActivity(
     unresolvedConversationAuthors: data.unresolved_conversation_authors.map(String),
     reviewerLatestState,
     reviewerLatestCommit,
+    reviewerReviewsSince,
+    reviewerPendingReviews,
     latestActivityAt,
   }
+}
+
+async function releaseFailedApprovalIfNoAction(
+  repo: string,
+  number: number,
+  target: string,
+): Promise<boolean> {
+  const failed = getFailedBehaviorLaunch('approve-prs', target)
+  if (!failed?.launchCallId
+    || failed.launchBehavior !== 'pr_approve'
+    || failed.launchRepo !== repo
+    || failed.launchPr !== number
+    || failed.launchSource !== 'poise:approve-prs') {
+    return false
+  }
+  const logs = await fetchAgentLogs({ signal: behaviorSignal() })
+  const call = logs.find((row) => row.id === failed.launchCallId)
+  if (!call
+    || call.status.toLowerCase() !== 'failed'
+    || call.behavior !== 'pr_approve'
+    || call.repo !== repo
+    || String(call.pr_id || '') !== String(number)
+    || String(call.actor || '').toLowerCase() !== failed.launchActor.toLowerCase()
+    || call.source !== failed.launchSource
+    || call.correlation_id !== failed.launchCorrelationId
+    || call.expected_head !== failed.launchExpectedHead
+    || call.action !== null
+    || call.outcome !== null
+    || call.head_sha !== null) {
+    return false
+  }
+  const startedAt = agentCallStartedAt(call)
+  if (!Number.isFinite(Date.parse(startedAt))) return false
+  const activity = await checkReviewActivity(
+    repo,
+    number,
+    failed.launchActor,
+    startedAt,
+  )
+  if (activity.headSha !== failed.launchExpectedHead
+    || activity.reviewerReviewsSince !== 0
+    || activity.reviewerPendingReviews !== 0) {
+    return false
+  }
+  const released = releaseFailedBehaviorLaunch(
+    'approve-prs',
+    target,
+    failed.launchCallId,
+    failed.launchExpectedHead,
+  )
+  if (released) {
+    console.log(`[behaviors] approve-prs recovered failed no-action launch for ${repo}#${number}`)
+  }
+  return released
 }
 
 async function checkChangesAddressed(repo: string, number: number, reviewer: string): Promise<ChangesAddressedResult> {
@@ -1327,7 +1395,16 @@ async function tickApprovePrs(): Promise<void> {
           seenTarget = `${pr.repo}#${pr.number}@quiet=${quietAnchor}/head=${activity.headSha}`
           firedReason = `clean review ${review.callId.slice(0, 8)}, quiet since ${quietAnchor}, head=${activity.headSha.slice(0, 8)}`
         }
-        const claimId = claimSeenOwned('approve-prs', seenTarget)
+        let claimId = claimSeenOwned('approve-prs', seenTarget)
+        if (!claimId) {
+          const recovered = await releaseFailedApprovalIfNoAction(
+            pr.repo,
+            pr.number,
+            seenTarget,
+          )
+          if (!recovered) continue
+          claimId = claimSeenOwned('approve-prs', seenTarget)
+        }
         if (!claimId) continue
         trackClaim('approve-prs', seenTarget, claimId)
         try {

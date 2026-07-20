@@ -91,6 +91,8 @@ interface ReviewActivityFixture {
   latestActivityAt?: string | null
   reviewerLatestState?: string | null
   reviewerLatestCommit?: string | null
+  reviewerReviewsSince?: number
+  reviewerPendingReviews?: number
 }
 
 function arrangeCli(
@@ -196,6 +198,8 @@ function arrangeCli(
           reviewer_latest_commit: reviewActivity.reviewerLatestCommit ?? null,
           reviewer_change_requests_since: 0,
           reviewer_approvals_since: 0,
+          reviewer_reviews_since: reviewActivity.reviewerReviewsSince ?? 0,
+          reviewer_pending_reviews: reviewActivity.reviewerPendingReviews ?? 0,
           latest_activity_at: reviewActivity.latestActivityAt ?? null,
         }),
         stderr: '',
@@ -1418,6 +1422,41 @@ describe('behavior launch claims', () => {
     vi.setSystemTime(new Date(Date.now() + runtime.BEHAVIOR_RETRY_BASE_MS))
     await runtime.runEnabledBehaviorsOnce()
 
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+  })
+
+  it('recovers a terminal failed approval only after GitHub proves no reviewer action', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
+    const launched = await launchApprovalBeforeCrash()
+    const callId = '1'.repeat(32)
+    agentLogs = [agentLog({
+      id: callId,
+      behavior: 'pr_approve',
+      started_at: new Date(Date.parse(launched.requestedAt) + 1_000).toISOString(),
+      started_at_precise: new Date(Date.parse(launched.requestedAt) + 1_001).toISOString(),
+      status: 'failed',
+      error: 'legacy preflight timeout',
+      expected_head: launched.expectedHead,
+      actor: launched.actor,
+      source: launched.source,
+      correlation_id: launched.correlationId,
+    })]
+
+    const { database: db, behaviors: runtime } = await restartModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(db.hasSeen('approve-prs', launched.target)).toBe(true)
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+
+    arrangeCli(true, false, { reviewerReviewsSince: 1 })
+    vi.setSystemTime(new Date(Date.now() + runtime.BEHAVIOR_RETRY_BASE_MS))
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+
+    arrangeCli(true, false, { reviewerReviewsSince: 0, reviewerPendingReviews: 0 })
+    await runtime.runEnabledBehaviorsOnce()
     expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
   })
 
