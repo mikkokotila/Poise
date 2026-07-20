@@ -93,6 +93,7 @@ interface ReviewActivityFixture {
   reviewerLatestCommit?: string | null
   reviewerReviewsSince?: number
   reviewerPendingReviews?: number
+  resolveSuperseded?: boolean
 }
 
 function arrangeCli(
@@ -206,6 +207,19 @@ function arrangeCli(
       }
     }
     if (command === 'github-interface' && args[0] === '--resolve-nonblocking-conversations-if-ready') {
+      if (reviewActivity.resolveSuperseded) {
+        return {
+          stdout: JSON.stringify({
+            action: 'resolved_nonblocking_conversations_if_ready',
+            repository: pr.repo,
+            pull_number: pr.number,
+            outcome: 'superseded',
+            head_sha: HEAD_SHA,
+            current_head_sha: NEXT_HEAD_SHA,
+          }),
+          stderr: '',
+        }
+      }
       return {
         stdout: JSON.stringify({
           ready_except_conversations: false,
@@ -999,6 +1013,22 @@ describe('behavior launch claims', () => {
       status: 'ok',
       failures: [],
     })
+  })
+
+  it('treats a typed resolver head supersession as a safe no-op', async () => {
+    arrangeCli(false, false, { resolveSuperseded: true })
+    const { database: db, behaviors: runtime } = await loadModules()
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_resolve_unblocking_enabled', '1')
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(runtime.getBehaviorsRuntimeHealth()).toMatchObject({
+      status: 'ok',
+      failures: [],
+    })
+    expect(runtime.getResolveUnblockingLastFired()).toBeNull()
   })
 
   it('clears a recovered scan failure when the scan launches a worker', async () => {

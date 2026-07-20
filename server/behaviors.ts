@@ -1471,6 +1471,7 @@ interface ResolveResult {
   headSha: string
   resolved_count: number
   unresolved_count: number
+  superseded: boolean
 }
 
 // Meta key holding the last real resolve-unblocking fire as JSON
@@ -1520,6 +1521,24 @@ async function resolveNonblockingIfReady(repo: string, number: number): Promise<
     'github-interface --resolve-nonblocking-conversations-if-ready',
   )
   const headSha = String(data.head_sha || '').toLowerCase()
+  if (data.outcome === 'superseded') {
+    const currentHeadSha = String(data.current_head_sha || '').toLowerCase()
+    if (data.action !== 'resolved_nonblocking_conversations_if_ready'
+      || data.repository !== repo
+      || data.pull_number !== number
+      || headSha !== expectedHead
+      || !SHA_PATTERN.test(currentHeadSha)
+      || currentHeadSha === expectedHead) {
+      throw new Error('github-interface resolution returned malformed supersession')
+    }
+    return {
+      ready_except_conversations: false,
+      headSha: currentHeadSha,
+      resolved_count: 0,
+      unresolved_count: 0,
+      superseded: true,
+    }
+  }
   const resolvedCount = safeInteger(data.resolved_count, 'resolve resolved_count')
   const unresolvedCount = safeInteger(data.unresolved_count, 'resolve unresolved_count')
   if (data.action !== 'resolved_nonblocking_conversations_if_ready'
@@ -1549,6 +1568,7 @@ async function resolveNonblockingIfReady(repo: string, number: number): Promise<
     headSha,
     resolved_count: resolvedCount,
     unresolved_count: unresolvedCount,
+    superseded: false,
   }
 }
 
@@ -1567,7 +1587,9 @@ async function tickResolveUnblocking(): Promise<void> {
         // starting another resolve operation.
         if (!isEnabled('resolve-unblocking')) return
         const result = await resolveNonblockingIfReady(pr.repo, pr.number)
-        if (result.resolved_count > 0) {
+        if (result.superseded) {
+          console.log(`[behaviors] resolve-unblocking superseded on ${pr.repo}#${pr.number} by head ${result.headSha}`)
+        } else if (result.resolved_count > 0) {
           const key = `${pr.repo}#${pr.number}`
           console.log(`[behaviors] resolve-unblocking cleared ${result.resolved_count} convo(s) on ${key}`)
           // github-interface doesn't write a log row for this call, so
