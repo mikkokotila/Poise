@@ -20,14 +20,15 @@ import { mkdir } from 'node:fs/promises'
 import { fetchAgentLogs } from './agent'
 import { claudeAuth } from './claude-auth'
 import {
-  claimSeenOwned,
+  claimPrOperationOwned,
+  claimSeenOwnedAs,
   clearSeenExceptLaunched,
   completeBehaviorLaunchOwned,
   completeSeenOwned,
   getFailedBehaviorLaunch,
   getMeta,
   hasSeen,
-  latestCleanReviewLaunch,
+  latestApprovalBasisLaunch,
   linkBehaviorLaunchCallOwned,
   listBehaviorLaunchClaims,
   listBehaviorDeadLetters,
@@ -39,7 +40,9 @@ import {
   releaseSeen,
   releaseSeenOwned,
   releaseFailedBehaviorLaunch,
+  releasePrOperationOwned,
   renewSeenOwned,
+  renewPrOperationOwned,
   setBehaviorLaunchErrorOwned,
   setMeta,
   type BehaviorAgentLaunch,
@@ -327,6 +330,7 @@ function completeOwnedClaim(behavior: ActiveClaim['behavior'], target: string, c
 
 export const BEHAVIOR_REGISTRATION_GRACE_MS = 5 * 60_000
 const BEHAVIOR_CLAIM_RENEWAL_MS = 2 * 60 * 60_000
+const PR_OPERATION_EVALUATION_LEASE_MS = 65_000
 const RUNNING_AGENT_STATUSES = new Set(['pending', 'queued', 'running', 'in_progress'])
 const FAILED_AGENT_STATUSES = new Set([
   'failed',
@@ -374,6 +378,7 @@ function retainClaimSafely(claim: BehaviorLaunchClaim, error: string): void {
     claim.claimId,
     BEHAVIOR_CLAIM_RENEWAL_MS,
   )
+  renewPrOperationOwned(claim.claimId, BEHAVIOR_CLAIM_RENEWAL_MS)
 }
 
 function completeClaimSafely(claim: BehaviorLaunchClaim, error: string | null = null): boolean {
@@ -572,6 +577,7 @@ async function reconcileBehaviorLaunchClaims(
         claim.claimId,
         BEHAVIOR_CLAIM_RENEWAL_MS,
       )
+      renewPrOperationOwned(claim.claimId, BEHAVIOR_CLAIM_RENEWAL_MS)
     } else {
       const message = `unrecognized agent call status "${status || 'missing'}"`
       if (deadLetterClaim(claim, message)) {
@@ -768,6 +774,7 @@ function settleClaimAfterExit(
         'worker exited successfully; awaiting durable agent result',
       )
       renewSeenOwned(behavior, target, claimId, BEHAVIOR_CLAIM_RENEWAL_MS)
+      renewPrOperationOwned(claimId, BEHAVIOR_CLAIM_RENEWAL_MS)
       return
     }
     const outcome = error?.message || signal || `exit ${code ?? 'unknown'}`
@@ -779,6 +786,7 @@ function settleClaimAfterExit(
       `worker exited ${outcome}; awaiting durable agent result`,
     )
     renewSeenOwned(behavior, target, claimId, BEHAVIOR_CLAIM_RENEWAL_MS)
+    renewPrOperationOwned(claimId, BEHAVIOR_CLAIM_RENEWAL_MS)
     console.error(`[behaviors] ${behavior} worker exited for ${target}; awaiting durable result (${outcome})`)
   }
 }
@@ -832,6 +840,9 @@ async function fireReview(
     expectedHead,
     actor,
   )) return false
+  if (!renewPrOperationOwned(claimId, BEHAVIOR_CLAIM_RENEWAL_MS)) {
+    throw new Error(`review PR operation ownership was lost for ${pr.repo}#${pr.number}`)
+  }
   await spawnDetached(AGENT_INTERFACE, args, {
     cwd: agentInterfaceCwd(),
     env: claudeSubscriptionEnvironment(),
@@ -942,13 +953,16 @@ async function tickReviewNewPrs(): Promise<void> {
     const prs = await listOpenPrsByAuthor(author)
     await recoverFailedSnapshotReviews(prs, reviewer)
     let failure: unknown
-    for (const pr of prs) {
+    await Promise.all(prs.map(async (pr) => {
       if (!isEnabled('review-new-prs') || behaviorAborted()) return
+      const key = `${pr.repo}#${pr.number}`
+      const operationId = claimPrOperationOwned(key, PR_OPERATION_EVALUATION_LEASE_MS)
+      if (!operationId) return
+      let launched = false
       try {
-        const key = `${pr.repo}#${pr.number}`
         // Atomic claim: exactly one caller succeeds for any given key
         // across all concurrent runtimes. Losers skip silently.
-        let claimId = claimSeenOwned('review-new-prs', key)
+        let claimId = claimSeenOwnedAs('review-new-prs', key, operationId)
         if (!claimId) {
           const recovered = await releaseFailedBehaviorIfNoAction(
             'review-new-prs',
@@ -956,10 +970,10 @@ async function tickReviewNewPrs(): Promise<void> {
             pr.number,
             key,
           )
-          if (!recovered) continue
-          claimId = claimSeenOwned('review-new-prs', key)
+          if (!recovered) return
+          claimId = claimSeenOwnedAs('review-new-prs', key, operationId)
         }
-        if (!claimId) continue
+        if (!claimId) return
         trackClaim('review-new-prs', key, claimId)
 
         try {
@@ -977,7 +991,7 @@ async function tickReviewNewPrs(): Promise<void> {
               if (ch.hasChangeRequest) {
                 completeOwnedClaim('review-new-prs', key, claimId)
                 console.log(`[behaviors] review-new-prs skipped for ${pr.repo}#${pr.number} — outstanding CHANGES_REQUESTED, approve-prs owns it`)
-                continue
+                return
               }
             } catch (err) {
               if (behaviorAborted()) {
@@ -989,15 +1003,13 @@ async function tickReviewNewPrs(): Promise<void> {
             }
           }
 
-          const launched = await fireReview(pr, setting, key, claimId)
-          if (!launched) {
+          const accepted = await fireReview(pr, setting, key, claimId)
+          if (!accepted) {
             releaseOwnedClaim('review-new-prs', key, claimId)
             return
           }
+          launched = true
           console.log(`[behaviors] review-new-prs fired for ${pr.repo}#${pr.number} (p=${setting})`)
-          // Keep one durable in-flight worker per behavior. The next target is
-          // considered only after reconciliation observes completion.
-          return
         } catch (err) {
           // Pre-launch work and spawn acknowledgement are part of the claim.
           // Release on failure so the next tick can retry this exact target.
@@ -1008,8 +1020,10 @@ async function tickReviewNewPrs(): Promise<void> {
         if (behaviorAborted()) return
         console.error(`[behaviors] review-new-prs step failed for ${pr.repo}#${pr.number}:`, err)
         failure ??= err
+      } finally {
+        if (!launched) releasePrOperationOwned(operationId)
       }
-    }
+    }))
     if (failure) throw failure
   } catch (err) {
     console.error('[behaviors] tick failed:', err)
@@ -1317,6 +1331,9 @@ async function fireApprove(
     expectedHead,
     actor,
   )) return false
+  if (!renewPrOperationOwned(claimId, BEHAVIOR_CLAIM_RENEWAL_MS)) {
+    throw new Error(`approval PR operation ownership was lost for ${pr.repo}#${pr.number}`)
+  }
   await spawnDetached(AGENT_INTERFACE, args, {
     cwd: agentInterfaceCwd(),
     env: claudeSubscriptionEnvironment(),
@@ -1339,8 +1356,15 @@ async function tickApprovePrs(): Promise<void> {
   try {
     const prs = await listOpenPrsByAuthor(author)
     let failure: unknown
-    for (const pr of prs) {
+    await Promise.all(prs.map(async (pr) => {
       if (!isEnabled('approve-prs') || behaviorAborted()) return
+      const prTarget = `${pr.repo}#${pr.number}`
+      const operationId = claimPrOperationOwned(
+        prTarget,
+        PR_OPERATION_EVALUATION_LEASE_MS,
+      )
+      if (!operationId) return
+      let launched = false
       try {
         const check = await checkChangesAddressed(pr.repo, pr.number, reviewer)
         if (!isEnabled('approve-prs')) return
@@ -1362,7 +1386,7 @@ async function tickApprovePrs(): Promise<void> {
         let firedReason = ''
         let expectedHead = ''
         if (check.hasChangeRequest) {
-          if (check.responseCount < 1 || check.latestRequestAt === null) continue
+          if (check.responseCount < 1 || check.latestRequestAt === null) return
           const activity = await checkReviewActivity(
             pr.repo,
             pr.number,
@@ -1374,13 +1398,13 @@ async function tickApprovePrs(): Promise<void> {
             || activity.headSha !== check.headSha
             || activity.unresolvedConversationAuthors.some(
               (author) => author.toLowerCase() !== reviewer.toLowerCase(),
-            )) continue
+            )) return
           expectedHead = check.headSha
           seenTarget = `${pr.repo}#${pr.number}@req=${check.latestRequestAt}/r=${check.responseCount}/head=${check.headSha}`
           firedReason = `req=${check.latestRequestAt}, r=${check.responseCount}: ${check.commitsAfterRequest}c+${check.authorInlineRepliesAfterRequest}reply, head=${check.headSha.slice(0, 8)}`
         } else {
-          const review = latestCleanReviewLaunch(pr.repo, pr.number)
-          if (!review) continue
+          const review = latestApprovalBasisLaunch(pr.repo, pr.number)
+          if (!review) return
           const completedAtMs = Date.parse(review.completedAt)
           if (!Number.isFinite(completedAtMs)) {
             throw new Error(`invalid completed review timestamp for ${pr.repo}#${pr.number}`)
@@ -1396,7 +1420,7 @@ async function tickApprovePrs(): Promise<void> {
             || activity.activeChangeRequestAuthors.length > 0
             || activity.unresolvedConversationCount > 0
             || (activity.reviewerLatestState === 'APPROVED'
-              && activity.reviewerLatestCommit === activity.headSha)) continue
+              && activity.reviewerLatestCommit === activity.headSha)) return
           if (activity.headSha !== review.headSha && activity.latestActivityAt === null) {
             throw new Error(`head changed without an activity watermark for ${pr.repo}#${pr.number}`)
           }
@@ -1404,13 +1428,13 @@ async function tickApprovePrs(): Promise<void> {
             ? completedAtMs
             : Date.parse(activity.latestActivityAt)
           const quietAnchorMs = Math.max(completedAtMs, latestActivityAtMs)
-          if (Date.now() - quietAnchorMs < APPROVAL_QUIET_WINDOW_MS) continue
+          if (Date.now() - quietAnchorMs < APPROVAL_QUIET_WINDOW_MS) return
           const quietAnchor = new Date(quietAnchorMs).toISOString()
           expectedHead = activity.headSha
           seenTarget = `${pr.repo}#${pr.number}@quiet=${quietAnchor}/head=${activity.headSha}`
           firedReason = `clean review ${review.callId.slice(0, 8)}, quiet since ${quietAnchor}, head=${activity.headSha.slice(0, 8)}`
         }
-        let claimId = claimSeenOwned('approve-prs', seenTarget)
+        let claimId = claimSeenOwnedAs('approve-prs', seenTarget, operationId)
         if (!claimId) {
           const recovered = await releaseFailedBehaviorIfNoAction(
             'approve-prs',
@@ -1418,29 +1442,31 @@ async function tickApprovePrs(): Promise<void> {
             pr.number,
             seenTarget,
           )
-          if (!recovered) continue
-          claimId = claimSeenOwned('approve-prs', seenTarget)
+          if (!recovered) return
+          claimId = claimSeenOwnedAs('approve-prs', seenTarget, operationId)
         }
-        if (!claimId) continue
+        if (!claimId) return
         trackClaim('approve-prs', seenTarget, claimId)
         try {
-          const launched = await fireApprove(pr, seenTarget, claimId, expectedHead)
-          if (!launched) {
+          const accepted = await fireApprove(pr, seenTarget, claimId, expectedHead)
+          if (!accepted) {
             releaseOwnedClaim('approve-prs', seenTarget, claimId)
             return
           }
+          launched = true
         } catch (err) {
           releaseOwnedClaim('approve-prs', seenTarget, claimId)
           throw err
         }
         console.log(`[behaviors] approve-prs fired for ${pr.repo}#${pr.number} (${firedReason})`)
-        return
       } catch (err) {
         if (behaviorAborted()) return
         console.error(`[behaviors] approve-prs check/fire failed for ${pr.repo}#${pr.number}:`, err)
         failure ??= err
+      } finally {
+        if (!launched) releasePrOperationOwned(operationId)
       }
-    }
+    }))
     if (failure) throw failure
   } catch (err) {
     console.error('[behaviors] approve-prs tick failed:', err)
@@ -1579,8 +1605,14 @@ async function tickResolveUnblocking(): Promise<void> {
   try {
     const prs = await listOpenPrsByAuthor(author)
     let failure: unknown
-    for (const pr of prs) {
+    await Promise.all(prs.map(async (pr) => {
       if (!isEnabled('resolve-unblocking') || behaviorAborted()) return
+      const key = `${pr.repo}#${pr.number}`
+      const operationId = claimPrOperationOwned(
+        key,
+        PR_OPERATION_EVALUATION_LEASE_MS,
+      )
+      if (!operationId) return
       try {
         // This CLI performs the mutation itself. The synchronous flag check
         // immediately before invocation prevents a disabled behavior from
@@ -1590,7 +1622,6 @@ async function tickResolveUnblocking(): Promise<void> {
         if (result.superseded) {
           console.log(`[behaviors] resolve-unblocking superseded on ${pr.repo}#${pr.number} by head ${result.headSha}`)
         } else if (result.resolved_count > 0) {
-          const key = `${pr.repo}#${pr.number}`
           console.log(`[behaviors] resolve-unblocking cleared ${result.resolved_count} convo(s) on ${key}`)
           // github-interface doesn't write a log row for this call, so
           // unlike pr_review / pr_approve there's no agent-interface
@@ -1606,8 +1637,10 @@ async function tickResolveUnblocking(): Promise<void> {
         if (behaviorAborted()) return
         console.error(`[behaviors] resolve-unblocking failed for ${pr.repo}#${pr.number}:`, err)
         failure ??= err
+      } finally {
+        releasePrOperationOwned(operationId)
       }
-    }
+    }))
     if (failure) throw failure
   } catch (err) {
     console.error('[behaviors] resolve-unblocking tick failed:', err)
@@ -1745,7 +1778,6 @@ export async function runEnabledBehaviorsOnce(
       return await withBehaviorProcessLock('review-new-prs', async () => {
         await reconcileBehaviorLaunchClaims('review-new-prs')
         if (!behaviorRetryDue('review-new-prs')) return false
-        if (listBehaviorLaunchClaims('review-new-prs').length > 0) return false
         if (claudeAuth.snapshot().status !== 'authenticated') return false
         await tickReviewNewPrs()
         return listBehaviorLaunchClaims('review-new-prs').length === 0
@@ -1758,7 +1790,6 @@ export async function runEnabledBehaviorsOnce(
       return await withBehaviorProcessLock('approve-prs', async () => {
         await reconcileBehaviorLaunchClaims('approve-prs')
         if (!behaviorRetryDue('approve-prs')) return false
-        if (listBehaviorLaunchClaims('approve-prs').length > 0) return false
         if (claudeAuth.snapshot().status !== 'authenticated') return false
         await tickApprovePrs()
         return listBehaviorLaunchClaims('approve-prs').length === 0

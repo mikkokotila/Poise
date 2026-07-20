@@ -182,11 +182,16 @@ function arrangeCli(
       const reviewer = args[args.indexOf('--username') + 1].toLowerCase()
       const requested = (reviewActivity.requestedReviewers || [])
         .some((login) => login.toLowerCase() === reviewer)
+      const cwdParts = String(options?.cwd || '').split('/')
+      const repository = cwdParts.length >= 2
+        ? `${cwdParts[cwdParts.length - 2]}/${cwdParts[cwdParts.length - 1]}`
+        : pr.repo
+      const pullNumber = Number(String(args[1] || '').replace(/^#/, ''))
       return {
         stdout: JSON.stringify({
           action: 'review_activity_since',
-          repository: pr.repo,
-          pull_number: pr.number,
+          repository,
+          pull_number: pullNumber,
           username: reviewer,
           state: reviewActivity.state ?? 'OPEN',
           draft: reviewActivity.draft ?? false,
@@ -302,6 +307,7 @@ function deferred<T>() {
 function recordCompletedInitialReview(
   db: typeof import('../server/db'),
   options: {
+    pull?: Pick<typeof pr, 'repo' | 'number'>
     target?: string
     completedAt?: string
     headSha?: string
@@ -309,7 +315,8 @@ function recordCompletedInitialReview(
     callId?: string
   } = {},
 ): void {
-  const target = options.target ?? `${pr.repo}#${pr.number}`
+  const pull = options.pull ?? pr
+  const target = options.target ?? `${pull.repo}#${pull.number}`
   const claimId = db.claimSeenOwned('review-new-prs', target)
   if (!claimId) throw new Error('could not arrange initial review claim')
   const marked = db.markBehaviorLaunchIntentOwned({
@@ -317,8 +324,8 @@ function recordCompletedInitialReview(
     target,
     claimId,
     launchBehavior: 'pr_review',
-    repo: pr.repo,
-    pr: pr.number,
+    repo: pull.repo,
+    pr: pull.number,
     requestedAt: new Date().toISOString(),
     expectedHead: options.headSha ?? HEAD_SHA,
     actor: 'review-bot',
@@ -547,6 +554,95 @@ describe('behavior launch claims', () => {
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
   })
 
+  it('uses a completed approval as the basis for approving a later head', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
+    arrangeCli(false, false, {
+      headSha: NEXT_HEAD_SHA,
+      latestActivityAt: '2026-07-15T11:49:59.000Z',
+      reviewerLatestState: 'APPROVED',
+      reviewerLatestCommit: HEAD_SHA,
+    })
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_approve_prs_enabled', '1')
+
+    const target = `${pr.repo}#${pr.number}@quiet=prior/head=${HEAD_SHA}`
+    const claimId = db.claimSeenOwned('approve-prs', target)!
+    expect(db.markBehaviorLaunchIntentOwned({
+      key: 'approve-prs',
+      target,
+      claimId,
+      launchBehavior: 'pr_approve',
+      repo: pr.repo,
+      pr: pr.number,
+      requestedAt: '2026-07-15T11:39:00.000Z',
+      expectedHead: HEAD_SHA,
+      actor: 'review-bot',
+      source: 'poise:approve-prs',
+      correlationId: claimId,
+    })).toBe(true)
+    expect(db.linkBehaviorLaunchCallOwned(
+      'approve-prs',
+      target,
+      claimId,
+      'b'.repeat(32),
+    )).toBe(true)
+    expect(db.completeBehaviorLaunchOwned({
+      key: 'approve-prs',
+      target,
+      claimId,
+      outcome: 'approved',
+      action: 'approved',
+      completedAt: '2026-07-15T11:40:00.000Z',
+      headSha: HEAD_SHA,
+    })).toBe(true)
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(mocks.spawnDetached.mock.calls[0][1]).toContain(NEXT_HEAD_SHA)
+  })
+
+  it('launches eligible approvals independently across PRs', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
+    const secondPr = {
+      repo: 'Vaquum/poise-second',
+      number: 18,
+      url: 'https://github.com/Vaquum/poise-second/pull/18',
+      status: 'open',
+      author: 'poise-user',
+    }
+    listedPrs = [pr, secondPr]
+    arrangeCli(false)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_approve_prs_enabled', '1')
+    recordCompletedInitialReview(db, {
+      completedAt: '2026-07-15T11:40:00.000Z',
+    })
+    recordCompletedInitialReview(db, {
+      pull: secondPr,
+      completedAt: '2026-07-15T11:40:00.000Z',
+      callId: 'd'.repeat(32),
+    })
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+    expect(mocks.spawnDetached.mock.calls.map((call) => call[1])).toEqual(
+      expect.arrayContaining([
+        expect.arrayContaining(['--pr-approve', `#${pr.number}`]),
+        expect.arrayContaining(['--pr-approve', `#${secondPr.number}`]),
+      ]),
+    )
+  })
+
   it('does not approve a clean review while a review conversation is unresolved', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
@@ -624,6 +720,7 @@ describe('behavior launch claims', () => {
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
     mocks.spawnDetached.mockClear()
     db.clearSeen('approve-prs')
+    db.clearSeen('pr-operation')
 
     activity.draft = true
     await runtime.runEnabledBehaviorsOnce()
@@ -798,7 +895,7 @@ describe('behavior launch claims', () => {
     expect(mocks.spawnDetached).not.toHaveBeenCalled()
   })
 
-  it('keeps one durable in-flight worker per scheduled behavior', async () => {
+  it('keeps one durable in-flight worker per PR', async () => {
     const secondPr = {
       repo: 'Vaquum/poise-second',
       number: 18,
@@ -819,10 +916,15 @@ describe('behavior launch claims', () => {
     await runtime.runEnabledBehaviorsOnce()
     await runtime.runEnabledBehaviorsOnce()
 
-    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
     expect(mocks.spawnDetached).toHaveBeenCalledWith(
       'agent-interface',
       expect.arrayContaining(['--pr-review', `#${pr.number}`]),
+      expect.any(Object),
+    )
+    expect(mocks.spawnDetached).toHaveBeenCalledWith(
+      'agent-interface',
+      expect.arrayContaining(['--pr-review', `#${secondPr.number}`]),
       expect.any(Object),
     )
   })

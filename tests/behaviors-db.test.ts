@@ -95,6 +95,8 @@ describe('behavior database lifecycle', () => {
     const {
       claimSeen,
       claimSeenOwned,
+      claimSeenOwnedAs,
+      claimPrOperationOwned,
       closeDatabase,
       completeSeenOwned,
       linkBehaviorLaunchCallOwned,
@@ -102,9 +104,31 @@ describe('behavior database lifecycle', () => {
       markBehaviorLaunchIntentOwned,
       releaseSeen,
       releaseSeenOwned,
+      releasePrOperationOwned,
       renewSeenOwned,
+      renewPrOperationOwned,
       db,
     } = await loadIsolatedDb(path)
+
+    const prOperation = claimPrOperationOwned('owner/repo#7', 60_000)
+    expect(prOperation).toEqual(expect.any(String))
+    expect(claimPrOperationOwned('owner/repo#7', 60_000)).toBeNull()
+    expect(claimSeenOwnedAs(
+      'approve-prs',
+      'owner/repo#7@generation',
+      prOperation!,
+    )).toBe(prOperation)
+    expect(renewPrOperationOwned(prOperation!, 120_000)).toBe(true)
+    expect(releasePrOperationOwned(prOperation!)).toBe(true)
+    const nextPrOperation = claimPrOperationOwned('owner/repo#7', 60_000)
+    expect(nextPrOperation).toEqual(expect.any(String))
+    expect(nextPrOperation).not.toBe(prOperation)
+    expect(releasePrOperationOwned(nextPrOperation!)).toBe(true)
+    expect(releaseSeenOwned(
+      'approve-prs',
+      'owner/repo#7@generation',
+      prOperation!,
+    )).toBe(true)
 
     expect(claimSeen('review-new-prs', 'repo#1@abc')).toBe(true)
     expect(claimSeen('review-new-prs', 'repo#1@abc')).toBe(false)

@@ -378,8 +378,19 @@ export function claimSeenOwned(
   target: string,
   leaseMs: number = DEFAULT_CLAIM_LEASE_MS,
 ): string | null {
+  return claimSeenOwnedAs(key, target, randomUUID(), leaseMs)
+}
+
+export function claimSeenOwnedAs(
+  key: string,
+  target: string,
+  claimId: string,
+  leaseMs: number = DEFAULT_CLAIM_LEASE_MS,
+): string | null {
   if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0) throw new Error('leaseMs must be a positive integer')
-  const claimId = randomUUID()
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(claimId)) {
+    throw new Error('claimId must be a stable operation identifier')
+  }
   const now = Date.now()
   const info = db.prepare(
     `INSERT INTO behavior_seen(key, target, seen_at, claim_id, lease_until)
@@ -408,6 +419,28 @@ export function claimSeenOwned(
        AND behavior_seen.launch_requested_at IS NULL`
   ).run(key, target, new Date(now).toISOString(), claimId, now + leaseMs, now)
   return info.changes === 1 ? claimId : null
+}
+
+export function claimPrOperationOwned(target: string, leaseMs: number): string | null {
+  return claimSeenOwned('pr-operation', target, leaseMs)
+}
+
+export function renewPrOperationOwned(claimId: string, leaseMs: number): boolean {
+  if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0) throw new Error('leaseMs must be a positive integer')
+  const info = db.prepare(`
+    UPDATE behavior_seen
+    SET lease_until = ?
+    WHERE key = 'pr-operation' AND claim_id = ? AND claim_id <> ''
+  `).run(Date.now() + leaseMs, claimId)
+  return info.changes === 1
+}
+
+export function releasePrOperationOwned(claimId: string): boolean {
+  const info = db.prepare(`
+    DELETE FROM behavior_seen
+    WHERE key = 'pr-operation' AND claim_id = ? AND claim_id <> ''
+  `).run(claimId)
+  return info.changes === 1
 }
 
 export function markBehaviorLaunchIntentOwned(input: {
@@ -639,21 +672,27 @@ export function releaseSeen(key: string, target: string): void {
 }
 
 export function releaseSeenOwned(key: string, target: string, claimId: string): boolean {
-  const info = db.prepare(
-    'DELETE FROM behavior_seen WHERE key = ? AND target = ? AND claim_id = ?'
-  ).run(key, target, claimId)
-  return info.changes === 1
+  return db.transaction(() => {
+    const info = db.prepare(
+      'DELETE FROM behavior_seen WHERE key = ? AND target = ? AND claim_id = ?'
+    ).run(key, target, claimId)
+    if (info.changes === 1) releasePrOperationOwned(claimId)
+    return info.changes === 1
+  })()
 }
 
 // Convert an in-flight owned claim into the durable terminal seen marker.
 // The owner predicate makes a late callback harmless after lease recovery.
 export function completeSeenOwned(key: string, target: string, claimId: string): boolean {
-  const info = db.prepare(
-    `UPDATE behavior_seen
-     SET claim_id = '', lease_until = NULL, seen_at = ?
-     WHERE key = ? AND target = ? AND claim_id = ?`
-  ).run(new Date().toISOString(), key, target, claimId)
-  return info.changes === 1
+  return db.transaction(() => {
+    const info = db.prepare(
+      `UPDATE behavior_seen
+       SET claim_id = '', lease_until = NULL, seen_at = ?
+       WHERE key = ? AND target = ? AND claim_id = ?`
+    ).run(new Date().toISOString(), key, target, claimId)
+    if (info.changes === 1) releasePrOperationOwned(claimId)
+    return info.changes === 1
+  })()
 }
 
 export type ReviewLaunchOutcome = 'clean' | 'changes_requested'
@@ -683,25 +722,28 @@ export function completeBehaviorLaunchOwned(input: {
   if (expectedPair[input.action] !== input.outcome) {
     throw new Error('behavior completion action/outcome mismatch')
   }
-  const info = db.prepare(`
-    UPDATE behavior_seen
-    SET claim_id = '', lease_until = NULL, seen_at = ?, launch_error = NULL,
-        launch_outcome = ?, launch_completed_at = ?, launch_head_sha = ?,
-        launch_action = ?
-    WHERE key = ? AND target = ? AND claim_id = ? AND claim_id <> ''
-      AND launch_expected_head = ?
-  `).run(
-    new Date().toISOString(),
-    input.outcome,
-    input.completedAt,
-    input.headSha,
-    input.action,
-    input.key,
-    input.target,
-    input.claimId,
-    input.headSha,
-  )
-  return info.changes === 1
+  return db.transaction(() => {
+    const info = db.prepare(`
+      UPDATE behavior_seen
+      SET claim_id = '', lease_until = NULL, seen_at = ?, launch_error = NULL,
+          launch_outcome = ?, launch_completed_at = ?, launch_head_sha = ?,
+          launch_action = ?
+      WHERE key = ? AND target = ? AND claim_id = ? AND claim_id <> ''
+        AND launch_expected_head = ?
+    `).run(
+      new Date().toISOString(),
+      input.outcome,
+      input.completedAt,
+      input.headSha,
+      input.action,
+      input.key,
+      input.target,
+      input.claimId,
+      input.headSha,
+    )
+    if (info.changes === 1) releasePrOperationOwned(input.claimId)
+    return info.changes === 1
+  })()
 }
 
 export function completeReviewLaunchOwned(input: {
@@ -837,27 +879,34 @@ export function listSnapshotOnlySeen(key: string): Array<{ target: string, seenA
   }))
 }
 
-export interface CompletedReviewLaunch {
+export interface CompletedApprovalBasisLaunch {
   callId: string
   completedAt: string
   headSha: string
 }
 
-export function latestCleanReviewLaunch(
+export function latestApprovalBasisLaunch(
   repo: string,
   pr: number,
-): CompletedReviewLaunch | null {
+): CompletedApprovalBasisLaunch | null {
   const row = db.prepare(`
     SELECT launch_call_id, launch_completed_at, launch_head_sha
     FROM behavior_seen
-    WHERE key = 'review-new-prs'
-      AND claim_id = ''
-      AND launch_behavior = 'pr_review'
+    WHERE claim_id = ''
       AND launch_repo = ?
       AND launch_pr = ?
       AND launch_error IS NULL
-      AND launch_action = 'reviewed_clean'
-      AND launch_outcome = 'clean'
+      AND (
+        (key = 'review-new-prs'
+          AND launch_behavior = 'pr_review'
+          AND launch_action = 'reviewed_clean'
+          AND launch_outcome = 'clean')
+        OR
+        (key = 'approve-prs'
+          AND launch_behavior = 'pr_approve'
+          AND launch_action = 'approved'
+          AND launch_outcome = 'approved')
+      )
       AND launch_call_id IS NOT NULL
       AND launch_completed_at IS NOT NULL
       AND launch_head_sha IS NOT NULL
