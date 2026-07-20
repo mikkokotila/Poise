@@ -560,6 +560,8 @@ describe('behavior launch claims', () => {
     arrangeCli(false, false, {
       headSha: NEXT_HEAD_SHA,
       latestActivityAt: '2026-07-15T11:49:59.000Z',
+      unresolvedConversationCount: 3,
+      unresolvedConversationAuthors: ['review-bot'],
       reviewerLatestState: 'APPROVED',
       reviewerLatestCommit: HEAD_SHA,
     })
@@ -604,6 +606,59 @@ describe('behavior launch claims', () => {
 
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
     expect(mocks.spawnDetached.mock.calls[0][1]).toContain(NEXT_HEAD_SHA)
+  })
+
+  it('does not reapprove while another reviewer owns an unresolved conversation', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
+    arrangeCli(false, false, {
+      headSha: NEXT_HEAD_SHA,
+      latestActivityAt: '2026-07-15T11:49:59.000Z',
+      unresolvedConversationCount: 2,
+      unresolvedConversationAuthors: ['review-bot', 'other-reviewer'],
+      reviewerLatestState: 'APPROVED',
+      reviewerLatestCommit: HEAD_SHA,
+    })
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_approve_prs_enabled', '1')
+
+    const target = `${pr.repo}#${pr.number}@quiet=prior/head=${HEAD_SHA}`
+    const claimId = db.claimSeenOwned('approve-prs', target)!
+    expect(db.markBehaviorLaunchIntentOwned({
+      key: 'approve-prs',
+      target,
+      claimId,
+      launchBehavior: 'pr_approve',
+      repo: pr.repo,
+      pr: pr.number,
+      requestedAt: '2026-07-15T11:39:00.000Z',
+      expectedHead: HEAD_SHA,
+      actor: 'review-bot',
+      source: 'poise:approve-prs',
+      correlationId: claimId,
+    })).toBe(true)
+    expect(db.linkBehaviorLaunchCallOwned(
+      'approve-prs',
+      target,
+      claimId,
+      'b'.repeat(32),
+    )).toBe(true)
+    expect(db.completeBehaviorLaunchOwned({
+      key: 'approve-prs',
+      target,
+      claimId,
+      outcome: 'approved',
+      action: 'approved',
+      completedAt: '2026-07-15T11:40:00.000Z',
+      headSha: HEAD_SHA,
+    })).toBe(true)
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
   })
 
   it('launches eligible approvals independently across PRs', async () => {

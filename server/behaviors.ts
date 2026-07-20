@@ -1415,10 +1415,19 @@ async function tickApprovePrs(): Promise<void> {
             reviewer,
             review.completedAt,
           )
+          const reapprovalOwnsEveryUnresolvedConversation =
+            activity.reviewerLatestState === 'APPROVED'
+            && activity.reviewerLatestCommit !== null
+            && activity.reviewerLatestCommit !== activity.headSha
+            && activity.unresolvedConversationAuthors.length > 0
+            && activity.unresolvedConversationAuthors.every(
+              (author) => author.toLowerCase() === reviewer.toLowerCase(),
+            )
           if (activity.state !== 'OPEN'
             || activity.draft
             || activity.activeChangeRequestAuthors.length > 0
-            || activity.unresolvedConversationCount > 0
+            || (activity.unresolvedConversationCount > 0
+              && !reapprovalOwnsEveryUnresolvedConversation)
             || (activity.reviewerLatestState === 'APPROVED'
               && activity.reviewerLatestCommit === activity.headSha)) return
           if (activity.headSha !== review.headSha && activity.latestActivityAt === null) {
