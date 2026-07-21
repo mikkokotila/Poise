@@ -84,7 +84,9 @@ interface ReviewActivityFixture {
   requestedReviewers?: string[]
   activeChangeRequestAuthors?: string[]
   unresolvedConversationCount?: number
+  unresolvedLiveConversationCount?: number
   unresolvedConversationAuthors?: string[]
+  unresolvedLiveConversationAuthors?: string[]
   headSha?: string
   state?: string
   draft?: boolean
@@ -94,6 +96,8 @@ interface ReviewActivityFixture {
   reviewerReviewsSince?: number
   reviewerPendingReviews?: number
   resolveSuperseded?: boolean
+  resolveUnresolvedCount?: number
+  resolveBlockers?: string[]
 }
 
 function arrangeCli(
@@ -199,7 +203,20 @@ function arrangeCli(
           reviewer_requested: requested,
           active_change_request_authors: reviewActivity.activeChangeRequestAuthors ?? [],
           unresolved_conversation_count: reviewActivity.unresolvedConversationCount ?? 0,
+          unresolved_outdated_conversation_count: Math.max(
+            0,
+            (reviewActivity.unresolvedConversationCount ?? 0)
+              - (reviewActivity.unresolvedLiveConversationCount
+                ?? reviewActivity.unresolvedConversationCount
+                ?? 0),
+          ),
+          unresolved_live_conversation_count: reviewActivity.unresolvedLiveConversationCount
+            ?? reviewActivity.unresolvedConversationCount
+            ?? 0,
           unresolved_conversation_authors: reviewActivity.unresolvedConversationAuthors ?? [],
+          unresolved_live_conversation_authors: reviewActivity.unresolvedLiveConversationAuthors
+            ?? reviewActivity.unresolvedConversationAuthors
+            ?? [],
           reviewer_latest_state: reviewActivity.reviewerLatestState ?? null,
           reviewer_latest_commit: reviewActivity.reviewerLatestCommit ?? null,
           reviewer_change_requests_since: 0,
@@ -237,8 +254,10 @@ function arrangeCli(
           statuses_green: false,
           checks_green: false,
           checks_present: false,
+          blockers: reviewActivity.resolveBlockers
+            ?? ['reviewer_not_approved_current_head'],
           resolved_count: 0,
-          unresolved_count: 0,
+          unresolved_count: reviewActivity.resolveUnresolvedCount ?? 0,
           latest_reviews: {},
           conversations: [],
         }),
@@ -714,6 +733,28 @@ describe('behavior launch claims', () => {
     expect(mocks.spawnDetached).not.toHaveBeenCalled()
   })
 
+  it('evaluates approval after a third-party conversation becomes outdated', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
+    arrangeCli(false, false, {
+      unresolvedConversationCount: 1,
+      unresolvedLiveConversationCount: 0,
+      unresolvedConversationAuthors: ['other-reviewer'],
+      unresolvedLiveConversationAuthors: [],
+    })
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_approve_prs_enabled', '1')
+    recordCompletedInitialReview(db, { completedAt: '2026-07-15T11:40:00.000Z' })
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(mocks.spawnDetached.mock.calls[0][1]).toContain('--pr-approve')
+  })
+
   it('does not approve addressed changes while another reviewer owns an unresolved conversation', async () => {
     arrangeCli(true, false, {
       unresolvedConversationCount: 2,
@@ -1186,6 +1227,24 @@ describe('behavior launch claims', () => {
       failures: [],
     })
     expect(runtime.getResolveUnblockingLastFired()).toBeNull()
+  })
+
+  it('logs the exact resolver blockers for unresolved conversations', async () => {
+    arrangeCli(false, false, {
+      resolveUnresolvedCount: 1,
+      resolveBlockers: ['reviewer_not_approved_current_head'],
+    })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const { database: db, behaviors: runtime } = await loadModules()
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_resolve_unblocking_enabled', '1')
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(log).toHaveBeenCalledWith(
+      `[behaviors] resolve-unblocking waiting on ${pr.repo}#${pr.number}: reviewer_not_approved_current_head`,
+    )
   })
 
   it('clears a recovered scan failure when the scan launches a worker', async () => {

@@ -1059,7 +1059,9 @@ interface ReviewActivityResult {
   reviewerRequested: boolean
   activeChangeRequestAuthors: string[]
   unresolvedConversationCount: number
+  unresolvedLiveConversationCount: number
   unresolvedConversationAuthors: string[]
+  unresolvedLiveConversationAuthors: string[]
   reviewerLatestState: string | null
   reviewerLatestCommit: string | null
   reviewerReviewsSince: number
@@ -1099,6 +1101,10 @@ async function checkReviewActivity(
     data.unresolved_conversation_count,
     'review-activity-since unresolved_conversation_count',
   )
+  const unresolvedLiveConversationCount = safeInteger(
+    data.unresolved_live_conversation_count,
+    'review-activity-since unresolved_live_conversation_count',
+  )
   if (data.action !== 'review_activity_since'
     || data.repository !== repo
     || data.pull_number !== number
@@ -1109,7 +1115,11 @@ async function checkReviewActivity(
     || !Array.isArray(data.active_change_request_authors)
     || data.active_change_request_authors.some((value) => typeof value !== 'string')
     || !Array.isArray(data.unresolved_conversation_authors)
-    || data.unresolved_conversation_authors.some((value) => typeof value !== 'string')) {
+    || data.unresolved_conversation_authors.some((value) => typeof value !== 'string')
+    || !Array.isArray(data.unresolved_live_conversation_authors)
+    || data.unresolved_live_conversation_authors.some(
+      (value) => typeof value !== 'string',
+    )) {
     throw new Error('github-interface --review-activity-since returned malformed state')
   }
   const headSha = String(data.head_sha || '').toLowerCase()
@@ -1150,7 +1160,9 @@ async function checkReviewActivity(
     reviewerRequested: data.reviewer_requested,
     activeChangeRequestAuthors: data.active_change_request_authors.map(String),
     unresolvedConversationCount,
+    unresolvedLiveConversationCount,
     unresolvedConversationAuthors: data.unresolved_conversation_authors.map(String),
+    unresolvedLiveConversationAuthors: data.unresolved_live_conversation_authors.map(String),
     reviewerLatestState,
     reviewerLatestCommit,
     reviewerReviewsSince,
@@ -1393,10 +1405,12 @@ async function tickApprovePrs(): Promise<void> {
             reviewer,
             check.latestRequestAt,
           )
+          // An outdated thread is evidence to inspect, not a current-head veto.
+          // The approval agent receives every thread in its immutable PR packet.
           if (activity.state !== 'OPEN'
             || activity.draft
             || activity.headSha !== check.headSha
-            || activity.unresolvedConversationAuthors.some(
+            || activity.unresolvedLiveConversationAuthors.some(
               (author) => author.toLowerCase() !== reviewer.toLowerCase(),
             )) return
           expectedHead = check.headSha
@@ -1426,7 +1440,7 @@ async function tickApprovePrs(): Promise<void> {
           if (activity.state !== 'OPEN'
             || activity.draft
             || activity.activeChangeRequestAuthors.length > 0
-            || (activity.unresolvedConversationCount > 0
+            || (activity.unresolvedLiveConversationCount > 0
               && !reapprovalOwnsEveryUnresolvedConversation)
             || (activity.reviewerLatestState === 'APPROVED'
               && activity.reviewerLatestCommit === activity.headSha)) return
@@ -1506,6 +1520,7 @@ interface ResolveResult {
   headSha: string
   resolved_count: number
   unresolved_count: number
+  blockers: string[]
   superseded: boolean
 }
 
@@ -1571,11 +1586,16 @@ async function resolveNonblockingIfReady(repo: string, number: number): Promise<
       headSha: currentHeadSha,
       resolved_count: 0,
       unresolved_count: 0,
+      blockers: [],
       superseded: true,
     }
   }
   const resolvedCount = safeInteger(data.resolved_count, 'resolve resolved_count')
   const unresolvedCount = safeInteger(data.unresolved_count, 'resolve unresolved_count')
+  if (!Array.isArray(data.blockers)
+    || data.blockers.some((value) => typeof value !== 'string')) {
+    throw new Error('github-interface resolution returned malformed blockers')
+  }
   if (data.action !== 'resolved_nonblocking_conversations_if_ready'
     || data.repository !== repo
     || data.pull_number !== number
@@ -1603,6 +1623,7 @@ async function resolveNonblockingIfReady(repo: string, number: number): Promise<
     headSha,
     resolved_count: resolvedCount,
     unresolved_count: unresolvedCount,
+    blockers: data.blockers.map(String),
     superseded: false,
   }
 }
@@ -1641,6 +1662,10 @@ async function tickResolveUnblocking(): Promise<void> {
             at: new Date().toISOString(),
             target: key,
           }))
+        } else if (result.unresolved_count > 0) {
+          console.log(
+            `[behaviors] resolve-unblocking waiting on ${key}: ${result.blockers.join(', ')}`,
+          )
         }
       } catch (err) {
         if (behaviorAborted()) return
