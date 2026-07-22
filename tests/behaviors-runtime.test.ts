@@ -551,6 +551,24 @@ describe('behavior launch claims', () => {
     )).toBe(false)
   })
 
+  it('waits for a busy per-PR lock instead of silently starving an eligible approval', async () => {
+    arrangeCli(false)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_approve_prs_enabled', '1')
+    recordCompletedInitialReview(db)
+    const blocker = db.claimPrOperationOwned(`${pr.repo}#${pr.number}`, 65_000)
+    if (!blocker) throw new Error('could not arrange competing PR operation')
+    setTimeout(() => db.releasePrOperationOwned(blocker), 25)
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(mocks.spawnDetached.mock.calls[0][1]).toContain('--pr-approve')
+  })
+
   it('moves the quiet window forward when new PR activity appears', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
