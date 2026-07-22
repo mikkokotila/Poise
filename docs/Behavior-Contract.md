@@ -19,7 +19,7 @@ Each behavior follows one transaction shape:
 `review-new-prs` accepts either one atomic `requested_changes` review or the
 authoritative `reviewed_clean` outcome. `approve-prs` accepts one head-pinned
 approval or one atomic change request. A clean review becomes approval-eligible
-after ten quiet minutes. `resolve-unblocking` uses the upstream strong
+on the next scheduler scan. `resolve-unblocking` uses the upstream strong
 resolution primitive, which revalidates the complete gate before every thread
 mutation.
 

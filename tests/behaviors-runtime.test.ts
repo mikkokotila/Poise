@@ -500,10 +500,10 @@ describe('behavior launch claims', () => {
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
   })
 
-  it('approves a requested clean review after ten quiet minutes without a CI gate', async () => {
+  it('approves a requested clean review on the next scan without a CI gate', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
-    const completedAt = '2026-07-15T11:49:59.000Z'
+    const completedAt = '2026-07-15T11:59:59.000Z'
     arrangeCli(false, false, {
       requestedReviewers: ['other-reviewer', 'REVIEW-BOT'],
       headSha: NEXT_HEAD_SHA,
@@ -547,7 +547,7 @@ describe('behavior launch claims', () => {
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
     expect(db.claimSeen(
       'approve-prs',
-      `${pr.repo}#${pr.number}@quiet=2026-07-15T11:49:59.000Z/head=${NEXT_HEAD_SHA}`,
+      `${pr.repo}#${pr.number}@head=${NEXT_HEAD_SHA}`,
     )).toBe(false)
   })
 
@@ -569,12 +569,12 @@ describe('behavior launch claims', () => {
     expect(mocks.spawnDetached.mock.calls[0][1]).toContain('--pr-approve')
   })
 
-  it('moves the quiet window forward when new PR activity appears', async () => {
+  it('does not debounce recent PR activity', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
     const activity: ReviewActivityFixture = {
       requestedReviewers: ['review-bot'],
-      latestActivityAt: '2026-07-15T11:55:00.000Z',
+      latestActivityAt: '2026-07-15T11:59:59.000Z',
     }
     arrangeCli(false, false, activity)
     mocks.spawnDetached.mockResolvedValue(undefined)
@@ -584,10 +584,6 @@ describe('behavior launch claims', () => {
     db.setMeta('behavior_approve_prs_enabled', '1')
     recordCompletedInitialReview(db, { completedAt: '2026-07-15T11:40:00.000Z' })
 
-    await runtime.runEnabledBehaviorsOnce()
-    expect(mocks.spawnDetached).not.toHaveBeenCalled()
-
-    vi.setSystemTime(new Date('2026-07-15T12:05:00.000Z'))
     await runtime.runEnabledBehaviorsOnce()
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
   })
@@ -791,7 +787,7 @@ describe('behavior launch claims', () => {
     expect(mocks.spawnDetached).not.toHaveBeenCalled()
   })
 
-  it('waits ten minutes after another reviewer dismisses a change request', async () => {
+  it('approves on the next scan after another reviewer dismisses a change request', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
     const activity: ReviewActivityFixture = {
@@ -812,10 +808,6 @@ describe('behavior launch claims', () => {
 
     activity.activeChangeRequestAuthors = []
     activity.latestActivityAt = '2026-07-15T12:00:00.000Z'
-    await runtime.runEnabledBehaviorsOnce()
-    expect(mocks.spawnDetached).not.toHaveBeenCalled()
-
-    vi.setSystemTime(new Date('2026-07-15T12:10:00.000Z'))
     await runtime.runEnabledBehaviorsOnce()
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
   })
@@ -928,10 +920,6 @@ describe('behavior launch claims', () => {
       response: 'reviewed-clean',
     })]
     vi.setSystemTime(new Date('2026-07-15T11:45:00.000Z'))
-    await runtime.runEnabledBehaviorsOnce()
-    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
-
-    vi.setSystemTime(new Date('2026-07-15T11:55:00.000Z'))
     await runtime.runEnabledBehaviorsOnce()
     expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
     expect(mocks.spawnDetached.mock.calls[1][1]).toContain('--pr-approve')
