@@ -331,6 +331,8 @@ function completeOwnedClaim(behavior: ActiveClaim['behavior'], target: string, c
 export const BEHAVIOR_REGISTRATION_GRACE_MS = 5 * 60_000
 const BEHAVIOR_CLAIM_RENEWAL_MS = 2 * 60 * 60_000
 const PR_OPERATION_EVALUATION_LEASE_MS = 65_000
+const APPROVAL_PR_OPERATION_WAIT_MS = 10_000
+const PR_OPERATION_RETRY_MS = 50
 const RUNNING_AGENT_STATUSES = new Set(['pending', 'queued', 'running', 'in_progress'])
 const FAILED_AGENT_STATUSES = new Set([
   'failed',
@@ -344,6 +346,26 @@ const SUPERSEDED_AGENT_ERROR = 'pull-request head changed during behavior execut
 
 function upstreamBehavior(behavior: ActiveClaim['behavior']): BehaviorAgentLaunch {
   return behavior === 'review-new-prs' ? 'pr_review' : 'pr_approve'
+}
+
+async function claimEligibleApprovalOperation(target: string): Promise<string | null> {
+  const deadline = Date.now() + APPROVAL_PR_OPERATION_WAIT_MS
+  while (!behaviorAborted() && isEnabled('approve-prs')) {
+    const operationId = claimPrOperationOwned(target, PR_OPERATION_EVALUATION_LEASE_MS)
+    if (operationId) return operationId
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return null
+    await waitForBehavior(new Promise<void>((resolveDelay) => {
+      setTimeout(resolveDelay, Math.min(PR_OPERATION_RETRY_MS, remaining))
+    }))
+  }
+  return null
+}
+
+function hasActiveAgentLaunchForPr(repo: string, pr: number): boolean {
+  return (['review-new-prs', 'approve-prs'] as const).some((behavior) =>
+    listBehaviorLaunchClaims(behavior).some((claim) =>
+      claim.launchRepo === repo && claim.launchPr === pr))
 }
 
 function markLaunchIntent(
@@ -1384,11 +1406,12 @@ async function tickApprovePrs(): Promise<void> {
         return
       }
       if (!check.hasChangeRequest && !latestApprovalBasisLaunch(pr.repo, pr.number)) return
-      const operationId = claimPrOperationOwned(
-        prTarget,
-        PR_OPERATION_EVALUATION_LEASE_MS,
-      )
-      if (!operationId) return
+      if (hasActiveAgentLaunchForPr(pr.repo, pr.number)) return
+      const operationId = await claimEligibleApprovalOperation(prTarget)
+      if (!operationId) {
+        console.log(`[behaviors] approve-prs deferred for ${prTarget}: PR operation busy`)
+        return
+      }
       let launched = false
       try {
         if (!isEnabled('approve-prs')) return
