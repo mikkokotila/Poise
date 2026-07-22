@@ -1063,10 +1063,7 @@ async function tickReviewNewPrs(): Promise<void> {
 // explicitly requests that identity's initial approval.
 //
 // Follow-ups dedupe by request timestamp + response count. A clean initial
-// review starts a ten-minute quiet window; later PR activity moves that window
-// forward, and the approval generation dedupes by its final anchor + head SHA.
-
-export const APPROVAL_QUIET_WINDOW_MS = 10 * 60_000
+// review becomes eligible on the next scheduler scan and dedupes by head SHA.
 
 interface ChangesAddressedResult {
   hasChangeRequest: boolean
@@ -1454,10 +1451,6 @@ async function tickApprovePrs(): Promise<void> {
         } else {
           const review = latestApprovalBasisLaunch(pr.repo, pr.number)
           if (!review) return
-          const completedAtMs = Date.parse(review.completedAt)
-          if (!Number.isFinite(completedAtMs)) {
-            throw new Error(`invalid completed review timestamp for ${pr.repo}#${pr.number}`)
-          }
           const activity = await checkReviewActivity(
             pr.repo,
             pr.number,
@@ -1482,15 +1475,9 @@ async function tickApprovePrs(): Promise<void> {
           if (activity.headSha !== review.headSha && activity.latestActivityAt === null) {
             throw new Error(`head changed without an activity watermark for ${pr.repo}#${pr.number}`)
           }
-          const latestActivityAtMs = activity.latestActivityAt === null
-            ? completedAtMs
-            : Date.parse(activity.latestActivityAt)
-          const quietAnchorMs = Math.max(completedAtMs, latestActivityAtMs)
-          if (Date.now() - quietAnchorMs < APPROVAL_QUIET_WINDOW_MS) return
-          const quietAnchor = new Date(quietAnchorMs).toISOString()
           expectedHead = activity.headSha
-          seenTarget = `${pr.repo}#${pr.number}@quiet=${quietAnchor}/head=${activity.headSha}`
-          firedReason = `clean review ${review.callId.slice(0, 8)}, quiet since ${quietAnchor}, head=${activity.headSha.slice(0, 8)}`
+          seenTarget = `${pr.repo}#${pr.number}@head=${activity.headSha}`
+          firedReason = `clean review ${review.callId.slice(0, 8)}, head=${activity.headSha.slice(0, 8)}`
         }
         let claimId = claimSeenOwnedAs('approve-prs', seenTarget, operationId)
         if (!claimId) {
