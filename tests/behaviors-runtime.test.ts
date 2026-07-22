@@ -53,6 +53,7 @@ const pr = {
   url: 'https://github.com/Vaquum/poise-test/pull/17',
   status: 'open',
   author: 'poise-user',
+  draft: 0,
 }
 const HEAD_SHA = 'a'.repeat(40)
 const NEXT_HEAD_SHA = 'd'.repeat(40)
@@ -689,6 +690,7 @@ describe('behavior launch claims', () => {
       url: 'https://github.com/Vaquum/poise-second/pull/18',
       status: 'open',
       author: 'poise-user',
+      draft: 0,
     }
     listedPrs = [pr, secondPr]
     arrangeCli(false)
@@ -998,6 +1000,7 @@ describe('behavior launch claims', () => {
       url: 'https://github.com/Vaquum/poise-second/pull/18',
       status: 'open',
       author: 'poise-user',
+      draft: 0,
     }
     listedPrs = [pr, secondPr]
     arrangeCli(false)
@@ -1079,6 +1082,7 @@ describe('behavior launch claims', () => {
       url: 'https://github.com/Vaquum/downtime-test/pull/18',
       status: 'open',
       author: 'poise-user',
+      draft: 0,
     }
     listedPrs = [pr, downtimePr]
     arrangeCli(false)
@@ -1448,6 +1452,25 @@ describe('behavior launch claims', () => {
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
   })
 
+  it('does not review a draft and triggers when it becomes ready', async () => {
+    listedPrs = [{ ...pr, draft: 1 }]
+    arrangeCli(false)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
+    db.setMeta('behavior_review_new_prs_enabled', '1')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
+
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+
+    listedPrs = [pr]
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+  })
+
   it('snapshots every existing PR without per-head source calls', async () => {
     const secondPr = {
       repo: 'Vaquum/second-test',
@@ -1455,6 +1478,7 @@ describe('behavior launch claims', () => {
       url: 'https://github.com/Vaquum/second-test/pull/18',
       status: 'open',
       author: 'poise-user',
+      draft: 0,
     }
     listedPrs = [pr, secondPr]
     arrangeCli(false)

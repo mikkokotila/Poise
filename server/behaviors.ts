@@ -594,6 +594,7 @@ interface DatastorePr {
   repo: string
   number: number
   url: string
+  draft: boolean
 }
 
 interface DatastoreFreshness {
@@ -695,8 +696,10 @@ async function listOpenPrsByAuthor(author: string): Promise<DatastorePr[]> {
     const repo = String(value.repo || '')
     const number = safeInteger(value.number, `github-datastore PR row ${index} number`)
     const url = String(value.url || '')
+    const draft = safeInteger(value.draft, `github-datastore PR row ${index} draft`)
     if (!/^[^/\s]+\/[^/\s]+$/.test(repo)
       || number < 1
+      || draft > 1
       || value.status !== 'open'
       || value.author !== author
       || url !== `https://github.com/${repo}/pull/${number}`) {
@@ -705,8 +708,8 @@ async function listOpenPrsByAuthor(author: string): Promise<DatastorePr[]> {
     const key = `${repo}#${number}`
     if (seen.has(key)) throw new Error(`github-datastore returned duplicate PR ${key}`)
     seen.add(key)
-    return { repo, number, url }
-  })
+    return { repo, number, url, draft: draft === 1 }
+  }).filter((pr) => !pr.draft)
 }
 
 async function localCheckoutPath(owner: string, repo: string): Promise<string> {
@@ -1371,6 +1374,16 @@ async function tickApprovePrs(): Promise<void> {
     await Promise.all(prs.map(async (pr) => {
       if (!isEnabled('approve-prs') || behaviorAborted()) return
       const prTarget = `${pr.repo}#${pr.number}`
+      let check: ChangesAddressedResult
+      try {
+        check = await checkChangesAddressed(pr.repo, pr.number, reviewer)
+      } catch (err) {
+        if (behaviorAborted()) return
+        console.error(`[behaviors] approve-prs check failed for ${pr.repo}#${pr.number}:`, err)
+        failure ??= err
+        return
+      }
+      if (!check.hasChangeRequest && !latestApprovalBasisLaunch(pr.repo, pr.number)) return
       const operationId = claimPrOperationOwned(
         prTarget,
         PR_OPERATION_EVALUATION_LEASE_MS,
@@ -1378,7 +1391,6 @@ async function tickApprovePrs(): Promise<void> {
       if (!operationId) return
       let launched = false
       try {
-        const check = await checkChangesAddressed(pr.repo, pr.number, reviewer)
         if (!isEnabled('approve-prs')) return
         // Follow-up trigger: reviewer has at least one CHANGES_REQUESTED review
         // on the PR, AND the author has engaged with it at least once
