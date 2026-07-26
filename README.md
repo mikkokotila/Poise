@@ -85,9 +85,11 @@ npm run install:production
 ```
 
 The macOS installer builds Poise, resolves the tracked Caller ref in
-`config/caller-release.json` to an immutable release, and registers three
-per-user launchd services. They keep Poise alive, check `/api/health`, and
-update Caller from the tracked remote ref every minute. Update output is in
+`config/caller-release.json` to an immutable release, installs the Claude and
+Codex stop gates, and registers three per-user launchd services. They keep
+Poise alive, check `/api/health`, and reconcile Poise `main`, Caller, and both
+agent hooks from their remote sources every minute. Updates use fast-forward
+only and refuse to overwrite a dirty production worktree. Output is in
 `~/.poise/logs/caller-update.out.log` and failures are in
 `~/.poise/logs/caller-update.err.log`. A transition to degraded health produces
 a desktop notification; expired Claude authentication also opens Poise's

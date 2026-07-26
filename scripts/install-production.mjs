@@ -17,6 +17,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config as loadDotenv } from 'dotenv'
+import { installStopGate } from './stop-gate-runtime.mjs'
 
 const projectRoot = await realpath(fileURLToPath(new URL('..', import.meta.url)))
 const trackedRelease = JSON.parse(await readFile(
@@ -233,35 +234,6 @@ async function installCallerRelease(python) {
   }
 }
 
-async function updateInstalledStopGate() {
-  const hookRoot = join(home, '.local', 'share', 'caller-pr-stop-gate')
-  const hookPython = join(hookRoot, 'bin', 'python')
-  if (!await executable(hookPython)) return
-  const candidates = [
-    '/opt/homebrew/bin/uv',
-    '/usr/local/bin/uv',
-    'uv',
-  ]
-  let uv
-  for (const candidate of candidates) {
-    if (await executable(candidate)) {
-      uv = candidate
-      break
-    }
-  }
-  if (!uv) throw new Error('uv is required to update the installed Caller stop gate')
-  await run(uv, [
-    'pip',
-    'install',
-    '--python',
-    hookPython,
-    '--no-deps',
-    '--reinstall',
-    join(releaseRoot, 'source', 'github_interface'),
-    join(releaseRoot, 'source', 'agent_interface'),
-  ])
-}
-
 function xml(value) {
   return String(value)
     .replaceAll('&', '&amp;')
@@ -364,7 +336,13 @@ async function main() {
 
   const [node, python] = await Promise.all([supportedNode(), python313()])
   await installCallerRelease(python)
-  await updateInstalledStopGate()
+  await installStopGate({
+    home,
+    manifest,
+    python,
+    releaseRoot,
+    run,
+  })
   const nodeEnvironment = {
     ...process.env,
     PATH: `${dirname(node)}:${process.env.PATH || '/usr/bin:/bin'}`,
@@ -455,16 +433,18 @@ async function main() {
     atomicWrite(monitorPlist, monitor),
     atomicWrite(updaterPlist, updater),
   ])
-  if (process.env.POISE_CALLER_UPDATER !== '1') await bootout(updaterLabel)
+  const selfUpdating = process.env.POISE_RUNTIME_RECONCILER === '1'
+    || process.env.POISE_CALLER_UPDATER === '1'
+  if (!selfUpdating) await bootout(updaterLabel)
   await bootout(monitorLabel)
   await bootout(serviceLabel)
   await run('/bin/launchctl', ['enable', `${domain}/${serviceLabel}`])
   await run('/bin/launchctl', ['enable', `${domain}/${monitorLabel}`])
   await run('/bin/launchctl', ['enable', `${domain}/${updaterLabel}`])
   await bootstrap(servicePlist)
-  await bootstrap(monitorPlist)
-  if (process.env.POISE_CALLER_UPDATER !== '1') await bootstrap(updaterPlist)
   await waitForHealthyProduction()
+  await bootstrap(monitorPlist)
+  if (!selfUpdating) await bootstrap(updaterPlist)
   console.log(`Installed ${serviceLabel} with Caller ${manifest.commit}`)
 }
 

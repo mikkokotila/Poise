@@ -22,6 +22,7 @@
     "start": "node dist/server.js",
     "preview": "npm run build && npm run start",
     "install:production": "node scripts/install-production.mjs",
+    "update:runtime": "node scripts/update-caller.mjs",
     "update:caller": "node scripts/update-caller.mjs",
     "monitor:production": "node scripts/monitor-production.mjs",
     "typecheck": "npm run typecheck:client && npm run typecheck:server && npm run typecheck:tests",
