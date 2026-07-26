@@ -18,7 +18,10 @@ await Promise.all([
 ])
 
 const release = JSON.parse(await readFile(resolve('config/caller-release.json'), 'utf8'))
-await writeFile(resolve(releaseRoot, 'release.json'), `${JSON.stringify(release, null, 2)}\n`)
+await writeFile(resolve(releaseRoot, 'release.json'), `${JSON.stringify({
+  ...release,
+  commit: 'a'.repeat(40),
+}, null, 2)}\n`)
 await Promise.all([
   'agent-interface',
   'github-datastore',

@@ -84,11 +84,14 @@ npm ci
 npm run install:production
 ```
 
-The macOS installer builds Poise, installs the exact Caller commit in
-`config/caller-release.json`, and registers two per-user launchd services:
-one keeps the application alive and the other checks `/api/health` every
-minute. A transition to degraded health produces a desktop notification;
-expired Claude authentication also opens Poise's subscription sign-in prompt.
+The macOS installer builds Poise, resolves the tracked Caller ref in
+`config/caller-release.json` to an immutable release, and registers three
+per-user launchd services. They keep Poise alive, check `/api/health`, and
+update Caller from the tracked remote ref every minute. Update output is in
+`~/.poise/logs/caller-update.out.log` and failures are in
+`~/.poise/logs/caller-update.err.log`. A transition to degraded health produces
+a desktop notification; expired Claude authentication also opens Poise's
+subscription sign-in prompt.
 
 The production build emits the browser client under `dist/client` and the Node
 entrypoint at `dist/server.js`. The server binds `127.0.0.1:5555` by default.

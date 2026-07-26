@@ -1,6 +1,6 @@
 {
   "repository": "mikkokotila/caller",
-  "commit": "0b6a54fbcabd4e2434014b1e7dafeb763f11d149",
+  "ref": "main",
   "packages": {
     "agent-interface": "0.2.0",
     "github-datastore": "0.2.0",
