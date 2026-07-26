@@ -808,6 +808,22 @@ function inlineWrapAtCaretEdge(range: Range): HTMLElement | null {
   return null
 }
 
+// Wrap `s` in `**…**`, keeping any whitespace at its edges OUTSIDE the
+// markers. CommonMark's flanking rules say a `**` run preceded by
+// whitespace can't close and one followed by whitespace can't open, so
+// `**bold **text` is not emphasis at all — every strict renderer prints
+// the asterisks literally. Our own parser is lenient enough to still
+// show it bold, which is exactly what let malformed text sit unnoticed
+// in saved documents. Selections routinely carry a trailing space
+// (that's what a double-click hands us), so normalise here.
+// Whitespace-only input is returned untouched — there's nothing to bold.
+function wrapBoldPreservingEdgeSpace(s: string): string {
+  const lead  = /^\s*/.exec(s)![0]
+  const trail = /\s*$/.exec(s.slice(lead.length))![0]
+  const core  = s.slice(lead.length, s.length - trail.length)
+  return core ? `${lead}**${core}**${trail}` : s
+}
+
 // Cmd+B handler. Four behaviours:
 //   - Collapsed selection INSIDE a <strong>: exit bold mode. Move
 //     the caret to line-level immediately after the strong; the
@@ -887,15 +903,15 @@ function toggleBoldAtSelection() {
     const before   = innerText.slice(0, selStart)
     const selected = innerText.slice(selStart, selEnd)
     const after    = innerText.slice(selEnd)
-    const replacement =
-      (before ? `**${before}**` : '') +
-      selected +
-      (after  ? `**${after}**`  : '')
-    // The cursor lands at the end of the now-plain selected run.
-    // That's `before` + `**…**` markers (4 chars) + `selected`
-    // chars into the replacement string, or just `selected.length`
-    // when there was nothing before the selection.
-    const cursorInReplacement = (before ? before.length + 4 : 0) + selected.length
+    const beforeRun = before ? wrapBoldPreservingEdgeSpace(before) : ''
+    const afterRun  = after  ? wrapBoldPreservingEdgeSpace(after)  : ''
+    const replacement = beforeRun + selected + afterRun
+    // The cursor lands at the end of the now-plain selected run — i.e.
+    // past the rebuilt `before` run plus the selection itself. Measure
+    // the rendered run rather than assuming a fixed 4 marker chars:
+    // wrapBoldPreservingEdgeSpace may shift whitespace outside the
+    // markers, or decline to wrap a whitespace-only run entirely.
+    const cursorInReplacement = beforeRun.length + selected.length
     const replacementNode = document.createTextNode(replacement)
     strong.parentNode!.replaceChild(replacementNode, strong)
     const r = document.createRange()
@@ -924,7 +940,7 @@ function toggleBoldAtSelection() {
   }
 
   const visible = sel.toString()
-  document.execCommand('insertText', false, '**' + visible + '**')
+  document.execCommand('insertText', false, wrapBoldPreservingEdgeSpace(visible))
 }
 
 // Find the textContent offset where a given descendant node's content
@@ -2163,19 +2179,26 @@ function selectionAsAnnotationRange(): { range: AnnotationRange, snippet: string
   }
 }
 
-// Show or hide the floating selection-action buttons (Comment +
-// Issue) based on the current selection. Both are anchored just
-// above the selection's end rect: Comment sits closest to the
-// selection (left), Issue one button-width to its right. While the
-// issue composer is open the buttons stay hidden — focus is in the
-// composer and the selection has collapsed.
+// Hide the whole floating selection cluster. Always dismiss the three
+// together: they appear together, so hiding only some of them strands
+// the rest on screen with no selection left to act on. (Call sites used
+// to hide them one by one, and when a third button joined the original
+// pair the older sites kept dismissing two.)
+function hideSelectionActions(): void {
+  if (commentBtnEl) commentBtnEl.hidden = true
+  if (issueBtnEl) issueBtnEl.hidden = true
+  if (snippetBtnEl) snippetBtnEl.hidden = true
+}
+
+// Show or hide the floating selection-action buttons (Comment, Issue,
+// Snippet) based on the current selection. All three are anchored just
+// above the selection's end rect and grow rightward: Comment sits
+// closest to the selection, then Issue, then Snippet. While either
+// composer is open the buttons stay hidden — focus is in the composer
+// and the selection has collapsed.
 function updateCommentButtonForSelection(): void {
   if (!commentBtnEl || !docEl) return
-  const hideAll = () => {
-    commentBtnEl!.hidden = true
-    if (issueBtnEl) issueBtnEl.hidden = true
-    if (snippetBtnEl) snippetBtnEl.hidden = true
-  }
+  const hideAll = hideSelectionActions
   // While either composer is open, focus is in it and the selection has
   // collapsed — keep the whole cluster hidden.
   if (issueComposerEl || snippetComposerEl) { hideAll(); return }
@@ -2227,10 +2250,13 @@ function createAnnotationFromSelection(): void {
     updated_at: now,
   }
   annotations.push(a)
-  // Collapse the selection so the floating button hides naturally and
+  // Collapse the selection so the floating buttons hide naturally and
   // the underline overlay can be drawn over the now-quiet selection.
+  // Dismiss the cluster explicitly too: focus is about to move into the
+  // annotation panel, so the selectionchange that follows takes the
+  // "not the editor" path and won't do it for us.
   window.getSelection()?.removeAllRanges()
-  if (commentBtnEl) commentBtnEl.hidden = true
+  hideSelectionActions()
   scheduleAnnotationsSave()
   renderAnnotationOverlay()
   openPanelForAnnotation(id)
@@ -2293,7 +2319,7 @@ function closeIssueComposer(): void {
   if (!issueComposerEl) return
   issueComposerEl.remove()
   issueComposerEl = null
-  // Both selection-action buttons stay hidden — the selection has
+  // The selection-action buttons stay hidden — the selection has
   // collapsed by now (focus moved to the composer). Next non-collapsed
   // selection in the editor will re-show them via selectionchange.
 }
@@ -2313,8 +2339,7 @@ function openIssueComposerFromSelection(): void {
   const rect = sel.getRangeAt(0).getBoundingClientRect()
   // Hide the selection-action buttons immediately so they don't sit
   // under the composer while it animates in.
-  if (commentBtnEl) commentBtnEl.hidden = true
-  if (issueBtnEl) issueBtnEl.hidden = true
+  hideSelectionActions()
 
   const composer = document.createElement('div')
   composer.className = 'composer composer-issue editor-floating-composer'
@@ -2447,9 +2472,7 @@ function openSnippetComposerFromSelection(): void {
   // Freeze the selection rect before focus moves to the composer and
   // collapses it — same reason as the issue composer.
   const rect = sel.getRangeAt(0).getBoundingClientRect()
-  if (commentBtnEl) commentBtnEl.hidden = true
-  if (issueBtnEl) issueBtnEl.hidden = true
-  if (snippetBtnEl) snippetBtnEl.hidden = true
+  hideSelectionActions()
 
   const composer = document.createElement('div')
   composer.className = 'composer composer-snippet editor-floating-composer'
@@ -3021,16 +3044,16 @@ function attachHandlers() {
     renderAnnotationOverlay()
   })
 
-  // Show / hide the floating Comment button based on the live
+  // Show / hide the floating selection buttons based on the live
   // selection. selectionchange fires on every cursor move, so this
   // also handles the case where the user starts a selection with
   // shift+arrow and grows it.
   document.addEventListener('selectionchange', () => {
     // Only react when the editor is the focused element — avoids
-    // showing the button while the user has selected text in some
+    // showing the buttons while the user has selected text in some
     // other view.
     if (document.activeElement !== docEl) {
-      if (commentBtnEl) commentBtnEl.hidden = true
+      hideSelectionActions()
       return
     }
     updateCommentButtonForSelection()
