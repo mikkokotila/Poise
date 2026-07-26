@@ -386,7 +386,10 @@ async function main() {
   }
   const service = plist([
     key('Label', `<string>${serviceLabel}</string>`),
-    key('ProgramArguments', array([node, join(projectRoot, 'dist', 'server.js')])),
+    // start-production.mjs rebuilds dist/ when the checkout has moved and
+    // then starts the server in-process, so a relaunch can never serve a
+    // bundle that no longer matches the source on disk.
+    key('ProgramArguments', array([node, join(projectRoot, 'scripts', 'start-production.mjs')])),
     key('WorkingDirectory', `<string>${xml(projectRoot)}</string>`),
     key('EnvironmentVariables', dictionary(environment)),
     key('RunAtLoad', '<true/>'),

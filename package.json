@@ -20,6 +20,7 @@
     "build:client": "vite build",
     "build:server": "esbuild server/production.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/server.js",
     "start": "node dist/server.js",
+    "start:production": "node scripts/start-production.mjs",
     "preview": "npm run build && npm run start",
     "install:production": "node scripts/install-production.mjs",
     "update:runtime": "node scripts/update-caller.mjs",
