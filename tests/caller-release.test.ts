@@ -2,10 +2,9 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import release from '../config/caller-release.json'
 import { getCallerReleaseHealth } from '../server/caller-release'
 
-const EXPECTED_COMMIT = release.commit
+const EXPECTED_COMMIT = 'a'.repeat(40)
 const ENV_KEYS = [
   'POISE_ENFORCE_CALLER_RELEASE',
   'CALLER_RELEASE_SHA',
@@ -40,6 +39,7 @@ async function configureRelease(commit = EXPECTED_COMMIT): Promise<void> {
   }
   await writeFile(join(root, 'release.json'), JSON.stringify({
     repository: 'mikkokotila/caller',
+    ref: 'main',
     commit: EXPECTED_COMMIT,
     packages: {
       'agent-interface': '0.2.0',
@@ -63,7 +63,7 @@ describe('Caller release health', () => {
     })
   })
 
-  it('accepts the exact executable release declared by Poise', async () => {
+  it('accepts an executable release resolved from the tracked ref', async () => {
     await configureRelease()
     await expect(getCallerReleaseHealth()).resolves.toMatchObject({
       status: 'ready',
@@ -73,12 +73,12 @@ describe('Caller release health', () => {
     })
   })
 
-  it('fails closed when the configured commit differs', async () => {
-    await configureRelease('a'.repeat(40))
+  it('fails closed when the configured commit differs from the release marker', async () => {
+    await configureRelease('b'.repeat(40))
     await expect(getCallerReleaseHealth()).resolves.toMatchObject({
       status: 'invalid',
       required: true,
-      error: 'Caller release commit does not match the Poise manifest',
+      error: 'Caller release commit does not match the release marker',
     })
   })
 })

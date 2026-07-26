@@ -8,6 +8,7 @@ const COMMANDS = ['agent-interface', 'github-datastore', 'github-interface'] as 
 
 interface ReleaseMarker {
   repository?: unknown
+  ref?: unknown
   commit?: unknown
   packages?: unknown
 }
@@ -21,11 +22,16 @@ export interface CallerReleaseHealth {
   error: string | null
 }
 
-function invalid(required: boolean, actualCommit: string | null, error: string): CallerReleaseHealth {
+function invalid(
+  required: boolean,
+  actualCommit: string | null,
+  error: string,
+  expectedCommit = actualCommit || '',
+): CallerReleaseHealth {
   return {
     status: 'invalid',
     required,
-    expectedCommit: release.commit,
+    expectedCommit,
     actualCommit,
     packages: release.packages,
     error,
@@ -47,14 +53,14 @@ export async function getCallerReleaseHealth(): Promise<CallerReleaseHealth> {
     return {
       status: 'unmanaged',
       required,
-      expectedCommit: release.commit,
+      expectedCommit: '',
       actualCommit: null,
       packages: release.packages,
       error: null,
     }
   }
-  if (!SHA_PATTERN.test(release.commit) || actualCommit !== release.commit) {
-    return invalid(required, actualCommit, 'Caller release commit does not match the Poise manifest')
+  if (!actualCommit || !SHA_PATTERN.test(actualCommit)) {
+    return invalid(required, actualCommit, 'Caller release commit is missing or invalid')
   }
   if (![releaseRoot, binRoot, agentRoot].every(isAbsolute)) {
     return invalid(required, actualCommit, 'Caller release paths must be absolute')
@@ -68,7 +74,7 @@ export async function getCallerReleaseHealth(): Promise<CallerReleaseHealth> {
     ])
     if (!isWithin(resolvedReleaseRoot, resolvedBinRoot)
       || !isWithin(resolvedReleaseRoot, resolvedAgentRoot)) {
-      return invalid(required, actualCommit, 'Caller release paths escape the pinned release root')
+      return invalid(required, actualCommit, 'Caller release paths escape the release root')
     }
     const markerPath = join(resolvedReleaseRoot, 'release.json')
     const markerStat = await stat(markerPath)
@@ -77,9 +83,19 @@ export async function getCallerReleaseHealth(): Promise<CallerReleaseHealth> {
     }
     const marker = JSON.parse(await readFile(markerPath, 'utf8')) as ReleaseMarker
     if (marker.repository !== release.repository
-      || marker.commit !== release.commit
+      || marker.ref !== release.ref
       || JSON.stringify(marker.packages) !== JSON.stringify(release.packages)) {
-      return invalid(required, actualCommit, 'Caller release marker does not match the Poise manifest')
+      return invalid(required, actualCommit, 'Caller release marker does not match the tracked release')
+    }
+    if (typeof marker.commit !== 'string'
+      || !SHA_PATTERN.test(marker.commit)
+      || marker.commit !== actualCommit) {
+      return invalid(
+        required,
+        actualCommit,
+        'Caller release commit does not match the release marker',
+        typeof marker.commit === 'string' ? marker.commit : '',
+      )
     }
     await Promise.all(COMMANDS.map(async (command) => {
       const commandPath = join(resolvedBinRoot, command)
@@ -96,7 +112,7 @@ export async function getCallerReleaseHealth(): Promise<CallerReleaseHealth> {
   return {
     status: 'ready',
     required,
-    expectedCommit: release.commit,
+    expectedCommit: actualCommit,
     actualCommit,
     packages: release.packages,
     error: null,

@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import release from '../config/caller-release.json'
 import { createAuthenticatedClaudeAuth } from './claude-auth-fixture'
 
-const EXPECTED_CALLER_COMMIT = release.commit
+const EXPECTED_CALLER_COMMIT = 'a'.repeat(40)
 let root = ''
 let staticDir = ''
 let server: Server
@@ -122,7 +122,7 @@ describe('production server', () => {
       callerRelease: {
         status: 'unmanaged',
         required: false,
-        expectedCommit: EXPECTED_CALLER_COMMIT,
+        expectedCommit: '',
       },
     })
     expect((await fetch(`${baseUrl}/api/unknown`)).status).toBe(404)
@@ -290,7 +290,7 @@ describe('production server', () => {
     await expect(production.startProductionServer({ staticDir, port })).rejects.toThrow(/POISE_PORT/)
   })
 
-  it('fails closed when production has no pinned Caller release', async () => {
+  it('fails closed when production has no managed Caller release', async () => {
     await expect(production.startProductionServer({ staticDir, port: 5556 }))
       .rejects.toThrow(/POISE_ENFORCE_CALLER_RELEASE/)
   })
@@ -324,6 +324,7 @@ describe('production server', () => {
     }
     await writeFile(join(releaseRoot, 'release.json'), JSON.stringify({
       repository: 'mikkokotila/caller',
+      ref: release.ref,
       commit: EXPECTED_CALLER_COMMIT,
       packages: {
         'agent-interface': '0.2.0',

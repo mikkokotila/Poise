@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { constants } from 'node:fs'
 import {
   access,
@@ -19,10 +19,20 @@ import { fileURLToPath } from 'node:url'
 import { config as loadDotenv } from 'dotenv'
 
 const projectRoot = await realpath(fileURLToPath(new URL('..', import.meta.url)))
-const manifest = JSON.parse(await readFile(
+const trackedRelease = JSON.parse(await readFile(
   join(projectRoot, 'config', 'caller-release.json'),
   'utf8',
 ))
+const resolvedCommit = execFileSync('gh', [
+  'api',
+  `repos/${trackedRelease.repository}/commits/${encodeURIComponent(trackedRelease.ref)}`,
+  '--jq',
+  '.sha',
+], { encoding: 'utf8' }).trim().toLowerCase()
+if (!/^[0-9a-f]{40}$/.test(resolvedCommit)) {
+  throw new Error(`Caller ${trackedRelease.ref} did not resolve to a commit SHA`)
+}
+const manifest = { ...trackedRelease, commit: resolvedCommit }
 const home = homedir()
 const stateRoot = join(home, '.poise')
 const releaseRoot = join(stateRoot, 'releases', 'caller', manifest.commit)
@@ -31,8 +41,10 @@ const agentRoot = join(releaseRoot, 'source', 'agent_interface')
 const launchAgents = join(home, 'Library', 'LaunchAgents')
 const serviceLabel = 'com.vaquum.poise'
 const monitorLabel = 'com.vaquum.poise.health'
+const updaterLabel = 'com.vaquum.poise.caller-update'
 const servicePlist = join(launchAgents, `${serviceLabel}.plist`)
 const monitorPlist = join(launchAgents, `${monitorLabel}.plist`)
+const updaterPlist = join(launchAgents, `${updaterLabel}.plist`)
 const logRoot = join(stateRoot, 'logs')
 const domain = `gui/${process.getuid()}`
 const dotenvPath = join(projectRoot, '.env')
@@ -114,19 +126,31 @@ async function python313() {
       // Try the next explicit interpreter.
     }
   }
-  throw new Error('Python 3.13 is required to install the pinned Caller release')
+  throw new Error('Python 3.13 is required to install the Caller release')
+}
+
+function isKnownRelease(marker) {
+  return marker.repository === manifest.repository
+    && marker.commit === manifest.commit
+    && (marker.ref === undefined || marker.ref === manifest.ref)
+    && JSON.stringify(marker.packages) === JSON.stringify(manifest.packages)
 }
 
 async function validateExistingRelease() {
   try {
     const marker = JSON.parse(await readFile(join(releaseRoot, 'release.json'), 'utf8'))
-    if (JSON.stringify(marker) !== JSON.stringify(manifest)) return false
+    if (!isKnownRelease(marker)) return false
     for (const command of ['agent-interface', 'github-datastore', 'github-interface']) {
       const path = join(binRoot, command)
       await access(path, constants.X_OK)
       const firstLine = (await readFile(path, 'utf8')).split('\n', 1)[0]
       if (!firstLine.startsWith('#!')) return false
       await access(firstLine.slice(2).trim().split(/\s+/, 1)[0], constants.X_OK)
+    }
+    if (marker.ref === undefined) {
+      await writeFile(join(releaseRoot, 'release.json'), `${JSON.stringify(manifest, null, 2)}\n`, {
+        mode: 0o600,
+      })
     }
     return true
   } catch {
@@ -157,7 +181,7 @@ async function installCallerRelease(python) {
   try {
     await stat(releaseRoot)
     const marker = JSON.parse(await readFile(join(releaseRoot, 'release.json'), 'utf8'))
-    if (JSON.stringify(marker) !== JSON.stringify(manifest)) {
+    if (!isKnownRelease(marker)) {
       throw new Error(`Refusing to replace unknown Caller release at ${releaseRoot}`)
     }
     await rm(releaseRoot, { recursive: true })
@@ -174,7 +198,7 @@ async function installCallerRelease(python) {
     await run('gh', ['repo', 'clone', manifest.repository, source, '--', '--filter=blob:none', '--no-checkout'])
     await run('git', ['-C', source, 'checkout', '--detach', manifest.commit])
     const actual = await commandOutput('git', ['-C', source, 'rev-parse', 'HEAD'])
-    if (actual !== manifest.commit) throw new Error('Caller checkout did not resolve to the pinned commit')
+    if (actual !== manifest.commit) throw new Error('Caller checkout did not resolve to the selected commit')
     await run(python, ['-m', 'venv', venv])
     const venvPython = join(venv, 'bin', 'python')
     await run(venvPython, [
@@ -207,6 +231,35 @@ async function installCallerRelease(python) {
     await rm(staging, { recursive: true, force: true })
     throw error
   }
+}
+
+async function updateInstalledStopGate() {
+  const hookRoot = join(home, '.local', 'share', 'caller-pr-stop-gate')
+  const hookPython = join(hookRoot, 'bin', 'python')
+  if (!await executable(hookPython)) return
+  const candidates = [
+    '/opt/homebrew/bin/uv',
+    '/usr/local/bin/uv',
+    'uv',
+  ]
+  let uv
+  for (const candidate of candidates) {
+    if (await executable(candidate)) {
+      uv = candidate
+      break
+    }
+  }
+  if (!uv) throw new Error('uv is required to update the installed Caller stop gate')
+  await run(uv, [
+    'pip',
+    'install',
+    '--python',
+    hookPython,
+    '--no-deps',
+    '--reinstall',
+    join(releaseRoot, 'source', 'github_interface'),
+    join(releaseRoot, 'source', 'agent_interface'),
+  ])
 }
 
 function xml(value) {
@@ -311,6 +364,7 @@ async function main() {
 
   const [node, python] = await Promise.all([supportedNode(), python313()])
   await installCallerRelease(python)
+  await updateInstalledStopGate()
   const nodeEnvironment = {
     ...process.env,
     PATH: `${dirname(node)}:${process.env.PATH || '/usr/bin:/bin'}`,
@@ -380,16 +434,36 @@ async function main() {
     key('StandardOutPath', `<string>${xml(join(logRoot, 'health.out.log'))}</string>`),
     key('StandardErrorPath', `<string>${xml(join(logRoot, 'health.err.log'))}</string>`),
   ])
+  const updater = plist([
+    key('Label', `<string>${updaterLabel}</string>`),
+    key('ProgramArguments', array([node, join(projectRoot, 'scripts', 'update-caller.mjs')])),
+    key('WorkingDirectory', `<string>${xml(projectRoot)}</string>`),
+    key('EnvironmentVariables', dictionary({
+      HOME: home,
+      LANG: process.env.LANG || 'en_US.UTF-8',
+      PATH: path,
+      POISE_HEALTH_URL: `http://127.0.0.1:${process.env.POISE_PORT || '5555'}/api/health`,
+      TMPDIR: process.env.TMPDIR || '/tmp',
+    })),
+    key('RunAtLoad', '<true/>'),
+    key('StartInterval', '<integer>60</integer>'),
+    key('StandardOutPath', `<string>${xml(join(logRoot, 'caller-update.out.log'))}</string>`),
+    key('StandardErrorPath', `<string>${xml(join(logRoot, 'caller-update.err.log'))}</string>`),
+  ])
   await Promise.all([
     atomicWrite(servicePlist, service),
     atomicWrite(monitorPlist, monitor),
+    atomicWrite(updaterPlist, updater),
   ])
+  if (process.env.POISE_CALLER_UPDATER !== '1') await bootout(updaterLabel)
   await bootout(monitorLabel)
   await bootout(serviceLabel)
   await run('/bin/launchctl', ['enable', `${domain}/${serviceLabel}`])
   await run('/bin/launchctl', ['enable', `${domain}/${monitorLabel}`])
+  await run('/bin/launchctl', ['enable', `${domain}/${updaterLabel}`])
   await bootstrap(servicePlist)
   await bootstrap(monitorPlist)
+  if (process.env.POISE_CALLER_UPDATER !== '1') await bootstrap(updaterPlist)
   await waitForHealthyProduction()
   console.log(`Installed ${serviceLabel} with Caller ${manifest.commit}`)
 }

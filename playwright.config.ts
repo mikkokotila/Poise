@@ -1,13 +1,10 @@
 import { defineConfig, devices } from '@playwright/test'
-import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const port = 5566
 const baseURL = `http://127.0.0.1:${port}`
 const e2eRoot = resolve('test-results/e2e')
-const callerRelease = JSON.parse(
-  readFileSync(new URL('./config/caller-release.json', import.meta.url), 'utf8'),
-) as { commit: string }
+const callerCommit = 'a'.repeat(40)
 const callerReleaseRoot = resolve(e2eRoot, 'caller-release')
 
 export default defineConfig({
@@ -49,7 +46,7 @@ export default defineConfig({
       POISE_CHAT_ATTACHMENTS_DIR: resolve(e2eRoot, 'chat-attachments'),
       POISE_ESPANSO_MATCH_DIR: resolve(e2eRoot, 'espanso-match'),
       POISE_ENFORCE_CALLER_RELEASE: '1',
-      CALLER_RELEASE_SHA: callerRelease.commit,
+      CALLER_RELEASE_SHA: callerCommit,
       CALLER_RELEASE_ROOT: callerReleaseRoot,
       CALLER_BIN_ROOT: resolve(callerReleaseRoot, 'venv/bin'),
       AGENT_INTERFACE_ROOT: resolve(callerReleaseRoot, 'source/agent_interface'),
