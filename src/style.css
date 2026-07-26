@@ -3548,18 +3548,36 @@ tr:hover .replay-btn { opacity: 1; }
 /* The bar piggybacks on .view-header for outer alignment. We
    override the inner layout (split into left/right halves) AND clamp
    the bar's width to the same max as the writing area below
-   (680px) so the chrome and the page sit in one column. The
-   .view-header's padding-right (which other views use to clear the
-   inline top-nav) isn't needed here — the centered 680px stays well
-   clear of the burger. */
+   (680px) so the chrome and the page sit in one column.
+
+   #top-nav is fixed to the *viewport*, while this bar is centred
+   inside #app (itself capped at --typo-width). Below ~1610px of
+   viewport the nav reaches into #app and used to paint straight over
+   the bar's right half: the doc switcher went under "Current" /
+   "Swarm" and — because the nav sits at z-index 120 — swallowed the
+   clicks, so the document menu could not be opened at all.
+
+   So: pin the bar's LEFT edge to the writing column (chrome and page
+   still read as one column) and stop its RIGHT edge short of the nav
+   instead of sliding beneath it. On wide viewports the reserve is
+   inert and the bar is the full 680px; as the viewport narrows the
+   bar shortens and the meta + doc switcher travel left with it. */
 .editor-bar {
   justify-content: space-between;
   /* Drop the .view-header bottom margin — the writing area handles
      its own breathing room. */
   margin-bottom: var(--sp-4);
+  /* Footprint #top-nav claims on the right of the viewport: the nav
+     items themselves (~395px for the current six) + the burger + its
+     right offset + a breathing gap. Widening the nav — a seventh view,
+     a longer label — means raising this. */
+  --nav-reserve: 480px;
   max-width: 680px;
-  margin-left: auto;
-  margin-right: auto;
+  /* (100vw - 100%) / 2 converts this parent-relative box into viewport
+     space: #app is centred, so that expression is #app's own left
+     inset. Whatever the nav needs beyond that becomes right margin. */
+  margin-left: max((100% - 680px) / 2, 0px);
+  margin-right: max(var(--nav-reserve) - (100vw - 100%) / 2, 0px);
   padding-right: 0;
 }
 .editor-bar-left,
