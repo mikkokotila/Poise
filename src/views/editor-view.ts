@@ -856,6 +856,9 @@ function toggleBoldAtSelection() {
   if (!docEl.contains(range.commonAncestorContainer) && range.commonAncestorContainer !== docEl) return
 
   const strong = strongAncestorOf(range.commonAncestorContainer)
+  // The run-splitting branches below rewrite the DOM directly rather
+  // than through insertText, so no beforeinput fires to snapshot for us.
+  if (strong && !range.collapsed) recordHistoryPoint()
   if (strong) {
     if (range.collapsed) {
       // Exit bold mode. Caret moves to line-level right after the
@@ -1075,6 +1078,259 @@ function serializeDoc(): string {
     lines.push((child as HTMLElement).textContent || '')
   }
   return lines.join('\n')
+}
+
+// ── Undo / redo ──────────────────────────────────────────────────────
+//
+// The browser's own undo stack can't be used here. reclassifyLines →
+// rebuildLineInPlace rewrites a line's children (`innerHTML = ''`, then
+// re-append) outside any editing transaction, so every marker
+// transition — `# `, `## `, `- `, `1. `, ``` — detaches the nodes
+// Chrome's undo records point at. Those records then become no-ops:
+// typing `one`⏎`# two` and pressing Cmd+Z walked back to `# `, silently
+// swallowed the next two presses, then deleted the whole line in one
+// step, and redo could never recover the word. In a longer document
+// undo would also jump to an unrelated earlier line.
+//
+// So we keep our own history of whole-document markdown snapshots plus a
+// caret position, and own Cmd+Z / Cmd+Shift+Z outright. Documents here
+// are capped at 5 MiB and typically a few KB, so full snapshots are far
+// cheaper than tracking deltas correctly.
+interface EditorHistoryEntry {
+  text: string       // full markdown, exactly as serializeDoc yields it
+  line: number       // caret line index
+  offset: number     // caret offset within that line's source text
+}
+
+const HISTORY_LIMIT = 300
+// Plain typing coalesces into one undo step until this much idle time
+// passes; structural edits close the step immediately.
+const HISTORY_COALESCE_MS = 450
+
+let historyUndo: EditorHistoryEntry[] = []
+let historyRedo: EditorHistoryEntry[] = []
+let historyPre: EditorHistoryEntry | null = null
+let historyBatchOpen = false
+let historyBatchTimer: number | null = null
+// Set while we rebuild the document from a snapshot, so the resulting
+// DOM churn doesn't record history of its own.
+let historySuppress = false
+
+function captureHistoryEntry(): EditorHistoryEntry {
+  const pos = caretSourcePosition()
+  return { text: serializeDoc(), line: pos?.line ?? 0, offset: pos?.offset ?? 0 }
+}
+
+// Caret as (line index, offset into that line's source text).
+function caretSourcePosition(): { line: number, offset: number } | null {
+  if (!docEl) return null
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0) return null
+  const range = sel.getRangeAt(0)
+  const line = lineElOf(range.startContainer)
+  if (!line || line.parentElement !== docEl) return null
+  const idx = Array.prototype.indexOf.call(docEl.children, line)
+  if (idx < 0) return null
+  return { line: idx, offset: offsetInLineFor(line, range.startContainer, range.startOffset) }
+}
+
+function resetEditorHistory(): void {
+  historyUndo = []
+  historyRedo = []
+  historyPre = null
+  historyBatchOpen = false
+  if (historyBatchTimer !== null) { clearTimeout(historyBatchTimer); historyBatchTimer = null }
+}
+
+function closeHistoryBatch(): void {
+  historyBatchOpen = false
+  historyPre = null
+  if (historyBatchTimer !== null) { clearTimeout(historyBatchTimer); historyBatchTimer = null }
+}
+
+// Called from beforeinput — snapshots the document as it stands *before*
+// the edit lands, so one undo restores it. Cheap when a batch is already
+// open (the common case while typing a word).
+function noteHistoryPre(): void {
+  if (historySuppress || historyBatchOpen) return
+  historyPre = captureHistoryEntry()
+}
+
+// Called once the edit has landed. `immediate` closes the undo step now
+// (structural edit); otherwise typing keeps coalescing into it.
+function commitHistoryBatch(immediate: boolean): void {
+  if (historySuppress) return
+  if (!historyBatchOpen) {
+    if (historyPre) {
+      historyUndo.push(historyPre)
+      if (historyUndo.length > HISTORY_LIMIT) historyUndo.shift()
+      historyRedo = []
+    }
+    historyBatchOpen = true
+  }
+  if (historyBatchTimer !== null) { clearTimeout(historyBatchTimer); historyBatchTimer = null }
+  if (immediate) { closeHistoryBatch(); return }
+  historyBatchTimer = window.setTimeout(closeHistoryBatch, HISTORY_COALESCE_MS)
+}
+
+// For mutations we make directly, without going through beforeinput /
+// input (the bold toggle's run-splitting branch, edit-card apply).
+// Snapshot first, then mutate.
+function recordHistoryPoint(): void {
+  if (historySuppress) return
+  closeHistoryBatch()
+  historyUndo.push(captureHistoryEntry())
+  if (historyUndo.length > HISTORY_LIMIT) historyUndo.shift()
+  historyRedo = []
+}
+
+function restoreHistoryEntry(entry: EditorHistoryEntry): void {
+  if (!docEl) return
+  historySuppress = true
+  try {
+    loadIntoEditor(entry.text)
+    const idx = Math.max(0, Math.min(entry.line, docEl.children.length - 1))
+    const line = docEl.children[idx] as HTMLElement | undefined
+    if (line) {
+      docEl.focus()
+      setCursorOffsetInLine(line, Math.max(0, Math.min(entry.offset, (line.textContent || '').length)))
+    }
+    updateEmptyState()
+    scheduleSave()
+    renderAnnotationOverlay()
+  } finally {
+    historySuppress = false
+  }
+}
+
+function undoEditor(): void {
+  closeHistoryBatch()
+  const prev = historyUndo.pop()
+  if (!prev) return
+  historyRedo.push(captureHistoryEntry())
+  if (historyRedo.length > HISTORY_LIMIT) historyRedo.shift()
+  restoreHistoryEntry(prev)
+}
+
+function redoEditor(): void {
+  closeHistoryBatch()
+  const next = historyRedo.pop()
+  if (!next) return
+  historyUndo.push(captureHistoryEntry())
+  if (historyUndo.length > HISTORY_LIMIT) historyUndo.shift()
+  restoreHistoryEntry(next)
+}
+
+// ── Source-preserving structural edits ───────────────────────────────
+//
+// Chrome's native line merge is unusable in this editor. When it joins
+// two lines it moves only *rendered* content: our `display:none`
+// `.md-marker` spans are discarded (and inline `style` attributes get
+// injected in their place). Because reclassify then rebuilds the
+// markdown from the surviving textContent, a single Backspace at a line
+// start silently rewrote the file — `second with **bold** text` came
+// back as `second with bold text`, and the same for `` `code` ``. The
+// delimiters, not just their rendering, were gone.
+//
+// So every edit that spans a line boundary is performed here instead,
+// in markdown-source coordinates (each line's textContent, markers
+// included), and the DOM is rebuilt from that. Callers preventDefault
+// the native behaviour first.
+
+// Nearest .editor-line ancestor of a node, or null when outside.
+function lineElOf(node: Node | null): HTMLElement | null {
+  let n: Node | null = node
+  while (n) {
+    if (n.nodeType === Node.ELEMENT_NODE
+        && (n as HTMLElement).classList?.contains('editor-line')) return n as HTMLElement
+    n = n.parentNode
+  }
+  return null
+}
+
+// Replace the source span between (startLine, startOff) and
+// (endLine, endOff) with `insert`, then re-derive the whole line tree.
+// `insert` may contain newlines — a paste over a multi-line selection
+// goes through here too. Offsets are line-textContent offsets, so they
+// address the markdown, not the visible text.
+function replaceSourceRange(
+  startLine: HTMLElement, startOff: number,
+  endLine: HTMLElement, endOff: number,
+  insert: string,
+): void {
+  if (!docEl) return
+  const head = (startLine.textContent || '').slice(0, startOff)
+  const tail = (endLine.textContent || '').slice(endOff)
+
+  // Drop every line from startLine's successor through endLine; their
+  // content is already folded into head/tail.
+  if (startLine !== endLine) {
+    let n = startLine.nextElementSibling
+    while (n) {
+      const next = n.nextElementSibling
+      const wasEnd = n === endLine
+      n.remove()
+      if (wasEnd) break
+      n = next
+    }
+  }
+
+  const merged = head + insert + tail
+  const caretOffset = head.length + insert.length
+  const parts = merged.split('\n')
+  // Build as `body` placeholders and let reclassifyLines assign real
+  // kinds — it has the cross-line context (code fences) that a local
+  // decision here would miss.
+  const built: HTMLElement[] = []
+  const frag = document.createDocumentFragment()
+  for (const part of parts) {
+    const el = buildLineEl(part, 'body')
+    built.push(el)
+    frag.appendChild(el)
+  }
+  startLine.replaceWith(frag)
+  reclassifyLines()
+
+  // Walk the caret's source offset back into (line, offset). rebuild
+  // mutates line elements in place, so `built` references stay valid.
+  let remaining = caretOffset
+  let idx = 0
+  while (idx < parts.length - 1 && remaining > parts[idx].length) {
+    remaining -= parts[idx].length + 1
+    idx++
+  }
+  const target = built[idx]
+  if (target) setCursorOffsetInLine(target, Math.max(0, Math.min(remaining, (target.textContent || '').length)))
+}
+
+// Join `line` onto the line above it. The surviving line keeps its own
+// block marker; the incoming line's marker is dropped, since a single
+// line can only carry one (this is what every markdown editor does when
+// you join a list item onto the paragraph above). Inline markers ride
+// along untouched because we move source text, not rendered nodes.
+function mergeLineBackward(line: HTMLElement): void {
+  const keep = line.previousElementSibling as HTMLElement | null
+  if (!keep) return
+  const kind = (line.dataset.kind || 'body') as LineKind
+  const text = line.textContent || ''
+  const dropLen = (kind === 'h1' || kind === 'h2' || kind === 'list-item')
+    ? markerLengthFor(kind, text)
+    : 0
+  replaceSourceRange(keep, (keep.textContent || '').length, line, dropLen, '')
+}
+
+// Remove a line's block marker in place, demoting it to body text.
+// Backspace at the visible start of a heading or list item used to be a
+// dead key: the caret snaps past the hidden marker, so there was nothing
+// behind it to delete and the marker could only be removed by selecting
+// the whole line. Now it strips the marker, matching iA Writer / Typora,
+// and a second Backspace merges the line as usual.
+function stripBlockMarker(line: HTMLElement): void {
+  const kind = (line.dataset.kind || 'body') as LineKind
+  const text = line.textContent || ''
+  const len = markerLengthFor(kind, text)
+  if (len <= 0) return
+  replaceSourceRange(line, 0, line, len, '')
 }
 
 function updateEmptyState() {
@@ -1458,6 +1714,9 @@ async function loadDoc(slug: string) {
     currentSlug = nextSlug
     documentVersions.set(currentSlug, data.version)
     loadIntoEditor(data.content)
+    // History is per-document: undo must never walk back into the
+    // previous document's text and save it over this one.
+    resetEditorHistory()
     try { localStorage.setItem(LAST_OPEN_KEY, currentSlug) } catch { /* ignore */ }
     setTriggerTitle()
     setMetaForCurrent()
@@ -1556,6 +1815,7 @@ async function deleteCurrent() {
   if (docEl) {
     docEl.contentEditable = 'false'
     loadIntoEditor('')
+    resetEditorHistory()
   }
   docs = docs.filter((x) => x.slug !== d.slug)
   try { localStorage.removeItem(LAST_OPEN_KEY) } catch { /* ignore */ }
@@ -1820,6 +2080,8 @@ function applyEditToDoc(edit: EditCardData): 'applied' | 'conflict' {
   const charRange = findCharRangeForEdit(snap.text, edit)
   if (!charRange) return 'conflict'
   const next = snap.text.slice(0, charRange.start) + edit.new + snap.text.slice(charRange.end)
+  // Accepting an agent edit is a discrete, undoable step.
+  recordHistoryPoint()
   loadIntoEditor(next)
   // After re-render, scroll the (now visible) `new` text into view.
   const afterSnap = docTextSnapshot()
@@ -2900,6 +3162,86 @@ function attachHandlers() {
       return
     }
 
+    // Snapshot the pre-edit document for undo before anything mutates.
+    noteHistoryPre()
+
+    // Any edit that crosses a line boundary has to be done in source
+    // coordinates — see replaceSourceRange for why the native merge
+    // can't be trusted with our hidden markers.
+    const isDelete = t === 'deleteContentBackward' || t === 'deleteContentForward'
+      || t === 'deleteByCut' || t === 'deleteByDrag'
+      || t === 'deleteWordBackward' || t === 'deleteWordForward'
+    const isPlainInsert = (t === 'insertText' || t === 'insertReplacementText'
+      || t === 'insertFromPaste' || t === 'insertFromDrop')
+    if (isDelete || isPlainInsert) {
+      const sel = window.getSelection()
+      if (sel && sel.rangeCount > 0) {
+        const range = sel.getRangeAt(0)
+        const startLine = lineElOf(range.startContainer)
+        const endLine = lineElOf(range.endContainer)
+        if (startLine && endLine && startLine !== endLine) {
+          // Multi-line selection: replace it ourselves. For a delete the
+          // replacement is empty; for an insert it's the typed/pasted
+          // text (which may itself contain newlines).
+          const insert = isDelete ? '' : (e.dataTransfer?.getData('text/plain') ?? e.data ?? '')
+          e.preventDefault()
+          replaceSourceRange(
+            startLine, offsetInLineFor(startLine, range.startContainer, range.startOffset),
+            endLine, offsetInLineFor(endLine, range.endContainer, range.endOffset),
+            insert,
+          )
+          updateEmptyState()
+          scheduleSave()
+          renderAnnotationOverlay()
+          commitHistoryBatch(true)
+          return
+        }
+      }
+    }
+
+    // Collapsed caret sitting on a line boundary. Backward at the start
+    // of a line strips its block marker if it has one (demoting the
+    // heading / list item), else joins it onto the line above; forward
+    // at the end of a line pulls the next line up.
+    if (t === 'deleteContentBackward' || t === 'deleteContentForward') {
+      const sel = window.getSelection()
+      if (sel && sel.rangeCount > 0) {
+        const range = sel.getRangeAt(0)
+        if (range.collapsed) {
+          const line = lineElOf(range.startContainer)
+          if (line && line.parentElement === docEl) {
+            const kind = (line.dataset.kind || 'body') as LineKind
+            const text = line.textContent || ''
+            const markerLen = markerLengthFor(kind, text)
+            const off = offsetInLineFor(line, range.startContainer, range.startOffset)
+            const hasBlockMarker = markerLen > 0
+              && (kind === 'h1' || kind === 'h2' || kind === 'list-item')
+            if (t === 'deleteContentBackward' && off <= markerLen && hasBlockMarker) {
+              e.preventDefault()
+              stripBlockMarker(line)
+              updateEmptyState(); scheduleSave(); renderAnnotationOverlay()
+              commitHistoryBatch(true)
+              return
+            }
+            if (t === 'deleteContentBackward' && off === 0 && line.previousElementSibling) {
+              e.preventDefault()
+              mergeLineBackward(line)
+              updateEmptyState(); scheduleSave(); renderAnnotationOverlay()
+              commitHistoryBatch(true)
+              return
+            }
+            if (t === 'deleteContentForward' && off === text.length && line.nextElementSibling) {
+              e.preventDefault()
+              mergeLineBackward(line.nextElementSibling as HTMLElement)
+              updateEmptyState(); scheduleSave(); renderAnnotationOverlay()
+              commitHistoryBatch(true)
+              return
+            }
+          }
+        }
+      }
+    }
+
     if ((t === 'insertText' || t === 'insertCompositionText') && typeof e.data === 'string') {
       const sel = window.getSelection()
       if (!sel || sel.rangeCount === 0) return
@@ -2921,11 +3263,13 @@ function attachHandlers() {
       // The browser won't fire 'input' for a prevented insertion, so
       // run the post-edit pipeline ourselves to reclassify, save and
       // refresh annotation underline geometry (it depends on DOM
-      // ranges that just moved).
+      // ranges that just moved) — and close the undo step, which the
+      // 'input' handler would otherwise have done.
       reclassifyLines()
       updateEmptyState()
       scheduleSave()
       renderAnnotationOverlay()
+      commitHistoryBatch(false)
       return
     }
 
@@ -2968,6 +3312,7 @@ function attachHandlers() {
       updateEmptyState()
       scheduleSave()
       renderAnnotationOverlay()
+      commitHistoryBatch(true)
       return
     }
   })
@@ -3034,7 +3379,7 @@ function attachHandlers() {
     document.execCommand('delete')
   })
 
-  docEl!.addEventListener('input', () => {
+  docEl!.addEventListener('input', (e) => {
     reclassifyLines()
     updateEmptyState()
     scheduleSave()
@@ -3042,6 +3387,11 @@ function attachHandlers() {
     // tree has been canonicalised, so DOM ranges and getClientRects
     // produce the right pixel positions for the underlines.
     renderAnnotationOverlay()
+    // Plain typing coalesces into one undo step; anything structural
+    // (Enter, delete, paste) ends the step where it happened.
+    const t = (e as InputEvent).inputType || ''
+    const coalescing = t === 'insertText' || t === 'insertCompositionText'
+    commitHistoryBatch(!coalescing)
   })
 
   // Show / hide the floating selection buttons based on the live
@@ -3114,6 +3464,20 @@ function attachHandlers() {
     if ((e.metaKey || e.ctrlKey) && (e.key === 'n' || e.key === 'N')) {
       e.preventDefault()
       void newDoc()
+    }
+    // Own undo/redo outright — the native stack is incoherent here
+    // because reclassify rebuilds line children behind its back. See the
+    // history section above.
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+      e.preventDefault()
+      if (e.shiftKey) redoEditor()
+      else            undoEditor()
+      return
+    }
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'y' || e.key === 'Y') && !e.shiftKey) {
+      e.preventDefault()
+      redoEditor()
+      return
     }
     if ((e.metaKey || e.ctrlKey) && (e.key === 'b' || e.key === 'B') && !e.shiftKey && !e.altKey) {
       e.preventDefault()

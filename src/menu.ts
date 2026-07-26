@@ -57,20 +57,31 @@ function closeAllPanels() {
 export function initMenu(callbacks: MenuCallbacks): { switchTo: (v: ViewName) => void; currentView: () => ViewName } {
   let current: ViewName = loadView()
 
-  // Inline view-nav (top-right, left of the burger toggle).
+  // View-nav — the right-hand half of the control bar.
   const nav = document.createElement('nav')
   nav.id = 'top-nav'
   nav.innerHTML = VIEW_ITEMS.map((v) => `
     <button class="nav-item" data-view="${v.key}">${v.label}</button>
   `).join('')
-  document.body.appendChild(nav)
 
-  // Burger toggle (top-right corner). Only opens Settings + Typography.
+  // Burger toggle. Only opens Settings + Typography.
   const toggle = document.createElement('button')
   toggle.id = 'menu-toggle'
   toggle.innerHTML = ICON_BURGER
   toggle.setAttribute('aria-label', 'Menu')
-  document.body.appendChild(toggle)
+
+  // The control bar is one flex row per view: the view's own controls on
+  // the left, these global controls on the right. Both halves have to be
+  // siblings in that row for the split to hold — the previous layout
+  // pinned the nav and burger with position:fixed over the top of every
+  // view and kept the left half clear of them with a hardcoded padding
+  // reserve, which went stale the moment a sixth view was added and let
+  // the nav sit on top of (and swallow clicks meant for) the editor's
+  // own controls. In one flex row, overlap is not expressible.
+  const globalBar = document.createElement('div')
+  globalBar.id = 'app-bar-global'
+  globalBar.append(nav, toggle)
+  document.body.appendChild(globalBar)
 
   // Menu popover — Settings + Typography only.
   const menu = document.createElement('div')
@@ -84,7 +95,50 @@ export function initMenu(callbacks: MenuCallbacks): { switchTo: (v: ViewName) =>
       <span class="menu-icon">${ICON_TYPO}</span><span class="menu-text">Typography</span>
     </button>
   `
-  document.body.appendChild(menu)
+  // The popover anchors to the burger, so it lives in the same cluster
+  // rather than being pinned to the viewport corner — the cluster's
+  // position now depends on the app column's width (which the typography
+  // setting can change).
+  globalBar.appendChild(menu)
+
+  // Re-home the global cluster into whichever view is showing. Views are
+  // lazy-rendered and their shells are built exactly once, so the header
+  // we need may not exist yet at switch time; observing #app re-homes the
+  // cluster the moment it appears, with no ordering assumptions. Also
+  // publishes the bar's height as --app-bar-h so the side panels can sit
+  // below it instead of fighting it for z-index.
+  const appEl = document.getElementById('app')!
+  let barResizeObserver: ResizeObserver | null = null
+  function publishBarHeight(header: HTMLElement) {
+    const h = Math.round(header.getBoundingClientRect().height)
+    if (h > 0) document.documentElement.style.setProperty('--app-bar-h', h + 'px')
+  }
+  function mountGlobalControls() {
+    const header = appEl.querySelector<HTMLElement>('.view:not([hidden]) .view-header')
+    if (!header) return
+    if (globalBar.parentElement !== header) header.appendChild(globalBar)
+    if (barResizeObserver) barResizeObserver.disconnect()
+    barResizeObserver = new ResizeObserver(() => publishBarHeight(header))
+    barResizeObserver.observe(header)
+    publishBarHeight(header)
+  }
+  let mountQueued = false
+  function queueMount() {
+    if (mountQueued) return
+    mountQueued = true
+    requestAnimationFrame(() => { mountQueued = false; mountGlobalControls() })
+  }
+  new MutationObserver(queueMount).observe(appEl, {
+    childList: true, subtree: true, attributes: true, attributeFilter: ['hidden'],
+  })
+  queueMount()
+
+  // Sticky bars read as chrome only once content slides under them.
+  const onScroll = () => {
+    document.body.classList.toggle('is-scrolled', window.scrollY > 2)
+  }
+  window.addEventListener('scroll', onScroll, { passive: true })
+  onScroll()
 
   function setActiveItem() {
     nav.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((b) => {
