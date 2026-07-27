@@ -246,6 +246,48 @@ describe('chat runtime hardening', () => {
     await expect(readFile(contextPath)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
+  // The annotation panel ("Ask the agent about this passage") used to send the
+  // annotation's own `ann-xxxxxxxx` id as the chat session. That never matches
+  // slugFromEditorSession, so none of the above applied: the agent got the
+  // snippet in quotes and nothing else, and answered questions about a passage
+  // with "The working directory is empty". These two cases pin the difference.
+  it('sends no document context for a session id that is not document-bound', async () => {
+    const editor = join(root, 'editor')
+    await mkdir(editor, { recursive: true })
+    await writeFile(join(editor, 'passage.md'), '# Passage\n\nThe quick brown fox.', 'utf8')
+    const chat = await import('../server/chat')
+    database = await import('../server/db')
+
+    await chat.sendChat('ann-qncjuig3', 'What does this passage say?', 'gpt')
+
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    const [, args] = mocks.spawnDetached.mock.calls[0] as [string, string[], unknown]
+    const prompt = args[1]
+    expect(prompt).toContain('What does this passage say?')
+    // No context file is created, so there is nothing for the agent to read.
+    expect(prompt).not.toContain('context file')
+    expect(prompt).not.toContain('The quick brown fox')
+  })
+
+  it('sends the document for a session id bound to that document', async () => {
+    const editor = join(root, 'editor')
+    await mkdir(editor, { recursive: true })
+    await writeFile(join(editor, 'passage.md'), '# Passage\n\nThe quick brown fox.', 'utf8')
+    const chat = await import('../server/chat')
+    database = await import('../server/db')
+
+    // The shape the editor now mints: `editor-<slug>-<digits>`.
+    await chat.sendChat('editor-passage-1769500000000042', 'What does this passage say?', 'gpt')
+
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    const [, args] = mocks.spawnDetached.mock.calls[0] as [string, string[], unknown]
+    const prompt = args[1]
+    const contextRelative = prompt.match(/context file "([^"]+)"/)?.[1]
+    expect(contextRelative).toBeTruthy()
+    const contextPath = join(args[args.indexOf('--pwd') + 1], contextRelative!)
+    await expect(readFile(contextPath, 'utf8')).resolves.toContain('The quick brown fox')
+  })
+
   it('fails closed before spawning when aggregate authored context exceeds its budget', async () => {
     const editor = join(root, 'editor')
     await mkdir(editor, { recursive: true })
