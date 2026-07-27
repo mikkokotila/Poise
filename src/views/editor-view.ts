@@ -2471,8 +2471,14 @@ function updateCommentButtonForSelection(): void {
   const rects = range.getClientRects()
   if (rects.length === 0) { hideAll(); return }
   const last = rects[rects.length - 1]
-  const commentLeft = last.right + window.scrollX + 4
-  const top = last.top + window.scrollY - 28
+  // getClientRects is viewport-relative and these buttons are
+  // position:fixed, so the rect IS the coordinate — adding the page
+  // scroll double-counts it. It used to, which put the whole cluster
+  // scrollY pixels below the selection: fine at the top of a document,
+  // and completely off-screen anywhere else, so on a scrolled page there
+  // was no Comment button to click at all.
+  const commentLeft = last.right + 4
+  const top = last.top - 28
   commentBtnEl.style.left = commentLeft + 'px'
   commentBtnEl.style.top  = top + 'px'
   commentBtnEl.hidden = false
@@ -2493,6 +2499,49 @@ function updateCommentButtonForSelection(): void {
 // Create a new annotation from the current selection, append to the
 // list, persist, and immediately open the panel for it so the user
 // can type a comment.
+// Mint a chat session id that the server recognises as belonging to this
+// document.
+//
+// This matters more than it looks. server/chat.ts only attaches the voice
+// guide, the document's current body and the edit-proposal contract when
+// slugFromEditorSession(sessionId) matches — that is, when the id has the
+// shape `editor-<slug>-<digits>` (server/editor.ts). Annotations used to
+// reuse their own `ann-xxxxxxxx` id as the session, which never matches, so
+// "Ask the agent about this passage" sent the agent nothing but the snippet
+// in quotes. Asked what a passage said, the agent answered "The working
+// directory is empty — there's no file or image here for me to read."
+//
+// The trailing group must stay all digits or the server's reverse lookup
+// rejects it, so uniqueness comes from extra digits rather than a suffix:
+// two annotations made in the same millisecond still get distinct sessions,
+// which keeps each passage's conversation separate.
+function editorChatSessionId(slug: string): string {
+  const unique = `${Date.now()}${String(Math.floor(Math.random() * 1000)).padStart(3, '0')}`
+  return `editor-${slug}-${unique}`
+}
+
+// Sessions written before the above are inert: the agent can never see the
+// document through them. Upgrade one when its transcript is still empty —
+// there is nothing to lose and everything to gain. An annotation that has
+// already been talked to keeps its id: the agent's own session memory holds
+// that conversation, and a silent re-mint would strand it.
+function upgradeAnnotationSessionIfInert(a: Annotation): boolean {
+  if (!currentSlug) return false
+  if (slugFromEditorSessionId(a.session_id) === currentSlug) return false
+  if (panelMessages.length > 0) return false
+  a.session_id = editorChatSessionId(currentSlug)
+  a.updated_at = new Date().toISOString()
+  scheduleAnnotationsSave()
+  return true
+}
+
+// Mirror of server/editor.ts slugFromEditorSession. Anchored on the
+// all-digit tail so slugs containing `-` are extracted correctly.
+function slugFromEditorSessionId(sessionId: string): string | null {
+  const m = String(sessionId || '').match(/^editor-(.+)-\d+$/)
+  return m ? m[1] : null
+}
+
 function createAnnotationFromSelection(): void {
   if (!currentSlug || annotationsReadySlug !== currentSlug) {
     setMeta('Annotations unavailable')
@@ -2504,7 +2553,7 @@ function createAnnotationFromSelection(): void {
   const now = new Date().toISOString()
   const a: Annotation = {
     id,
-    session_id: id,
+    session_id: editorChatSessionId(currentSlug),
     range: got.range,
     snippet: got.snippet,
     comment: '',
@@ -2573,8 +2622,9 @@ function placeComposerNearRect(el: HTMLElement, rect: DOMRect): void {
   } else {
     top = Math.max(margin, rect.top - margin - h)
   }
-  el.style.left = (left + window.scrollX) + 'px'
-  el.style.top  = (top + window.scrollY) + 'px'
+  // Viewport coordinates for a position:fixed element — no scroll term.
+  el.style.left = left + 'px'
+  el.style.top  = top + 'px'
 }
 
 function closeIssueComposer(): void {
@@ -2890,6 +2940,39 @@ function stopPanelPoll(): void {
   if (panelPollTimer) { clearTimeout(panelPollTimer); panelPollTimer = null }
 }
 
+// Now that these sessions are document-bound they also receive the editor's
+// response-format contract, so a reply that proposes edits arrives as a JSON
+// object rather than prose. This panel has no accept/decline affordance — that
+// lives in the document chat pane — so rendering the object raw would put a
+// wall of JSON in front of the writer. Show the message the agent wrote, and
+// name the changes it proposed.
+function panelReplyView(reply: string): { text: string, edits: string[] } {
+  const trimmed = reply.trim()
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(trimmed) as {
+        chat?: unknown, edits?: unknown, document?: unknown
+      }
+      const isContract = !!parsed && typeof parsed === 'object'
+        && (Array.isArray(parsed.edits) || typeof parsed.document === 'string')
+      if (isContract) {
+        const said = typeof parsed.chat === 'string' ? parsed.chat.trim() : ''
+        const edits = Array.isArray(parsed.edits)
+          ? parsed.edits
+            .map((e) => (e && typeof (e as { description?: unknown }).description === 'string'
+              ? String((e as { description: string }).description).trim()
+              : ''))
+            .filter(Boolean)
+          : typeof parsed.document === 'string' ? ['Rewrite the whole document'] : []
+        return { text: said || 'Proposed a change to the document.', edits }
+      }
+    } catch {
+      // Not the contract after all — show it exactly as the agent wrote it.
+    }
+  }
+  return { text: reply, edits: [] }
+}
+
 function renderPanelChat(): void {
   if (!panelEl) return
   const log = panelEl.querySelector<HTMLElement>('.editor-annotation-chat-log')
@@ -2919,9 +3002,16 @@ function renderPanelChat(): void {
         </div>
       `)
     } else if (reply !== undefined) {
+      const view = panelReplyView(reply)
+      const edits = view.edits.length
+        ? `<ul class="editor-annotation-chat-edits">${
+          view.edits.map((d) => `<li>${escapeHtml(d)}</li>`).join('')
+        }</ul><div class="editor-annotation-chat-hint">Open the document chat to apply these.</div>`
+        : ''
       parts.push(`
         <div class="editor-annotation-chat-msg editor-annotation-chat-agent">
-          <pre class="editor-annotation-chat-body editor-annotation-chat-mono">${escapeHtml(reply)}</pre>
+          <div class="editor-annotation-chat-body">${escapeHtml(view.text)}</div>
+          ${edits}
         </div>
       `)
     } else if (m.response) {
@@ -2978,6 +3068,19 @@ async function sendPanelChat(sessionId: string, snippet: string): Promise<void> 
     window.setTimeout(() => { void refreshPanelChat(sessionId).then(() => schedulePanelPoll(sessionId)) }, 800)
   } catch (err) {
     console.error('[editor] sendPanelChat failed:', err)
+    // A console line is invisible to the writer: the message would just
+    // vanish from the box with nothing sent and nothing said. Put the text
+    // back so it isn't lost, and say so in the panel.
+    input.value = text
+    autoResizePanelInput()
+    const log = panelEl.querySelector<HTMLElement>('.editor-annotation-chat-log')
+    if (log) {
+      const failure = document.createElement('div')
+      failure.className = 'editor-annotation-chat-error'
+      failure.textContent = 'Could not send — the agent service did not accept the message.'
+      log.appendChild(failure)
+      log.scrollTop = log.scrollHeight
+    }
   } finally {
     sendBtn.disabled = false
     input.disabled = false
@@ -3052,18 +3155,44 @@ function openPanelForAnnotation(id: string): void {
     const top = wouldOverflowBottom
       ? Math.max(margin, rect.top - margin - panelRect.height)
       : rect.bottom + margin
-    panelEl.style.left = (rect.left + window.scrollX) + 'px'
-    panelEl.style.top  = (top + window.scrollY) + 'px'
+    // Same contract as the buttons above: the panel is position:fixed and
+    // `rect` is viewport-relative, so the scroll must not be added. The
+    // overflow test two lines up is already viewport-relative, which is
+    // what made the mismatch visible.
+    panelEl.style.left = rect.left + 'px'
+    panelEl.style.top  = top + 'px'
   }
   ta.focus()
 
   // Kick off chat fetch + polling for this session.
-  void refreshPanelChat(a.session_id).then(() => schedulePanelPoll(a.session_id))
+  // Load the transcript first, then decide whether this annotation's session
+  // can be upgraded to a document-bound one (see
+  // upgradeAnnotationSessionIfInert — it needs to know whether anything has
+  // been said yet).
+  void refreshPanelChat(a.session_id).then(() => {
+    upgradeAnnotationSessionIfInert(a)
+    schedulePanelPoll(a.session_id)
+  })
 
-  setTimeout(() => {
-    document.addEventListener('click', onPanelOutsideClick)
-    document.addEventListener('keydown', onPanelKeydown)
-  }, 0)
+  // Dismiss on a press outside the panel. This has to be a capture-phase
+  // *mousedown*, not a click.
+  //
+  // The panel is opened from the Comment button's mousedown, and the click
+  // that completes that same press is not dispatched until the user lifts the
+  // button. A bubbling click listener — armed here through setTimeout(…, 0),
+  // which runs about a millisecond later — was therefore live in time to
+  // receive the opening gesture's own click, and its target (the button, or
+  // the common ancestor of button and panel) is by definition outside the
+  // panel. So the panel was torn down on mouseup: it flashed and vanished for
+  // anyone who did not click infinitely fast, and the writer never got to type
+  // a comment or a question. Automated clicks send mousedown and mouseup with
+  // no dwell between them, which is why this survived testing.
+  //
+  // Listening on mousedown in the capture phase means the press that opened
+  // the panel is already past this point in its dispatch and cannot close it.
+  // The issue and snippet composers use the same contract.
+  document.addEventListener('mousedown', onPanelOutsidePress, true)
+  document.addEventListener('keydown', onPanelKeydown)
 }
 
 function closePanel(): void {
@@ -3075,16 +3204,18 @@ function closePanel(): void {
   panelMessages = []
   panelReplies.clear()
   stopPanelPoll()
-  document.removeEventListener('click', onPanelOutsideClick)
+  document.removeEventListener('mousedown', onPanelOutsidePress, true)
   document.removeEventListener('keydown', onPanelKeydown)
 }
 
-function onPanelOutsideClick(e: MouseEvent): void {
+function onPanelOutsidePress(e: MouseEvent): void {
   if (!panelEl) return
   const t = e.target as Node
   if (panelEl.contains(t)) return
-  // Allow clicks on annotation marks to switch panels (handled by the
-  // overlay click delegate); other clicks close the panel.
+  // The control that opens the panel must never also close it.
+  if (commentBtnEl && commentBtnEl.contains(t)) return
+  // Allow presses on annotation marks to switch panels (the overlay click
+  // delegate opens the new one); other presses close the panel.
   if ((t as HTMLElement).classList?.contains('annotation-mark')) return
   closePanel()
 }

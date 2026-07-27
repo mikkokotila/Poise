@@ -215,15 +215,44 @@ function fileFor(slug: string): string {
   return join(EDITOR_DIR, canonicalSlug(slug) + '.md')
 }
 
-// First non-empty line, with optional leading "#" stripped so a doc
-// starting with `# My Heading` titles as `My Heading` rather than
-// `# My Heading`. Truncated at 200 chars so titles can't dominate
-// the sidebar.
+// The document's first non-empty line, rendered as plain text.
+//
+// The title is a label — in the document switcher, the window of the
+// editor bar, the menu. It should read the way the line reads on the
+// page, so the markup that produces that rendering is stripped rather
+// than shown: a doc whose first line is `**Portfolio** is the entirety`
+// titles as `Portfolio is the entirety`, not `**Portfolio **is the…`.
+// Only the leading `#` used to be removed, so every other marker leaked
+// through verbatim.
+//
+// Kept deliberately literal: this mirrors the small inline grammar the
+// editor itself renders (bold, inline code, block markers) and nothing
+// more. Truncated at 200 chars so titles can't dominate the list.
 function deriveTitle(content: string): string {
   const line = (content || '').split('\n').find((l) => l.trim().length > 0)
   if (!line) return 'Untitled'
-  const t = line.trim().replace(/^#+\s*/, '').slice(0, 200)
+  const t = stripMarkdownForTitle(line).slice(0, 200)
   return t || 'Untitled'
+}
+
+// Strip the markers the editor hides when it renders a line. Order
+// matters: block markers are anchored to the start, so they go first.
+export function stripMarkdownForTitle(line: string): string {
+  let t = String(line || '').trim()
+  // Block markers: heading hashes, bullet, or an ordered-list number.
+  t = t.replace(/^#{1,6}\s+/, '')
+  t = t.replace(/^(?:-\s+|\d+[.)]\s+)/, '')
+  // Fenced-code markers carry no prose; drop the fence and any language.
+  t = t.replace(/^```+\s*\S*\s*/, '')
+  // Inline runs: unwrap the content, drop the delimiters. Bold before
+  // italic so `**x**` isn't consumed one asterisk at a time. Whitespace
+  // that sat inside a delimiter (`**Portfolio **`) is preserved as the
+  // space it renders as, then collapsed below.
+  t = t.replace(/\*\*([^*]+)\*\*/g, '$1')
+  t = t.replace(/`([^`]+)`/g, '$1')
+  // Any delimiters left over are unmatched, so they render literally in
+  // the editor too — leave them alone rather than guess.
+  return t.replace(/\s+/g, ' ').trim()
 }
 
 export interface DocSummary {

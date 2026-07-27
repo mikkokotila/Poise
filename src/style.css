@@ -4259,6 +4259,15 @@ body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
    in height so a long thread doesn't push the composer out of
    reach. Bubbles are styled like Confab's chat-pane but compacted
    for the narrower panel. */
+/* Send failures are reported in the transcript itself — the writer is
+   looking there, not at the console. */
+.editor-annotation-chat-error {
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--a5, #b3261e);
+  padding: 4px 2px;
+}
+
 .editor-annotation-chat-log {
   flex: 1 1 auto;
   min-height: 60px;
@@ -4282,6 +4291,12 @@ body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
 }
 .editor-annotation-chat-user { justify-content: flex-end; }
 .editor-annotation-chat-agent { justify-content: flex-start; }
+/* An agent turn can carry a bubble plus a list of proposed edits; those
+   stack under the bubble rather than sitting beside it. */
+.editor-annotation-chat-agent {
+  flex-direction: column;
+  align-items: flex-start;
+}
 .editor-annotation-chat-body {
   max-width: 85%;
   padding: 6px 10px;
@@ -4292,10 +4307,26 @@ body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
   white-space: pre-wrap;
   word-wrap: break-word;
 }
-.editor-annotation-chat-mono {
-  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+/* Agent replies are prose, so they wrap and keep the author's line breaks
+   rather than sitting in a monospace block. */
+.editor-annotation-chat-agent .editor-annotation-chat-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Edits the agent proposed. Named, not applied — this panel has no
+   accept/decline; that lives in the document chat pane. */
+.editor-annotation-chat-edits {
+  margin: 4px 0 0;
+  padding-left: 18px;
   font-size: 11.5px;
-  margin: 0;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.editor-annotation-chat-hint {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-tertiary);
 }
 .editor-annotation-chat-user .editor-annotation-chat-body {
   background: color-mix(in srgb, var(--a4, #c89b3c) 16%, transparent);
