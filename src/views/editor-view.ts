@@ -2452,6 +2452,16 @@ function hideSelectionActions(): void {
   if (snippetBtnEl) snippetBtnEl.hidden = true
 }
 
+// The control bar is a fixed opaque band across the top of the window, so
+// anything we position from a viewport rect has to stay clear of it or it
+// lands underneath, invisible and unclickable. menu.ts publishes the bar's
+// measured height; the fallback matches the CSS.
+function controlBarBottom(): number {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue('--app-bar-h').trim()
+  const h = parseFloat(raw)
+  return Number.isFinite(h) && h > 0 ? h : 96
+}
+
 // Show or hide the floating selection-action buttons (Comment, Issue,
 // Snippet) based on the current selection. All three are anchored just
 // above the selection's end rect and grow rightward: Comment sits
@@ -2478,7 +2488,10 @@ function updateCommentButtonForSelection(): void {
   // and completely off-screen anywhere else, so on a scrolled page there
   // was no Comment button to click at all.
   const commentLeft = last.right + 4
-  const top = last.top - 28
+  // Prefer just above the selection; if that would be behind the bar (the
+  // passage is scrolled up against it) sit just below it instead.
+  const above = last.top - 28
+  const top = above < controlBarBottom() + 4 ? last.bottom + 4 : above
   commentBtnEl.style.left = commentLeft + 'px'
   commentBtnEl.style.top  = top + 'px'
   commentBtnEl.hidden = false
@@ -2622,9 +2635,10 @@ function placeComposerNearRect(el: HTMLElement, rect: DOMRect): void {
   } else {
     top = Math.max(margin, rect.top - margin - h)
   }
-  // Viewport coordinates for a position:fixed element — no scroll term.
+  // Viewport coordinates for a position:fixed element — no scroll term, and
+  // never above the control bar.
   el.style.left = left + 'px'
-  el.style.top  = top + 'px'
+  el.style.top  = Math.max(top, controlBarBottom() + margin) + 'px'
 }
 
 function closeIssueComposer(): void {
@@ -3160,7 +3174,7 @@ function openPanelForAnnotation(id: string): void {
     // overflow test two lines up is already viewport-relative, which is
     // what made the mismatch visible.
     panelEl.style.left = rect.left + 'px'
-    panelEl.style.top  = top + 'px'
+    panelEl.style.top  = Math.max(top, controlBarBottom() + margin) + 'px'
   }
   ta.focus()
 

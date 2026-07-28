@@ -356,13 +356,23 @@ body {
    covering it. It carries a solid background, so content scrolling
    beneath it is hidden rather than showing through. */
 .view-header {
-  position: sticky;
+  /* FIXED and full-viewport — not sticky, and not confined to #app.
+     Both parts are load-bearing.
+
+     Sticky only pins vertically: a bar inside a horizontally scrollable
+     page slides sideways with the content. And #app is a centred column
+     (max-width: var(--typo-width)), while some views deliberately break
+     out of it — .kanban is `width: 100vw; left: 50%;
+     transform: translateX(-50%)` — so a column-width bar left the kanban
+     lanes rendering in plain sight to its left and right. A control bar
+     has to be a band across the whole window with nothing beside it. */
+  position: fixed;
   top: 0;
-  /* Above in-page positioned content (kanban lanes, editor overlays,
-     floating selection buttons) and above the side panels, which start
-     below the bar (--app-bar-h) rather than under it — that keeps the
-     burger, which doubles as the panels' close button, always clickable
-     without a z-index fight. */
+  left: 0;
+  right: 0;
+  /* Above everything in the page. The side panels start below the bar
+     (top: var(--app-bar-h)) instead of fighting it, so the burger — which
+     doubles as their close button — stays clickable. */
   z-index: 130;
   display: flex;
   /* Top-aligned, not centred: when the local half reflows onto a second
@@ -377,16 +387,24 @@ body {
      top-right at every width above the breakpoint below. */
   flex-wrap: nowrap;
   min-height: 32px;
+  /* Opaque, always. Content scrolls underneath and must not show through.
+     --bg is a solid colour in both themes. */
   background: var(--bg);
-  /* #app pads 40px at the top; rise into that padding and pad it back so
-     the bar's background covers the strip above it and it pins flush to
-     the viewport edge, without moving the content below. */
-  margin-top: calc(-1 * var(--app-pad-top));
-  padding-top: var(--app-pad-top);
-  padding-bottom: var(--sp-3);
-  margin-bottom: var(--sp-4);
+  /* Full-bleed band, inner content aligned to the same column as #app so
+     the controls line up with the page below. max() keeps the inset from
+     going negative once the viewport is narrower than the column. */
+  padding: var(--app-pad-top)
+           max(24px, calc((100% - var(--typo-width, 960px)) / 2 + 24px))
+           var(--sp-3);
   border-bottom: 1px solid transparent;
   transition: border-color var(--t-base) ease;
+}
+/* The bar is out of flow, so every view has to start below it. One rule,
+   driven by the bar's measured height (published by src/menu.ts), so a bar
+   that grows a second row on a narrow viewport pushes content down with it
+   instead of covering it. */
+#app {
+  padding-top: calc(var(--app-bar-h, 96px) + var(--sp-4));
 }
 /* Hairline only once something has scrolled under it. */
 body.is-scrolled .view-header { border-bottom-color: var(--border); }
@@ -431,7 +449,10 @@ body.is-scrolled .view-header { border-bottom-color: var(--border); }
   #top-nav {
     overflow-x: auto;
     scrollbar-width: none;
-    max-width: calc(100vw - 2 * var(--sp-4) - 32px - var(--sp-2));
+    /* Budget the bar's real side inset (24px each side), the burger and the
+       gap. Using --sp-4 here assumed a 16px inset and left the cluster
+       hanging 16px past the bar's own padding on phone widths. */
+    max-width: calc(100vw - 2 * 24px - 32px - var(--sp-2));
   }
   #top-nav::-webkit-scrollbar { display: none; }
   .nav-item { padding: 0 var(--sp-2); }
@@ -934,10 +955,10 @@ tr:hover .review-btn { opacity: 1; }
   /* Below the control bar rather than under it: the burger doubles as
      these panels' close button, so it has to stay visible and clickable
      while one is open. Disjoint vertical space beats a z-index race. */
-  top: var(--app-bar-h, 72px);
+  top: var(--app-bar-h, 96px);
   right: 0;
   width: 320px;
-  height: calc(100vh - var(--app-bar-h, 72px));
+  height: calc(100vh - var(--app-bar-h, 96px));
   background: var(--surface);
   border-left: 1px solid var(--border);
   box-shadow: var(--e-3);
@@ -1155,7 +1176,16 @@ tr:hover .review-btn { opacity: 1; }
 
 .view[hidden] { display: none !important; }
 
-.view-entering {
+/* The entrance animation runs on the view's CONTENT, never on the view
+   itself. A transform on an ancestor makes a position:fixed descendant
+   resolve against that ancestor instead of the viewport, so animating the
+   section un-fixed the control bar for the length of the animation: on
+   every single navigation the bar collapsed from the full window back to
+   the app column and slid down with the content — measured at 34 of 45
+   frames, roughly a third of a second, with the kanban lanes visible
+   beside it exactly as before the bar was made full-width. Excluding the
+   header keeps the motion and leaves the bar alone. */
+.view-entering > :not(.view-header) {
   animation: viewIn 0.22s cubic-bezier(0.22, 0.61, 0.36, 1) both;
 }
 
@@ -2967,11 +2997,17 @@ tr:hover .replay-btn { opacity: 1; }
 
 #chat-panel {
   position: fixed;
-  top: 0;
+  /* Below the control bar, like the other fixed panels. The bar is a
+     full-width opaque band at z-index 130, so a panel starting at y=0 has
+     its own header — including .chat-close, which is the ONLY way to close
+     this pane (there is no Escape handler in chat-pane.ts) — painted over
+     and click-swallowed. Both lines are load-bearing: offsetting the top
+     without shortening the height pushes the composer off the bottom. */
+  top: var(--app-bar-h, 96px);
   left: 0;
   width: 25vw;
   min-width: 360px;
-  height: 100vh;
+  height: calc(100vh - var(--app-bar-h, 96px));
   background: var(--surface);
   border-right: 1px solid var(--border);
   box-shadow: var(--e-3);
@@ -4091,10 +4127,11 @@ tr:hover .replay-btn { opacity: 1; }
 body.editor-writer-mode #app-bar-global {
   display: none;
 }
-/* Nothing is left to separate from, so drop the bar's chrome too. */
+/* Nothing is left to separate from, so drop the bar's rule. The background
+   stays opaque — it is the page colour, so it reads as bare, but text
+   scrolling underneath still cannot show through the band. */
 body.editor-writer-mode .view-header {
   border-bottom-color: transparent;
-  background: transparent;
 }
 /* Hide every bar control except the focus toggle. The right side
    (meta + doc-picker) goes too. */
@@ -4259,6 +4296,37 @@ body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
    in height so a long thread doesn't push the composer out of
    reach. Bubbles are styled like Confab's chat-pane but compacted
    for the narrower panel. */
+/* Snippets that could not be read. This replaces the table rather than
+   sitting beside it: the alternative was the first-run "No snippets yet"
+   line, which asserts something false about the user's data. */
+.snip-load-error {
+  max-width: 620px;
+  padding: var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.snip-load-error-title {
+  margin: 0 0 var(--sp-2);
+  font-weight: 600;
+  color: var(--text);
+}
+.snip-load-error-detail {
+  margin: 0 0 var(--sp-2);
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--a5, #b3261e);
+}
+.snip-load-error-where {
+  margin: 0 0 var(--sp-3);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
 /* Send failures are reported in the transcript itself — the writer is
    looking there, not at the console. */
 .editor-annotation-chat-error {
