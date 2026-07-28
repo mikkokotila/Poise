@@ -59,6 +59,13 @@ function renderShell(): string {
         <tbody id="snippets-tbody"></tbody>
       </table>
       <p class="snip-empty" hidden>No snippets yet. Add one to create your first <code>;trigger</code>.</p>
+      <div class="snip-load-error" hidden>
+        <p class="snip-load-error-title">Your snippets could not be read.</p>
+        <p class="snip-load-error-detail"></p>
+        <p class="snip-load-error-where">They are still on disk in the espanso match file — nothing has been
+          lost, and nothing will be written until the file can be read again.</p>
+        <button type="button" class="st-save snip-retry">Try again</button>
+      </div>
     </main>
   `
 }
@@ -81,6 +88,13 @@ function renderRow(s: Snippet): HTMLTableRowElement {
   return tr
 }
 
+// The reason the last load failed, or null when the list is trustworthy.
+// Without this a failed read fell back to the default empty list and the
+// view claimed, in the same words it uses for a brand-new install, that the
+// user had no snippets — while the server had just explained exactly what
+// was wrong with their file.
+let loadError: string | null = null
+
 function renderRows() {
   tbodyEl.innerHTML = ''
   const frag = document.createDocumentFragment()
@@ -88,10 +102,19 @@ function renderRows() {
   tbodyEl.appendChild(frag)
 
   const n = snippets.length
-  viewEl.querySelector('#snippets-count')!.textContent = n ? `${n} snippet${n === 1 ? '' : 's'}` : ''
-  viewEl.querySelector<HTMLElement>('#snippets-table')!.hidden = n === 0
-  viewEl.querySelector<HTMLElement>('.snip-empty')!.hidden = n > 0
-  viewEl.querySelector<HTMLElement>('.snip-espanso-hint')!.hidden = espansoOk
+  const failed = loadError !== null
+  viewEl.querySelector('#snippets-count')!.textContent = failed || !n ? '' : `${n} snippet${n === 1 ? '' : 's'}`
+  viewEl.querySelector<HTMLElement>('#snippets-table')!.hidden = failed || n === 0
+  // "No snippets yet" is a statement about the user's data. Only make it
+  // when the data was actually read.
+  viewEl.querySelector<HTMLElement>('.snip-empty')!.hidden = failed || n > 0
+  viewEl.querySelector<HTMLElement>('.snip-espanso-hint')!.hidden = failed || espansoOk
+
+  const errorBox = viewEl.querySelector<HTMLElement>('.snip-load-error')!
+  errorBox.hidden = !failed
+  if (failed) {
+    viewEl.querySelector<HTMLElement>('.snip-load-error-detail')!.textContent = loadError!
+  }
 }
 
 // ── inline edit row (expand-to-edit) ──────────────────────────────────────
@@ -149,6 +172,14 @@ function collapseOpen() {
     main.querySelector('.expand-btn')?.classList.remove('open')
     if (main.classList.contains('snip-draft')) main.remove()
   }
+  // openAdd force-shows the table and hides the onboarding line to make room
+  // for the draft. Discarding that draft on a first run otherwise left a bare
+  // TRIGGER/SNIPPET header and no instructions at all, until the view was
+  // re-entered. Put the empty state back when nothing is left.
+  if (!snippets.length && loadError === null) {
+    viewEl.querySelector<HTMLElement>('#snippets-table')!.hidden = true
+    viewEl.querySelector<HTMLElement>('.snip-empty')!.hidden = false
+  }
 }
 
 function onTbodyClick(e: MouseEvent) {
@@ -192,9 +223,37 @@ async function putSnippets(list: Snippet[]): Promise<SnippetState> {
 
 async function preserveEditAfterConflict(status: HTMLElement | null): Promise<void> {
   const refreshed = await fetchSnippets()
+  if (refreshed) {
+    // Repaint the other rows against what was just fetched. Without this the
+    // status said "Latest data loaded" while the table still showed the old
+    // values for whatever the other writer changed. The open editor is kept:
+    // renderRows would rebuild the whole tbody and take the user's unsaved
+    // text with it, which is the one thing this path exists to protect.
+    repaintRowsAroundOpenEditor()
+  }
   setStatus(status, refreshed
     ? 'Snippets changed elsewhere. Latest data loaded; your unsaved edit is preserved. Review and save again.'
     : 'Snippets changed elsewhere. Your unsaved edit is preserved; reload before saving.', 'error')
+}
+
+// Refresh every saved row's rendering in place, leaving the open edit row and
+// the row it belongs to untouched.
+function repaintRowsAroundOpenEditor(): void {
+  const editRow = tbodyEl.querySelector('.snip-expand-row')
+  const editingMain = editRow?.previousElementSibling as HTMLElement | null
+  const editingTrigger = editingMain?.dataset.trigger ?? null
+  for (const row of Array.from(tbodyEl.querySelectorAll<HTMLElement>('tr.snip-row'))) {
+    if (row === editingMain || row.classList.contains('snip-draft')) continue
+    const snip = snippets.find((x) => x.trigger === row.dataset.trigger)
+    if (!snip) { row.remove(); continue }
+    row.replaceWith(renderRow(snip))
+  }
+  // Rows added elsewhere since the last load would otherwise never appear.
+  for (const snip of snippets) {
+    if (snip.trigger === editingTrigger) continue
+    if (tbodyEl.querySelector(`tr.snip-row[data-trigger="${CSS.escape(snip.trigger)}"]`)) continue
+    tbodyEl.appendChild(renderRow(snip))
+  }
 }
 
 async function save(editRow: HTMLTableRowElement) {
@@ -241,6 +300,11 @@ async function del(editRow: HTMLTableRowElement) {
   const editingTrigger = main?.dataset.trigger ?? null
   // Draft (never saved) or somehow unkeyed → just discard, no server call.
   if (main?.classList.contains('snip-draft') || editingTrigger == null) { collapseOpen(); return }
+  // Deleting a saved snippet is immediate, irreversible and one click away
+  // from the row you were merely editing — and unlike a document there is no
+  // copy of it anywhere. Confirm, the same as the editor does before removing
+  // a document.
+  if (!window.confirm(`Delete the snippet "${editingTrigger}"? This cannot be undone.`)) return
   const next = snippets.filter((s) => s.trigger !== editingTrigger)
   const delBtn = editRow.querySelector<HTMLButtonElement>('.snip-delete')!
   delBtn.disabled = true
@@ -285,20 +349,38 @@ function openAdd() {
 function attachHandlers() {
   viewEl.querySelector('.snip-add')!.addEventListener('click', openAdd)
   tbodyEl.addEventListener('click', onTbodyClick)
+  viewEl.querySelector('.snip-retry')!.addEventListener('click', () => {
+    void fetchSnippets().then(() => renderRows())
+  })
 }
 
 async function fetchSnippets(): Promise<boolean> {
   try {
     const res = await fetch('/api/snippets')
-    if (!res.ok) return false
+    if (!res.ok) {
+      // The server explains itself well here — an unparseable poise.yml comes
+      // back as the YAML parser's message, with line and column. Keep it: it
+      // is the only thing that tells the user which file to look at and why.
+      const body = await res.json().catch(() => ({})) as { error?: string }
+      loadError = body.error || `The snippets file could not be read (HTTP ${res.status}).`
+      return false
+    }
     const data = await res.json()
-    if (!Array.isArray(data.snippets) || typeof data.version !== 'string') return false
+    if (!Array.isArray(data.snippets) || typeof data.version !== 'string') {
+      loadError = 'The server returned an unreadable snippet list.'
+      return false
+    }
     snippets = Array.isArray(data.snippets) ? data.snippets : []
     snippetVersion = data.version
     espansoOk = data.espansoDetected !== false
+    loadError = null
     return true
-  } catch {
-    return false // leave the current list intact; a stale save will conflict safely
+  } catch (err) {
+    // Leave the current list intact; a stale save will conflict safely.
+    loadError = (err as Error)?.message
+      ? `Could not reach Poise to read your snippets (${(err as Error).message}).`
+      : 'Could not reach Poise to read your snippets.'
+    return false
   }
 }
 

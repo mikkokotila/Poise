@@ -4278,6 +4278,37 @@ body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
    in height so a long thread doesn't push the composer out of
    reach. Bubbles are styled like Confab's chat-pane but compacted
    for the narrower panel. */
+/* Snippets that could not be read. This replaces the table rather than
+   sitting beside it: the alternative was the first-run "No snippets yet"
+   line, which asserts something false about the user's data. */
+.snip-load-error {
+  max-width: 620px;
+  padding: var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.snip-load-error-title {
+  margin: 0 0 var(--sp-2);
+  font-weight: 600;
+  color: var(--text);
+}
+.snip-load-error-detail {
+  margin: 0 0 var(--sp-2);
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--a5, #b3261e);
+}
+.snip-load-error-where {
+  margin: 0 0 var(--sp-3);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
 /* Send failures are reported in the transcript itself — the writer is
    looking there, not at the console. */
 .editor-annotation-chat-error {
