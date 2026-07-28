@@ -356,13 +356,23 @@ body {
    covering it. It carries a solid background, so content scrolling
    beneath it is hidden rather than showing through. */
 .view-header {
-  position: sticky;
+  /* FIXED and full-viewport — not sticky, and not confined to #app.
+     Both parts are load-bearing.
+
+     Sticky only pins vertically: a bar inside a horizontally scrollable
+     page slides sideways with the content. And #app is a centred column
+     (max-width: var(--typo-width)), while some views deliberately break
+     out of it — .kanban is `width: 100vw; left: 50%;
+     transform: translateX(-50%)` — so a column-width bar left the kanban
+     lanes rendering in plain sight to its left and right. A control bar
+     has to be a band across the whole window with nothing beside it. */
+  position: fixed;
   top: 0;
-  /* Above in-page positioned content (kanban lanes, editor overlays,
-     floating selection buttons) and above the side panels, which start
-     below the bar (--app-bar-h) rather than under it — that keeps the
-     burger, which doubles as the panels' close button, always clickable
-     without a z-index fight. */
+  left: 0;
+  right: 0;
+  /* Above everything in the page. The side panels start below the bar
+     (top: var(--app-bar-h)) instead of fighting it, so the burger — which
+     doubles as their close button — stays clickable. */
   z-index: 130;
   display: flex;
   /* Top-aligned, not centred: when the local half reflows onto a second
@@ -377,16 +387,24 @@ body {
      top-right at every width above the breakpoint below. */
   flex-wrap: nowrap;
   min-height: 32px;
+  /* Opaque, always. Content scrolls underneath and must not show through.
+     --bg is a solid colour in both themes. */
   background: var(--bg);
-  /* #app pads 40px at the top; rise into that padding and pad it back so
-     the bar's background covers the strip above it and it pins flush to
-     the viewport edge, without moving the content below. */
-  margin-top: calc(-1 * var(--app-pad-top));
-  padding-top: var(--app-pad-top);
-  padding-bottom: var(--sp-3);
-  margin-bottom: var(--sp-4);
+  /* Full-bleed band, inner content aligned to the same column as #app so
+     the controls line up with the page below. max() keeps the inset from
+     going negative once the viewport is narrower than the column. */
+  padding: var(--app-pad-top)
+           max(24px, calc((100% - var(--typo-width, 960px)) / 2 + 24px))
+           var(--sp-3);
   border-bottom: 1px solid transparent;
   transition: border-color var(--t-base) ease;
+}
+/* The bar is out of flow, so every view has to start below it. One rule,
+   driven by the bar's measured height (published by src/menu.ts), so a bar
+   that grows a second row on a narrow viewport pushes content down with it
+   instead of covering it. */
+#app {
+  padding-top: calc(var(--app-bar-h, 96px) + var(--sp-4));
 }
 /* Hairline only once something has scrolled under it. */
 body.is-scrolled .view-header { border-bottom-color: var(--border); }
@@ -4091,10 +4109,11 @@ tr:hover .replay-btn { opacity: 1; }
 body.editor-writer-mode #app-bar-global {
   display: none;
 }
-/* Nothing is left to separate from, so drop the bar's chrome too. */
+/* Nothing is left to separate from, so drop the bar's rule. The background
+   stays opaque — it is the page colour, so it reads as bare, but text
+   scrolling underneath still cannot show through the band. */
 body.editor-writer-mode .view-header {
   border-bottom-color: transparent;
-  background: transparent;
 }
 /* Hide every bar control except the focus toggle. The right side
    (meta + doc-picker) goes too. */
