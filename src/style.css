@@ -449,7 +449,10 @@ body.is-scrolled .view-header { border-bottom-color: var(--border); }
   #top-nav {
     overflow-x: auto;
     scrollbar-width: none;
-    max-width: calc(100vw - 2 * var(--sp-4) - 32px - var(--sp-2));
+    /* Budget the bar's real side inset (24px each side), the burger and the
+       gap. Using --sp-4 here assumed a 16px inset and left the cluster
+       hanging 16px past the bar's own padding on phone widths. */
+    max-width: calc(100vw - 2 * 24px - 32px - var(--sp-2));
   }
   #top-nav::-webkit-scrollbar { display: none; }
   .nav-item { padding: 0 var(--sp-2); }
@@ -952,10 +955,10 @@ tr:hover .review-btn { opacity: 1; }
   /* Below the control bar rather than under it: the burger doubles as
      these panels' close button, so it has to stay visible and clickable
      while one is open. Disjoint vertical space beats a z-index race. */
-  top: var(--app-bar-h, 72px);
+  top: var(--app-bar-h, 96px);
   right: 0;
   width: 320px;
-  height: calc(100vh - var(--app-bar-h, 72px));
+  height: calc(100vh - var(--app-bar-h, 96px));
   background: var(--surface);
   border-left: 1px solid var(--border);
   box-shadow: var(--e-3);
@@ -2985,11 +2988,17 @@ tr:hover .replay-btn { opacity: 1; }
 
 #chat-panel {
   position: fixed;
-  top: 0;
+  /* Below the control bar, like the other fixed panels. The bar is a
+     full-width opaque band at z-index 130, so a panel starting at y=0 has
+     its own header — including .chat-close, which is the ONLY way to close
+     this pane (there is no Escape handler in chat-pane.ts) — painted over
+     and click-swallowed. Both lines are load-bearing: offsetting the top
+     without shortening the height pushes the composer off the bottom. */
+  top: var(--app-bar-h, 96px);
   left: 0;
   width: 25vw;
   min-width: 360px;
-  height: 100vh;
+  height: calc(100vh - var(--app-bar-h, 96px));
   background: var(--surface);
   border-right: 1px solid var(--border);
   box-shadow: var(--e-3);
