@@ -1176,7 +1176,16 @@ tr:hover .review-btn { opacity: 1; }
 
 .view[hidden] { display: none !important; }
 
-.view-entering {
+/* The entrance animation runs on the view's CONTENT, never on the view
+   itself. A transform on an ancestor makes a position:fixed descendant
+   resolve against that ancestor instead of the viewport, so animating the
+   section un-fixed the control bar for the length of the animation: on
+   every single navigation the bar collapsed from the full window back to
+   the app column and slid down with the content — measured at 34 of 45
+   frames, roughly a third of a second, with the kanban lanes visible
+   beside it exactly as before the bar was made full-width. Excluding the
+   header keeps the motion and leaves the bar alone. */
+.view-entering > :not(.view-header) {
   animation: viewIn 0.22s cubic-bezier(0.22, 0.61, 0.36, 1) both;
 }
 
