@@ -9,7 +9,7 @@
 // runtime — the view is just a UI for state, not the place where
 // agent automations actually run.
 
-import { BEHAVIORS, isEnabled, setEnabled, getSetting, setSetting, getScratchpad, setScratchpad, getLastTriggered, getBehaviorDiagnostics, refreshState, type BehaviorKey, type BehaviorSetting, isBehaviorStateLoaded } from '../behaviors'
+import { BEHAVIORS, isEnabled, setEnabled, getSetting, setSetting, getScratchpad, setScratchpad, getLastTriggered, getBehaviorDiagnostics, refreshState, type BehaviorKey, type BehaviorSetting, isBehaviorStateLoaded, getBehaviorOwner } from '../behaviors'
 
 let viewEl: HTMLElement
 let initialized = false
@@ -57,13 +57,20 @@ function ownerCell(username: string | null): string {
 // True when the last attempt to read server state failed, so the mirror is not
 // to be trusted. The toggles drive agents that write to real pull requests —
 // an unknown state must not be presented as a confident "off".
+// Behaviours whose enable/disable is still in flight. renderRows rebuilds a
+// row from scratch, and a rebuild triggered mid-request (the
+// poise:behaviors-changed listener calls it) produced a fresh, enabled
+// checkbox — dropping the guard that stops a second click while the first is
+// still travelling. Rendering consults this so the guard survives a repaint.
+const togglesInFlight = new Set<BehaviorKey>()
+
 function stateUnknown(): boolean {
   return !isBehaviorStateLoaded()
 }
 
 function toggleCell(key: BehaviorKey): string {
   const on = isEnabled(key)
-  const unknown = stateUnknown()
+  const unknown = stateUnknown() || togglesInFlight.has(key)
   const title = unknown
     ? 'Behaviour state could not be read from the server — this may not reflect what is running.'
     : `Toggle ${key}`
@@ -379,25 +386,20 @@ function renderRow(meta: typeof BEHAVIORS[number]): HTMLTableRowElement {
   return tr
 }
 
+// Entering the view used to issue two identical GETs — one here for the owner
+// map and one inside refreshState — and each one costs an `agent-interface
+// --logs` spawn on the server. refreshState reads the same payload, so the
+// owners come from its cached copy and this is a single request.
+//
+// (A non-ok response also used to return early here, skipping refreshState
+// entirely: the mirror stayed at its defaults with every toggle drawn OFF and
+// no diagnostics, while the runtime carried on spawning agents. refreshState
+// records the failure, so it must always run.)
 async function fetchBehaviorOwners() {
-  try {
-    const res = await fetch('/api/behaviors')
-    if (res.ok) {
-      const data = await res.json()
-      for (const key of BEHAVIORS.map((behavior) => behavior.key)) {
-        behaviorOwners[key as BehaviorKey] = data[key]?.owner ?? null
-      }
-    }
-    // A non-ok response used to return here, skipping the refreshState below.
-    // That left the client mirror at its defaults — every toggle drawn OFF —
-    // and left diagnostics unset, so the view calmly reported that no
-    // automation was running while the server-side runtime carried on
-    // spawning agents against real pull requests. refreshState records the
-    // failure, so let it run and say so.
-  } catch { /* leave owners null — cell will show a dash */ }
-  // Same call also pulls enabled flags into the client mirror so the
-  // toggle reflects server truth at first render.
   await refreshState()
+  for (const key of BEHAVIORS.map((behavior) => behavior.key)) {
+    behaviorOwners[key as BehaviorKey] = getBehaviorOwner(key) ?? null
+  }
 }
 
 function renderDiagnostics() {
@@ -460,18 +462,20 @@ function attachHandlers() {
       const key = cb.dataset.behavior as BehaviorKey
       const requested = cb.checked
       cb.disabled = true
+      togglesInFlight.add(key)
       void setEnabled(key, requested).catch((err: unknown) => {
         alert(`Could not update behavior: ${(err as Error).message}`)
       }).finally(() => {
         // On failure setEnabled restores its local mirror. On success the
         // change event may have rebuilt this row, so repaint whichever input
         // is currently attached instead of trusting the stale element.
+        togglesInFlight.delete(key)
         const current = viewEl.querySelector<HTMLInputElement>(
           `input[type="checkbox"][data-behavior="${key}"]`,
         )
         if (current) {
           current.checked = isEnabled(key)
-          current.disabled = false
+          current.disabled = stateUnknown()
         }
       })
       return

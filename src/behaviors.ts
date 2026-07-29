@@ -147,6 +147,12 @@ export async function setScratchpad(key: BehaviorKey, text: string): Promise<voi
 let stateLoadOk = false
 export function isBehaviorStateLoaded(): boolean { return stateLoadOk }
 
+// Owner of each behaviour, from the same payload as everything else.
+const ownerByKey: Partial<Record<BehaviorKey, string | null>> = {}
+export function getBehaviorOwner(key: BehaviorKey): string | null {
+  return ownerByKey[key] ?? null
+}
+
 // Ordering guard for concurrent reads. Two refreshes can be in flight at once
 // — the tick fires while a view entry is still loading, or a slow response is
 // still on the wire when a newer one returns. Without a sequence the older
@@ -168,6 +174,9 @@ export async function refreshState(): Promise<void> {
       if (data[k]?.setting) settingByKey[k] = data[k].setting
       scratchpadByKey[k] = typeof data[k]?.scratchpad === 'string' ? data[k].scratchpad : ''
       lastByKey[k] = data[k]?.lastTriggered ?? null
+    }
+    for (const k of BEHAVIORS.map((behavior) => behavior.key)) {
+      ownerByKey[k] = typeof data[k]?.owner === 'string' ? data[k].owner : null
     }
     diagnostics = data.diagnostics ?? null
     stateLoadOk = true
