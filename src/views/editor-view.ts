@@ -87,6 +87,9 @@ let issueBtnEl: HTMLButtonElement | null = null
 let snippetBtnEl: HTMLButtonElement | null = null
 let panelEl: HTMLElement | null = null
 let panelForId: string | null = null
+// The annotation created by the Comment press that opened the current panel,
+// if any. Only this one may be auto-discarded when the panel closes empty.
+let panelCreatedId: string | null = null
 let annotationsSaveTimer: ReturnType<typeof setTimeout> | null = null
 
 // Issue composer state. When the user clicks the floating Issue
@@ -2327,14 +2330,41 @@ function reAnchorAnnotation(a: Annotation): AnnotationRange | null {
   // We don't try to rebind multi-line snippets in this pass; those
   // simply orphan if they shift, until the user re-annotates.
   if (a.snippet.includes('\n')) return null
-  for (let i = 0; i < lines.length; i++) {
+
+  // Search outward from the line the annotation was last seen on, not from
+  // the top of the document. Scanning from line 0 and taking the first hit
+  // moved a note onto an entirely different passage whenever the document
+  // repeated a phrase: a note on the second "Note" in a file jumped to the
+  // first one and was persisted there, so its comment then labelled text it
+  // was never about — and a second such note landed on the same words,
+  // stacking two marks on one span.
+  const home = a.range.start_line
+  const order: number[] = []
+  for (let d = 0; d < lines.length; d++) {
+    if (home - d >= 0) order.push(home - d)
+    if (d > 0 && home + d < lines.length) order.push(home + d)
+  }
+
+  // Never re-anchor on top of another annotation's span; prefer the next
+  // free occurrence on that line, then keep searching outward.
+  const taken = new Set(annotations
+    .filter((x) => x.id !== a.id)
+    .map((x) => `${x.range.start_line}:${x.range.start_offset}`))
+
+  let fallback: AnnotationRange | null = null
+  for (const i of order) {
     const text = lines[i].textContent || ''
-    const idx = text.indexOf(a.snippet)
-    if (idx >= 0) {
-      return { start_line: i, start_offset: idx, end_line: i, end_offset: idx + a.snippet.length }
+    for (let idx = text.indexOf(a.snippet); idx >= 0; idx = text.indexOf(a.snippet, idx + 1)) {
+      const candidate = {
+        start_line: i, start_offset: idx, end_line: i, end_offset: idx + a.snippet.length,
+      }
+      if (!taken.has(`${i}:${idx}`)) return candidate
+      if (!fallback) fallback = candidate
     }
   }
-  return null
+  // Every occurrence is already spoken for — keep the closest rather than
+  // orphaning the note entirely.
+  return fallback
 }
 
 // Render the annotation underline overlay. Each annotation can occupy
@@ -2667,6 +2697,8 @@ function createAnnotationFromSelection(): void {
   scheduleAnnotationsSave()
   renderAnnotationOverlay()
   openPanelForAnnotation(id)
+  // Opened by its own creation, so closing it with nothing in it discards it.
+  panelCreatedId = id
 }
 
 function deleteAnnotation(id: string): void {
@@ -3299,6 +3331,17 @@ function openPanelForAnnotation(id: string): void {
 // as a note the user forgot they made. Discard it on close.
 function discardPanelAnnotationIfEmpty(): void {
   if (panelForId == null) return
+  // Only ever discard the annotation this panel session just created. The
+  // first version of this tested `panelMessages.length === 0`, which is not
+  // evidence of an empty conversation: refreshPanelChat leaves panelMessages
+  // untouched when the transcript request is not ok, and returns immediately
+  // when a poll is already in flight. So opening an OLD annotation whose
+  // comment box happened to be empty — its content living entirely in the
+  // chat — and closing it while that request failed deleted it, along with
+  // the only record of its session id. Verified: a 502 on the transcript
+  // fetch was enough. A note the user did not create in this breath is now
+  // never removed without them asking.
+  if (panelForId !== panelCreatedId) return
   const a = annotations.find((x) => x.id === panelForId)
   if (!a) return
   if (a.comment.trim() !== '' || panelMessages.length > 0) return
@@ -3311,6 +3354,7 @@ function closePanel(): void {
   if (!panelEl) return
   if (panelEl.hidden && !panelForId) return
   discardPanelAnnotationIfEmpty()
+  panelCreatedId = null
   panelEl.hidden = true
   panelEl.innerHTML = ''
   panelForId = null
