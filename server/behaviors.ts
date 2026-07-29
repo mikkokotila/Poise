@@ -818,7 +818,6 @@ function settleClaimAfterExit(
 
 async function fireReview(
   pr: DatastorePr,
-  setting: BehaviorSetting,
   claimTarget: string,
   claimId: string,
 ): Promise<boolean> {
@@ -841,6 +840,13 @@ async function fireReview(
   // re-read the flag between it returning and the spawn below, so a toggle-off
   // in that window still posted on the pull request it was meant to stop.
   if (!isEnabled('review-new-prs') || behaviorAborted()) return false
+  // Read the ceiling here rather than taking a snapshot from the top of the
+  // tick. A tick fans out over every open pull request, and each one waits on
+  // auth, a checkout resolve and the head-SHA subprocess above — minutes, in
+  // the worst case. Narrowing the ceiling in the view took effect immediately
+  // on screen while the run already under way kept spawning agents at the old
+  // one, so the view understated which pull requests were being acted on.
+  const setting = getSetting('review-new-prs')
   // Pass the priority ceiling through as `--p`. agent-interface forwards
   // it to github-interface as `--p <value>`; for review-new-prs the
   // possible values are p0 / p1 / p2.
@@ -978,7 +984,6 @@ async function tickReviewNewPrs(): Promise<void> {
     await snapshotReviewNewPrs()
     return
   }
-  const setting = getSetting('review-new-prs')
   try {
     const prs = await listOpenPrsByAuthor(author)
     await recoverFailedSnapshotReviews(prs, reviewer)
@@ -1033,13 +1038,13 @@ async function tickReviewNewPrs(): Promise<void> {
             }
           }
 
-          const accepted = await fireReview(pr, setting, key, claimId)
+          const accepted = await fireReview(pr, key, claimId)
           if (!accepted) {
             releaseOwnedClaim('review-new-prs', key, claimId)
             return
           }
           launched = true
-          console.log(`[behaviors] review-new-prs fired for ${pr.repo}#${pr.number} (p=${setting})`)
+          console.log(`[behaviors] review-new-prs fired for ${pr.repo}#${pr.number} (p=${getSetting('review-new-prs')})`)
         } catch (err) {
           // Pre-launch work and spawn acknowledgement are part of the claim.
           // Release on failure so the next tick can retry this exact target.

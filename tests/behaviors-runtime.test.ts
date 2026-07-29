@@ -1910,6 +1910,44 @@ describe('behavior launch claims', () => {
     expect(runtime.isEnabled('review-new-prs')).toBe(false)
   })
 
+  // The ceiling decides which pull requests get acted on. A tick fans out over
+  // every open PR and each one waits on auth, a checkout resolve and the
+  // head-SHA subprocess, so narrowing the ceiling took effect on screen
+  // immediately while the run already under way kept spawning at the old one.
+  it('uses the ceiling as it stands at spawn, not as it was when the tick began', async () => {
+    arrangeCli(false)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const headSha = deferred<{ stdout: string, stderr: string }>()
+    const base = mocks.runFile.getMockImplementation()!
+    mocks.runFile.mockImplementation(async (command: string, args: string[], options?: { cwd?: string }) => {
+      if (command === 'github-interface' && args[0] === '--head-sha') return headSha.promise
+      return base(command, args, options)
+    })
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
+    db.setMeta('behavior_review_new_prs_enabled', '1')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
+    runtime.setSetting('review-new-prs', 'p4')
+
+    const tick = runtime.runEnabledBehaviorsOnce()
+    await vi.waitFor(() => expect(mocks.runFile.mock.calls.some(
+      (c: unknown[]) => c[0] === 'github-interface' && (c[1] as string[])[0] === '--head-sha',
+    )).toBe(true))
+    // The person dials the ceiling back while the head-SHA lookup is out.
+    runtime.setSetting('review-new-prs', 'p0')
+    headSha.resolve({
+      stdout: JSON.stringify({ action: 'head_sha', repository: pr.repo, pull_number: pr.number, head_sha: HEAD_SHA }),
+      stderr: '',
+    })
+    await tick
+
+    expect(mocks.spawnDetached).toHaveBeenCalled()
+    const args = mocks.spawnDetached.mock.calls[0][1] as string[]
+    expect(args[args.indexOf('--p') + 1]).toBe('p0')
+  })
+
   it('does not launch after disable during the final auth gate', async () => {
     arrangeCli(false)
     mocks.spawnDetached.mockResolvedValue(undefined)
