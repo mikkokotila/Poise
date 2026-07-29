@@ -69,6 +69,7 @@ const togglesInFlight = new Set<BehaviorKey>()
 // each one a ceiling a behavior could genuinely fire at. And disabling the
 // element while that write was in flight took focus away from the person
 // pressing the key. Settle on the value they land on, then write once.
+const DEAD_LETTERS_SHOWN = 5
 const SETTING_WRITE_DELAY_MS = 400
 const settingWrites = new Map<BehaviorKey, ReturnType<typeof setTimeout>>()
 
@@ -476,8 +477,14 @@ function renderDiagnostics() {
     diagnostics.identity.error ? `Identity: ${diagnostics.identity.error}` : '',
     ...diagnostics.failures.map((failure) =>
       `${failure.behavior}: ${failure.consecutiveFailures} consecutive ${failure.kind} failure(s)`),
-    ...diagnostics.deadLetters.slice(0, 5).map((letter) =>
+    ...diagnostics.deadLetters.slice(0, DEAD_LETTERS_SHOWN).map((letter) =>
       `${letter.behavior} ${letter.target}: ${letter.error}`),
+    // A dead letter is a target the behaviour permanently gave up on. Showing
+    // the newest few and nothing else made an older one drop off the only
+    // surface that names it, with the panel reading as if it were complete.
+    diagnostics.deadLetters.length > DEAD_LETTERS_SHOWN
+      ? `${diagnostics.deadLetters.length - DEAD_LETTERS_SHOWN} older abandoned target(s) not shown`
+      : '',
   ].filter(Boolean)
   if (messages.length === 0) {
     // Nothing specific to report. Say something only when the runtime itself
