@@ -147,6 +147,9 @@ let memoryTitleEl: HTMLElement | null = null
 let memorySaveBtn: HTMLButtonElement | null = null
 let memoryStatusEl: HTMLElement | null = null
 let memoryKey: BehaviorKey | null = null
+// The memory as it stood when the panel opened, so closing can tell whether
+// there is an unsaved change to commit.
+let memoryLoadedValue = ''
 
 function setMemoryStatus(text: string, cls: 'info' | 'ok' | 'error' = 'info') {
   if (!memoryStatusEl) return
@@ -204,6 +207,7 @@ function openMemoryPanel(key: BehaviorKey) {
   const meta = BEHAVIORS.find((b) => b.key === key)
   if (memoryTitleEl) memoryTitleEl.textContent = `Memory for ${meta?.label ?? key}`
   if (memoryTextarea) memoryTextarea.value = getScratchpad(key)
+  memoryLoadedValue = getScratchpad(key)
   setMemoryStatus('')
   memoryPanelEl.classList.add('open')
   // Defer listener attach so the click that opened the panel doesn't
@@ -215,10 +219,27 @@ function openMemoryPanel(key: BehaviorKey) {
   }, 0)
 }
 
+// The memory is edited behind an explicit Save, but every way of leaving the
+// panel — Escape, a click outside, the close button, switching view — used to
+// drop whatever had been typed without saving it and without saying so. The
+// text is a durable instruction the agent runs with, so losing it silently is
+// the wrong default. Closing now commits an unsaved change; if that commit
+// fails the panel stays open with the error, rather than closing over work
+// that was never stored.
 function closeMemoryPanel() {
+  if (!memoryPanelEl) return
+  if (memoryKey && memoryTextarea && memoryTextarea.value !== memoryLoadedValue) {
+    void saveMemory().then((saved) => { if (saved) finishClosingMemoryPanel() })
+    return
+  }
+  finishClosingMemoryPanel()
+}
+
+function finishClosingMemoryPanel() {
   if (!memoryPanelEl) return
   memoryPanelEl.classList.remove('open')
   memoryKey = null
+  memoryLoadedValue = ''
   document.removeEventListener('mousedown', onMemoryOutside)
   document.removeEventListener('keydown', onMemoryKeydown)
 }
@@ -237,18 +258,23 @@ function onMemoryOutside(e: MouseEvent) {
   closeMemoryPanel()
 }
 
-async function saveMemory() {
-  if (!memoryKey || !memoryTextarea || !memorySaveBtn) return
+// Returns whether the memory is now stored, so the close path can keep the
+// panel open when it is not.
+async function saveMemory(): Promise<boolean> {
+  if (!memoryKey || !memoryTextarea || !memorySaveBtn) return true
   const key = memoryKey
   const text = memoryTextarea.value
   memorySaveBtn.disabled = true
   memorySaveBtn.textContent = 'Saving…'
   try {
     await setScratchpad(key, text)
+    memoryLoadedValue = text
     setMemoryStatus('Saved.', 'ok')
     refreshMemoryCell(key)
+    return true
   } catch (err) {
     setMemoryStatus('Failed to save: ' + (err as Error).message, 'error')
+    return false
   } finally {
     memorySaveBtn.disabled = false
     memorySaveBtn.textContent = 'Save'
@@ -322,11 +348,19 @@ function renderDiagnostics() {
   const el = viewEl.querySelector<HTMLElement>('#behavior-diagnostics')
   if (!el) return
   const diagnostics = getBehaviorDiagnostics()
-  if (!diagnostics || diagnostics.status === 'ok') {
+  if (!diagnostics) {
     el.hidden = true
     el.textContent = ''
     return
   }
+  // Build the messages first and hide only when there are none. Returning
+  // early on `status === 'ok'` made two of the lines below unreachable: the
+  // runtime's status is computed from the ticker, the heartbeat, stalled
+  // operations, failures, identity and the datastore — it does not consider
+  // agentLogsError or deadLetters at all. So a real agent-log error, and any
+  // dead letter (a behaviour that gave up on a target), sat in the payload
+  // while the panel stayed hidden and empty. Observed on a live instance:
+  // status "ok" alongside `agent-interface log row 0 has invalid expected_head`.
   const messages = [
     diagnostics.agentLogsError ? `Agent log: ${diagnostics.agentLogsError}` : '',
     diagnostics.datastore.error ? `Datastore: ${diagnostics.datastore.error}` : '',
@@ -336,7 +370,19 @@ function renderDiagnostics() {
     ...diagnostics.deadLetters.slice(0, 5).map((letter) =>
       `${letter.behavior} ${letter.target}: ${letter.error}`),
   ].filter(Boolean)
-  el.textContent = messages.join(' · ') || 'Behavior runtime is degraded.'
+  if (messages.length === 0) {
+    // Nothing specific to report. Say something only when the runtime itself
+    // is unhealthy, so an "ok" runtime stays quiet.
+    if (diagnostics.status === 'ok') {
+      el.hidden = true
+      el.textContent = ''
+      return
+    }
+    el.textContent = 'Behavior runtime is degraded.'
+    el.hidden = false
+    return
+  }
+  el.textContent = messages.join(' · ')
   el.hidden = false
 }
 
