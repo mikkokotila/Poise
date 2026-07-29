@@ -114,31 +114,78 @@ async function postBehavior(key: BehaviorKey, body: { enabled?: boolean, setting
   return res.json()
 }
 
+// Writes have to invalidate reads that were already on the wire. Ordering the
+// reads against each other is not enough: GET /api/behaviors blocks on an
+// `agent-interface --logs` subprocess for as long as 30 seconds, so a tick's
+// GET is routinely still unanswered when a click's POST completes. That GET
+// carries a snapshot taken before the change and is still the newest read when
+// it lands, so it overwrote the mirror with the pre-click value — the toggle
+// repainted OFF on a behaviour that is running, and a just-saved memory
+// reverted to its pre-save text, both for a full refresh interval.
+//
+// Each key counts the writes started against it. A read records the count
+// before it asks, and applies a key's user-writable fields only if no write
+// began, and none was already in flight, while it was out.
+const writesStarted: Partial<Record<BehaviorKey, number>> = {}
+const writesInFlight: Partial<Record<BehaviorKey, number>> = {}
+
+function beginWrite(key: BehaviorKey): void {
+  writesStarted[key] = (writesStarted[key] ?? 0) + 1
+  writesInFlight[key] = (writesInFlight[key] ?? 0) + 1
+}
+
+function endWrite(key: BehaviorKey): void {
+  writesInFlight[key] = Math.max(0, (writesInFlight[key] ?? 1) - 1)
+}
+
+function readIsCurrentFor(key: BehaviorKey, startedAt: number, wasBusy: boolean): boolean {
+  return !wasBusy && (writesStarted[key] ?? 0) === startedAt && (writesInFlight[key] ?? 0) === 0
+}
+
 export async function setEnabled(key: BehaviorKey, enabled: boolean): Promise<void> {
   // Optimistic local update so the toggle UI doesn't flicker; the
   // server is authoritative and a re-fetch on next view-mount will
   // correct any drift.
   enabledByKey[key] = enabled
+  beginWrite(key)
   try {
     const data = await postBehavior(key, { enabled })
     enabledByKey[key] = !!data.enabled
   } catch (err) {
     enabledByKey[key] = !enabled
     throw err
+  } finally {
+    endWrite(key)
   }
   window.dispatchEvent(new CustomEvent('poise:behaviors-changed', { detail: { key, enabled: enabledByKey[key] } }))
 }
 
-export async function setSetting(key: BehaviorKey, setting: BehaviorSetting): Promise<void> {
-  const previous = settingByKey[key] ?? 'p2'
-  settingByKey[key] = setting
-  try {
-    const data = await postBehavior(key, { setting })
-    if (data.setting) settingByKey[key] = data.setting
-  } catch (err) {
-    settingByKey[key] = previous
-    throw err
+// Setting writes are serialized per behaviour. The server stores whichever
+// request arrives last, so two in flight at once could leave the ceiling on a
+// value the person had already moved past — and a ceiling decides which pull
+// requests the automation acts on.
+const settingWriteChain: Partial<Record<BehaviorKey, Promise<void>>> = {}
+
+export function setSetting(key: BehaviorKey, setting: BehaviorSetting): Promise<void> {
+  const run = async () => {
+    const previous = settingByKey[key] ?? 'p2'
+    settingByKey[key] = setting
+    beginWrite(key)
+    try {
+      const data = await postBehavior(key, { setting })
+      if (data.setting) settingByKey[key] = data.setting
+    } catch (err) {
+      settingByKey[key] = previous
+      throw err
+    } finally {
+      endWrite(key)
+    }
   }
+  const chained = (settingWriteChain[key] ?? Promise.resolve()).then(run, run)
+  // The chain only orders the requests; a rejection belongs to its own caller
+  // and must not be reported twice or left unhandled here.
+  settingWriteChain[key] = chained.catch(() => {})
+  return chained
 }
 
 // `loaded` is what the caller believed was stored when it began editing. The
@@ -147,6 +194,7 @@ export async function setSetting(key: BehaviorKey, setting: BehaviorSetting): Pr
 export async function setScratchpad(key: BehaviorKey, text: string, loaded?: string): Promise<void> {
   const previous = scratchpadByKey[key] ?? ''
   scratchpadByKey[key] = text
+  beginWrite(key)
   try {
     const data = await postBehavior(key, {
       scratchpad: text,
@@ -158,6 +206,8 @@ export async function setScratchpad(key: BehaviorKey, text: string, loaded?: str
     // truthful rather than restoring a value we now know is stale.
     scratchpadByKey[key] = err instanceof BehaviorConflictError ? err.current : previous
     throw err
+  } finally {
+    endWrite(key)
   }
 }
 
@@ -184,19 +234,32 @@ let refreshSequence = 0
 
 export async function refreshState(): Promise<void> {
   const mine = ++refreshSequence
+  const keys = BEHAVIORS.map((behavior) => behavior.key)
+  // Snapshot the write counters before asking, so the answer can be checked
+  // against what the person did while it was on the wire.
+  const before = new Map(keys.map((k) => [k, {
+    started: writesStarted[k] ?? 0,
+    busy: (writesInFlight[k] ?? 0) > 0,
+  }]))
   try {
     const res = await fetch('/api/behaviors')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
     // A newer refresh already answered; this one is history.
     if (mine !== refreshSequence) return
-    for (const k of BEHAVIORS.map((behavior) => behavior.key)) {
+    for (const k of keys) {
+      const seen = before.get(k)!
+      // Server-owned columns are safe either way — nothing the person does
+      // here writes them, so a slightly old value is just a slightly old value.
+      lastByKey[k] = data[k]?.lastTriggered ?? null
+      // These three the person can change from this view. If they did so while
+      // this read was out, the read predates the change and must not undo it.
+      if (!readIsCurrentFor(k, seen.started, seen.busy)) continue
       enabledByKey[k] = !!data[k]?.enabled
       if (data[k]?.setting) settingByKey[k] = data[k].setting
       scratchpadByKey[k] = typeof data[k]?.scratchpad === 'string' ? data[k].scratchpad : ''
-      lastByKey[k] = data[k]?.lastTriggered ?? null
     }
-    for (const k of BEHAVIORS.map((behavior) => behavior.key)) {
+    for (const k of keys) {
       ownerByKey[k] = typeof data[k]?.owner === 'string' ? data[k].owner : null
     }
     diagnostics = data.diagnostics ?? null
