@@ -2474,6 +2474,15 @@ function controlBarBottom(): number {
 // closest to the selection, then Issue, then Snippet. While either
 // composer is open the buttons stay hidden — focus is in the composer
 // and the selection has collapsed.
+// Geometry of the floating selection cluster. The button size matches the
+// .editor-comment-btn rule in style.css; the gap and margin are the breathing
+// room between the buttons and between the cluster and the writing column.
+const SELECTION_BTN = 24
+const SELECTION_GAP = 4
+const SELECTION_MARGIN = 12
+// Minimum breathing room against the window frame when space is tight.
+const SELECTION_EDGE = 4
+
 function updateCommentButtonForSelection(): void {
   if (!commentBtnEl || !docEl) return
   const hideAll = hideSelectionActions
@@ -2486,33 +2495,89 @@ function updateCommentButtonForSelection(): void {
   if (!docEl.contains(range.commonAncestorContainer) && range.commonAncestorContainer !== docEl) { hideAll(); return }
   const rects = range.getClientRects()
   if (rects.length === 0) { hideAll(); return }
+  const first = rects[0]
   const last = rects[rects.length - 1]
+
+  // The cluster belongs in the margin, beside the writing column — never
+  // over the prose. Anchored to the selection's end it sat on top of the
+  // words: at the end of a line it covered the line below, mid-paragraph it
+  // covered the very text being acted on, and it moved with every change of
+  // selection. Pinned to the column's edge it has one predictable home and
+  // the passage stays legible while the user decides.
+  //
   // getClientRects is viewport-relative and these buttons are
-  // position:fixed, so the rect IS the coordinate — adding the page
-  // scroll double-counts it. It used to, which put the whole cluster
-  // scrollY pixels below the selection: fine at the top of a document,
-  // and completely off-screen anywhere else, so on a scrolled page there
-  // was no Comment button to click at all.
-  const commentLeft = last.right + 4
-  // Prefer just above the selection; if that would be behind the bar (the
-  // passage is scrolled up against it) sit just below it instead.
-  const above = last.top - 28
-  const top = above < controlBarBottom() + 4 ? last.bottom + 4 : above
-  commentBtnEl.style.left = commentLeft + 'px'
-  commentBtnEl.style.top  = top + 'px'
-  commentBtnEl.hidden = false
-  // 24px button + 4px gap = 28px per slot. The cluster grows rightward
-  // from the selection end: Comment, then Issue, then Snippet.
-  if (issueBtnEl) {
-    issueBtnEl.style.left = (commentLeft + 28) + 'px'
-    issueBtnEl.style.top  = top + 'px'
-    issueBtnEl.hidden = false
+  // position:fixed, so a rect IS the coordinate — adding the page scroll
+  // double-counts it and puts the cluster off-screen on a scrolled page.
+  const page = docEl.closest('.editor-page') as HTMLElement | null
+  const column = (page || docEl).getBoundingClientRect()
+  const clusterWidth = 3 * SELECTION_BTN + 2 * SELECTION_GAP
+
+  // Vertically: line up with the first line of the selection, so the cluster
+  // sits where the passage begins rather than trailing its end. Kept clear of
+  // the control bar and of the bottom of the window.
+  const preferredTop = first.top + (first.height - SELECTION_BTN) / 2
+  const top = Math.max(
+    controlBarBottom() + SELECTION_MARGIN,
+    Math.min(preferredTop, window.innerHeight - SELECTION_BTN - SELECTION_MARGIN),
+  )
+
+  // Horizontally: in the margin beside the column. A row of three needs
+  // ~80px of margin; when the window is too narrow for that the same three
+  // stack vertically and need only one button's width, which still fits the
+  // margin a 680px column leaves at ~760px of viewport. Right margin first,
+  // then left. Only when neither margin can hold even a stack does the
+  // cluster float past the selection's end.
+  const rightRow = column.right + SELECTION_MARGIN
+  const leftRow = column.left - SELECTION_MARGIN - clusterWidth
+  const fitsRight = rightRow + clusterWidth <= window.innerWidth - SELECTION_MARGIN
+  const fitsLeft = leftRow >= SELECTION_MARGIN
+  // A stack only needs one button's width, and it may sit closer to the
+  // window edge than a row would — the point is to stay off the prose, and
+  // EDGE is enough to keep it from touching the frame. That difference is
+  // what lets a 680px column still have a usable margin at ~760px of
+  // viewport, where a row cannot fit on either side.
+  const rightStack = Math.min(column.right + SELECTION_MARGIN,
+    window.innerWidth - SELECTION_BTN - SELECTION_EDGE)
+  const leftStack = Math.max(column.left - SELECTION_MARGIN - SELECTION_BTN, SELECTION_EDGE)
+  const stacksRight = rightStack >= column.right + SELECTION_EDGE
+  const stacksLeft = leftStack + SELECTION_BTN <= column.left - SELECTION_EDGE
+
+  let left: number
+  let vertical = false
+  let below = false
+  if (fitsRight) left = rightRow
+  else if (fitsLeft) left = leftRow
+  else if (stacksRight) { left = rightStack; vertical = true }
+  else if (stacksLeft) { left = leftStack; vertical = true }
+  else {
+    // No margin on either side — the column fills the window. Sit under the
+    // selection's last line rather than on top of it, pushed to the column's
+    // right edge where a line most often has room left over.
+    below = true
+    left = Math.max(SELECTION_EDGE,
+      Math.min(column.right - clusterWidth, window.innerWidth - clusterWidth - SELECTION_EDGE))
   }
-  if (snippetBtnEl) {
-    snippetBtnEl.style.left = (commentLeft + 56) + 'px'
-    snippetBtnEl.style.top  = top + 'px'
-    snippetBtnEl.hidden = false
+
+  // A vertical stack is taller than a row, so re-clamp against the window
+  // bottom using the stack's full height.
+  const stackHeight = 3 * SELECTION_BTN + 2 * SELECTION_GAP
+  const clusterTop = below
+    ? Math.min(last.bottom + SELECTION_GAP, window.innerHeight - SELECTION_BTN - SELECTION_EDGE)
+    : vertical
+      ? Math.max(controlBarBottom() + SELECTION_MARGIN,
+        Math.min(top, window.innerHeight - stackHeight - SELECTION_MARGIN))
+      : top
+
+  const step = SELECTION_BTN + SELECTION_GAP
+  const place = (el: HTMLButtonElement | null, slot: number) => {
+    if (!el) return
+    el.style.left = (vertical ? left : left + slot * step) + 'px'
+    el.style.top = (vertical ? clusterTop + slot * step : clusterTop) + 'px'
+    el.hidden = false
   }
+  place(commentBtnEl, 0)
+  place(issueBtnEl, 1)
+  place(snippetBtnEl, 2)
 }
 
 // Create a new annotation from the current selection, append to the
@@ -3412,6 +3477,43 @@ function attachHandlers() {
             if (t === 'deleteContentForward' && off === text.length && line.nextElementSibling) {
               e.preventDefault()
               mergeLineBackward(line.nextElementSibling as HTMLElement)
+              updateEmptyState(); scheduleSave(); renderAnnotationOverlay()
+              commitHistoryBatch(true)
+              return
+            }
+          }
+        }
+      }
+    }
+
+    // Retyping a block marker over an existing one. The caret snaps past a
+    // hidden marker, so a `#` typed at the visible start of a heading landed
+    // *after* the marker: `## Heading` became `## #Heading`, still an H2, and
+    // there was no way to change a heading's level by typing at all — the
+    // marker could only be removed with Backspace and the whole thing retyped.
+    // Typing `#` at the visible start now clears the line's existing marker
+    // and starts the new one, so `## Heading` + `#` + space reads as H1, and
+    // `# Heading` + `##` + space reads as H2.
+    if (t === 'insertText' && e.data === '#') {
+      const sel = window.getSelection()
+      if (sel && sel.rangeCount > 0) {
+        const range = sel.getRangeAt(0)
+        if (range.collapsed) {
+          const line = lineElOf(range.startContainer)
+          if (line && line.parentElement === docEl) {
+            const kind = (line.dataset.kind || 'body') as LineKind
+            const text = line.textContent || ''
+            const markerLen = markerLengthFor(kind, text)
+            const hasBlockMarker = markerLen > 0
+              && (kind === 'h1' || kind === 'h2' || kind === 'list-item')
+            if (hasBlockMarker
+                && offsetInLineFor(line, range.startContainer, range.startOffset) === markerLen) {
+              e.preventDefault()
+              noteHistoryPre()
+              // Replace the old marker with the single `#` just typed; the
+              // caret lands after it so a second `#` or the space continues
+              // the new marker normally.
+              replaceSourceRange(line, 0, line, markerLen, '#')
               updateEmptyState(); scheduleSave(); renderAnnotationOverlay()
               commitHistoryBatch(true)
               return
