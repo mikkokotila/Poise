@@ -16,7 +16,7 @@ import { existsSync } from 'node:fs'
 import { join, dirname, delimiter } from 'node:path'
 import { homedir } from 'node:os'
 import { createHash } from 'node:crypto'
-import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
+import { parse as parseYaml, parseDocument, stringify as stringifyYaml, isMap, isSeq } from 'yaml'
 import { withProcessLock } from './process-lock'
 
 // espanso's macOS config root holds config/ and match/. Override the
@@ -121,14 +121,80 @@ export async function readSnippetState(): Promise<SnippetState> {
   }) as { matches?: unknown } | null
   const matches = doc && Array.isArray(doc.matches) ? doc.matches : []
   const snippets: Snippet[] = []
+  const seenTriggers = new Set<string>()
   for (const m of matches) {
-    if (m && typeof m === 'object'
-        && typeof (m as any).trigger === 'string'
-        && typeof (m as any).replace === 'string') {
-      snippets.push({ trigger: (m as any).trigger, replace: (m as any).replace })
+    if (isSimpleMatch(m)) {
+      // A file can carry the same trigger twice — a hand edit, a dotfiles
+      // merge, a sync that concatenated two versions. Read it, but keep only
+      // the first: the write path rejects duplicates, so surfacing them all
+      // made the file readable and unwritable at once, and every save (and
+      // every "save selection as snippet") failed with `duplicate trigger`
+      // until the user found and fixed the file by hand.
+      if (seenTriggers.has(m.trigger)) continue
+      seenTriggers.add(m.trigger)
+      snippets.push({ trigger: m.trigger, replace: m.replace })
     }
   }
   return { snippets, version: versionFor(raw) }
+}
+
+function isSimpleMatch(m: unknown): m is Snippet {
+  return !!m && typeof m === 'object'
+    && typeof (m as { trigger?: unknown }).trigger === 'string'
+    && typeof (m as { replace?: unknown }).replace === 'string'
+}
+
+// Everything in poise.yml that Poise does not model: other top-level keys
+// (global_vars, imports, a `label`), and matches that are more than a plain
+// trigger/replace pair (regex, form, vars, word, propagate_case).
+//
+// Poise used to rewrite the file as nothing but its own pairs, so a user who
+// hand-added an espanso feature to this file lost it on the next save with no
+// warning. Poise still owns the simple pairs — it just carries the rest
+// through untouched.
+// Rewrite poise.yml so it carries Poise's simple pairs while leaving
+// everything else in the file exactly as the user wrote it — other top-level
+// keys (global_vars, imports), matches that are more than a plain
+// trigger/replace pair (regex, form, vars), and their comments.
+//
+// Poise used to emit `{ matches: [...] }` from scratch, so a user who
+// hand-added an espanso feature to this file lost it on the next save from
+// the UI, with no warning. Editing the parsed document instead of rebuilding
+// it keeps comments and formatting that a parse/stringify round-trip drops.
+async function renderSnippetFile(snippets: Snippet[]): Promise<string> {
+  let raw: string | null = null
+  try {
+    raw = await readSnippetSource()
+  } catch (err: any) {
+    if (err.code !== 'ENOENT') throw err
+  }
+  if (raw === null || raw.trim() === '') {
+    return stringifyYaml({ matches: snippets })
+  }
+
+  let doc
+  try {
+    doc = parseDocument(raw, { merge: false, schema: 'core', strict: true, uniqueKeys: true })
+    if (doc.errors.length) throw new Error(doc.errors[0].message)
+  } catch {
+    // An unparseable file never reaches a write — readSnippetState throws
+    // first. If it somehow does, do not try to salvage it.
+    return stringifyYaml({ matches: snippets })
+  }
+
+  const contents = doc.contents
+  if (!isMap(contents)) return stringifyYaml({ matches: snippets })
+
+  const seq = doc.get('matches', true)
+  if (!isSeq(seq)) {
+    doc.set('matches', snippets)
+    return String(doc)
+  }
+  // Drop the pairs Poise owns, keep everything else in place, then append the
+  // current set in order.
+  seq.items = seq.items.filter((item) => !isSimpleMatch(doc.createNode(item).toJSON()))
+  for (const snip of snippets) seq.items.push(doc.createNode(snip))
+  return String(doc)
 }
 
 export async function listSnippets(): Promise<Snippet[]> {
@@ -192,7 +258,7 @@ async function writeSnippets(snippets: Snippet[], expectedVersion: string): Prom
   // espanso schema: { matches: [{ trigger, replace }] }. yaml.stringify
   // owns the quoting/escaping and emits block scalars for multi-line
   // bodies — no manual escaping here.
-  const body = stringifyYaml({ matches: snippets })
+  const body = await renderSnippetFile(snippets)
   if (Buffer.byteLength(body, 'utf8') > MAX_SNIPPETS_BYTES) {
     throw new Error(`serialized snippets exceed ${MAX_SNIPPETS_BYTES} bytes`)
   }

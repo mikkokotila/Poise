@@ -103,7 +103,7 @@ function renderRows() {
 
   const n = snippets.length
   const failed = loadError !== null
-  viewEl.querySelector('#snippets-count')!.textContent = failed || !n ? '' : `${n} snippet${n === 1 ? '' : 's'}`
+  updateSnippetCount()
   viewEl.querySelector<HTMLElement>('#snippets-table')!.hidden = failed || n === 0
   // "No snippets yet" is a statement about the user's data. Only make it
   // when the data was actually read.
@@ -249,7 +249,20 @@ async function preserveEditAfterConflict(
 
 // Refresh every saved row's rendering in place, leaving the open edit row and
 // the row it belongs to untouched.
+// The header total. Blank while the list is empty or unreadable — a count
+// over an error box would be a claim we cannot stand behind.
+function updateSnippetCount(): void {
+  const el = viewEl.querySelector('#snippets-count')
+  if (!el) return
+  const n = snippets.length
+  el.textContent = loadError !== null || !n ? '' : `${n} snippet${n === 1 ? '' : 's'}`
+}
+
 function repaintRowsAroundOpenEditor(): void {
+  // The header count is the only place the total is stated, and this path
+  // adds and removes rows — leaving it stale made the header contradict the
+  // table the user was looking at ("1 snippet" over three rows).
+  updateSnippetCount()
   const editRow = tbodyEl.querySelector('.snip-expand-row')
   const editingMain = editRow?.previousElementSibling as HTMLElement | null
   const editingTrigger = editingMain?.dataset.trigger ?? null
@@ -340,6 +353,11 @@ function openAdd() {
     ;(existingDraft.nextElementSibling?.querySelector('.snip-trigger-input') as HTMLElement | null)?.focus()
     return
   }
+  // Nothing may be composed while the file cannot be read. The error box says
+  // nothing will be written until the file parses again, and opening a draft
+  // over it put an editable table of stale rows on screen beside that promise
+  // — with a Save that could only fail.
+  if (loadError !== null) return
   collapseOpen()
   // The table is hidden while the saved list is empty — show it for the draft.
   viewEl.querySelector<HTMLElement>('#snippets-table')!.hidden = false
@@ -403,6 +421,11 @@ export async function initSnippetsView() {
     tbodyEl = viewEl.querySelector<HTMLTableSectionElement>('#snippets-tbody')!
     attachHandlers()
   }
+  // Re-entering the view re-renders the table from scratch, and renderRows
+  // starts by emptying the tbody — which threw away an open editor and every
+  // character typed into it, with no prompt. If something is being edited,
+  // leave the screen alone: the list is refreshed the next time it is safe.
+  if (tbodyEl.querySelector('.snip-expand-row')) return
   await fetchSnippets()
   renderRows()
 }
