@@ -390,12 +390,13 @@ body {
   /* Opaque, always. Content scrolls underneath and must not show through.
      --bg is a solid colour in both themes. */
   background: var(--bg);
-  /* Full-bleed band, inner content aligned to the same column as #app so
-     the controls line up with the page below. max() keeps the inset from
-     going negative once the viewport is narrower than the column. */
-  padding: var(--app-pad-top)
-           max(24px, calc((100% - var(--typo-width, 960px)) / 2 + 24px))
-           var(--sp-3);
+  /* Full-bleed band, and the CONTENT uses the whole band too. Insetting the
+     content to #app's centred column looked tidier but starved it: on a
+     2000px screen the column left only ~912px for the controls, so the
+     filter cluster wrapped onto a second row while most of the bar sat
+     empty. The controls get the window; 24px matches #app's own side
+     padding and the full-bleed .kanban, which starts at the same inset. */
+  padding: var(--app-pad-top) 24px var(--sp-3);
   border-bottom: 1px solid transparent;
   transition: border-color var(--t-base) ease;
 }
