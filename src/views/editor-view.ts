@@ -1866,9 +1866,12 @@ async function openChatForCurrentDoc(): Promise<void> {
         session: data.session_id,
         label,
         parseEdits: true,
-        onEditHover: (edit: EditCardData) => { showEditHoverHighlight(edit) },
+        onEditHover: (edit: EditCardData) => {
+          if (currentSlug !== slug) return
+          showEditHoverHighlight(edit)
+        },
         onEditLeave: () => { clearEditHoverHighlight() },
-        onEditAccept: (edit: EditCardData) => applyEditToDoc(edit),
+        onEditAccept: (edit: EditCardData) => applyEditToDoc(edit, slug),
         onEditDecline: () => { /* no doc-side work; pane updates its own state */ },
       },
     }))
@@ -2077,8 +2080,13 @@ function clearEditHoverHighlight(): void {
 // Returns 'applied' (success, save scheduled) or 'conflict' (the
 // edit's `old` could no longer be located — the pane shows the card
 // as conflict so the user can try again after fixing the drift).
-function applyEditToDoc(edit: EditCardData): 'applied' | 'conflict' {
+// `slug` is the document the chat was opened for. The chat pane outlives a
+// document switch, so without this an Accept landed on whatever happened to be
+// open — rewriting a document the agent never saw, and silently not applying
+// the edit to the one it was about.
+function applyEditToDoc(edit: EditCardData, slug: string): 'applied' | 'conflict' {
   if (!docEl) return 'conflict'
+  if (currentSlug !== slug) return 'conflict'
   const snap = docTextSnapshot()
   const charRange = findCharRangeForEdit(snap.text, edit)
   if (!charRange) return 'conflict'
@@ -2338,11 +2346,18 @@ function reAnchorAnnotation(a: Annotation): AnnotationRange | null {
   // first one and was persisted there, so its comment then labelled text it
   // was never about — and a second such note landed on the same words,
   // stacking two marks on one span.
+  // `home` is a remembered index, so it can point past the end after lines
+  // are deleted. Bound BOTH directions — pushing an out-of-range `home` made
+  // the loop below read lines[i].textContent off undefined and throw, which
+  // killed renderAnnotationOverlay mid-pipeline and took the undo recording
+  // and the autosave for that keystroke with it.
   const home = a.range.start_line
   const order: number[] = []
   for (let d = 0; d < lines.length; d++) {
-    if (home - d >= 0) order.push(home - d)
-    if (d > 0 && home + d < lines.length) order.push(home + d)
+    const back = home - d
+    const fwd = home + d
+    if (back >= 0 && back < lines.length) order.push(back)
+    if (d > 0 && fwd >= 0 && fwd < lines.length) order.push(fwd)
   }
 
   // Never re-anchor on top of another annotation's span; prefer the next
@@ -2642,6 +2657,14 @@ function editorChatSessionId(slug: string): string {
 function upgradeAnnotationSessionIfInert(a: Annotation): boolean {
   if (!currentSlug) return false
   if (slugFromEditorSessionId(a.session_id) === currentSlug) return false
+  // An empty panelMessages is not proof of an empty conversation — the same
+  // trap that made closePanel delete notes. refreshPanelChat leaves it
+  // untouched when the transcript request is not ok and returns immediately
+  // when a poll is already in flight, so a failed or skipped load looked
+  // exactly like "never talked to". Re-minting then replaced the only record
+  // of the old session id and stranded a real conversation for good. Require
+  // proof that THIS session's transcript actually loaded, and was empty.
+  if (panelChatLoadedFor !== a.session_id) return false
   if (panelMessages.length > 0) return false
   a.session_id = editorChatSessionId(currentSlug)
   a.updated_at = new Date().toISOString()
@@ -3023,6 +3046,9 @@ let panelMessages: PanelChatEntry[] = []
 const panelReplies: Map<string, string> = new Map()
 let panelPollTimer: ReturnType<typeof setTimeout> | null = null
 let panelPollInflight = false
+// The session whose transcript last loaded successfully. Only that session may
+// be judged empty; see upgradeAnnotationSessionIfInert.
+let panelChatLoadedFor: string | null = null
 
 const PANEL_FAST_POLL_MS = 1500    // matches chat-pane's running cadence
 const PANEL_SLOW_POLL_MS = 8000    // idle cadence
@@ -3042,6 +3068,7 @@ async function refreshPanelChat(sessionId: string): Promise<void> {
     if (!res.ok) return
     const data = await res.json()
     panelMessages = (data.messages || []) as PanelChatEntry[]
+    panelChatLoadedFor = sessionId
     // Pull bodies for every newly-completed entry whose hash we
     // haven't cached yet. Tiny payloads, fire in parallel.
     const toFetch = panelMessages.filter((m) => m.status === 'completed' && m.response && !panelReplies.has(m.id))
@@ -3298,6 +3325,7 @@ function openPanelForAnnotation(id: string): void {
   // can be upgraded to a document-bound one (see
   // upgradeAnnotationSessionIfInert — it needs to know whether anything has
   // been said yet).
+  panelChatLoadedFor = null
   void refreshPanelChat(a.session_id).then(() => {
     upgradeAnnotationSessionIfInert(a)
     schedulePanelPoll(a.session_id)
@@ -3461,7 +3489,15 @@ function attachHandlers() {
       || t === 'deleteWordBackward' || t === 'deleteWordForward'
     const isPlainInsert = (t === 'insertText' || t === 'insertReplacementText'
       || t === 'insertFromPaste' || t === 'insertFromDrop')
-    if (isDelete || isPlainInsert) {
+    // Enter and Shift+Enter replace the selection with a line break. They were
+    // missing from this list, so the one gesture that both deletes across a
+    // boundary AND splits a line went to the native path — which merges the
+    // blocks before re-splitting them and re-serialises the moved paragraph
+    // without our display:none markers. Selecting across two lines and
+    // pressing Enter turned `second with **bold** text` into `with bold text`
+    // in the source, and autosaved it that way.
+    const isBreak = t === 'insertParagraph' || t === 'insertLineBreak'
+    if (isDelete || isPlainInsert || isBreak) {
       const sel = window.getSelection()
       if (sel && sel.rangeCount > 0) {
         const range = sel.getRangeAt(0)
@@ -3471,7 +3507,9 @@ function attachHandlers() {
           // Multi-line selection: replace it ourselves. For a delete the
           // replacement is empty; for an insert it's the typed/pasted
           // text (which may itself contain newlines).
-          const insert = isDelete ? '' : (e.dataTransfer?.getData('text/plain') ?? e.data ?? '')
+          const insert = isDelete ? ''
+            : isBreak ? '\n'
+            : (e.dataTransfer?.getData('text/plain') ?? e.data ?? '')
           e.preventDefault()
           replaceSourceRange(
             startLine, offsetInLineFor(startLine, range.startContainer, range.startOffset),
