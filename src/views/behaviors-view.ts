@@ -9,7 +9,7 @@
 // runtime — the view is just a UI for state, not the place where
 // agent automations actually run.
 
-import { BEHAVIORS, isEnabled, setEnabled, getSetting, setSetting, getScratchpad, setScratchpad, getLastTriggered, getBehaviorDiagnostics, refreshState, type BehaviorKey, type BehaviorSetting } from '../behaviors'
+import { BEHAVIORS, isEnabled, setEnabled, getSetting, setSetting, getScratchpad, setScratchpad, getLastTriggered, getBehaviorDiagnostics, refreshState, type BehaviorKey, type BehaviorSetting, isBehaviorStateLoaded } from '../behaviors'
 
 let viewEl: HTMLElement
 let initialized = false
@@ -54,11 +54,22 @@ function ownerCell(username: string | null): string {
   `
 }
 
+// True when the last attempt to read server state failed, so the mirror is not
+// to be trusted. The toggles drive agents that write to real pull requests —
+// an unknown state must not be presented as a confident "off".
+function stateUnknown(): boolean {
+  return !isBehaviorStateLoaded()
+}
+
 function toggleCell(key: BehaviorKey): string {
   const on = isEnabled(key)
+  const unknown = stateUnknown()
+  const title = unknown
+    ? 'Behaviour state could not be read from the server — this may not reflect what is running.'
+    : `Toggle ${key}`
   return `
-    <label class="toggle" aria-label="Toggle ${escapeHtml(key)}">
-      <input type="checkbox" data-behavior="${escapeHtml(key)}" ${on ? 'checked' : ''} />
+    <label class="toggle${unknown ? ' toggle-unknown' : ''}" aria-label="Toggle ${escapeHtml(key)}" title="${escapeHtml(title)}">
+      <input type="checkbox" data-behavior="${escapeHtml(key)}" ${on ? 'checked' : ''}${unknown ? ' disabled' : ''} />
       <span class="toggle-slider"></span>
     </label>
   `
@@ -333,11 +344,18 @@ function renderRow(meta: typeof BEHAVIORS[number]): HTMLTableRowElement {
 async function fetchBehaviorOwners() {
   try {
     const res = await fetch('/api/behaviors')
-    if (!res.ok) return
-    const data = await res.json()
-    for (const key of BEHAVIORS.map((behavior) => behavior.key)) {
-      behaviorOwners[key as BehaviorKey] = data[key]?.owner ?? null
+    if (res.ok) {
+      const data = await res.json()
+      for (const key of BEHAVIORS.map((behavior) => behavior.key)) {
+        behaviorOwners[key as BehaviorKey] = data[key]?.owner ?? null
+      }
     }
+    // A non-ok response used to return here, skipping the refreshState below.
+    // That left the client mirror at its defaults — every toggle drawn OFF —
+    // and left diagnostics unset, so the view calmly reported that no
+    // automation was running while the server-side runtime carried on
+    // spawning agents against real pull requests. refreshState records the
+    // failure, so let it run and say so.
   } catch { /* leave owners null — cell will show a dash */ }
   // Same call also pulls enabled flags into the client mirror so the
   // toggle reflects server truth at first render.

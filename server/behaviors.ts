@@ -836,6 +836,11 @@ async function fireReview(
   await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   if (!isEnabled('review-new-prs') || behaviorAborted()) return false
   const expectedHead = await currentHeadSha(pr.repo, pr.number, actor)
+  // The head-SHA lookup above is a subprocess with a 30s timeout, so the user
+  // has a real window to turn the behaviour off while it is out. Nothing
+  // re-read the flag between it returning and the spawn below, so a toggle-off
+  // in that window still posted on the pull request it was meant to stop.
+  if (!isEnabled('review-new-prs') || behaviorAborted()) return false
   // Pass the priority ceiling through as `--p`. agent-interface forwards
   // it to github-interface as `--p <value>`; for review-new-prs the
   // possible values are p0 / p1 / p2.
@@ -1336,6 +1341,11 @@ async function fireApprove(
   await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   if (!isEnabled('approve-prs') || behaviorAborted()) return false
   const currentHead = await currentHeadSha(pr.repo, pr.number, actor)
+  // The head-SHA lookup above is a subprocess with a 30s timeout, so the user
+  // has a real window to turn the behaviour off while it is out. Nothing
+  // re-read the flag between it returning and the spawn below, so a toggle-off
+  // in that window still posted on the pull request it was meant to stop.
+  if (!isEnabled('approve-prs') || behaviorAborted()) return false
   if (currentHead !== expectedHead) {
     throw new Error(
       `approval head changed before launch: expected ${expectedHead}, got ${currentHead}`,

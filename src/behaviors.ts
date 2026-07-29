@@ -141,6 +141,12 @@ export async function setScratchpad(key: BehaviorKey, text: string): Promise<voi
 }
 
 // Called by the view on init to load the current state from the server.
+// Whether the last read of server state succeeded. The toggles drive agents
+// that write to real pull requests, so the view needs to know when what it is
+// showing is a guess rather than the server's answer.
+let stateLoadOk = false
+export function isBehaviorStateLoaded(): boolean { return stateLoadOk }
+
 export async function refreshState(): Promise<void> {
   try {
     const res = await fetch('/api/behaviors')
@@ -153,7 +159,9 @@ export async function refreshState(): Promise<void> {
       lastByKey[k] = data[k]?.lastTriggered ?? null
     }
     diagnostics = data.diagnostics ?? null
+    stateLoadOk = true
   } catch (error) {
+    stateLoadOk = false
     diagnostics = {
       status: 'degraded',
       agentLogsError: error instanceof Error ? error.message : String(error),
