@@ -3647,9 +3647,18 @@ function attachHandlers() {
   docEl!.addEventListener('paste', (e: ClipboardEvent) => {
     e.preventDefault()
     const text = e.clipboardData?.getData('text/plain') || ''
+    // Snapshot before the insert. execCommand called from inside a paste
+    // handler does not reliably deliver a beforeinput of its own, so the
+    // usual recorder never sees the edit — a paste landed and Cmd+Z then
+    // did nothing at all, while typing or deleting over the same selection
+    // undid correctly. Capturing here covers both cases: if beforeinput does
+    // fire, this is the same pre-state it would have taken, and the extra
+    // commit below is a no-op once the batch has closed.
+    noteHistoryPre()
     // insertText respects the line model: newlines split into new
     // editor-line divs via the browser's normal Enter handling.
     document.execCommand('insertText', false, text)
+    commitHistoryBatch(true)
   })
 
   // Drag-and-drop also tries to inject HTML; force plain-text the same
@@ -3658,7 +3667,10 @@ function attachHandlers() {
     e.preventDefault()
     const text = e.dataTransfer?.getData('text/plain') || ''
     if (!text) return
+    // Same reasoning as paste above.
+    noteHistoryPre()
     document.execCommand('insertText', false, text)
+    commitHistoryBatch(true)
   })
 
   // Selection.toString() and the browser's default copy data both
