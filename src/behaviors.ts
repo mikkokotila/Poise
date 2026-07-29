@@ -91,12 +91,25 @@ export function getBehaviorDiagnostics(): BehaviorDiagnostics | null {
   return diagnostics
 }
 
-async function postBehavior(key: BehaviorKey, body: { enabled?: boolean, setting?: BehaviorSetting, scratchpad?: string }) {
+// A 409 from the memory precondition carries the value that is actually
+// stored, so the caller can offer it rather than just reporting a number.
+export class BehaviorConflictError extends Error {
+  constructor(message: string, readonly current: string) { super(message) }
+}
+
+async function postBehavior(key: BehaviorKey, body: { enabled?: boolean, setting?: BehaviorSetting, scratchpad?: string, scratchpadPrevious?: string }) {
   const res = await fetch(`/api/behaviors/${encodeURIComponent(key)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
+  if (res.status === 409) {
+    const data = await res.json().catch(() => ({}))
+    throw new BehaviorConflictError(
+      data?.error || 'the memory changed since it was loaded',
+      typeof data?.scratchpad === 'string' ? data.scratchpad : '',
+    )
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
 }
@@ -128,14 +141,22 @@ export async function setSetting(key: BehaviorKey, setting: BehaviorSetting): Pr
   }
 }
 
-export async function setScratchpad(key: BehaviorKey, text: string): Promise<void> {
+// `loaded` is what the caller believed was stored when it began editing. The
+// server refuses the write if that no longer matches, so a second window
+// cannot silently overwrite the first one's memory.
+export async function setScratchpad(key: BehaviorKey, text: string, loaded?: string): Promise<void> {
   const previous = scratchpadByKey[key] ?? ''
   scratchpadByKey[key] = text
   try {
-    const data = await postBehavior(key, { scratchpad: text })
+    const data = await postBehavior(key, {
+      scratchpad: text,
+      ...(typeof loaded === 'string' ? { scratchpadPrevious: loaded } : {}),
+    })
     if (typeof data.scratchpad === 'string') scratchpadByKey[key] = data.scratchpad
   } catch (err) {
-    scratchpadByKey[key] = previous
+    // On a conflict the server told us what is really stored; keep the mirror
+    // truthful rather than restoring a value we now know is stale.
+    scratchpadByKey[key] = err instanceof BehaviorConflictError ? err.current : previous
     throw err
   }
 }

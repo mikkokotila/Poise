@@ -9,7 +9,7 @@
 // runtime — the view is just a UI for state, not the place where
 // agent automations actually run.
 
-import { BEHAVIORS, isEnabled, setEnabled, getSetting, setSetting, getScratchpad, setScratchpad, getLastTriggered, getBehaviorDiagnostics, refreshState, type BehaviorKey, type BehaviorSetting, isBehaviorStateLoaded, getBehaviorOwner } from '../behaviors'
+import { BEHAVIORS, isEnabled, setEnabled, getSetting, setSetting, getScratchpad, setScratchpad, getLastTriggered, getBehaviorDiagnostics, refreshState, BehaviorConflictError, type BehaviorKey, type BehaviorSetting, isBehaviorStateLoaded, getBehaviorOwner } from '../behaviors'
 
 let viewEl: HTMLElement
 let initialized = false
@@ -63,6 +63,46 @@ function ownerCell(username: string | null): string {
 // checkbox — dropping the guard that stops a second click while the first is
 // still travelling. Rendering consults this so the guard survives a repaint.
 const togglesInFlight = new Set<BehaviorKey>()
+
+// A native <select> fires `change` on every value the keyboard passes through,
+// so holding Down from ==p0 to <=p4 used to persist p1, p2 and p3 on the way —
+// each one a ceiling a behavior could genuinely fire at. And disabling the
+// element while that write was in flight took focus away from the person
+// pressing the key. Settle on the value they land on, then write once.
+const SETTING_WRITE_DELAY_MS = 400
+const settingWrites = new Map<BehaviorKey, ReturnType<typeof setTimeout>>()
+
+function queueSettingWrite(key: BehaviorKey, requested: BehaviorSetting) {
+  const pending = settingWrites.get(key)
+  if (pending !== undefined) clearTimeout(pending)
+  settingWrites.set(key, setTimeout(() => {
+    settingWrites.delete(key)
+    void setSetting(key, requested).catch((err: unknown) => {
+      alert(`Could not update behavior setting: ${(err as Error).message}`)
+    }).finally(() => {
+      // Another keystroke may have queued a newer value while this was in
+      // flight; leave the control showing what the person chose, not what
+      // this older write happened to store.
+      if (settingWrites.has(key)) return
+      const current = viewEl.querySelector<HTMLSelectElement>(
+        `select.behavior-setting[data-behavior="${key}"]`,
+      )
+      if (current) current.value = getSetting(key)
+    })
+  }, SETTING_WRITE_DELAY_MS))
+}
+
+// Leaving the view must not drop a ceiling the person just chose.
+function flushSettingWrites() {
+  for (const [key, timer] of settingWrites) {
+    clearTimeout(timer)
+    settingWrites.delete(key)
+    const sel = viewEl?.querySelector<HTMLSelectElement>(
+      `select.behavior-setting[data-behavior="${key}"]`,
+    )
+    if (sel) void setSetting(key, sel.value as BehaviorSetting).catch(() => {})
+  }
+}
 
 function stateUnknown(): boolean {
   return !isBehaviorStateLoaded()
@@ -323,12 +363,23 @@ async function saveMemory(): Promise<boolean> {
   memorySaveBtn.disabled = true
   memorySaveBtn.textContent = 'Saving…'
   try {
-    await setScratchpad(key, text)
+    await setScratchpad(key, text, memoryLoadedValue)
     memoryLoadedValue = text
     setMemoryStatus('Saved.', 'ok')
     refreshMemoryCell(key)
     return true
   } catch (err) {
+    if (err instanceof BehaviorConflictError) {
+      // Someone else wrote this memory while it was open here. Keep what was
+      // typed — it is the only copy — and say plainly what happened, so the
+      // choice to merge or overwrite belongs to the person who typed it.
+      memoryLoadedValue = err.current
+      setMemoryStatus(
+        'Not saved — this memory was changed elsewhere. Save again to overwrite it with what is here.',
+        'error',
+      )
+      return false
+    }
     setMemoryStatus('Failed to save: ' + (err as Error).message, 'error')
     return false
   } finally {
@@ -484,19 +535,7 @@ function attachHandlers() {
     if (target.matches('select.behavior-setting[data-behavior]')) {
       const sel = target as HTMLSelectElement
       const key = sel.dataset.behavior as BehaviorKey
-      const requested = sel.value as BehaviorSetting
-      sel.disabled = true
-      void setSetting(key, requested).catch((err: unknown) => {
-        alert(`Could not update behavior setting: ${(err as Error).message}`)
-      }).finally(() => {
-        const current = viewEl.querySelector<HTMLSelectElement>(
-          `select.behavior-setting[data-behavior="${key}"]`,
-        )
-        if (current) {
-          current.value = getSetting(key)
-          current.disabled = false
-        }
-      })
+      queueSettingWrite(key, sel.value as BehaviorSetting)
       return
     }
   })
@@ -547,6 +586,7 @@ async function tickRefresh() {
 
 export function stopBehaviorsRefresh() {
   closeMemoryPanel()
+  flushSettingWrites()
   if (!tickListening) return
   window.removeEventListener('poise:refresh-tick', onTick)
   tickListening = false

@@ -286,6 +286,33 @@ describe('production server', () => {
     expect(state['review-new-prs'].enabled).toBe(false)
   })
 
+  // Two Poise windows open on the same behavior used to mean the later save
+  // silently discarded the earlier one — a memory is prose someone wrote, and
+  // losing it leaves no trace that it existed.
+  it('refuses a memory write when the stored value moved underneath it', async () => {
+    const url = `${baseUrl}/api/behaviors/review-new-prs`
+    const headers = { 'Content-Type': 'application/json' }
+    await fetch(url, { method: 'POST', headers, body: JSON.stringify({ scratchpad: 'from window A' }) })
+
+    const stale = await fetch(url, {
+      method: 'POST', headers,
+      body: JSON.stringify({ scratchpad: 'from window B', scratchpadPrevious: '' }),
+    })
+    expect(stale.status).toBe(409)
+    expect(await stale.json()).toMatchObject({ scratchpad: 'from window A' })
+
+    const state = await (await fetch(`${baseUrl}/api/behaviors`)).json() as Record<string, { scratchpad?: string }>
+    expect(state['review-new-prs'].scratchpad).toBe('from window A')
+
+    // Re-reading and saving against the current value goes through.
+    const ok = await fetch(url, {
+      method: 'POST', headers,
+      body: JSON.stringify({ scratchpad: 'from window B', scratchpadPrevious: 'from window A' }),
+    })
+    expect(ok.status).toBe(200)
+    expect(await ok.json()).toMatchObject({ scratchpad: 'from window B' })
+  })
+
   it.each([0, -1, 1.5, 65_536, Number.NaN])('rejects invalid production port %s', async (port) => {
     await expect(production.startProductionServer({ staticDir, port })).rejects.toThrow(/POISE_PORT/)
   })
