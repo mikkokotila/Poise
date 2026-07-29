@@ -147,11 +147,22 @@ export async function setScratchpad(key: BehaviorKey, text: string): Promise<voi
 let stateLoadOk = false
 export function isBehaviorStateLoaded(): boolean { return stateLoadOk }
 
+// Ordering guard for concurrent reads. Two refreshes can be in flight at once
+// — the tick fires while a view entry is still loading, or a slow response is
+// still on the wire when a newer one returns. Without a sequence the older
+// answer could land last and overwrite newer state: a toggle the user had just
+// switched repainted itself from a snapshot taken before the change, and a
+// just-saved memory reverted to its pre-save text.
+let refreshSequence = 0
+
 export async function refreshState(): Promise<void> {
+  const mine = ++refreshSequence
   try {
     const res = await fetch('/api/behaviors')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
+    // A newer refresh already answered; this one is history.
+    if (mine !== refreshSequence) return
     for (const k of BEHAVIORS.map((behavior) => behavior.key)) {
       enabledByKey[k] = !!data[k]?.enabled
       if (data[k]?.setting) settingByKey[k] = data[k].setting
@@ -161,6 +172,7 @@ export async function refreshState(): Promise<void> {
     diagnostics = data.diagnostics ?? null
     stateLoadOk = true
   } catch (error) {
+    if (mine !== refreshSequence) return
     stateLoadOk = false
     diagnostics = {
       status: 'degraded',

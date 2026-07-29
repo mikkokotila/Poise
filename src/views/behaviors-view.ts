@@ -105,8 +105,19 @@ function relTime(iso: string): string {
   return `${Math.floor(months / 12)}y`
 }
 
+// "Last triggered" is read from the agent log. When that read fails the value
+// is simply absent, which used to render as an em dash — indistinguishable
+// from "this has never run". Say the truth instead: unknown, not never.
+function lastTriggeredUnavailable(): boolean {
+  const d = getBehaviorDiagnostics()
+  return !!d?.agentLogsError
+}
+
 function lastTriggeredCell(key: BehaviorKey): string {
   const last = getLastTriggered(key)
+  if (!last && lastTriggeredUnavailable()) {
+    return '<span class="last-dash" title="The agent log could not be read, so this is unknown — not necessarily never.">?</span>'
+  }
   if (!last) return '<span class="last-dash">—</span>'
   return `<a class="behavior-last-link" href="#" data-target="${escapeHtml(last.target)}" title="${escapeHtml(last.target)} · ${escapeHtml(last.at)}">${escapeHtml(relTime(last.at))}</a>`
 }
@@ -210,6 +221,19 @@ function buildMemoryPanel(): HTMLElement {
 }
 
 function openMemoryPanel(key: BehaviorKey) {
+  // Clicking a different behaviour's memory button replaced the textarea in
+  // place, so whatever had been typed for the previous one vanished without
+  // being saved and without a word. Commit it first, exactly as closing does,
+  // and stay put if that commit fails rather than moving on over lost work.
+  if (memoryKey && memoryKey !== key && memoryTextarea
+      && memoryTextarea.value !== memoryLoadedValue) {
+    const previous = memoryTextarea.value
+    void saveMemory().then((saved) => {
+      if (saved) openMemoryPanel(key)
+      else if (memoryTextarea) memoryTextarea.value = previous
+    })
+    return
+  }
   if (!memoryPanelEl) {
     memoryPanelEl = buildMemoryPanel()
     document.body.appendChild(memoryPanelEl)
@@ -220,6 +244,8 @@ function openMemoryPanel(key: BehaviorKey) {
   if (memoryTextarea) memoryTextarea.value = getScratchpad(key)
   memoryLoadedValue = getScratchpad(key)
   setMemoryStatus('')
+  memoryPanelEl.removeAttribute('inert')
+  memoryPanelEl.removeAttribute('aria-hidden')
   memoryPanelEl.classList.add('open')
   // Defer listener attach so the click that opened the panel doesn't
   // immediately count as an outside-click and close it.
@@ -248,6 +274,11 @@ function closeMemoryPanel() {
 
 function finishClosingMemoryPanel() {
   if (!memoryPanelEl) return
+  // Off-screen is not gone: without this the closed panel kept its place in
+  // the tab order, so tabbing landed in a textarea nobody could see and its
+  // Save button did nothing at all (memoryKey is null by then).
+  memoryPanelEl.setAttribute('inert', '')
+  memoryPanelEl.setAttribute('aria-hidden', 'true')
   memoryPanelEl.classList.remove('open')
   memoryKey = null
   memoryLoadedValue = ''
@@ -273,6 +304,13 @@ function onMemoryOutside(e: MouseEvent) {
 // panel open when it is not.
 async function saveMemory(): Promise<boolean> {
   if (!memoryKey || !memoryTextarea || !memorySaveBtn) return true
+  // When the state read failed, the textarea was filled from an empty mirror
+  // rather than from the stored note — saving then would replace a real memory
+  // with nothing. Refuse, and say why.
+  if (stateUnknown()) {
+    setMemoryStatus('Not saved — the current memory could not be read from the server.', 'error')
+    return false
+  }
   const key = memoryKey
   const text = memoryTextarea.value
   memorySaveBtn.disabled = true

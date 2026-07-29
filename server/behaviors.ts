@@ -1954,11 +1954,27 @@ export function getBehaviorsRuntimeHealth(): BehaviorsRuntimeHealth {
   } catch {
     reviewer = null
   }
+  // Every behaviour reads `me` to know whose pull requests to act on, and each
+  // returns immediately when it is unset. So an enabled behaviour with no `me`
+  // does nothing at all, tick after tick, while the view reported a healthy
+  // runtime and an Active toggle — the user has no way to tell it is inert.
+  // Every behaviour reads `me` to know whose pull requests to act on, and each
+  // returns immediately when it is unset. So an enabled behaviour with no `me`
+  // does nothing at all, tick after tick, while the view showed an Active
+  // toggle and said nothing — the user has no way to tell it is inert. Report
+  // it, but leave the overall status alone: the runtime itself is healthy, and
+  // the production monitor alerts on that field.
+  const author = getMeta('me') || ''
   const identityValid = reviewer !== null
+  const identityError = reviewer === null
+    ? 'REVIEW_AGENT_USERNAME is missing or invalid'
+    : (anyEnabled && author === ''
+      ? 'No GitHub username set in Settings — enabled behaviours cannot act until it is'
+      : null)
   const identity = {
     status: identityValid ? 'valid' as const : 'invalid' as const,
     actor: reviewer,
-    error: identityValid ? null : 'REVIEW_AGENT_USERNAME is missing or invalid',
+    error: identityError,
   }
   const datastoreUnavailable = anyEnabled && datastoreFreshness.status === 'unavailable'
   return {
