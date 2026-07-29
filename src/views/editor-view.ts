@@ -1241,6 +1241,30 @@ function redoEditor(): void {
 // the native behaviour first.
 
 // Nearest .editor-line ancestor of a node, or null when outside.
+// Where a pointer event lands, in document terms. caretRangeFromPoint is the
+// widely-supported spelling; caretPositionFromPoint is the standard one.
+function caretRangeFromPoint(x: number, y: number): Range | null {
+  const d = document as Document & {
+    caretRangeFromPoint?: (x: number, y: number) => Range | null
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node, offset: number } | null
+  }
+  if (typeof d.caretRangeFromPoint === 'function') return d.caretRangeFromPoint(x, y)
+  const pos = d.caretPositionFromPoint?.(x, y)
+  if (!pos) return null
+  const r = document.createRange()
+  r.setStart(pos.offsetNode, pos.offset)
+  r.collapse(true)
+  return r
+}
+
+interface DragSource {
+  startLine: HTMLElement
+  endLine: HTMLElement
+  startOffset: number
+  endOffset: number
+}
+let dragSource: DragSource | null = null
+
 function lineElOf(node: Node | null): HTMLElement | null {
   let n: Node | null = node
   while (n) {
@@ -1493,6 +1517,48 @@ function rebuildLineInPlace(line: HTMLElement, kind: LineKind) {
 // in the case of code-block fences, every line that follows in the
 // block — gets rebuilt in place with cursor preserved at its
 // textContent offset.
+// Renumber the ordered-list block containing `line`. A numbered list is a run
+// of adjacent list-item lines whose markers are numeric; inserting into one
+// used to leave the numbers repeating (1, 2, 2, 3) and deleting left a gap.
+// Bullets are untouched — their marker carries no ordinal.
+function renumberOrderedListAround(line: HTMLElement | null): void {
+  if (!docEl || !line) return
+  const isNumbered = (el: Element | null) => !!el
+    && (el as HTMLElement).dataset?.kind === 'list-item'
+    && /^\d+[.)] /.test((el as HTMLElement).textContent || '')
+  if (!isNumbered(line)) return
+
+  let first: HTMLElement = line
+  while (isNumbered(first.previousElementSibling)) {
+    first = first.previousElementSibling as HTMLElement
+  }
+  const block: HTMLElement[] = []
+  for (let el: HTMLElement | null = first; el && isNumbered(el);
+       el = el.nextElementSibling as HTMLElement | null) {
+    block.push(el)
+  }
+
+  // Keep whichever delimiter the writer chose, and start from their first
+  // number rather than forcing 1 — a list may deliberately begin at 0 or 5.
+  const head = (block[0].textContent || '').match(/^(\d+)([.)]) /)
+  if (!head) return
+  const start = parseInt(head[1], 10)
+  const delim = head[2]
+  block.forEach((el, i) => {
+    const text = el.textContent || ''
+    const want = `${start + i}${delim} `
+    const rest = text.replace(/^\d+[.)] /, '')
+    if (`${want}${rest}` === text) return
+    const caret = getCursorOffsetInLine(el)
+    const fresh = buildLineEl(`${want}${rest}`, 'list-item')
+    el.dataset.kind = fresh.dataset.kind!
+    if (fresh.dataset.listMarker !== undefined) el.dataset.listMarker = fresh.dataset.listMarker
+    el.innerHTML = ''
+    while (fresh.firstChild) el.appendChild(fresh.firstChild)
+    if (caret !== null) setCursorOffsetInLine(el, Math.min(caret, (el.textContent || '').length))
+  })
+}
+
 function reclassifyLines() {
   if (!docEl) return
   // The browser sometimes promotes the contenteditable into containing
@@ -1696,10 +1762,30 @@ function placeCaretAtEnd() {
   sel.addRange(range)
 }
 
+// A save that will not succeed must not silently lock the editor. When the
+// file has changed underneath us the flush keeps failing, and every doc-picker
+// click and every Cmd+N used to be a no-op with nothing said — the view simply
+// stopped responding for the rest of the session, and the only way out was to
+// reload and lose the unsaved text. Say what happened and let the user decide.
+async function flushBeforeLeavingDocument(action: string): Promise<boolean> {
+  if (await flushEditorSaves()) return true
+  const keep = window.confirm(
+    `This document could not be saved — it changed somewhere else since it was opened.\n\n`
+    + `OK to ${action} anyway and lose the unsaved changes, or Cancel to stay here `
+    + `and copy your text out first.`,
+  )
+  if (!keep) {
+    setMeta('Not saved — changed elsewhere')
+    return false
+  }
+  await discardEditorSaves()
+  return true
+}
+
 async function loadDoc(slug: string) {
   if (!docEl) return
   const requestId = ++loadRequestId
-  if (!(await flushEditorSaves()) || requestId !== loadRequestId) return
+  if (!(await flushBeforeLeavingDocument('switch documents')) || requestId !== loadRequestId) return
   closePanel()
   try {
     const res = await fetch(`/api/editor/doc/${encodeURIComponent(slug)}`)
@@ -1713,7 +1799,7 @@ async function loadDoc(slug: string) {
     // The current document remains editable while the target request is
     // in flight. Drain once more so keystrokes made during that request
     // cannot be stranded when currentSlug changes below.
-    if (!(await flushEditorSaves()) || requestId !== loadRequestId) return
+    if (!(await flushBeforeLeavingDocument('switch documents')) || requestId !== loadRequestId) return
     currentSlug = nextSlug
     documentVersions.set(currentSlug, data.version)
     loadIntoEditor(data.content)
@@ -1736,7 +1822,7 @@ async function loadDoc(slug: string) {
 }
 
 async function newDoc() {
-  if (!(await flushEditorSaves())) return
+  if (!(await flushBeforeLeavingDocument('start a new document'))) return
   try {
     const res = await fetch('/api/editor/docs', { method: 'POST' })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -2377,9 +2463,12 @@ function reAnchorAnnotation(a: Annotation): AnnotationRange | null {
       if (!fallback) fallback = candidate
     }
   }
-  // Every occurrence is already spoken for — keep the closest rather than
-  // orphaning the note entirely.
-  return fallback
+  // Every occurrence is already spoken for. Orphan the note rather than park
+  // it on top of another one: two marks over the same characters is how a
+  // note ends up labelling text it was never about, and the user cannot tell
+  // the two apart to remove either.
+  void fallback
+  return null
 }
 
 // Render the annotation underline overlay. Each annotation can occupy
@@ -2854,6 +2943,10 @@ function openIssueComposerFromSelection(): void {
 
   const showError = (msg: string) => { errEl.textContent = msg; errEl.hidden = false }
   const submit = async () => {
+    // Cmd+Enter auto-repeats while held, and the shortcut called this directly
+    // — the disabled button only guarded the click. Holding it opened several
+    // identical GitHub issues, which the user then had to go and close.
+    if (addB.disabled) return
     const title = titleInput.value.trim()
     const body = bodyTa.value.trim()
     const repo = repoSel.value
@@ -3064,9 +3157,18 @@ async function refreshPanelChat(sessionId: string): Promise<void> {
   if (panelPollInflight) return
   panelPollInflight = true
   try {
+    // The panel is shared: opening annotation B while A's transcript is still
+    // in flight used to let A's reply land in B's panel and keep re-landing
+    // there every poll, so the writer read a conversation belonging to a
+    // different passage with no way back. Bail unless this response is still
+    // for the annotation on screen.
+    const ownerAtStart = panelForId
     const res = await fetch(`/api/chat?session=${encodeURIComponent(sessionId)}`)
     if (!res.ok) return
     const data = await res.json()
+    if (panelForId !== ownerAtStart) return
+    const stillOpen = annotations.find((a) => a.id === panelForId)
+    if (!stillOpen || stillOpen.session_id !== sessionId) return
     panelMessages = (data.messages || []) as PanelChatEntry[]
     panelChatLoadedFor = sessionId
     // Pull bodies for every newly-completed entry whose hash we
@@ -3261,6 +3363,12 @@ function autoResizePanelInput(): void {
 //     dedicated chat pane. The first message gets the highlighted
 //     snippet prepended so the agent has context.
 function openPanelForAnnotation(id: string): void {
+  // Opening a different note ends the previous one's session. Without this the
+  // just-created empty note escaped discard-on-close — closePanel never ran,
+  // panelCreatedId still pointed at it, and it stayed on the page as an
+  // underline that reopens an empty panel forever.
+  if (panelForId != null && panelForId !== id) discardPanelAnnotationIfEmpty()
+  if (panelCreatedId !== id) panelCreatedId = null
   if (!panelEl) return
   const a = annotations.find((x) => x.id === id)
   if (!a) return
@@ -3701,13 +3809,64 @@ function attachHandlers() {
 
   // Drag-and-drop also tries to inject HTML; force plain-text the same
   // way as paste.
+  // Remember what was picked up, so an in-document drag can move rather than
+  // copy: the drop handler cancels the browser's default, and that default is
+  // what would have removed the source.
+  docEl!.addEventListener('dragstart', () => {
+    const sel = window.getSelection()
+    if (!sel || sel.rangeCount === 0 || sel.getRangeAt(0).collapsed) { dragSource = null; return }
+    const range = sel.getRangeAt(0)
+    const startLine = lineElOf(range.startContainer)
+    const endLine = lineElOf(range.endContainer)
+    if (!startLine || !endLine) { dragSource = null; return }
+    dragSource = {
+      startLine, endLine,
+      startOffset: offsetInLineFor(startLine, range.startContainer, range.startOffset),
+      endOffset: offsetInLineFor(endLine, range.endContainer, range.endOffset),
+    }
+  })
+  docEl!.addEventListener('dragend', () => { dragSource = null })
+
   docEl!.addEventListener('drop', (e: DragEvent) => {
     e.preventDefault()
     const text = e.dataTransfer?.getData('text/plain') || ''
+    const source = dragSource
+    dragSource = null
     if (!text) return
-    // Same reasoning as paste above.
     noteHistoryPre()
-    document.execCommand('insertText', false, text)
+
+    // Insert where the pointer is, not where the selection happens to be.
+    // execCommand targets the selection, so dropped text landed back at its
+    // origin: an in-document drag appeared to do nothing at all, and text
+    // dragged in from another application went to the last caret position
+    // rather than where it was aimed.
+    const at = caretRangeFromPoint(e.clientX, e.clientY)
+    const dropLine = at ? lineElOf(at.startContainer) : null
+    if (!at || !dropLine || dropLine.parentElement !== docEl) return
+    const dropOffset = offsetInLineFor(dropLine, at.startContainer, at.startOffset)
+    const dropIndex = Array.prototype.indexOf.call(docEl!.children, dropLine)
+
+    if (source) {
+      // In-document move: remove the original first, then insert at the drop
+      // point. Both go through source coordinates so hidden markers survive.
+      // When the removal was earlier on the same line, the drop offset shifts
+      // left by however much came out.
+      const sameLine = source.startLine === dropLine
+      const removed = sameLine && source.endOffset <= dropOffset
+        ? source.endOffset - source.startOffset
+        : 0
+      replaceSourceRange(source.startLine, source.startOffset, source.endLine, source.endOffset, '')
+      const target = (docEl!.children[Math.min(dropIndex, docEl!.children.length - 1)] as HTMLElement | undefined) || null
+      if (target) {
+        const offset = Math.max(0, Math.min(dropOffset - removed, (target.textContent || '').length))
+        replaceSourceRange(target, offset, target, offset, text)
+      }
+    } else {
+      replaceSourceRange(dropLine, dropOffset, dropLine, dropOffset, text)
+    }
+    updateEmptyState()
+    scheduleSave()
+    renderAnnotationOverlay()
     commitHistoryBatch(true)
   })
 
@@ -3928,6 +4087,11 @@ function attachHandlers() {
             const lineText = line.textContent || ''
             const markerMatch = lineText.match(/^(?:- |\d+[.)] )/)
             if (markerMatch) {
+              // These branches rewrite the DOM directly, so no beforeinput
+              // records them. Without this the new item could not be undone at
+              // all, and later in a session the Enter was folded into the
+              // preceding typing step so one undo threw away both.
+              recordHistoryPoint()
               const marker = markerMatch[0]
               const markerLen = marker.length
               const cursorOffset = getCursorOffsetInLine(line) ?? 0
@@ -3944,6 +4108,7 @@ function attachHandlers() {
                 sel.removeAllRanges()
                 sel.addRange(r)
                 reclassifyLines()
+                renumberOrderedListAround(line)
                 updateEmptyState()
                 scheduleSave()
                 renderAnnotationOverlay()
@@ -3980,6 +4145,7 @@ function attachHandlers() {
                 line.parentNode!.insertBefore(newLine, line.nextSibling)
                 setCursorOffsetInLine(newLine, newMarker.length)
                 reclassifyLines()
+                renumberOrderedListAround(line)
                 updateEmptyState()
                 scheduleSave()
                 renderAnnotationOverlay()
