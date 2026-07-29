@@ -5,7 +5,7 @@ import { initMenu } from './menu'
 import { initMainView, refreshMainView } from './views/main-view'
 import { initCurrentView } from './views/current-view'
 import { initSwarmView, focusRow as focusSwarmRow } from './views/swarm-view'
-import { initBehaviorsView } from './views/behaviors-view'
+import { initBehaviorsView, stopBehaviorsRefresh } from './views/behaviors-view'
 import { initSnippetsView } from './views/snippets-view'
 import { initEditorView, stopEditorRefresh } from './views/editor-view'
 import { toggle as toggleChat } from './views/chat-pane'
@@ -47,6 +47,12 @@ function showView(v: ViewSlug) {
   // writer-mode body class so the chrome reappears in other views.
   // All of those are essential on leaving the editor; keep the call.
   if (v !== 'editor')    stopEditorRefresh()
+  // Behaviors needs the same leave-cleanup. stopBehaviorsRefresh existed and
+  // was documented but nothing ever called it, so its memory panel stayed open
+  // over whatever view came next — a Behaviors draft floating over the editor —
+  // and its refresh tick kept fetching /api/behaviors for the rest of the
+  // session while the view was hidden.
+  if (v !== 'behaviors') stopBehaviorsRefresh()
 
   // Initialize the target first so content exists before the animation starts
   if (v === 'main')           initMainView()

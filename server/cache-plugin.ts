@@ -256,6 +256,17 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
               if (typeof body.scratchpad !== 'string') {
                 return json(res, 400, { error: 'scratchpad must be a string' })
               }
+              // A memory write is a blind overwrite of whatever is stored. Two
+              // Poise windows editing the same behavior meant the later save
+              // silently discarded the earlier one. When the client says what
+              // it believed was stored, hold it to that and let it re-read.
+              if (typeof body.scratchpadPrevious === 'string'
+                && getScratchpadMap()[key] !== body.scratchpadPrevious) {
+                return json(res, 409, {
+                  error: 'the memory changed since it was loaded',
+                  scratchpad: getScratchpadMap()[key],
+                })
+              }
             }
             // Persist passive configuration first; enabling last guarantees
             // the first tick observes the submitted setting and memory.

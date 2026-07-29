@@ -836,6 +836,11 @@ async function fireReview(
   await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   if (!isEnabled('review-new-prs') || behaviorAborted()) return false
   const expectedHead = await currentHeadSha(pr.repo, pr.number, actor)
+  // The head-SHA lookup above is a subprocess with a 30s timeout, so the user
+  // has a real window to turn the behaviour off while it is out. Nothing
+  // re-read the flag between it returning and the spawn below, so a toggle-off
+  // in that window still posted on the pull request it was meant to stop.
+  if (!isEnabled('review-new-prs') || behaviorAborted()) return false
   // Pass the priority ceiling through as `--p`. agent-interface forwards
   // it to github-interface as `--p <value>`; for review-new-prs the
   // possible values are p0 / p1 / p2.
@@ -1336,6 +1341,11 @@ async function fireApprove(
   await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   if (!isEnabled('approve-prs') || behaviorAborted()) return false
   const currentHead = await currentHeadSha(pr.repo, pr.number, actor)
+  // The head-SHA lookup above is a subprocess with a 30s timeout, so the user
+  // has a real window to turn the behaviour off while it is out. Nothing
+  // re-read the flag between it returning and the spawn below, so a toggle-off
+  // in that window still posted on the pull request it was meant to stop.
+  if (!isEnabled('approve-prs') || behaviorAborted()) return false
   if (currentHead !== expectedHead) {
     throw new Error(
       `approval head changed before launch: expected ${expectedHead}, got ${currentHead}`,
@@ -1944,11 +1954,27 @@ export function getBehaviorsRuntimeHealth(): BehaviorsRuntimeHealth {
   } catch {
     reviewer = null
   }
+  // Every behaviour reads `me` to know whose pull requests to act on, and each
+  // returns immediately when it is unset. So an enabled behaviour with no `me`
+  // does nothing at all, tick after tick, while the view reported a healthy
+  // runtime and an Active toggle — the user has no way to tell it is inert.
+  // Every behaviour reads `me` to know whose pull requests to act on, and each
+  // returns immediately when it is unset. So an enabled behaviour with no `me`
+  // does nothing at all, tick after tick, while the view showed an Active
+  // toggle and said nothing — the user has no way to tell it is inert. Report
+  // it, but leave the overall status alone: the runtime itself is healthy, and
+  // the production monitor alerts on that field.
+  const author = getMeta('me') || ''
   const identityValid = reviewer !== null
+  const identityError = reviewer === null
+    ? 'REVIEW_AGENT_USERNAME is missing or invalid'
+    : (anyEnabled && author === ''
+      ? 'No GitHub username set in Settings — enabled behaviours cannot act until it is'
+      : null)
   const identity = {
     status: identityValid ? 'valid' as const : 'invalid' as const,
     actor: reviewer,
-    error: identityValid ? null : 'REVIEW_AGENT_USERNAME is missing or invalid',
+    error: identityError,
   }
   const datastoreUnavailable = anyEnabled && datastoreFreshness.status === 'unavailable'
   return {

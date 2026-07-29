@@ -1875,6 +1875,41 @@ describe('behavior launch claims', () => {
     expect(db.hasSeen('review-new-prs', '__snapshot_v3__')).toBe(false)
   })
 
+  // The enabled flag is re-read immediately before the head-SHA lookup, but
+  // that lookup is a subprocess. Nothing checked again between it returning and
+  // the agent being spawned, so a toggle-off during that window still posted a
+  // review on the pull request the user was trying to stop.
+  it('does not launch after disable during the head-SHA lookup', async () => {
+    arrangeCli(false)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const headSha = deferred<{ stdout: string, stderr: string }>()
+    const base = mocks.runFile.getMockImplementation()!
+    mocks.runFile.mockImplementation(async (command: string, args: string[], options?: { cwd?: string }) => {
+      if (command === 'github-interface' && args[0] === '--head-sha') return headSha.promise
+      return base(command, args, options)
+    })
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
+    db.setMeta('behavior_review_new_prs_enabled', '1')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
+
+    const tick = runtime.runEnabledBehaviorsOnce()
+    await vi.waitFor(() => expect(mocks.runFile.mock.calls.some(
+      (c: unknown[]) => c[0] === 'github-interface' && (c[1] as string[])[0] === '--head-sha',
+    )).toBe(true))
+    const disable = runtime.setEnabled('review-new-prs', false)
+    headSha.resolve({
+      stdout: JSON.stringify({ action: 'head_sha', repository: pr.repo, pull_number: pr.number, head_sha: HEAD_SHA }),
+      stderr: '',
+    })
+    await Promise.all([tick, disable])
+
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+    expect(runtime.isEnabled('review-new-prs')).toBe(false)
+  })
+
   it('does not launch after disable during the final auth gate', async () => {
     arrangeCli(false)
     mocks.spawnDetached.mockResolvedValue(undefined)

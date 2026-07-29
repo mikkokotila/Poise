@@ -91,12 +91,25 @@ export function getBehaviorDiagnostics(): BehaviorDiagnostics | null {
   return diagnostics
 }
 
-async function postBehavior(key: BehaviorKey, body: { enabled?: boolean, setting?: BehaviorSetting, scratchpad?: string }) {
+// A 409 from the memory precondition carries the value that is actually
+// stored, so the caller can offer it rather than just reporting a number.
+export class BehaviorConflictError extends Error {
+  constructor(message: string, readonly current: string) { super(message) }
+}
+
+async function postBehavior(key: BehaviorKey, body: { enabled?: boolean, setting?: BehaviorSetting, scratchpad?: string, scratchpadPrevious?: string }) {
   const res = await fetch(`/api/behaviors/${encodeURIComponent(key)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
+  if (res.status === 409) {
+    const data = await res.json().catch(() => ({}))
+    throw new BehaviorConflictError(
+      data?.error || 'the memory changed since it was loaded',
+      typeof data?.scratchpad === 'string' ? data.scratchpad : '',
+    )
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
 }
@@ -128,32 +141,69 @@ export async function setSetting(key: BehaviorKey, setting: BehaviorSetting): Pr
   }
 }
 
-export async function setScratchpad(key: BehaviorKey, text: string): Promise<void> {
+// `loaded` is what the caller believed was stored when it began editing. The
+// server refuses the write if that no longer matches, so a second window
+// cannot silently overwrite the first one's memory.
+export async function setScratchpad(key: BehaviorKey, text: string, loaded?: string): Promise<void> {
   const previous = scratchpadByKey[key] ?? ''
   scratchpadByKey[key] = text
   try {
-    const data = await postBehavior(key, { scratchpad: text })
+    const data = await postBehavior(key, {
+      scratchpad: text,
+      ...(typeof loaded === 'string' ? { scratchpadPrevious: loaded } : {}),
+    })
     if (typeof data.scratchpad === 'string') scratchpadByKey[key] = data.scratchpad
   } catch (err) {
-    scratchpadByKey[key] = previous
+    // On a conflict the server told us what is really stored; keep the mirror
+    // truthful rather than restoring a value we now know is stale.
+    scratchpadByKey[key] = err instanceof BehaviorConflictError ? err.current : previous
     throw err
   }
 }
 
 // Called by the view on init to load the current state from the server.
+// Whether the last read of server state succeeded. The toggles drive agents
+// that write to real pull requests, so the view needs to know when what it is
+// showing is a guess rather than the server's answer.
+let stateLoadOk = false
+export function isBehaviorStateLoaded(): boolean { return stateLoadOk }
+
+// Owner of each behaviour, from the same payload as everything else.
+const ownerByKey: Partial<Record<BehaviorKey, string | null>> = {}
+export function getBehaviorOwner(key: BehaviorKey): string | null {
+  return ownerByKey[key] ?? null
+}
+
+// Ordering guard for concurrent reads. Two refreshes can be in flight at once
+// — the tick fires while a view entry is still loading, or a slow response is
+// still on the wire when a newer one returns. Without a sequence the older
+// answer could land last and overwrite newer state: a toggle the user had just
+// switched repainted itself from a snapshot taken before the change, and a
+// just-saved memory reverted to its pre-save text.
+let refreshSequence = 0
+
 export async function refreshState(): Promise<void> {
+  const mine = ++refreshSequence
   try {
     const res = await fetch('/api/behaviors')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
+    // A newer refresh already answered; this one is history.
+    if (mine !== refreshSequence) return
     for (const k of BEHAVIORS.map((behavior) => behavior.key)) {
       enabledByKey[k] = !!data[k]?.enabled
       if (data[k]?.setting) settingByKey[k] = data[k].setting
       scratchpadByKey[k] = typeof data[k]?.scratchpad === 'string' ? data[k].scratchpad : ''
       lastByKey[k] = data[k]?.lastTriggered ?? null
     }
+    for (const k of BEHAVIORS.map((behavior) => behavior.key)) {
+      ownerByKey[k] = typeof data[k]?.owner === 'string' ? data[k].owner : null
+    }
     diagnostics = data.diagnostics ?? null
+    stateLoadOk = true
   } catch (error) {
+    if (mine !== refreshSequence) return
+    stateLoadOk = false
     diagnostics = {
       status: 'degraded',
       agentLogsError: error instanceof Error ? error.message : String(error),

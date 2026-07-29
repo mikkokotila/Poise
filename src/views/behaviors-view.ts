@@ -9,7 +9,7 @@
 // runtime — the view is just a UI for state, not the place where
 // agent automations actually run.
 
-import { BEHAVIORS, isEnabled, setEnabled, getSetting, setSetting, getScratchpad, setScratchpad, getLastTriggered, getBehaviorDiagnostics, refreshState, type BehaviorKey, type BehaviorSetting } from '../behaviors'
+import { BEHAVIORS, isEnabled, setEnabled, getSetting, setSetting, getScratchpad, setScratchpad, getLastTriggered, getBehaviorDiagnostics, refreshState, BehaviorConflictError, type BehaviorKey, type BehaviorSetting, isBehaviorStateLoaded, getBehaviorOwner } from '../behaviors'
 
 let viewEl: HTMLElement
 let initialized = false
@@ -54,11 +54,70 @@ function ownerCell(username: string | null): string {
   `
 }
 
+// True when the last attempt to read server state failed, so the mirror is not
+// to be trusted. The toggles drive agents that write to real pull requests —
+// an unknown state must not be presented as a confident "off".
+// Behaviours whose enable/disable is still in flight. renderRows rebuilds a
+// row from scratch, and a rebuild triggered mid-request (the
+// poise:behaviors-changed listener calls it) produced a fresh, enabled
+// checkbox — dropping the guard that stops a second click while the first is
+// still travelling. Rendering consults this so the guard survives a repaint.
+const togglesInFlight = new Set<BehaviorKey>()
+
+// A native <select> fires `change` on every value the keyboard passes through,
+// so holding Down from ==p0 to <=p4 used to persist p1, p2 and p3 on the way —
+// each one a ceiling a behavior could genuinely fire at. And disabling the
+// element while that write was in flight took focus away from the person
+// pressing the key. Settle on the value they land on, then write once.
+const DEAD_LETTERS_SHOWN = 5
+const SETTING_WRITE_DELAY_MS = 400
+const settingWrites = new Map<BehaviorKey, ReturnType<typeof setTimeout>>()
+
+function queueSettingWrite(key: BehaviorKey, requested: BehaviorSetting) {
+  const pending = settingWrites.get(key)
+  if (pending !== undefined) clearTimeout(pending)
+  settingWrites.set(key, setTimeout(() => {
+    settingWrites.delete(key)
+    void setSetting(key, requested).catch((err: unknown) => {
+      alert(`Could not update behavior setting: ${(err as Error).message}`)
+    }).finally(() => {
+      // Another keystroke may have queued a newer value while this was in
+      // flight; leave the control showing what the person chose, not what
+      // this older write happened to store.
+      if (settingWrites.has(key)) return
+      const current = viewEl.querySelector<HTMLSelectElement>(
+        `select.behavior-setting[data-behavior="${key}"]`,
+      )
+      if (current) current.value = getSetting(key)
+    })
+  }, SETTING_WRITE_DELAY_MS))
+}
+
+// Leaving the view must not drop a ceiling the person just chose.
+function flushSettingWrites() {
+  for (const [key, timer] of settingWrites) {
+    clearTimeout(timer)
+    settingWrites.delete(key)
+    const sel = viewEl?.querySelector<HTMLSelectElement>(
+      `select.behavior-setting[data-behavior="${key}"]`,
+    )
+    if (sel) void setSetting(key, sel.value as BehaviorSetting).catch(() => {})
+  }
+}
+
+function stateUnknown(): boolean {
+  return !isBehaviorStateLoaded()
+}
+
 function toggleCell(key: BehaviorKey): string {
   const on = isEnabled(key)
+  const unknown = stateUnknown() || togglesInFlight.has(key)
+  const title = unknown
+    ? 'Behaviour state could not be read from the server — this may not reflect what is running.'
+    : `Toggle ${key}`
   return `
-    <label class="toggle" aria-label="Toggle ${escapeHtml(key)}">
-      <input type="checkbox" data-behavior="${escapeHtml(key)}" ${on ? 'checked' : ''} />
+    <label class="toggle${unknown ? ' toggle-unknown' : ''}" aria-label="Toggle ${escapeHtml(key)}" title="${escapeHtml(title)}">
+      <input type="checkbox" data-behavior="${escapeHtml(key)}" ${on ? 'checked' : ''}${unknown ? ' disabled' : ''} />
       <span class="toggle-slider"></span>
     </label>
   `
@@ -94,8 +153,19 @@ function relTime(iso: string): string {
   return `${Math.floor(months / 12)}y`
 }
 
+// "Last triggered" is read from the agent log. When that read fails the value
+// is simply absent, which used to render as an em dash — indistinguishable
+// from "this has never run". Say the truth instead: unknown, not never.
+function lastTriggeredUnavailable(): boolean {
+  const d = getBehaviorDiagnostics()
+  return !!d?.agentLogsError
+}
+
 function lastTriggeredCell(key: BehaviorKey): string {
   const last = getLastTriggered(key)
+  if (!last && lastTriggeredUnavailable()) {
+    return '<span class="last-dash" title="The agent log could not be read, so this is unknown — not necessarily never.">?</span>'
+  }
   if (!last) return '<span class="last-dash">—</span>'
   return `<a class="behavior-last-link" href="#" data-target="${escapeHtml(last.target)}" title="${escapeHtml(last.target)} · ${escapeHtml(last.at)}">${escapeHtml(relTime(last.at))}</a>`
 }
@@ -147,6 +217,9 @@ let memoryTitleEl: HTMLElement | null = null
 let memorySaveBtn: HTMLButtonElement | null = null
 let memoryStatusEl: HTMLElement | null = null
 let memoryKey: BehaviorKey | null = null
+// The memory as it stood when the panel opened, so closing can tell whether
+// there is an unsaved change to commit.
+let memoryLoadedValue = ''
 
 function setMemoryStatus(text: string, cls: 'info' | 'ok' | 'error' = 'info') {
   if (!memoryStatusEl) return
@@ -196,6 +269,19 @@ function buildMemoryPanel(): HTMLElement {
 }
 
 function openMemoryPanel(key: BehaviorKey) {
+  // Clicking a different behaviour's memory button replaced the textarea in
+  // place, so whatever had been typed for the previous one vanished without
+  // being saved and without a word. Commit it first, exactly as closing does,
+  // and stay put if that commit fails rather than moving on over lost work.
+  if (memoryKey && memoryKey !== key && memoryTextarea
+      && memoryTextarea.value !== memoryLoadedValue) {
+    const previous = memoryTextarea.value
+    void saveMemory().then((saved) => {
+      if (saved) openMemoryPanel(key)
+      else if (memoryTextarea) memoryTextarea.value = previous
+    })
+    return
+  }
   if (!memoryPanelEl) {
     memoryPanelEl = buildMemoryPanel()
     document.body.appendChild(memoryPanelEl)
@@ -204,7 +290,10 @@ function openMemoryPanel(key: BehaviorKey) {
   const meta = BEHAVIORS.find((b) => b.key === key)
   if (memoryTitleEl) memoryTitleEl.textContent = `Memory for ${meta?.label ?? key}`
   if (memoryTextarea) memoryTextarea.value = getScratchpad(key)
+  memoryLoadedValue = getScratchpad(key)
   setMemoryStatus('')
+  memoryPanelEl.removeAttribute('inert')
+  memoryPanelEl.removeAttribute('aria-hidden')
   memoryPanelEl.classList.add('open')
   // Defer listener attach so the click that opened the panel doesn't
   // immediately count as an outside-click and close it.
@@ -215,10 +304,32 @@ function openMemoryPanel(key: BehaviorKey) {
   }, 0)
 }
 
+// The memory is edited behind an explicit Save, but every way of leaving the
+// panel — Escape, a click outside, the close button, switching view — used to
+// drop whatever had been typed without saving it and without saying so. The
+// text is a durable instruction the agent runs with, so losing it silently is
+// the wrong default. Closing now commits an unsaved change; if that commit
+// fails the panel stays open with the error, rather than closing over work
+// that was never stored.
 function closeMemoryPanel() {
   if (!memoryPanelEl) return
+  if (memoryKey && memoryTextarea && memoryTextarea.value !== memoryLoadedValue) {
+    void saveMemory().then((saved) => { if (saved) finishClosingMemoryPanel() })
+    return
+  }
+  finishClosingMemoryPanel()
+}
+
+function finishClosingMemoryPanel() {
+  if (!memoryPanelEl) return
+  // Off-screen is not gone: without this the closed panel kept its place in
+  // the tab order, so tabbing landed in a textarea nobody could see and its
+  // Save button did nothing at all (memoryKey is null by then).
+  memoryPanelEl.setAttribute('inert', '')
+  memoryPanelEl.setAttribute('aria-hidden', 'true')
   memoryPanelEl.classList.remove('open')
   memoryKey = null
+  memoryLoadedValue = ''
   document.removeEventListener('mousedown', onMemoryOutside)
   document.removeEventListener('keydown', onMemoryKeydown)
 }
@@ -237,18 +348,41 @@ function onMemoryOutside(e: MouseEvent) {
   closeMemoryPanel()
 }
 
-async function saveMemory() {
-  if (!memoryKey || !memoryTextarea || !memorySaveBtn) return
+// Returns whether the memory is now stored, so the close path can keep the
+// panel open when it is not.
+async function saveMemory(): Promise<boolean> {
+  if (!memoryKey || !memoryTextarea || !memorySaveBtn) return true
+  // When the state read failed, the textarea was filled from an empty mirror
+  // rather than from the stored note — saving then would replace a real memory
+  // with nothing. Refuse, and say why.
+  if (stateUnknown()) {
+    setMemoryStatus('Not saved — the current memory could not be read from the server.', 'error')
+    return false
+  }
   const key = memoryKey
   const text = memoryTextarea.value
   memorySaveBtn.disabled = true
   memorySaveBtn.textContent = 'Saving…'
   try {
-    await setScratchpad(key, text)
+    await setScratchpad(key, text, memoryLoadedValue)
+    memoryLoadedValue = text
     setMemoryStatus('Saved.', 'ok')
     refreshMemoryCell(key)
+    return true
   } catch (err) {
+    if (err instanceof BehaviorConflictError) {
+      // Someone else wrote this memory while it was open here. Keep what was
+      // typed — it is the only copy — and say plainly what happened, so the
+      // choice to merge or overwrite belongs to the person who typed it.
+      memoryLoadedValue = err.current
+      setMemoryStatus(
+        'Not saved — this memory was changed elsewhere. Save again to overwrite it with what is here.',
+        'error',
+      )
+      return false
+    }
     setMemoryStatus('Failed to save: ' + (err as Error).message, 'error')
+    return false
   } finally {
     memorySaveBtn.disabled = false
     memorySaveBtn.textContent = 'Save'
@@ -304,39 +438,67 @@ function renderRow(meta: typeof BEHAVIORS[number]): HTMLTableRowElement {
   return tr
 }
 
+// Entering the view used to issue two identical GETs — one here for the owner
+// map and one inside refreshState — and each one costs an `agent-interface
+// --logs` spawn on the server. refreshState reads the same payload, so the
+// owners come from its cached copy and this is a single request.
+//
+// (A non-ok response also used to return early here, skipping refreshState
+// entirely: the mirror stayed at its defaults with every toggle drawn OFF and
+// no diagnostics, while the runtime carried on spawning agents. refreshState
+// records the failure, so it must always run.)
 async function fetchBehaviorOwners() {
-  try {
-    const res = await fetch('/api/behaviors')
-    if (!res.ok) return
-    const data = await res.json()
-    for (const key of BEHAVIORS.map((behavior) => behavior.key)) {
-      behaviorOwners[key as BehaviorKey] = data[key]?.owner ?? null
-    }
-  } catch { /* leave owners null — cell will show a dash */ }
-  // Same call also pulls enabled flags into the client mirror so the
-  // toggle reflects server truth at first render.
   await refreshState()
+  for (const key of BEHAVIORS.map((behavior) => behavior.key)) {
+    behaviorOwners[key as BehaviorKey] = getBehaviorOwner(key) ?? null
+  }
 }
 
 function renderDiagnostics() {
   const el = viewEl.querySelector<HTMLElement>('#behavior-diagnostics')
   if (!el) return
   const diagnostics = getBehaviorDiagnostics()
-  if (!diagnostics || diagnostics.status === 'ok') {
+  if (!diagnostics) {
     el.hidden = true
     el.textContent = ''
     return
   }
+  // Build the messages first and hide only when there are none. Returning
+  // early on `status === 'ok'` made two of the lines below unreachable: the
+  // runtime's status is computed from the ticker, the heartbeat, stalled
+  // operations, failures, identity and the datastore — it does not consider
+  // agentLogsError or deadLetters at all. So a real agent-log error, and any
+  // dead letter (a behaviour that gave up on a target), sat in the payload
+  // while the panel stayed hidden and empty. Observed on a live instance:
+  // status "ok" alongside `agent-interface log row 0 has invalid expected_head`.
   const messages = [
     diagnostics.agentLogsError ? `Agent log: ${diagnostics.agentLogsError}` : '',
     diagnostics.datastore.error ? `Datastore: ${diagnostics.datastore.error}` : '',
     diagnostics.identity.error ? `Identity: ${diagnostics.identity.error}` : '',
     ...diagnostics.failures.map((failure) =>
       `${failure.behavior}: ${failure.consecutiveFailures} consecutive ${failure.kind} failure(s)`),
-    ...diagnostics.deadLetters.slice(0, 5).map((letter) =>
+    ...diagnostics.deadLetters.slice(0, DEAD_LETTERS_SHOWN).map((letter) =>
       `${letter.behavior} ${letter.target}: ${letter.error}`),
+    // A dead letter is a target the behaviour permanently gave up on. Showing
+    // the newest few and nothing else made an older one drop off the only
+    // surface that names it, with the panel reading as if it were complete.
+    diagnostics.deadLetters.length > DEAD_LETTERS_SHOWN
+      ? `${diagnostics.deadLetters.length - DEAD_LETTERS_SHOWN} older abandoned target(s) not shown`
+      : '',
   ].filter(Boolean)
-  el.textContent = messages.join(' · ') || 'Behavior runtime is degraded.'
+  if (messages.length === 0) {
+    // Nothing specific to report. Say something only when the runtime itself
+    // is unhealthy, so an "ok" runtime stays quiet.
+    if (diagnostics.status === 'ok') {
+      el.hidden = true
+      el.textContent = ''
+      return
+    }
+    el.textContent = 'Behavior runtime is degraded.'
+    el.hidden = false
+    return
+  }
+  el.textContent = messages.join(' · ')
   el.hidden = false
 }
 
@@ -358,18 +520,20 @@ function attachHandlers() {
       const key = cb.dataset.behavior as BehaviorKey
       const requested = cb.checked
       cb.disabled = true
+      togglesInFlight.add(key)
       void setEnabled(key, requested).catch((err: unknown) => {
         alert(`Could not update behavior: ${(err as Error).message}`)
       }).finally(() => {
         // On failure setEnabled restores its local mirror. On success the
         // change event may have rebuilt this row, so repaint whichever input
         // is currently attached instead of trusting the stale element.
+        togglesInFlight.delete(key)
         const current = viewEl.querySelector<HTMLInputElement>(
           `input[type="checkbox"][data-behavior="${key}"]`,
         )
         if (current) {
           current.checked = isEnabled(key)
-          current.disabled = false
+          current.disabled = stateUnknown()
         }
       })
       return
@@ -378,19 +542,7 @@ function attachHandlers() {
     if (target.matches('select.behavior-setting[data-behavior]')) {
       const sel = target as HTMLSelectElement
       const key = sel.dataset.behavior as BehaviorKey
-      const requested = sel.value as BehaviorSetting
-      sel.disabled = true
-      void setSetting(key, requested).catch((err: unknown) => {
-        alert(`Could not update behavior setting: ${(err as Error).message}`)
-      }).finally(() => {
-        const current = viewEl.querySelector<HTMLSelectElement>(
-          `select.behavior-setting[data-behavior="${key}"]`,
-        )
-        if (current) {
-          current.value = getSetting(key)
-          current.disabled = false
-        }
-      })
+      queueSettingWrite(key, sel.value as BehaviorSetting)
       return
     }
   })
@@ -441,6 +593,7 @@ async function tickRefresh() {
 
 export function stopBehaviorsRefresh() {
   closeMemoryPanel()
+  flushSettingWrites()
   if (!tickListening) return
   window.removeEventListener('poise:refresh-tick', onTick)
   tickListening = false

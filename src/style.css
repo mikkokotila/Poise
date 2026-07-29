@@ -4526,3 +4526,8 @@ body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
   line-height: 1.5;
   resize: vertical;
 }
+
+/* A toggle drawn from state we could not read. It controls agents that write
+   to real pull requests, so an unknown state is shown as unavailable rather
+   than as a confident "off". */
+.toggle-unknown { opacity: 0.45; cursor: not-allowed; }

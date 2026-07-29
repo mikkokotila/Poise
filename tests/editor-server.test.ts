@@ -90,6 +90,28 @@ function startEditorWorker(job: WorkerJob): WorkerHandle {
   return { ready, result }
 }
 
+// These cases hold the shared editor lock to prove a write cannot slip past
+// it. Taking it with `timeout: 0` says "fail rather than wait", which is right
+// once we have it — but the worker processes from the previous case release
+// their own handles as they exit, so demanding it on the first attempt made
+// the test depend on that teardown having finished. It had not on the slower
+// CI runner, and the case failed with SQLITE_BUSY before testing anything.
+// Wait for the lock to be free; refuse to wait once inside the transaction.
+async function acquireBlocker(path: string): Promise<InstanceType<typeof Database>> {
+  const deadline = Date.now() + 10_000
+  for (;;) {
+    const blocker = new Database(path, { timeout: 0 })
+    try {
+      blocker.exec('BEGIN IMMEDIATE')
+      return blocker
+    } catch (error) {
+      blocker.close()
+      if ((error as { code?: string }).code !== 'SQLITE_BUSY' || Date.now() >= deadline) throw error
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+  }
+}
+
 function releaseBlocker(blocker: InstanceType<typeof Database>): void {
   if (blocker.inTransaction) blocker.exec('COMMIT')
   if (blocker.open) blocker.close()
@@ -187,8 +209,7 @@ describe('editor file integrity', () => {
   it('makes document compare-and-swap atomic across Poise processes', async () => {
     const slug = 'cross-process-doc'
     const initial = await editor.writeDoc(slug, '# base')
-    const blocker = new Database(join(editorDir, '.poise-editor-lock.sqlite3'), { timeout: 0 })
-    blocker.exec('BEGIN IMMEDIATE')
+    const blocker = await acquireBlocker(join(editorDir, '.poise-editor-lock.sqlite3'))
     const jobs = [
       startEditorWorker({
         operation: 'doc',
@@ -243,8 +264,7 @@ describe('editor file integrity', () => {
       updated_at: '2026-07-10T00:00:00.000Z',
     })
     const variants = [annotation('process-a'), annotation('process-b')]
-    const blocker = new Database(join(editorDir, '.poise-editor-lock.sqlite3'), { timeout: 0 })
-    blocker.exec('BEGIN IMMEDIATE')
+    const blocker = await acquireBlocker(join(editorDir, '.poise-editor-lock.sqlite3'))
     const jobs = variants.map((value, index) => startEditorWorker({
       operation: 'annotations',
       slug,
