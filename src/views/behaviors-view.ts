@@ -71,37 +71,45 @@ const togglesInFlight = new Set<BehaviorKey>()
 // pressing the key. Settle on the value they land on, then write once.
 const DEAD_LETTERS_SHOWN = 5
 const SETTING_WRITE_DELAY_MS = 400
-const settingWrites = new Map<BehaviorKey, ReturnType<typeof setTimeout>>()
+// The pending value is held here, not read back off the <select> when the
+// timer fires. The element can be repainted from the mirror in between — by a
+// refresh tick, or by renderRows() after any behaviour is toggled — and the
+// mirror still holds the old ceiling until the write lands. Reading the DOM
+// at flush time therefore stored the value the person had moved away from.
+const settingWrites = new Map<BehaviorKey, { timer: ReturnType<typeof setTimeout>, value: BehaviorSetting }>()
+
+function writeSetting(key: BehaviorKey, value: BehaviorSetting): Promise<void> {
+  return setSetting(key, value).catch((err: unknown) => {
+    alert(`Could not update behavior setting: ${(err as Error).message}`)
+  }).then(() => {
+    // A newer choice may have been queued while this was in flight; leave the
+    // control showing what the person chose, not what this older write stored.
+    if (settingWrites.has(key)) return
+    const current = viewEl?.querySelector<HTMLSelectElement>(
+      `select.behavior-setting[data-behavior="${key}"]`,
+    )
+    if (current) current.value = getSetting(key)
+  })
+}
 
 function queueSettingWrite(key: BehaviorKey, requested: BehaviorSetting) {
   const pending = settingWrites.get(key)
-  if (pending !== undefined) clearTimeout(pending)
-  settingWrites.set(key, setTimeout(() => {
-    settingWrites.delete(key)
-    void setSetting(key, requested).catch((err: unknown) => {
-      alert(`Could not update behavior setting: ${(err as Error).message}`)
-    }).finally(() => {
-      // Another keystroke may have queued a newer value while this was in
-      // flight; leave the control showing what the person chose, not what
-      // this older write happened to store.
-      if (settingWrites.has(key)) return
-      const current = viewEl.querySelector<HTMLSelectElement>(
-        `select.behavior-setting[data-behavior="${key}"]`,
-      )
-      if (current) current.value = getSetting(key)
-    })
-  }, SETTING_WRITE_DELAY_MS))
+  if (pending) clearTimeout(pending.timer)
+  settingWrites.set(key, {
+    value: requested,
+    timer: setTimeout(() => {
+      settingWrites.delete(key)
+      void writeSetting(key, requested)
+    }, SETTING_WRITE_DELAY_MS),
+  })
 }
 
 // Leaving the view must not drop a ceiling the person just chose.
 function flushSettingWrites() {
-  for (const [key, timer] of settingWrites) {
-    clearTimeout(timer)
+  for (const [key, pending] of [...settingWrites]) {
+    clearTimeout(pending.timer)
     settingWrites.delete(key)
-    const sel = viewEl?.querySelector<HTMLSelectElement>(
-      `select.behavior-setting[data-behavior="${key}"]`,
-    )
-    if (sel) void setSetting(key, sel.value as BehaviorSetting).catch(() => {})
+    void writeSetting(key, pending.value)
   }
 }
 
@@ -109,18 +117,53 @@ function stateUnknown(): boolean {
   return !isBehaviorStateLoaded()
 }
 
+// Why a toggle is not clickable decides what to say about it: an unreadable
+// state means the position on screen may be a lie, whereas a write still in
+// flight means it is simply not settled yet. Folding both into one "could not
+// be read" message told people their state was unknown every time they
+// clicked. Both conditions are recomputed on every tick, so a toggle disabled
+// by a failed read comes back to life on its own once the read succeeds.
+function togglePresentation(key: BehaviorKey): { disabled: boolean, unknown: boolean, title: string } {
+  const unknown = stateUnknown()
+  const busy = togglesInFlight.has(key)
+  return {
+    disabled: unknown || busy,
+    unknown,
+    title: unknown
+      ? 'Behaviour state could not be read from the server — this may not reflect what is running.'
+      : busy ? 'Saving…' : `Toggle ${key}`,
+  }
+}
+
 function toggleCell(key: BehaviorKey): string {
   const on = isEnabled(key)
-  const unknown = stateUnknown() || togglesInFlight.has(key)
-  const title = unknown
-    ? 'Behaviour state could not be read from the server — this may not reflect what is running.'
-    : `Toggle ${key}`
+  const { disabled, unknown, title } = togglePresentation(key)
   return `
     <label class="toggle${unknown ? ' toggle-unknown' : ''}" aria-label="Toggle ${escapeHtml(key)}" title="${escapeHtml(title)}">
-      <input type="checkbox" data-behavior="${escapeHtml(key)}" ${on ? 'checked' : ''}${unknown ? ' disabled' : ''} />
+      <input type="checkbox" data-behavior="${escapeHtml(key)}" ${on ? 'checked' : ''}${disabled ? ' disabled' : ''} />
       <span class="toggle-slider"></span>
     </label>
   `
+}
+
+// Bring an already-rendered toggle back in line with what is now known. The
+// tick used to repaint `checked` only, and only on a toggle that was already
+// enabled — so a row drawn while the server was unreachable stayed disabled,
+// unchecked and captioned "could not be read" for as long as the view stayed
+// open, even after the very next read succeeded. Nothing else re-rendered it:
+// the row is rebuilt only on view entry and on a successful toggle, and the
+// toggle was the control that had been switched off.
+function repaintToggle(key: BehaviorKey, toggle: HTMLInputElement): void {
+  const { disabled, unknown, title } = togglePresentation(key)
+  const label = toggle.closest<HTMLElement>('.toggle')
+  if (label) {
+    label.classList.toggle('toggle-unknown', unknown)
+    label.title = title
+  }
+  toggle.disabled = disabled
+  // A write in flight owns the position until it settles; anything else and
+  // the mirror is the truth.
+  if (!togglesInFlight.has(key)) toggle.checked = isEnabled(key)
 }
 
 // Setting dropdown — priority ceiling for the behavior. p0 is shown as
@@ -253,7 +296,9 @@ function buildMemoryPanel(): HTMLElement {
   memorySaveBtn = panel.querySelector('.behavior-memory-save')
   memoryStatusEl = panel.querySelector('.behavior-memory-status')
 
-  panel.querySelector('.tp-close')!.addEventListener('click', closeMemoryPanel)
+  // Wrapped, not passed directly: as a listener the click Event would land in
+  // `force` and every close from the X button would discard an unsaved change.
+  panel.querySelector('.tp-close')!.addEventListener('click', () => closeMemoryPanel())
   memorySaveBtn!.addEventListener('click', () => void saveMemory())
   panel.querySelector('.behavior-memory-clear')!.addEventListener('click', () => {
     if (!memoryTextarea) return
@@ -289,9 +334,14 @@ function openMemoryPanel(key: BehaviorKey) {
   memoryKey = key
   const meta = BEHAVIORS.find((b) => b.key === key)
   if (memoryTitleEl) memoryTitleEl.textContent = `Memory for ${meta?.label ?? key}`
-  if (memoryTextarea) memoryTextarea.value = getScratchpad(key)
   memoryLoadedValue = getScratchpad(key)
-  setMemoryStatus('')
+  const draft = unsavedDrafts.get(key)
+  if (draft !== undefined) unsavedDrafts.delete(key)
+  if (memoryTextarea) memoryTextarea.value = draft ?? memoryLoadedValue
+  setMemoryStatus(
+    draft !== undefined ? 'This is an unsaved draft from earlier — it was never stored. Save to keep it.' : '',
+    draft !== undefined ? 'error' : 'info',
+  )
   memoryPanelEl.removeAttribute('inert')
   memoryPanelEl.removeAttribute('aria-hidden')
   memoryPanelEl.classList.add('open')
@@ -311,17 +361,50 @@ function openMemoryPanel(key: BehaviorKey) {
 // the wrong default. Closing now commits an unsaved change; if that commit
 // fails the panel stays open with the error, rather than closing over work
 // that was never stored.
-function closeMemoryPanel() {
+// `force` is for leaving the view entirely. Staying open is the right answer
+// to a failed save while the Behaviors view is still on screen — the panel
+// belongs there and the error is next to the text it refers to. It is the
+// wrong answer when the view is being replaced: the panel lives on
+// document.body, so it stayed floating above whatever came next, still
+// swallowing Escape. Close it either way in that case, and keep the text so
+// reopening the behaviour hands it back instead of losing it.
+function closeMemoryPanel(force = false) {
   if (!memoryPanelEl) return
   if (memoryKey && memoryTextarea && memoryTextarea.value !== memoryLoadedValue) {
-    void saveMemory().then((saved) => { if (saved) finishClosingMemoryPanel() })
+    const key = memoryKey
+    const draft = memoryTextarea.value
+    void saveMemory().then((saved) => {
+      if (saved) finishClosingMemoryPanel()
+      else if (force) {
+        unsavedDrafts.set(key, draft)
+        finishClosingMemoryPanel()
+      }
+    })
     return
   }
   finishClosingMemoryPanel()
 }
 
+// Text that could not be stored when the view went away. Held in memory only:
+// it is a draft, and pretending otherwise by persisting it would make it look
+// saved when the server never accepted it.
+const unsavedDrafts = new Map<BehaviorKey, string>()
+
 function finishClosingMemoryPanel() {
   if (!memoryPanelEl) return
+  // Hiding a subtree that still holds focus is a real problem, not a lint:
+  // the browser refuses the aria-hidden ("Blocked aria-hidden on an element
+  // because its descendant retained focus") and a screen-reader user is left
+  // on a control that visually no longer exists. Hand focus back to the
+  // button that opened the panel, which is also where a keyboard user expects
+  // to land, and fall back to blurring if that row is gone.
+  if (memoryPanelEl.contains(document.activeElement)) {
+    const opener = memoryKey && viewEl
+      ? viewEl.querySelector<HTMLButtonElement>(`.behavior-memory-btn[data-behavior="${memoryKey}"]`)
+      : null
+    if (opener) opener.focus()
+    else (document.activeElement as HTMLElement | null)?.blur()
+  }
   // Off-screen is not gone: without this the closed panel kept its place in
   // the tab order, so tabbing landed in a textarea nobody could see and its
   // Save button did nothing at all (memoryKey is null by then).
@@ -350,7 +433,33 @@ function onMemoryOutside(e: MouseEvent) {
 
 // Returns whether the memory is now stored, so the close path can keep the
 // panel open when it is not.
-async function saveMemory(): Promise<boolean> {
+//
+// Re-entrant callers are the norm here, not an edge case: clicking Save and
+// then pressing Escape before it answers runs this twice, because the close
+// path decides there is an unsaved change from a `memoryLoadedValue` the
+// first save has not updated yet. Both calls then carried the same "what I
+// loaded" baseline, so the server saw the second one as a stale write and
+// refused it — telling the person their memory had been changed elsewhere
+// when the only thing that had changed it was their own click. Wait for the
+// save already running instead of racing it.
+let memorySaveInFlight: Promise<boolean> | null = null
+
+function saveMemory(): Promise<boolean> {
+  if (memorySaveInFlight) {
+    const key = memoryKey
+    return memorySaveInFlight.then((ok) => {
+      // Same panel, and the save that just landed stored exactly what is on
+      // screen: there is nothing left to write.
+      if (ok && memoryKey === key && memoryTextarea?.value === memoryLoadedValue) return true
+      return saveMemory()
+    })
+  }
+  const run = performSave()
+  memorySaveInFlight = run
+  return run.finally(() => { memorySaveInFlight = null })
+}
+
+async function performSave(): Promise<boolean> {
   if (!memoryKey || !memoryTextarea || !memorySaveBtn) return true
   // When the state read failed, the textarea was filled from an empty mirror
   // rather than from the stored note — saving then would replace a real memory
@@ -585,14 +694,19 @@ async function tickRefresh() {
     const cell = tr.querySelector<HTMLElement>('.behavior-last-cell')
     if (cell) cell.innerHTML = lastTriggeredCell(meta.key)
     const toggle = tr.querySelector<HTMLInputElement>('input[type="checkbox"][data-behavior]')
-    if (toggle && !toggle.disabled) toggle.checked = isEnabled(meta.key)
+    if (toggle) repaintToggle(meta.key, toggle)
     const setting = tr.querySelector<HTMLSelectElement>('select.behavior-setting[data-behavior]')
-    if (setting && !setting.disabled) setting.value = getSetting(meta.key)
+    // A pending choice is the person's, not the server's. The write is
+    // debounced rather than sent on each keystroke, so between choosing a
+    // ceiling and it being stored there is a window in which the mirror still
+    // holds the old value — repainting from it here threw the choice away.
+    if (setting && !settingWrites.has(meta.key)) setting.value = getSetting(meta.key)
   }
 }
 
 export function stopBehaviorsRefresh() {
-  closeMemoryPanel()
+  // The view is going away, so the panel cannot stay open over what replaces it.
+  closeMemoryPanel(true)
   flushSettingWrites()
   if (!tickListening) return
   window.removeEventListener('poise:refresh-tick', onTick)
