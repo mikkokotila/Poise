@@ -221,7 +221,10 @@ async function putSnippets(list: Snippet[]): Promise<SnippetState> {
   return { snippets: data.snippets as Snippet[], version: data.version }
 }
 
-async function preserveEditAfterConflict(status: HTMLElement | null): Promise<void> {
+async function preserveEditAfterConflict(
+  status: HTMLElement | null,
+  intent: 'save' | 'delete' = 'save',
+): Promise<void> {
   const refreshed = await fetchSnippets()
   if (refreshed) {
     // Repaint the other rows against what was just fetched. Without this the
@@ -231,9 +234,17 @@ async function preserveEditAfterConflict(status: HTMLElement | null): Promise<vo
     // text with it, which is the one thing this path exists to protect.
     repaintRowsAroundOpenEditor()
   }
-  setStatus(status, refreshed
-    ? 'Snippets changed elsewhere. Latest data loaded; your unsaved edit is preserved. Review and save again.'
-    : 'Snippets changed elsewhere. Your unsaved edit is preserved; reload before saving.', 'error')
+  // A conflict during a delete needs its own wording. The save copy tells the
+  // user to "save again", which on this path means re-saving the very snippet
+  // they were trying to remove — the opposite of what they asked for.
+  const message = intent === 'delete'
+    ? (refreshed
+      ? 'Snippets changed elsewhere, so the delete did not go through. Latest data loaded — check the row and delete again.'
+      : 'Snippets changed elsewhere, so the delete did not go through. Reload before trying again.')
+    : (refreshed
+      ? 'Snippets changed elsewhere. Latest data loaded; your unsaved edit is preserved. Review and save again.'
+      : 'Snippets changed elsewhere. Your unsaved edit is preserved; reload before saving.')
+  setStatus(status, message, 'error')
 }
 
 // Refresh every saved row's rendering in place, leaving the open edit row and
@@ -315,7 +326,7 @@ async function del(editRow: HTMLTableRowElement) {
     renderRows()
   } catch (err) {
     const status = editRow.querySelector<HTMLElement>('.snip-status')
-    if (err instanceof SnippetConflictError) await preserveEditAfterConflict(status)
+    if (err instanceof SnippetConflictError) await preserveEditAfterConflict(status, 'delete')
     else setStatus(status, (err as Error).message || 'Failed to delete.', 'error')
     delBtn.disabled = false
   }
