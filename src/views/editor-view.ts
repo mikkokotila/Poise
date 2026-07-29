@@ -2398,6 +2398,12 @@ function renderAnnotationOverlay(): void {
 // text snippet for the current selection inside the editor. Returns
 // null if the selection is collapsed, doesn't span text, or escapes
 // the editor-doc element.
+// Two annotations cover the same span when all four coordinates agree.
+function sameRange(a: AnnotationRange, b: AnnotationRange): boolean {
+  return a.start_line === b.start_line && a.start_offset === b.start_offset
+    && a.end_line === b.end_line && a.end_offset === b.end_offset
+}
+
 function selectionAsAnnotationRange(): { range: AnnotationRange, snippet: string } | null {
   const sel = window.getSelection()
   if (!sel || sel.rangeCount === 0) return null
@@ -2562,6 +2568,18 @@ function createAnnotationFromSelection(): void {
   }
   const got = selectionAsAnnotationRange()
   if (!got) return
+  // Commenting on a span that already has a note opens that note. It used to
+  // add a second one over the top: identical range, identical snippet, its own
+  // underline, and nothing on screen to say there were now two. Documents
+  // collected stacks of them — three on one line in the case that surfaced
+  // this — and every one of them intercepted clicks on that text.
+  const existing = annotations.find((a) => sameRange(a.range, got.range))
+  if (existing) {
+    hideSelectionActions()
+    window.getSelection()?.removeAllRanges()
+    openPanelForAnnotation(existing.id)
+    return
+  }
   const id = 'ann-' + Math.random().toString(36).slice(2, 10)
   const now = new Date().toISOString()
   const a: Annotation = {
@@ -3209,9 +3227,25 @@ function openPanelForAnnotation(id: string): void {
   document.addEventListener('keydown', onPanelKeydown)
 }
 
+// An annotation carries a comment, a conversation, or both. One that closes
+// with neither is not a note — it is the residue of a click, and keeping it
+// leaves an invisible trap: the text stays underlined and every later click on
+// it reopens an empty panel, which reads as the editor misbehaving rather than
+// as a note the user forgot they made. Discard it on close.
+function discardPanelAnnotationIfEmpty(): void {
+  if (panelForId == null) return
+  const a = annotations.find((x) => x.id === panelForId)
+  if (!a) return
+  if (a.comment.trim() !== '' || panelMessages.length > 0) return
+  annotations = annotations.filter((x) => x.id !== a.id)
+  scheduleAnnotationsSave()
+  renderAnnotationOverlay()
+}
+
 function closePanel(): void {
   if (!panelEl) return
   if (panelEl.hidden && !panelForId) return
+  discardPanelAnnotationIfEmpty()
   panelEl.hidden = true
   panelEl.innerHTML = ''
   panelForId = null
