@@ -1866,9 +1866,12 @@ async function openChatForCurrentDoc(): Promise<void> {
         session: data.session_id,
         label,
         parseEdits: true,
-        onEditHover: (edit: EditCardData) => { showEditHoverHighlight(edit) },
+        onEditHover: (edit: EditCardData) => {
+          if (currentSlug !== slug) return
+          showEditHoverHighlight(edit)
+        },
         onEditLeave: () => { clearEditHoverHighlight() },
-        onEditAccept: (edit: EditCardData) => applyEditToDoc(edit),
+        onEditAccept: (edit: EditCardData) => applyEditToDoc(edit, slug),
         onEditDecline: () => { /* no doc-side work; pane updates its own state */ },
       },
     }))
@@ -2077,8 +2080,13 @@ function clearEditHoverHighlight(): void {
 // Returns 'applied' (success, save scheduled) or 'conflict' (the
 // edit's `old` could no longer be located — the pane shows the card
 // as conflict so the user can try again after fixing the drift).
-function applyEditToDoc(edit: EditCardData): 'applied' | 'conflict' {
+// `slug` is the document the chat was opened for. The chat pane outlives a
+// document switch, so without this an Accept landed on whatever happened to be
+// open — rewriting a document the agent never saw, and silently not applying
+// the edit to the one it was about.
+function applyEditToDoc(edit: EditCardData, slug: string): 'applied' | 'conflict' {
   if (!docEl) return 'conflict'
+  if (currentSlug !== slug) return 'conflict'
   const snap = docTextSnapshot()
   const charRange = findCharRangeForEdit(snap.text, edit)
   if (!charRange) return 'conflict'
@@ -2338,11 +2346,18 @@ function reAnchorAnnotation(a: Annotation): AnnotationRange | null {
   // first one and was persisted there, so its comment then labelled text it
   // was never about — and a second such note landed on the same words,
   // stacking two marks on one span.
+  // `home` is a remembered index, so it can point past the end after lines
+  // are deleted. Bound BOTH directions — pushing an out-of-range `home` made
+  // the loop below read lines[i].textContent off undefined and throw, which
+  // killed renderAnnotationOverlay mid-pipeline and took the undo recording
+  // and the autosave for that keystroke with it.
   const home = a.range.start_line
   const order: number[] = []
   for (let d = 0; d < lines.length; d++) {
-    if (home - d >= 0) order.push(home - d)
-    if (d > 0 && home + d < lines.length) order.push(home + d)
+    const back = home - d
+    const fwd = home + d
+    if (back >= 0 && back < lines.length) order.push(back)
+    if (d > 0 && fwd >= 0 && fwd < lines.length) order.push(fwd)
   }
 
   // Never re-anchor on top of another annotation's span; prefer the next
