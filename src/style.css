@@ -2661,12 +2661,49 @@ a.agent-target:hover {
   color: var(--text-tertiary);
 }
 
+/* A run with no pull request is identified by its chat session, and that
+   reference opens the conversation. It is a button because it navigates
+   inside Poise rather than to a URL; it should still read as the same kind
+   of target as the GitHub link beside it. */
+button.agent-target {
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+button.agent-target:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+
 /* Status reuses Archive's .state pill — same shape across both views.
    Add the agent-only flavors (ok / bad / flat) for completed / failed
    / queued so the closed vocabulary lights up correctly. */
 .state.ok   { color: var(--a3); border-color: var(--a3); }
 .state.bad  { color: var(--a5); border-color: var(--a5); }
 .state.flat { color: var(--text-tertiary); }
+.state.warn { color: var(--a2); border-color: var(--a2); }
+
+/* The verdict sits next to the status, not instead of it: "completed" says
+   the agent finished, the outcome says what it decided. */
+.state-outcome {
+  margin-left: 4px;
+}
+
+/* A thousand rows scroll a long way; the headers have to stay. */
+#swarm-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg);
+}
 
 /* Expand toggle — sits in the .action-cell column, same icon-button
    rhythm as .review-btn. Chevron rotates when the row is expanded.
@@ -2735,6 +2772,22 @@ tr:hover .replay-btn { opacity: 1; }
   background: transparent;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* The failure text of a run that failed. Every failed row has one and it was
+   rendered nowhere, so diagnosing a failure meant leaving Poise for the CLI. */
+.agent-response-error {
+  margin: 0 0 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  color: var(--a5);
+  background: transparent;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.agent-response-error:only-child {
+  margin-bottom: 0;
 }
 
 .agent-response-loading,
