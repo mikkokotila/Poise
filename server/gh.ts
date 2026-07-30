@@ -361,9 +361,15 @@ async function fetchKind(itemType: 'pr' | 'issue', body: any, me: string): Promi
   const batches = await Promise.all(scopes.map((scope) => runCli(['view', ...scope, ...common])))
 
   // Merge + dedupe by repo#number: the same item can land in both the
-  // user's and the agent's involvement (one opened it, the other
-  // reviewed). handleGhBody re-sorts by updated_at, so order here is
-  // irrelevant — we just keep the first sighting of each record.
+  // user's and the agent's involvement (one opened it, the other reviewed).
+  //
+  // This used to say handleGhBody re-sorts, so order here did not matter. It
+  // only sorts the 'all' branch — with record_type 'pull_request' or 'issue'
+  // (the Issues and PRs pills) the merged list went out in scope order, so
+  // everything the review agent authored was appended after the user's rows
+  // regardless of date. The first page of a supposedly newest-first table then
+  // held the user's oldest rows above the agent's newest. Sort here, where the
+  // merge happens, rather than relying on a caller that only sometimes does.
   const seen = new Set<string>()
   const out: GhRecord[] = []
   for (const recs of batches) {
@@ -374,6 +380,7 @@ async function fetchKind(itemType: 'pr' | 'issue', body: any, me: string): Promi
       out.push(toLegacy(r, itemType))
     }
   }
+  out.sort((a, b) => b.updated_at.localeCompare(a.updated_at))
   return out
 }
 
