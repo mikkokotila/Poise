@@ -15,6 +15,7 @@ async function loadIsolatedDb(path: string): Promise<typeof import('../server/db
 }
 
 afterEach(async () => {
+  vi.useRealTimers()
   if (loaded?.db.open) loaded.closeDatabase()
   loaded = null
   delete process.env.POISE_DB
@@ -205,5 +206,78 @@ describe('behavior database lifecycle', () => {
     closeDatabase()
     expect(db.open).toBe(false)
     expect(() => closeDatabase()).not.toThrow()
+  })
+
+  it('retires a dead letter after a later successful run for the same PR', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-29T06:56:00.000Z'))
+    tempRoot = await mkdtemp(join(tmpdir(), 'poise-db-test-'))
+    const {
+      claimSeenOwnedAs,
+      completeBehaviorLaunchOwned,
+      completeSeenOwned,
+      linkBehaviorLaunchCallOwned,
+      listBehaviorDeadLetters,
+      listBehaviorLaunchClaims,
+      markBehaviorLaunchIntentOwned,
+      recordBehaviorDeadLetter,
+      db,
+    } = await loadIsolatedDb(join(tempRoot, 'cache.db'))
+    const failedTarget = 'Vaquum/repo#127@head=old'
+    const failedClaim = 'a'.repeat(32)
+    expect(claimSeenOwnedAs('approve-prs', failedTarget, failedClaim)).toBe(failedClaim)
+    expect(markBehaviorLaunchIntentOwned({
+      key: 'approve-prs',
+      target: failedTarget,
+      claimId: failedClaim,
+      launchBehavior: 'pr_approve',
+      repo: 'Vaquum/repo',
+      pr: 127,
+      requestedAt: '2026-07-29T06:54:10.000Z',
+      expectedHead: '1'.repeat(40),
+      actor: 'bit-mis',
+      source: 'poise:approve-prs',
+      correlationId: failedClaim,
+    })).toBe(true)
+    const claim = listBehaviorLaunchClaims('approve-prs')[0]
+    recordBehaviorDeadLetter(claim, 'atomic review missing')
+    expect(completeSeenOwned('approve-prs', failedTarget, failedClaim)).toBe(true)
+    expect(listBehaviorDeadLetters()).toHaveLength(1)
+
+    vi.setSystemTime(new Date('2026-07-29T06:59:18.000Z'))
+    const recoveredTarget = 'Vaquum/repo#127@head=new'
+    const recoveredClaim = 'b'.repeat(32)
+    expect(claimSeenOwnedAs(
+      'approve-prs', recoveredTarget, recoveredClaim,
+    )).toBe(recoveredClaim)
+    expect(markBehaviorLaunchIntentOwned({
+      key: 'approve-prs',
+      target: recoveredTarget,
+      claimId: recoveredClaim,
+      launchBehavior: 'pr_approve',
+      repo: 'Vaquum/repo',
+      pr: 127,
+      requestedAt: '2026-07-29T06:58:11.000Z',
+      expectedHead: '2'.repeat(40),
+      actor: 'bit-mis',
+      source: 'poise:approve-prs',
+      correlationId: recoveredClaim,
+    })).toBe(true)
+    expect(linkBehaviorLaunchCallOwned(
+      'approve-prs', recoveredTarget, recoveredClaim, 'c'.repeat(32),
+    )).toBe(true)
+    expect(completeBehaviorLaunchOwned({
+      key: 'approve-prs',
+      target: recoveredTarget,
+      claimId: recoveredClaim,
+      outcome: 'approved',
+      action: 'approved',
+      completedAt: '2026-07-29T06:59:18.000Z',
+      headSha: '2'.repeat(40),
+    })).toBe(true)
+
+    expect(listBehaviorDeadLetters()).toEqual([])
+    expect(db.prepare('SELECT count(*) FROM behavior_dead_letters').pluck().get())
+      .toBe(1)
   })
 })
