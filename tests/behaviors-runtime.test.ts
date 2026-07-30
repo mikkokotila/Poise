@@ -1120,6 +1120,7 @@ describe('behavior launch claims', () => {
     db.setMeta('me', 'poise-user')
     db.setMeta('behavior_review_new_prs_keyver', '3')
     db.setMeta('behavior_review_new_prs_enabled', '1')
+    db.setMeta('behavior_review_new_prs_failed_snapshot_recovery_v1', '1')
     db.recordSeen('review-new-prs', '__snapshot_v3__')
     db.recordSeen('review-new-prs', `${pr.repo}#${pr.number}`)
     agentLogs = [agentLog({
@@ -1134,7 +1135,38 @@ describe('behavior launch claims', () => {
 
     await runtime.runEnabledBehaviorsOnce()
 
-    expect(db.getMeta('behavior_review_new_prs_failed_snapshot_recovery_v1')).toBe('1')
+    expect(db.getMeta('behavior_review_new_prs_snapshot_recovery_v2')).toBe('1')
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(mocks.spawnDetached.mock.calls[0][1]).toContain(`#${pr.number}`)
+  })
+
+  it('re-arms a snapshot-only PR missed by a mature runtime', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-30T06:21:21.370Z'))
+    arrangeCli(false)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
+    db.setMeta('behavior_review_new_prs_enabled', '1')
+    db.setMeta('behavior_review_new_prs_failed_snapshot_recovery_v1', '1')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
+    db.recordSeen('review-new-prs', `${pr.repo}#${pr.number}`)
+    agentLogs = [agentLog({
+      repo: 'Vaquum/previous',
+      pr_id: '16',
+      actor: 'review-bot',
+      status: 'completed',
+      action: 'reviewed_clean',
+      outcome: 'clean',
+      head_sha: HEAD_SHA,
+      started_at: '2026-07-29T18:01:09.127Z',
+      completed_at: '2026-07-29T18:07:51.000Z',
+    })]
+
+    await runtime.runEnabledBehaviorsOnce()
+
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
     expect(mocks.spawnDetached.mock.calls[0][1]).toContain(`#${pr.number}`)
   })
@@ -1145,6 +1177,15 @@ describe('behavior launch claims', () => {
     db.setMeta('me', 'poise-user')
     db.setMeta('behavior_review_new_prs_keyver', '3')
     db.setMeta('behavior_review_new_prs_enabled', '1')
+    agentLogs = [agentLog({
+      repo: 'Vaquum/previous',
+      pr_id: '16',
+      actor: 'review-bot',
+      status: 'completed',
+      action: 'reviewed_clean',
+      outcome: 'clean',
+      head_sha: HEAD_SHA,
+    })]
     mocks.authStatus = 'reauth_required'
 
     runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
@@ -1872,7 +1913,27 @@ describe('behavior launch claims', () => {
 
     expect(mocks.spawnDetached).not.toHaveBeenCalled()
     expect(runtime.isEnabled('review-new-prs')).toBe(false)
-    expect(db.hasSeen('review-new-prs', '__snapshot_v3__')).toBe(false)
+    expect(db.hasSeen('review-new-prs', '__snapshot_v3__')).toBe(true)
+  })
+
+  it('resumes with PRs that appeared while review was disabled', async () => {
+    listedPrs = []
+    arrangeCli(false)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
+    db.setMeta('behavior_review_new_prs_enabled', '1')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
+
+    await runtime.setEnabled('review-new-prs', false)
+    listedPrs = [pr]
+    await runtime.setEnabled('review-new-prs', true)
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(mocks.spawnDetached.mock.calls[0][1]).toContain(`#${pr.number}`)
   })
 
   // The enabled flag is re-read immediately before the head-SHA lookup, but

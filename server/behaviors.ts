@@ -936,12 +936,14 @@ function migrateReviewNewPrsLedger(): void {
 }
 
 const FAILED_SNAPSHOT_RECOVERY_META = 'behavior_review_new_prs_failed_snapshot_recovery_v1'
+const SNAPSHOT_RECOVERY_META = 'behavior_review_new_prs_snapshot_recovery_v2'
 
-async function recoverFailedSnapshotReviews(
+async function recoverSnapshotReviews(
   prs: DatastorePr[],
   reviewer: string,
 ): Promise<void> {
-  if (getMeta(FAILED_SNAPSHOT_RECOVERY_META) === '1') return
+  if (getMeta(SNAPSHOT_RECOVERY_META) === '1') return
+  const previousRecoveryComplete = getMeta(FAILED_SNAPSHOT_RECOVERY_META) === '1'
   const open = new Set(prs.map((pr) => `${pr.repo}#${pr.number}`))
   const candidates = listSnapshotOnlySeen('review-new-prs')
     .filter((row) => row.target !== REVIEW_SNAPSHOT_TARGET && open.has(row.target))
@@ -960,12 +962,17 @@ async function recoverFailedSnapshotReviews(
       const failedBeforeSnapshot = matching.some((entry) =>
         entry.status === 'failed'
         && Date.parse(entry.started_at) <= Date.parse(candidate.seenAt))
-      if (!completed && failedBeforeSnapshot) {
+      const matureRuntime = logs.some((entry) =>
+        entry.behavior === 'pr_review'
+        && entry.actor?.toLowerCase() === reviewer.toLowerCase()
+        && Date.parse(entry.started_at) < Date.parse(candidate.seenAt))
+      if (!completed && (failedBeforeSnapshot
+        || (matching.length === 0 && previousRecoveryComplete && matureRuntime))) {
         releaseSeen('review-new-prs', candidate.target)
       }
     }
   }
-  setMeta(FAILED_SNAPSHOT_RECOVERY_META, '1')
+  setMeta(SNAPSHOT_RECOVERY_META, '1')
 }
 
 async function tickReviewNewPrs(): Promise<void> {
@@ -986,7 +993,7 @@ async function tickReviewNewPrs(): Promise<void> {
   }
   try {
     const prs = await listOpenPrsByAuthor(author)
-    await recoverFailedSnapshotReviews(prs, reviewer)
+    await recoverSnapshotReviews(prs, reviewer)
     let failure: unknown
     await Promise.all(prs.map(async (pr) => {
       if (!isEnabled('review-new-prs') || behaviorAborted()) return
@@ -1736,12 +1743,11 @@ export async function setEnabled(key: BehaviorKey, enabled: boolean): Promise<vo
         setPersistedEnabled(key, enabled)
         if (key === 'review-new-prs') {
           if (enabled) {
-            // Snapshot first so an active launch row survives INSERT OR IGNORE;
-            // reconciliation may then release a known failure for the next tick.
-            await snapshotReviewNewPrs()
+            // A first-ever enable needs an anti-flood baseline. Re-enabling is
+            // a resume: preserving the ledger lets the next tick process PRs
+            // that appeared while the behavior was paused.
+            if (!hasSeen(key, REVIEW_SNAPSHOT_TARGET)) await snapshotReviewNewPrs()
             await reconcileBehaviorLaunchClaims(key)
-          } else {
-            clearSeenExceptLaunched(key)
           }
         } else if (key === 'approve-prs') {
           if (enabled) await reconcileBehaviorLaunchClaims(key)
