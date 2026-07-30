@@ -164,6 +164,14 @@ function toLegacy(r: DatastoreRecord, kind: 'pr' | 'issue'): GhRecord {
 // level metadata belongs. Returns every repo (including ones with no
 // PRs or issues), unlike a derivation from views.pr/views.issue.
 let repoListCache: { repos: string[], expiry: number } | null = null
+
+// The list is scoped to the configured organization, so changing that
+// organization invalidates it. Without this the repo pickers in Current kept
+// offering the previous org's repos for up to the TTL — and opening an issue
+// against one of them would have gone to the wrong place entirely.
+export function invalidateRepoListCache(): void {
+  repoListCache = null
+}
 const REPO_LIST_TTL_MS = 5 * 60 * 1000
 
 function shortRepo(full: string): string {

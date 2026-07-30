@@ -41,13 +41,6 @@ interface TypoConfig {
   commentLines: number      // inline-comment line clamp
   commentFontSize: number   // inline-comment font-size (rem)
   commentFontWeight: number // inline-comment font-weight
-  textColor: string         // --text
-  textSecondary: string     // --text-secondary
-  textTertiary: string      // --text-tertiary
-  bgColor: string           // --bg
-  borderColor: string       // --border
-  hoverColor: string        // --hover
-  accentColor: string       // --accent
 }
 
 interface Archetype {
@@ -97,15 +90,6 @@ const DEFAULTS: TypoConfig = {
   commentLines: 4,
   commentFontSize: 0.75,
   commentFontWeight: 400,
-  /* DS v1 colors — match :root --n0..--n7 / --a*. Users can still
-     customize from the panel; "Reset to defaults" returns to these. */
-  textColor: '#2F353D',         // N6
-  textSecondary: '#5C636D',     // N5
-  textTertiary: '#8E959E',      // N4
-  bgColor: '#F7F8F9',           // N0
-  borderColor: '#C5CBD1',       // N3
-  hoverColor: '#EEF0F2',        // N1
-  accentColor: '#161A20',       // N7
 }
 
 interface SliderDef {
@@ -201,21 +185,6 @@ const SLIDER_GROUPS: SliderGroup[] = [
       { key: 'commentFontWeight', label: 'Comment weight', min: 300,   max: 600,    step: 100,    fmt: f0 },
     ],
   },
-]
-
-interface ColorDef {
-  key: keyof TypoConfig
-  label: string
-}
-
-const COLORS: ColorDef[] = [
-  { key: 'textColor',     label: 'Text' },
-  { key: 'textSecondary', label: 'Secondary' },
-  { key: 'textTertiary',  label: 'Tertiary' },
-  { key: 'accentColor',   label: 'Accent' },
-  { key: 'bgColor',       label: 'Background' },
-  { key: 'borderColor',   label: 'Borders' },
-  { key: 'hoverColor',    label: 'Hover' },
 ]
 
 let config: TypoConfig = { ...DEFAULTS }
@@ -333,14 +302,8 @@ function apply() {
   const listSpacing = P < 0 ? P - 1 : P * 12 / (12 + P) - 1
   root.style.setProperty('--editor-list-spacing', `${listSpacing.toFixed(2)}px`)
 
-  // Colors are governed by the DS / theme system (see [data-theme="dark"]
-  // overrides in style.css). Setting them inline here would beat the
-  // theme cascade because inline-style specificity is (1,0,0,0). The
-  // typo config still carries color fields for forward compatibility,
-  // but writing them as inline overrides is suppressed by default.
-  // (If we want a per-user color customizer later, reintroduce these
-  // setProperty calls behind a "dirty" flag that tracks whether the
-  // user has actually deviated from DS defaults.)
+  // Colour is not written here at all — see the note where the Colors group
+  // used to be built. The theme system owns it.
 }
 
 function buildPanel(): HTMLElement {
@@ -404,24 +367,14 @@ function buildPanel(): HTMLElement {
     for (const def of group.sliders) addSlider(def)
   }
 
-  addLabel('Colors')
-
-  // Color pickers
-  for (const def of COLORS) {
-    const section = document.createElement('div')
-    section.className = 'tp-section tp-color-section'
-    section.innerHTML = `
-      <label class="tp-label">${def.label}</label>
-      <input type="color" class="tp-color" value="${config[def.key]}">
-    `
-    const input = section.querySelector('input')!
-    input.addEventListener('input', () => {
-      (config[def.key] as string) = input.value
-      save()
-      apply()
-    })
-    body.appendChild(section)
-  }
+  // The Colors group used to live here: seven pickers that persisted a hex to
+  // localStorage and changed nothing. apply() deliberately never wrote the
+  // colour variables — inline styles have (1,0,0,0) specificity and would beat
+  // the theme cascade, and applyTheme() in config.ts exists to strip exactly
+  // those overrides. So the swatch moved, the value stuck, and the page never
+  // changed. Colour belongs to the Theme toggle in Settings, which is the one
+  // control that works. If a per-user palette is wanted later it goes there,
+  // written as theme-scoped variables rather than inline overrides.
 
   // Reset
   const reset = document.createElement('button')

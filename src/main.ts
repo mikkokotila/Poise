@@ -119,9 +119,17 @@ const menu = initMenu({
 
 // When settings saves and triggers a refresh, re-init the open view to
 // pull fresh data through whatever cache layer it uses.
+// Saving settings re-scopes the data every view reads, so each view needs to
+// pull again. showView() does that by re-running the view's init — which for
+// the editor means tearing down and rebuilding the surface, taking the undo
+// stack and the cursor with it. Someone who saves a setting mid-draft should
+// not lose their history for it. The editor re-reads on its own next save
+// cycle and does not depend on org/me, so leave it alone; refresh the rest.
 window.addEventListener('poise:synced', () => {
-  if (menu.currentView() === 'main') refreshMainView()
-  else showView(menu.currentView())
+  const v = menu.currentView()
+  if (v === 'main') refreshMainView()
+  else if (v === 'editor') { /* nothing here is scoped by org/me */ }
+  else showView(v)
 })
 
 // Card chat icon → toggle the chat pane bound to that card's session.
