@@ -238,7 +238,7 @@ function renderShell(): string {
       </header>
       <div class="lane-list" data-lane="${l.key}"></div>
       ${l.key === 'pr' ? '' : `
-        <button class="lane-add" data-lane="${l.key}">+ ${l.key === 'issue' ? 'Add an issue' : 'Add a card'}</button>
+        <button class="lane-add" data-lane="${l.key}" aria-label="${l.key === 'issue' ? 'Add an issue' : `Add a card to ${l.label}`}">+ ${l.key === 'issue' ? 'Add an issue' : 'Add a card'}</button>
       `}
     </section>
   `).join('')
@@ -256,11 +256,21 @@ function renderShell(): string {
           <button data-time="yesterday" class="${timeFilter === 'yesterday' ? 'active' : ''}">Yesterday</button>
           <button data-time="week" class="${timeFilter === 'week' ? 'active' : ''}">This week</button>
         </div>
-        <input class="search-input" id="current-search" type="search" placeholder="Filter…" autocomplete="off" spellcheck="false" />
+        <input class="search-input" id="current-search" type="search" placeholder="Filter…" autocomplete="off" spellcheck="false" aria-label="Filter cards" />
       </div>
     </header>
+    <p id="current-load-error" class="st-help st-help-error" role="status" hidden></p>
     <div class="kanban">${lanes}</div>
   `
+}
+
+// A source that did not load is worth one line. Silence made a GitHub outage
+// look like an empty board.
+function showLoadError(message: string): void {
+  const el = viewEl?.querySelector<HTMLElement>('#current-load-error')
+  if (!el) return
+  el.textContent = message
+  el.hidden = !message
 }
 
 // ── Card chrome strategy ──────────────────────────────────────────────
@@ -301,7 +311,17 @@ function deleteButton(): string {
   return `<button class="card-action-btn card-delete" title="Delete card" aria-label="Delete card">×</button>`
 }
 
-function reviewButton(): string {
+// Offered on every pull request, including the merged and closed ones. It
+// spawns a real detached `agent-interface --pr-review`, so a click on a PR
+// that shipped last week burns an agent run to review something nobody can
+// act on. A finished pull request is not a review target.
+function reviewButton(item: LiveItem): string {
+  const settled = item.state === 'merged' || item.state === 'closed' || !!item.merged_at
+  if (settled) {
+    return `<button class="card-action-btn card-review-btn" disabled`
+      + ` title="This pull request is ${item.merged_at || item.state === 'merged' ? 'merged' : 'closed'} — nothing to review"`
+      + ` aria-label="Run PR review (unavailable)">${PR_REVIEW_PLAY_SVG}</button>`
+  }
   return `<button class="card-action-btn card-review-btn" title="Run PR review" aria-label="Run PR review">${PR_REVIEW_PLAY_SVG}</button>`
 }
 
@@ -366,10 +386,16 @@ function liveSessionId(item: LiveItem): string {
 
 function renderManualCard(card: ManualCard): HTMLElement {
   const el = document.createElement('article')
-  el.className = 'card'
+  el.className = 'card card-manual'
   el.draggable = true
   el.dataset.id = String(card.id)
   el.dataset.lane = card.lane
+  // Editing was mouse-only: clicking the card opened the editor and there was
+  // no keyboard equivalent, though the delete button next to it was reachable
+  // by Tab. Make the card itself a focus stop that opens on Enter.
+  el.tabIndex = 0
+  el.setAttribute('role', 'button')
+  el.setAttribute('aria-label', `Edit card: ${card.text.slice(0, 60)}`)
   // Meta row mirrors the PR/Issue card shape — repo (if linked) on the
   // left, timestamp at the end. Bottom-right hosts the delete action;
   // the top-right strip hosts the non-destructive tool icons (chat,
@@ -400,18 +426,28 @@ const PR_REVIEW_SPIN_SVG = '<svg width="11" height="11" viewBox="0 0 14 14" fill
 
 function renderLiveItem(item: LiveItem): HTMLElement {
   const el = document.createElement('article')
+  el.dataset.id = prKey(item)        // stable id across refreshes for the FLIP
+  paintLiveItem(el, item)
+  return el
+}
+
+// Repaint an existing live card from the latest data. The animated refresh
+// reused the card node and never touched its contents, so a pull request that
+// got merged slid to the top of the lane still showing no merged badge and its
+// original timestamp — the motion said something had happened and the text
+// said nothing had. Relative times were frozen at first paint too.
+function paintLiveItem(el: HTMLElement, item: LiveItem): void {
   const classes = ['card', 'card-live']
   if (isMergeable(item))      classes.push('card-mergeable')
   else if (isFresh(item) && item.is_pr === 1) classes.push('card-fresh')
   if (agentActiveKeys.has(prKey(item))) classes.push('card-active')
   el.className = classes.join(' ')
-  el.dataset.id = prKey(item)        // stable id across refreshes for the FLIP
   const st = liveStateLabel(item)
   const stateBadge = st ? `<span class="state ${st.cls}">${st.text}</span>` : ''
   // PR cards get a tiny review icon as the rightmost member of the
   // action strip; issue cards have no primary action — only the
   // tools row.
-  const primary = item.is_pr === 1 ? reviewButton() : ''
+  const primary = item.is_pr === 1 ? reviewButton(item) : ''
   el.innerHTML = `
     <a class="card-link" href="${safeHttpsUrl(item.url)}" target="_blank" rel="noopener">
       <div class="card-text">${escapeHtml(item.title)}</div>
@@ -429,10 +465,38 @@ function renderLiveItem(item: LiveItem): HTMLElement {
       primary,
     })}
   `
-  return el
+}
+
+// An open card editor is a child of its card, and renderAll empties every
+// lane list — so anything renderAll-triggered while someone was mid-sentence
+// (dropping another card, deleting one, typing in the search box) threw the
+// typed text away without a word. Capture the draft before the wipe and hand
+// it back afterwards.
+interface EditDraft { id: number, text: string, repo: string | null }
+let openEditDraft: EditDraft | null = null
+
+function captureOpenEdit(): EditDraft | null {
+  const editing = viewEl?.querySelector<HTMLElement>('.card.editing')
+  if (!editing) return null
+  const ta = editing.querySelector<HTMLTextAreaElement>('.card-edit textarea')
+  if (!ta) return null
+  const repoSel = editing.querySelector<HTMLSelectElement>('.card-edit .manual-repo')
+  return { id: Number(editing.dataset.id), text: ta.value, repo: repoSel?.value || null }
+}
+
+function restoreOpenEdit(draft: EditDraft | null): void {
+  if (!draft) return
+  const cardEl = viewEl?.querySelector<HTMLElement>(`.card[data-id="${draft.id}"]:not(.card-live)`)
+  // The card can be gone (deleted elsewhere) or filtered out of the DOM. Hold
+  // the draft rather than dropping it; the next render that shows the card
+  // again restores it.
+  if (!cardEl) { openEditDraft = draft; return }
+  openEditDraft = null
+  startEdit(cardEl, draft)
 }
 
 function renderAll() {
+  const draft = captureOpenEdit() ?? openEditDraft
   for (const l of LANES) {
     const list = laneListEl(l.key)
     list.innerHTML = ''
@@ -446,8 +510,32 @@ function renderAll() {
       for (const i of items) list.appendChild(renderLiveItem(i))
       count = items.length
     }
-    laneCountEl(l.key).textContent = String(count)
+    // Say the count is a floor, not a total, when the read was capped.
+    laneCountEl(l.key).textContent = l.type === 'live' && liveTruncated ? `${count}+` : String(count)
+    laneCountEl(l.key).title = l.type === 'live' && liveTruncated
+      ? `Showing the ${LIVE_LIMIT} most recently updated issues and pull requests combined; older ones are not loaded.`
+      : ''
+    renderLaneEmptyState(l, count)
   }
+  restoreOpenEdit(draft)
+}
+
+// An empty lane and a lane emptied by a filter look identical, and the second
+// one is the confusing case: the board looks like it has lost your work.
+function renderLaneEmptyState(l: LaneConfig, count: number): void {
+  const list = laneListEl(l.key)
+  if (count > 0) return
+  const filtered = l.type === 'manual'
+    ? !!searchQuery
+    : !!searchQuery || timeFilter !== 'all' || statusFilter !== 'all'
+  const note = document.createElement('p')
+  note.className = 'lane-empty'
+  note.textContent = filtered
+    ? (l.type === 'live' && liveTruncated
+        ? 'Nothing matches — and this lane is capped, so older items are not loaded.'
+        : 'Nothing matches the current filter.')
+    : (l.type === 'manual' ? 'No cards yet.' : 'Nothing here.')
+  list.appendChild(note)
 }
 
 // Re-render only the live lanes. Two modes:
@@ -508,10 +596,16 @@ function renderLiveLaneAnimated(laneKey: 'issue' | 'pr') {
     const idStr = prKey(item)
     const existing = existingEls.get(idStr)
     if (existing) {
+      // Refresh the contents before reusing the node — the element identity is
+      // what the FLIP needs, not its stale innards.
+      paintLiveItem(existing, item)
       fragment.appendChild(existing)        // moved to its new index
     } else {
       const fresh = renderLiveItem(item)
       fresh.classList.add('card-entering')   // CSS animation handles the fade-and-drop
+      // The keyframe uses `both`, so leaving the class on pins transform:none
+      // and the next FLIP cannot move the card. Take it off once it has played.
+      fresh.addEventListener('animationend', () => fresh.classList.remove('card-entering'), { once: true })
       fragment.appendChild(fresh)
     }
   }
@@ -686,13 +780,25 @@ async function pollLiveTick() {
   } catch { /* same */ }
 }
 
+// Ordering guard for the live read. The unfiltered query is slow and has no
+// loading state, so a person who clicks "Any" and then clicks again gets the
+// second, faster answer painted first and the first one landing on top of it
+// seconds later — leaving the header highlighting one filter while the lanes
+// show another. The newest read wins.
+let liveSequence = 0
+
 async function fetchLive() {
+  const mine = ++liveSequence
   const win = timeWindow()
   const payload: Record<string, unknown> = {
     operation: 'list',
     record_type: 'all',
     record_state: statusFilter === 'open' ? 'open' : 'all',
-    limit: LIVE_LIMIT,
+    // One request covers issues and pull requests together, so they compete
+    // for the same slots. Ask for one more than we will show, purely to detect
+    // that there were more and say so rather than presenting a truncated board
+    // as the whole picture.
+    limit: LIVE_LIMIT + 1,
     offset: 0,
   }
   if (win.since) payload.updated_since = win.since
@@ -704,8 +810,12 @@ async function fetchLive() {
   })
   if (!res.ok) throw new Error(`/api/gh ${res.status}`)
   const data = await res.json()
+  // A read from before the current filter is history; applying it would put
+  // the lanes and the header out of step.
+  if (mine !== liveSequence) return
   const records: GhRecord[] = data.records || []
-  liveItems = records.map((r) => ({
+  liveTruncated = records.length > LIVE_LIMIT
+  liveItems = records.slice(0, LIVE_LIMIT).map((r) => ({
     repo: r.repo,
     number: r.number,
     title: r.title,
@@ -718,6 +828,11 @@ async function fetchLive() {
   }))
   reconcilePending()
 }
+
+// Whether the last live read hit the cap. The lanes showed the first 200
+// issues-and-PRs-combined as though that were everything, so filtering for a
+// real but older issue produced an empty lane that read as "no such issue".
+let liveTruncated = false
 
 // Drop pending entries the datastore has now picked up (matched by
 // repo + number) and any older than PENDING_TTL_MS, then prepend the
@@ -783,33 +898,50 @@ function openManualComposer(lane: 'idea' | 'concept' | 'plan') {
   composer.className = 'composer'
   composer.innerHTML = `
     <textarea rows="3" placeholder="Write a card..." spellcheck="true"></textarea>
-    <select class="manual-repo">${manualRepoOptionsHtml()}</select>
+    <select class="manual-repo" aria-label="Link a repository">${manualRepoOptionsHtml()}</select>
     <div class="composer-row">
       <button class="composer-add">Add</button>
       <button class="composer-cancel" type="button">Cancel</button>
       <span class="composer-hint">⌘↵ to add</span>
     </div>
+    <p class="composer-error st-help st-help-error" role="alert" hidden></p>
   `
   laneNode.insertBefore(composer, addBtn)
   const ta = composer.querySelector<HTMLTextAreaElement>('textarea')!
   const repoSel = composer.querySelector<HTMLSelectElement>('.manual-repo')!
   const addB = composer.querySelector<HTMLButtonElement>('.composer-add')!
   const cancelB = composer.querySelector<HTMLButtonElement>('.composer-cancel')!
+  const errEl = composer.querySelector<HTMLElement>('.composer-error')!
 
   const close = () => { composer.remove(); addBtn.hidden = false }
+  let adding = false
   const submit = async () => {
+    if (adding) return
     const text = ta.value.trim()
     if (!text) { close(); return }
+    adding = true
     addB.disabled = true
+    errEl.hidden = true
     try {
       const repo = repoSel.value || null
       const card = await api<ManualCard>('POST', '/api/current', { text, lane, repo })
       manualCards.push(card)
       renderAll()
       close()
+      // A card written while the filter box excludes it used to vanish on
+      // creation, which is indistinguishable from the write having failed.
+      if (searchQuery && !matchesSearch(card.text)) {
+        showLoadError('Card added — the filter is hiding it.')
+        window.setTimeout(() => showLoadError(''), 5000)
+      }
     } catch (err) {
+      // A failed create was a silent no-op: the Add button simply stopped
+      // responding and the reason went to the console.
       addB.disabled = false
-      console.error(err)
+      errEl.textContent = `Not added — ${(err as Error).message}`
+      errEl.hidden = false
+    } finally {
+      adding = false
     }
   }
 
@@ -817,7 +949,7 @@ function openManualComposer(lane: 'idea' | 'concept' | 'plan') {
   cancelB.addEventListener('click', close)
   ta.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { e.preventDefault(); close() }
-    else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit() }
+    else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void submit() }
   })
   ta.focus()
 }
@@ -886,18 +1018,32 @@ function openIssueComposer(prefill?: IssueComposerPrefill) {
   // Prefilled body lands as the issue's body; user provides the title.
   if (prefill?.body) bodyTa.value = prefill.body
 
-  const close = () => { composer.remove(); addBtn.hidden = false }
+  // Cancel is refused while the write is in flight. Removing the composer did
+  // not cancel anything: the issue was still created and, on a promoted card,
+  // the source card still deleted — the person just never saw either happen.
+  const close = () => {
+    if (submitting) { showError('Still opening the issue — wait for it to finish.'); return }
+    composer.remove()
+    addBtn.hidden = false
+  }
   const showError = (msg: string) => {
     errEl.textContent = msg
     errEl.hidden = false
   }
+  // Disabling the button is not a guard: ⌘↵ calls submit() directly and never
+  // looks at it. The gh call can take the best part of a minute, so a repeated
+  // or held ⌘↵ opened a second and third identical issue on GitHub — the one
+  // action in this view that leaves the machine and cannot be taken back.
+  let submitting = false
   const submit = async () => {
+    if (submitting) return
     const title = titleInput.value.trim()
     const body = bodyTa.value.trim()
     const repo = repoSel.value             // already the full owner/name
     if (!title) { showError('Title is required'); titleInput.focus(); return }
     if (!repo)  { showError('Repo is required'); return }
 
+    submitting = true
     addB.disabled = true
     addB.textContent = 'Opening…'
     errEl.hidden = true
@@ -955,6 +1101,8 @@ function openIssueComposer(prefill?: IssueComposerPrefill) {
       addB.disabled = false
       addB.textContent = 'Open issue'
       showError((err as Error).message)
+    } finally {
+      submitting = false
     }
   }
 
@@ -962,8 +1110,13 @@ function openIssueComposer(prefill?: IssueComposerPrefill) {
   cancelB.addEventListener('click', close)
   for (const inp of [titleInput, bodyTa] as HTMLElement[]) {
     inp.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') { e.preventDefault(); close() }
-      else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit() }
+      // Escape while the write is out would abandon a request that is still
+      // going to create the issue — and delete the promoted card with it.
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        if (submitting) { showError('Still opening the issue — wait for it to finish.'); return }
+        close()
+      } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void submit() }
     })
   }
   titleInput.focus()
@@ -971,7 +1124,7 @@ function openIssueComposer(prefill?: IssueComposerPrefill) {
 
 // ── Edit / delete (manual lanes only) ────────────────────────────────────────
 
-function startEdit(cardEl: HTMLElement) {
+function startEdit(cardEl: HTMLElement, draft?: EditDraft) {
   if (cardEl.classList.contains('editing')) return
   if (cardEl.classList.contains('card-live')) return  // live cards are read-only
   const id = Number(cardEl.dataset.id)
@@ -986,15 +1139,19 @@ function startEdit(cardEl: HTMLElement) {
   wrapper.className = 'card-edit'
   wrapper.innerHTML = `
     <textarea rows="3" spellcheck="true"></textarea>
-    <select class="manual-repo">${manualRepoOptionsHtml(originalRepo)}</select>
+    <select class="manual-repo" aria-label="Link a repository">${manualRepoOptionsHtml(draft ? draft.repo : originalRepo)}</select>
     <div class="composer-row">
       <button class="composer-add">Save</button>
       <button class="composer-cancel" type="button">Cancel</button>
     </div>
+    <p class="card-edit-error st-help st-help-error" role="alert" hidden></p>
   `
   const ta = wrapper.querySelector<HTMLTextAreaElement>('textarea')!
   const repoSel = wrapper.querySelector<HTMLSelectElement>('.manual-repo')!
-  ta.value = originalText
+  const errEl = wrapper.querySelector<HTMLElement>('.card-edit-error')!
+  // A restored draft is text the person typed that was never stored; it wins
+  // over the saved value.
+  ta.value = draft ? draft.text : originalText
 
   const textNode = cardEl.querySelector<HTMLElement>('.card-text')!
   const metaNode = cardEl.querySelector<HTMLElement>('.card-meta')
@@ -1014,22 +1171,40 @@ function startEdit(cardEl: HTMLElement) {
     if (metaNode) metaNode.hidden = false
     if (deleteBtn) deleteBtn.hidden = false
   }
+  let saving = false
   const save = async () => {
+    if (saving) return
     const text = ta.value.trim()
     const repo = repoSel.value || null
     if (!text) { close(); return }
     if (text === originalText && repo === originalRepo) { close(); return }
+    saving = true
+    errEl.hidden = true
     try {
       const patch: Record<string, unknown> = {}
       if (text !== originalText) patch.text = text
-      if (repo !== originalRepo) patch.repo = repo
+      // The repo dropdown can be missing the card's current repo — it is built
+      // from a list that depends on the org fetch and the active time window.
+      // Sending the empty value it falls back to silently unlinked the repo,
+      // including when Save was pressed with nothing changed. Only write the
+      // repo when the dropdown actually offered the current one.
+      const repoOffered = [...repoSel.options].some((o) => (o.value || null) === originalRepo)
+      if (repoOffered && repo !== originalRepo) patch.repo = repo
+      if (Object.keys(patch).length === 0) { close(); return }
       const updated = await api<ManualCard>('PATCH', `/api/current/${id}`, patch)
       const idx = manualCards.findIndex((c) => c.id === id)
       if (idx >= 0) manualCards[idx] = updated
+      openEditDraft = null
       renderAll()
     } catch (err) {
-      console.error(err)
-      close()
+      // Closing here threw the rewritten text away and reverted the card, with
+      // the reason going only to the console. The editor stays open, holding
+      // the only copy, and says what went wrong.
+      errEl.textContent = `Not saved — ${(err as Error).message}`
+      errEl.hidden = false
+      ta.focus()
+    } finally {
+      saving = false
     }
   }
 
@@ -1063,14 +1238,50 @@ function clearIndicator() {
   if (dropIndicator) dropIndicator.remove()
 }
 
-function insertionIndex(list: HTMLElement, clientY: number): number {
+// `excludeId` is passed explicitly rather than read from `dragId`: the drop
+// handler clears dragId as soon as it starts (so a stale value cannot outlive
+// the drag), and reading it here after that counted the dragged card itself
+// and put the insertion one slot too low.
+function insertionIndex(list: HTMLElement, clientY: number, excludeId: number | null = dragId): number {
   const cardsInList = [...list.querySelectorAll<HTMLElement>('.card:not(.card-live)')]
-    .filter((c) => Number(c.dataset.id) !== dragId)
+    .filter((c) => Number(c.dataset.id) !== excludeId)
   for (let i = 0; i < cardsInList.length; i++) {
     const rect = cardsInList[i].getBoundingClientRect()
     if (clientY < rect.top + rect.height / 2) return i
   }
   return cardsInList.length
+}
+
+// The lane in the DOM is only the cards that pass the search box, but a
+// position is an index into the whole lane — and both the optimistic splice
+// here and moveCard on the server treated the visible slot as if it were the
+// absolute one. Dropping between two visible cards then reordered whatever was
+// hidden between them: the drop looked like it did nothing while a card the
+// person could not see moved. Anchor the drop to the visible card it lands
+// above and translate that into the full lane's index.
+function absoluteInsertIndex(
+  targetLane: 'idea' | 'concept' | 'plan',
+  list: HTMLElement,
+  clientY: number,
+  movingId: number,
+): number {
+  const full = manualCards
+    .filter((c) => c.lane === targetLane && c.id !== movingId)
+    .sort((a, b) => a.position - b.position)
+  const visibleIds = [...list.querySelectorAll<HTMLElement>('.card:not(.card-live)')]
+    .map((c) => Number(c.dataset.id))
+    .filter((cardId) => cardId !== movingId)
+  const slot = insertionIndex(list, clientY, movingId)
+  // Landing above a visible card means "immediately before that card".
+  if (slot < visibleIds.length) {
+    const anchor = full.findIndex((c) => c.id === visibleIds[slot])
+    return anchor >= 0 ? anchor : full.length
+  }
+  // Past the last visible card means "after it", not "at the end of the lane".
+  const last = visibleIds[visibleIds.length - 1]
+  if (last === undefined) return full.length
+  const lastIdx = full.findIndex((c) => c.id === last)
+  return lastIdx >= 0 ? lastIdx + 1 : full.length
 }
 
 function placeIndicator(list: HTMLElement, index: number) {
@@ -1140,8 +1351,13 @@ function attachDragHandlers() {
       lane.classList.remove('lane-drag-over')
       if (dragId === null) return
       const movingId = dragId
+      // renderAll() below detaches the drag source, so the delegated dragend
+      // on .kanban never fires and dragId stayed set for the rest of the
+      // session — after which a drag from another application over a manual
+      // lane was accepted as a card drag and moved this card again.
+      dragId = null
       const targetLane = l.key as 'idea' | 'concept' | 'plan'
-      const idx = insertionIndex(list, e.clientY)
+      const idx = absoluteInsertIndex(targetLane, list, e.clientY, movingId)
       clearIndicator()
 
       const moving = manualCards.find((c) => c.id === movingId)
@@ -1220,6 +1436,16 @@ function attachDragHandlers() {
 
 function attachCardClickHandlers() {
   const kanban = viewEl.querySelector<HTMLElement>('.kanban')!
+  // Enter on a focused manual card opens its editor — the keyboard equivalent
+  // of the click that was previously the only way in.
+  kanban.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return
+    const cardEl = (e.target as HTMLElement).closest<HTMLElement>('.card-manual')
+    if (!cardEl || cardEl !== e.target) return
+    if (cardEl.classList.contains('editing')) return
+    e.preventDefault()
+    startEdit(cardEl)
+  })
   kanban.addEventListener('click', async (e) => {
     const target = e.target as HTMLElement
 
@@ -1313,7 +1539,14 @@ function attachCardClickHandlers() {
       e.stopPropagation()
       const cardEl = delBtn.closest<HTMLElement>('.card')!
       const id = Number(cardEl.dataset.id)
-      try { await deleteManualCard(id) } catch (err) { console.error(err) }
+      // A card holds prose the person wrote and there is no undo, no trash and
+      // no history — the delete was one unconfirmed click on a 22px × next to
+      // the card body. Ask, and show what is about to go.
+      const card = manualCards.find((c) => c.id === id)
+      const preview = (card?.text || '').trim().replace(/\s+/g, ' ').slice(0, 80)
+      if (!window.confirm(preview ? `Delete this card?\n\n${preview}${preview.length === 80 ? '…' : ''}` : 'Delete this card?')) return
+      try { await deleteManualCard(id) }
+      catch (err) { alert(`Could not delete the card: ${(err as Error).message}`) }
       return
     }
     const cardEl = target.closest<HTMLElement>('.card')
@@ -1382,13 +1615,23 @@ export async function initCurrentView() {
     attachCardClickHandlers()
     attachFilterHandlers()
   }
-  try {
-    await Promise.all([fetchManual(), fetchLive(), fetchAllRepos(), fetchAgentActive()])
-    renderAll()
-    fetchPrStatus()                  // first PR-status pull, intentionally not awaited
-  } catch (err) {
-    console.error('[stream] failed to load:', err)
-  }
+  // Promise.all rejects on the first failure, so a single unreachable GitHub
+  // cache skipped renderAll entirely and the board stayed blank — including
+  // the person's own cards, which had loaded from SQLite perfectly well. Let
+  // each source fail on its own, paint whatever arrived, and say what did not.
+  const [manual, live, repos, active] = await Promise.allSettled([
+    fetchManual(), fetchLive(), fetchAllRepos(), fetchAgentActive(),
+  ])
+  renderAll()
+  const failures: string[] = []
+  if (manual.status === 'rejected') failures.push('your cards')
+  if (live.status === 'rejected') failures.push('GitHub issues and pull requests')
+  if (repos.status === 'rejected') failures.push('the repository list')
+  if (active.status === 'rejected') failures.push('agent activity')
+  showLoadError(failures.length
+    ? `Could not load ${failures.join(', ')}. Showing what is available.`
+    : '')
+  fetchPrStatus()                    // first PR-status pull, intentionally not awaited
   // Combined refresh at the user-chosen cadence (1m or 5m, from
   // Settings). Re-fetch live items + PR-status, re-render the live
   // lanes through the FLIP animator so cards glide to their new

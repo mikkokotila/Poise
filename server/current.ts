@@ -63,7 +63,17 @@ const setLaneAndPosition = db.prepare(
   `UPDATE current_cards SET lane = ?, position = ?, updated_at = ? WHERE id = ?`
 )
 
+// Re-densifying a lane touches every card in it. Stamping updated_at on all of
+// them made a card that had sat untouched for three weeks report that it had
+// just been modified, because a neighbour was nudged — so the timestamp stopped
+// meaning "when this card last changed" and became "when anyone last tidied
+// this lane". A position is bookkeeping; only the card the person actually
+// moved has changed.
 const setPosition = db.prepare(
+  `UPDATE current_cards SET position = ? WHERE id = ?`
+)
+
+const setPositionTouched = db.prepare(
   `UPDATE current_cards SET position = ?, updated_at = ? WHERE id = ?`
 )
 
@@ -117,19 +127,22 @@ export function moveCard(id: number, lane: Lane, index: number): CurrentCard {
       const ids = (cardsInLane.all(lane) as { id: number }[]).map((r) => r.id).filter((i) => i !== id)
       const clamped = Math.max(0, Math.min(index, ids.length))
       ids.splice(clamped, 0, id)
-      ids.forEach((cid, i) => setPosition.run(i, now, cid))
+      ids.forEach((cid, i) => {
+        if (cid === id) setPositionTouched.run(i, now, cid)
+        else setPosition.run(i, cid)
+      })
     } else {
       // Cross-lane: remove from source (re-densify it), insert into target at index.
       const sourceIds = (cardsInLane.all(sourceLane) as { id: number }[])
         .map((r) => r.id).filter((i) => i !== id)
-      sourceIds.forEach((cid, i) => setPosition.run(i, now, cid))
+      sourceIds.forEach((cid, i) => setPosition.run(i, cid))
 
       const targetIds = (cardsInLane.all(lane) as { id: number }[]).map((r) => r.id)
       const clamped = Math.max(0, Math.min(index, targetIds.length))
       targetIds.splice(clamped, 0, id)
       targetIds.forEach((cid, i) => {
         if (cid === id) setLaneAndPosition.run(lane, i, now, cid)
-        else setPosition.run(i, now, cid)
+        else setPosition.run(i, cid)
       })
     }
   })
@@ -140,11 +153,10 @@ export function moveCard(id: number, lane: Lane, index: number): CurrentCard {
 export function removeCard(id: number): void {
   const card = getCard(id)
   if (!card) return
-  const now = new Date().toISOString()
   const tx = db.transaction(() => {
     deleteCard.run(id)
     const ids = (cardsInLane.all(card.lane) as { id: number }[]).map((r) => r.id)
-    ids.forEach((cid, i) => setPosition.run(i, now, cid))
+    ids.forEach((cid, i) => setPosition.run(i, cid))
   })
   tx()
 }
