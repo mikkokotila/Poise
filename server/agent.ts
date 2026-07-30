@@ -78,9 +78,16 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
     throw new Error(`agent-interface log row ${index} is not an object`)
   }
   const row = value as Record<string, unknown>
+  // An absent field and an explicit null both mean "this row does not have
+  // one". Only `null` was accepted, so a row written before agent-interface
+  // added a field — `expected_head`, `source`, `correlation_id`, `action` —
+  // omits the key entirely, `row[field]` is undefined, and validation threw.
+  // One such row rejects the whole batch, because the batch is validated as a
+  // unit: with 1044 rows in the log and the oldest dating to May, Swarm served
+  // a 502 and rendered nothing at all. Absent is null.
   const optionalString = (field: string): string | null => {
     const item = row[field]
-    if (item === null) return null
+    if (item === null || item === undefined) return null
     if (typeof item !== 'string') {
       throw new Error(`agent-interface log row ${index} has invalid ${field}`)
     }

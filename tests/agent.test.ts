@@ -53,6 +53,32 @@ function logRow(overrides: Record<string, unknown> = {}): Record<string, unknown
 describe('agent log compatibility', () => {
   beforeEach(() => mocks.runFile.mockReset())
 
+  // Fields agent-interface added over time — expected_head, source,
+  // correlation_id, action — are simply absent from rows written before them.
+  // Only an explicit null was accepted, so `undefined` failed validation, and
+  // because the batch is validated as a unit one such row rejected all of
+  // them: with the oldest row in this log dating to May, /api/agent-logs
+  // answered 502 and Swarm rendered nothing at all.
+  it('reads a row written before a field existed, and does not fail its batch', async () => {
+    const legacy = logRow({ behavior: null, pr_id: null, repo: null, actor: 'bit-mis' })
+    for (const field of ['expected_head', 'source', 'correlation_id', 'action', 'outcome', 'head_sha', 'session_id']) {
+      delete legacy[field]
+    }
+    mocks.runFile.mockResolvedValue({
+      stdout: JSON.stringify([legacy, logRow({ id: 'b'.repeat(32) })]),
+      stderr: '',
+    })
+    const rows = await fetchAgentLogs()
+    expect(rows).toHaveLength(2)
+    // Absent reads as absent, not as a violation.
+    expect(rows.find((r) => r.id === 'a'.repeat(32))).toMatchObject({
+      expected_head: null, source: null, correlation_id: null, action: null,
+      outcome: null, head_sha: null, session_id: null,
+    })
+    // And the well-formed row beside it still arrives.
+    expect(rows.some((r) => r.id === 'b'.repeat(32))).toBe(true)
+  })
+
   it('keeps a historical unqualified repository row readable', async () => {
     mocks.runFile.mockResolvedValue({
       stdout: JSON.stringify([logRow({ repo: 'legacy-repo' })]),
