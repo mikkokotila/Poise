@@ -810,8 +810,17 @@ export function listBehaviorDeadLetters(limit = 50): BehaviorDeadLetter[] {
   const rows = db.prepare(`
     SELECT id, behavior, target, repo, pr, actor, source, correlation_id,
            call_id, error, created_at
-    FROM behavior_dead_letters
-    ORDER BY created_at DESC, id DESC
+    FROM behavior_dead_letters AS dead
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM behavior_seen AS recovered
+      WHERE recovered.key = dead.behavior
+        AND recovered.launch_repo = dead.repo
+        AND recovered.launch_pr = dead.pr
+        AND recovered.launch_outcome IS NOT NULL
+        AND julianday(recovered.launch_completed_at) > julianday(dead.created_at)
+    )
+    ORDER BY dead.created_at DESC, dead.id DESC
     LIMIT ?
   `).all(limit) as Array<{
     id: string
