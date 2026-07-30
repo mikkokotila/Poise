@@ -4,7 +4,7 @@ import { initSettings, toggleSettingsPanel, openSettingsPanel, isFullyConfigured
 import { initMenu } from './menu'
 import { initMainView, refreshMainView } from './views/main-view'
 import { initCurrentView } from './views/current-view'
-import { initSwarmView, focusRow as focusSwarmRow } from './views/swarm-view'
+import { initSwarmView, stopSwarmRefresh, focusRow as focusSwarmRow } from './views/swarm-view'
 import { initBehaviorsView, stopBehaviorsRefresh } from './views/behaviors-view'
 import { initSnippetsView } from './views/snippets-view'
 import { initEditorView, stopEditorRefresh } from './views/editor-view'
@@ -53,6 +53,11 @@ function showView(v: ViewSlug) {
   // and its refresh tick kept fetching /api/behaviors for the rest of the
   // session while the view was hidden.
   if (v !== 'behaviors') stopBehaviorsRefresh()
+  // Swarm had the same unused stop. After one visit it kept polling for the
+  // rest of the session: every tick spawned an `agent-interface --logs`
+  // subprocess, fetched the whole log and rebuilt a table of a thousand rows
+  // nobody was looking at, on the main thread, while the user typed elsewhere.
+  if (v !== 'swarm') stopSwarmRefresh()
 
   // Initialize the target first so content exists before the animation starts
   if (v === 'main')           initMainView()
@@ -154,7 +159,7 @@ window.addEventListener('poise:goto-swarm-row', (ev) => {
   // Defer one frame so showView's animation classes have applied and
   // initSwarmView() has run before we ask for a focus.
   window.requestAnimationFrame(() => {
-    focusSwarmRow(detail.repo, detail.pr_id)
+    void focusSwarmRow(detail.repo, detail.pr_id)
   })
 })
 
