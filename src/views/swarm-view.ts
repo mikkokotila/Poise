@@ -412,7 +412,12 @@ function applySwarmFlip(nextEntries: LogEntry[]) {
       // the innards are swapped. dataset.callId too: a row going
       // running→completed becomes eligible for a full-id response read.
       main.dataset.callId = e.response ? e.id : ''
-      main.innerHTML = mainRowInnerHTML(e)
+      // Rewriting the innards destroys any text the person has selected inside
+      // this row, and the poll does it once a minute — so a selection made to
+      // copy an id or a target could vanish before the copy. Skip the rewrite
+      // when nothing in the row has actually changed, which is the common case.
+      const next = mainRowInnerHTML(e)
+      if (main.innerHTML !== next) main.innerHTML = next
       fragment.appendChild(main)
     } else {
       const row = buildMainRow(e)

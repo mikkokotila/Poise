@@ -665,17 +665,14 @@ td:last-child {
 }
 
 /* ── Type toggle (IS/PR) ── */
+/* IS / PR marker. It is a label, not a control — there has never been a click
+   handler for it. The pointer cursor and hover fade advertised an interaction
+   that does not exist, so it read as a broken button. */
 .type-toggle {
   font-size: 0.6875rem;
   font-weight: 600;
   letter-spacing: 0.02em;
-  cursor: pointer;
   user-select: none;
-  transition: opacity var(--t-base) ease;
-}
-
-.type-toggle:hover {
-  opacity: 0.6;
 }
 
 tr.expanded .type-toggle {
