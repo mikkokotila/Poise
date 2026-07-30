@@ -3,7 +3,7 @@ import { initTypography, toggleTypographyPanel } from './typo'
 import { initSettings, toggleSettingsPanel, openSettingsPanel, isFullyConfigured } from './settings'
 import { initMenu } from './menu'
 import { initMainView, refreshMainView } from './views/main-view'
-import { initCurrentView } from './views/current-view'
+import { initCurrentView, stopCurrentPolling } from './views/current-view'
 import { initSwarmView, stopSwarmRefresh, focusRow as focusSwarmRow } from './views/swarm-view'
 import { initBehaviorsView, stopBehaviorsRefresh } from './views/behaviors-view'
 import { initSnippetsView } from './views/snippets-view'
@@ -58,6 +58,8 @@ function showView(v: ViewSlug) {
   // subprocess, fetched the whole log and rebuilt a table of a thousand rows
   // nobody was looking at, on the main thread, while the user typed elsewhere.
   if (v !== 'swarm') stopSwarmRefresh()
+  // And Current, the third view with an exported stop that nothing called.
+  if (v !== 'current') stopCurrentPolling()
 
   // Initialize the target first so content exists before the animation starts
   if (v === 'main')           initMainView()
