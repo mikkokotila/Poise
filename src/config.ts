@@ -11,11 +11,26 @@ export interface AppSettings {
 let current: AppSettings = { org: '', me: '', timezone: '' }
 let loaded = false
 
+// Whether the last read actually reached the server. A failed read used to be
+// indistinguishable from an empty one: `current` kept its blank defaults,
+// isFullyConfigured saw no org and no me, and a fully configured install was
+// told it was unconfigured and had the settings panel forced open over it — on
+// top of whatever the person was doing.
+let loadOk = false
+export function settingsLoadOk(): boolean { return loadOk }
+
 export async function loadSettings(): Promise<AppSettings> {
   try {
     const res = await fetch('/api/settings')
-    if (res.ok) current = await res.json()
-  } catch { /* ignore — leave defaults */ }
+    if (res.ok) {
+      current = await res.json()
+      loadOk = true
+    } else {
+      loadOk = false
+    }
+  } catch {
+    loadOk = false
+  }
   loaded = true
   return current
 }
