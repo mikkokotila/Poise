@@ -2,7 +2,7 @@ import './style.css'
 import { initTypography, toggleTypographyPanel } from './typo'
 import { initSettings, toggleSettingsPanel, openSettingsPanel, isFullyConfigured } from './settings'
 import { initMenu } from './menu'
-import { initMainView, refreshMainView } from './views/main-view'
+import { initMainView, refreshMainView, stopMainRefresh } from './views/main-view'
 import { initCurrentView, stopCurrentPolling } from './views/current-view'
 import { initSwarmView, stopSwarmRefresh, focusRow as focusSwarmRow } from './views/swarm-view'
 import { initBehaviorsView, stopBehaviorsRefresh } from './views/behaviors-view'
@@ -60,6 +60,9 @@ function showView(v: ViewSlug) {
   if (v !== 'swarm') stopSwarmRefresh()
   // And Current, the third view with an exported stop that nothing called.
   if (v !== 'current') stopCurrentPolling()
+  // And Archive, the fourth and last. Every view in this app shipped a
+  // leave-cleanup that nothing invoked.
+  if (v !== 'main') stopMainRefresh()
 
   // Initialize the target first so content exists before the animation starts
   if (v === 'main')           initMainView()
