@@ -838,6 +838,21 @@ let liveTruncated = false
 // repo + number) and any older than PENDING_TTL_MS, then prepend the
 // remaining optimistic items so they appear at the top of their lane.
 // Called from fetchLive() right after liveItems is replaced.
+// Whether an item belongs in the lane under the filters that are actually
+// applied. A freshly-created issue is stamped now, so with the Yesterday
+// window selected the server will never return it — the optimistic copy was
+// prepended anyway, into a lane whose filter excludes it, and sat there
+// unreconcilable until its TTL expired.
+function withinActiveWindow(item: LiveItem): boolean {
+  if (statusFilter === 'open' && item.state !== 'open') return false
+  const win = timeWindow()
+  const t = new Date(item.updated_at || item.created_at).getTime()
+  if (!isFinite(t)) return true
+  if (win.since && t < new Date(win.since).getTime()) return false
+  if (win.until && t >= new Date(win.until).getTime()) return false
+  return true
+}
+
 function reconcilePending() {
   if (!pendingLiveItems.length) return
   const cutoff = Date.now() - PENDING_TTL_MS
@@ -845,8 +860,9 @@ function reconcilePending() {
     if (new Date(p.created_at).getTime() < cutoff) return false
     return !liveItems.some((li) => li.repo === p.repo && li.number === p.number)
   })
-  if (pendingLiveItems.length) {
-    liveItems = [...pendingLiveItems, ...liveItems]
+  const showable = pendingLiveItems.filter(withinActiveWindow)
+  if (showable.length) {
+    liveItems = [...showable, ...liveItems]
   }
 }
 
@@ -999,7 +1015,7 @@ function openIssueComposer(prefill?: IssueComposerPrefill) {
   composer.innerHTML = `
     <input type="text" class="issue-title" placeholder="Issue title" autocomplete="off" spellcheck="true" />
     <textarea class="issue-body" rows="3" placeholder="Body (optional)" spellcheck="true"></textarea>
-    <select class="issue-repo">${repoOptions}</select>
+    <select class="issue-repo" aria-label="Repository for the new issue">${repoOptions}</select>
     <div class="composer-row">
       <button class="composer-add">Open issue</button>
       <button class="composer-cancel" type="button">Cancel</button>
@@ -1014,6 +1030,25 @@ function openIssueComposer(prefill?: IssueComposerPrefill) {
   const addB = composer.querySelector<HTMLButtonElement>('.composer-add')!
   const cancelB = composer.querySelector<HTMLButtonElement>('.composer-cancel')!
   const errEl = composer.querySelector<HTMLElement>('.composer-error')!
+
+  // The list was a one-shot snapshot taken when the composer opened. If
+  // /api/repos had not answered yet it silently degraded to the repos inside
+  // the current time window — so the one you wanted could be missing and you
+  // picked a neighbour, or the list was empty and every submit answered "Repo
+  // is required" with no way out but closing the composer and losing the text.
+  // Fill it in when the real list lands.
+  if (allRepos.length === 0) {
+    void fetchAllRepos().then(() => {
+      if (!composer.isConnected || allRepos.length === 0) return
+      const chosen = repoSel.value
+      repoSel.innerHTML = allRepos
+        .map((r) => `<option value="${escapeHtml(r)}">${escapeHtml(shortRepo(r))}</option>`)
+        .join('')
+      // Keep whatever was already picked if it survived into the real list.
+      if (chosen && allRepos.includes(chosen)) repoSel.value = chosen
+      else if (wantRepo && allRepos.includes(wantRepo)) repoSel.value = wantRepo
+    })
+  }
 
   // Prefilled body lands as the issue's body; user provides the title.
   if (prefill?.body) bodyTa.value = prefill.body
@@ -1097,6 +1132,13 @@ function openIssueComposer(prefill?: IssueComposerPrefill) {
       close()
       await fetchLive()
       renderLiveOnly({ animate: true })
+      // Created, but the active filter excludes it — otherwise the composer
+      // just closes and nothing appears, which reads as a failed write.
+      const created = pendingLiveItems.find((p) => p.repo === repo)
+      if (created && !withinActiveWindow(created)) {
+        showLoadError('Issue created — the current filter is hiding it.')
+        window.setTimeout(() => showLoadError(''), 6000)
+      }
     } catch (err) {
       addB.disabled = false
       addB.textContent = 'Open issue'
@@ -1217,9 +1259,18 @@ function startEdit(cardEl: HTMLElement, draft?: EditDraft) {
 }
 
 async function deleteManualCard(id: number) {
+  const lane = manualCards.find((c) => c.id === id)?.lane
   await api('DELETE', `/api/current/${id}`)
   manualCards = manualCards.filter((c) => c.id !== id)
   renderAll()
+  // The focused card just stopped existing, so focus fell to <body> and a
+  // keyboard user had to tab in from the top of the page again. Land on the
+  // next card in the same lane, or that lane's add button.
+  if (!lane) return
+  const laneNode = viewEl?.querySelector<HTMLElement>(`.lane[data-lane="${lane}"]`)
+  const next = laneNode?.querySelector<HTMLElement>('.card-manual')
+    ?? laneNode?.querySelector<HTMLElement>('.lane-add')
+  next?.focus()
 }
 
 // ── Drag and drop (manual lanes only) ────────────────────────────────────────

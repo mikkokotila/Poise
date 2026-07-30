@@ -168,9 +168,12 @@ function humanAvatarFallback(username: string): string {
   return `https://github.com/${encodeURIComponent(username)}.png?size=48`
 }
 
+// Populated only when the pull request has an assignee — 7 of 400 rows in the
+// current cache. The dash is honest, but it is worth saying which kind of
+// absence it is rather than leaving it to be read as missing data.
 function ownerCell(item: PrRow): string {
   const name = item.owner_login
-  if (!name) return '<span class="last-dash">—</span>'
+  if (!name) return '<span class="last-dash" title="No assignee">—</span>'
   const isBot = /\[bot\]$/i.test(name)
   const src = item.owner_avatar && item.owner_avatar.length > 0 ? item.owner_avatar : humanAvatarFallback(name)
   const classes = ['last-avatar']
@@ -178,6 +181,10 @@ function ownerCell(item: PrRow): string {
   return `<img class="${classes.join(' ')}" src="${safeHttpsUrl(src)}" alt="${escapeHtml(name)}" title="${escapeHtml(name)}" loading="lazy" decoding="async" onerror="this.classList.add('broken')" />`
 }
 
+// The column this fills was headed "Last", which reads as "who acted last".
+// There is no such field in the record — this is the author, and it always was
+// (every one of the 400 sampled rows has one). The header now says Author, so
+// the column and its contents agree.
 function lastCell(item: PrRow): string {
   const name = item.author
   if (!name) return '<span class="last-dash">\u2014</span>'
@@ -464,10 +471,12 @@ async function fetchPage(): Promise<void> {
         body: JSON.stringify({ ...payload, count_only: true, limit: undefined, offset: undefined }),
       }),
     ])
-    if (!pageRes.ok)  throw new Error(`Github ${pageRes.status}`)
-    if (!countRes.ok) throw new Error(`Github ${countRes.status}`)
+    if (!pageRes.ok) throw new Error(`Github ${pageRes.status}`)
     const pageData  = await pageRes.json()
-    const countData = await countRes.json()
+    // The count is a separate request and only feeds the "20 / 1083" pill.
+    // Failing the whole page on it threw away rows that had arrived perfectly
+    // well; the page is the thing the person came for.
+    const countData = countRes.ok ? await countRes.json().catch(() => ({})) : {}
     // The filters moved while this was out; these rows answer a question
     // nobody is asking any more.
     if (mine !== queryGeneration) return
@@ -640,7 +649,16 @@ function attachHandlers() {
 function repaintReviewButton(item: PrRow): void {
   const row = tbody?.querySelector<HTMLTableRowElement>(`tr[data-key="${CSS.escape(rowKey(item))}"]`)
   const cell = row?.querySelector<HTMLElement>('.action-cell')
-  if (cell) cell.innerHTML = reviewButtonHtml(item, stateLabel(item))
+  if (!cell) return
+  // Replacing the node drops focus to <body>, so a keyboard user who activated
+  // this button lands nowhere and has to tab back from the top of the table.
+  const hadFocus = cell.contains(document.activeElement)
+  cell.innerHTML = reviewButtonHtml(item, stateLabel(item))
+  if (hadFocus) {
+    const next = cell.querySelector<HTMLButtonElement>('.review-btn')
+    if (next && !next.disabled) next.focus()
+    else row?.querySelector<HTMLAnchorElement>('.title-cell a')?.focus()
+  }
 }
 
 export function initMainView() {
@@ -739,8 +757,18 @@ async function refreshMainSoft() {
     total = typeof countData.count === 'number' ? countData.count : next.length
     items = next
     offset = items.length
+    const wasDone = done
     done = items.length >= total
     loader.hidden = done
+    // When a refresh reopens paging — new rows arrived, so there is more to
+    // load again — the IntersectionObserver does not re-fire on its own: it
+    // reports state changes, and the sentinel never left the viewport. Without
+    // a nudge the loader spins forever and scrolling loads nothing.
+    if (wasDone && !done) {
+      requestAnimationFrame(() => {
+        if (mine === queryGeneration && sentinelNeedsFetch()) void fetchPage()
+      })
+    }
 
     if (next.length === 0) {
       tbody.innerHTML = ''
