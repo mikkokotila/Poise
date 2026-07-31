@@ -91,6 +91,16 @@ export interface ContentJobResponse {
   article_created?: boolean
 }
 
+// A launch whose agent is running but whose call row has not been identified
+// yet. Not a failure: the recovery pass links it shortly, and the article is
+// authored normally. It carries no call_id precisely because that is the thing
+// still unknown, so it is a distinct shape rather than a half-filled response.
+export interface ContentLaunchPending {
+  launch_id: string
+  status: 'pending'
+  pending: true
+}
+
 export interface ContentFinalizerDependencies {
   listCalls(): Promise<Array<{
     id: string
@@ -496,6 +506,10 @@ export async function recoverLegacyContentMappings(
   })
 }
 
+// A job that never reaches a terminal status is not a job that is still
+// working; it is one nobody will ever hear about again.
+const CONTENT_JOB_MAX_AGE_MS = 60 * 60 * 1000
+
 async function reconcileClaimedJob(
   job: ContentJobRow,
   owner: string,
@@ -523,6 +537,22 @@ async function reconcileClaimedJob(
     if (['failed', 'error', 'cancelled', 'canceled', 'timed_out', 'timeout'].includes(status)) {
       const message = observed.error || `author-content ended with status ${status}`
       dependencies.observeProcessFailure({ code: 1, signal: null, error: new Error(message) })
+      failOwned(job.call_id, owner, message, responseHash)
+      return
+    }
+
+    // A status that is neither terminal nor recognisably running — 'unknown'
+    // is what authorContentStatus returns when the call id is simply absent
+    // from the log — used to defer forever, with error cleared each time so
+    // nothing accumulated and nothing explained it. The transcript then showed
+    // an animated thinking bubble that would never resolve, and the machine
+    // went on spawning two subprocesses every couple of seconds for it.
+    // Give the job a wall-clock ceiling. The client gives up at ten minutes;
+    // an hour is a generous server bound for a genuinely long article.
+    const startedAt = Date.parse(job.started_at || job.created_at || '')
+    if (Number.isFinite(startedAt) && now - startedAt > CONTENT_JOB_MAX_AGE_MS) {
+      const message = `author-content did not report a terminal status within ${Math.round(CONTENT_JOB_MAX_AGE_MS / 60_000)} minutes`
+        + (status ? ` (last seen: ${status})` : ' (call never appeared in the agent log)')
       failOwned(job.call_id, owner, message, responseHash)
       return
     }
@@ -757,7 +787,7 @@ export async function launchAndEnqueueContentJob(
   topic: string,
   sessionId: string,
   launch: typeof startAuthorContent = startAuthorContent,
-): Promise<ContentJobResponse> {
+): Promise<ContentJobResponse | ContentLaunchPending> {
   const normalizedTopic = normalizeAuthorContentTopic(topic)
   const normalizedSessionId = String(sessionId || '').trim()
   if (!normalizedSessionId) throw new HttpError(400, 'session is required')
@@ -776,11 +806,22 @@ export async function launchAndEnqueueContentJob(
     } catch (error: any) {
       const message = error?.message || String(error)
       if (isAuthorContentDiscoveryPendingError(error)) {
+        // The agent WAS spawned. All that failed is finding its row in the call
+        // log inside a three-second window — routine on a large log or a loaded
+        // machine. The recovery pass links it about thirty seconds later and
+        // the article is authored and published normally.
+        //
+        // Re-throwing turned that into a 502 and told the person authoring had
+        // failed, while it was in fact running: they were not navigated to the
+        // article, their topic stayed in the composer, and pressing Enter again
+        // either hit "an author-content launch is already pending" or, after two
+        // minutes, started a second one. Report it as what it is — started, not
+        // yet identified.
         updatePendingLaunchError(intent.launch_id, message)
         wakeContentFinalizer()
-      } else {
-        failPendingLaunch(intent.launch_id, message)
+        return { launch_id: intent.launch_id, status: 'pending', pending: true }
       }
+      failPendingLaunch(intent.launch_id, message)
       throw error
     }
 
@@ -972,8 +1013,24 @@ function scheduleRuntime(delayMs: number): void {
     runtimeRun = (async () => {
       const now = Date.now()
       if (now >= runtimeNextRecoveryAt) {
-        await recoverLegacyContentMappings(dependencies.listCalls)
-        await recoverPendingContentLaunches(dependencies.listCalls)
+        // Each recovery phase is isolated, and the next recovery time advances
+        // whatever happens. Previously a throw in either phase — an unusable
+        // launch lock is enough — propagated out of the tick, so
+        // runtimeNextRecoveryAt was never advanced and finalization below never
+        // ran at all. The 30-second recovery became a 2-second hot retry that
+        // starved the finalizer: every completed article stayed 'pending' with
+        // a spinning indicator and a NULL error, and the only clue was a
+        // console line every two seconds.
+        try {
+          await recoverLegacyContentMappings(dependencies.listCalls)
+        } catch (error) {
+          console.error('[content-jobs] legacy mapping recovery failed:', error)
+        }
+        try {
+          await recoverPendingContentLaunches(dependencies.listCalls)
+        } catch (error) {
+          console.error('[content-jobs] pending launch recovery failed:', error)
+        }
         runtimeNextRecoveryAt = now
           + (runtimeOptions.recoveryIntervalMs ?? DEFAULT_RECOVERY_INTERVAL_MS)
       }

@@ -58,6 +58,54 @@ afterEach(async () => {
 })
 
 describe('durable author-content finalization', () => {
+  // A call that never reports a terminal status used to defer forever, with
+  // `error` cleared on every pass so nothing accumulated and nothing explained
+  // it. The transcript showed a thinking bubble that would never resolve while
+  // the machine kept spawning subprocesses for it every couple of seconds.
+  it('gives up on a job whose call never reports a terminal status', async () => {
+    // startedAt is well outside the one-hour ceiling.
+    const stale = jobs.enqueueContentJob({
+      callId: 'c'.repeat(32),
+      sessionId: 'chat-session',
+      topic: 'A job nobody will ever hear about again',
+      startedAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+    })
+    // 'unknown' is what authorContentStatus reports when the call id is simply
+    // absent from the agent log.
+    const inspectCall = vi.fn().mockResolvedValue({ status: 'unknown', response_hash: null })
+
+    jobs.startContentFinalizer({
+      intervalMs: 5,
+      retryDelayMs: 5,
+      dependencies: { listCalls: vi.fn().mockResolvedValue([]), inspectCall, readResponse: vi.fn() },
+    })
+
+    await vi.waitFor(() => {
+      const row = jobs.getContentJobResponse(stale.call_id)
+      expect(row).toMatchObject({ status: 'failed' })
+      expect(String((row as { error?: string }).error || '')).toMatch(/terminal status/)
+    }, { timeout: 2_000 })
+  })
+
+  it('keeps deferring a job that is still within its budget', async () => {
+    const fresh = jobs.enqueueContentJob({
+      callId: 'd'.repeat(32),
+      sessionId: 'chat-session',
+      topic: 'A job still working',
+      startedAt: new Date().toISOString(),
+    })
+    const inspectCall = vi.fn().mockResolvedValue({ status: 'running', response_hash: null })
+
+    jobs.startContentFinalizer({
+      intervalMs: 5,
+      retryDelayMs: 5,
+      dependencies: { listCalls: vi.fn().mockResolvedValue([]), inspectCall, readResponse: vi.fn() },
+    })
+
+    await vi.waitFor(() => expect(inspectCall).toHaveBeenCalled(), { timeout: 2_000 })
+    expect(jobs.getContentJobResponse(fresh.call_id)).toMatchObject({ status: 'running' })
+  })
+
   it('finalizes in the background without any status endpoint polling', async () => {
     const pending = enqueue()
     const inspectCall = vi.fn().mockResolvedValue({
@@ -270,7 +318,7 @@ describe('durable author-content finalization', () => {
       'Exact recovery topic',
       'exact-session',
       launch,
-    )).rejects.toBeInstanceOf(chat.AuthorContentDiscoveryTimeoutError)
+    )).resolves.toMatchObject({ status: 'pending', pending: true })
 
     const intent = database.db.prepare(`
       SELECT requested_at FROM content_launches WHERE session_id = ?
@@ -306,7 +354,7 @@ describe('durable author-content finalization', () => {
       'Recoverable discovery topic',
       'recoverable-discovery-session',
       vi.fn().mockRejectedValue(postSpawnError),
-    )).rejects.toBe(postSpawnError)
+    )).resolves.toMatchObject({ status: 'pending', pending: true })
     expect(database.db.prepare(`
       SELECT status, recovery_eligible, call_id FROM content_launches
       WHERE session_id = ?
@@ -338,7 +386,7 @@ describe('durable author-content finalization', () => {
       'Restart recovery topic',
       'restart-recovery-session',
       vi.fn().mockRejectedValue(new chat.AuthorContentDiscoveryTimeoutError()),
-    )).rejects.toBeInstanceOf(chat.AuthorContentDiscoveryTimeoutError)
+    )).resolves.toMatchObject({ status: 'pending', pending: true })
     const intent = database.db.prepare(`
       SELECT requested_at FROM content_launches WHERE session_id = ?
     `).get('restart-recovery-session') as { requested_at: string }
@@ -367,7 +415,7 @@ describe('durable author-content finalization', () => {
       'Delayed recovery topic',
       'delayed-session',
       launch,
-    )).rejects.toBeInstanceOf(chat.AuthorContentDiscoveryTimeoutError)
+    )).resolves.toMatchObject({ status: 'pending', pending: true })
 
     const secondLaunch = vi.fn()
     await expect(jobs.launchAndEnqueueContentJob(
@@ -430,7 +478,7 @@ describe('durable author-content finalization', () => {
       'Retryable topic',
       'retryable-session',
       discoveryTimeout,
-    )).rejects.toBeInstanceOf(chat.AuthorContentDiscoveryTimeoutError)
+    )).resolves.toMatchObject({ status: 'pending', pending: true })
     const original = database.db.prepare(`
       SELECT launch_id, requested_at, recovery_eligible FROM content_launches
       WHERE session_id = ? AND status = 'pending'
@@ -486,7 +534,7 @@ describe('durable author-content finalization', () => {
       'Late registration topic',
       'late-registration-session',
       timeout(),
-    )).rejects.toBeInstanceOf(chat.AuthorContentDiscoveryTimeoutError)
+    )).resolves.toMatchObject({ status: 'pending', pending: true })
     const original = database.db.prepare(`
       SELECT launch_id FROM content_launches WHERE session_id = ? AND status = 'pending'
     `).get('late-registration-session') as { launch_id: string }
@@ -507,7 +555,7 @@ describe('durable author-content finalization', () => {
       'Late registration topic',
       'late-registration-session',
       timeout(),
-    )).rejects.toBeInstanceOf(chat.AuthorContentDiscoveryTimeoutError)
+    )).resolves.toMatchObject({ status: 'pending', pending: true })
     const retry = database.db.prepare(`
       SELECT launch_id FROM content_launches
       WHERE session_id = ? AND status = 'pending'
@@ -542,7 +590,7 @@ describe('durable author-content finalization', () => {
       'Overlapping topic',
       'overlapping-session',
       timeout(),
-    )).rejects.toBeInstanceOf(chat.AuthorContentDiscoveryTimeoutError)
+    )).resolves.toMatchObject({ status: 'pending', pending: true })
     const original = database.db.prepare(`
       SELECT launch_id FROM content_launches WHERE session_id = ? AND status = 'pending'
     `).get('overlapping-session') as { launch_id: string }
@@ -560,7 +608,7 @@ describe('durable author-content finalization', () => {
       'Overlapping topic',
       'overlapping-session',
       timeout(),
-    )).rejects.toBeInstanceOf(chat.AuthorContentDiscoveryTimeoutError)
+    )).resolves.toMatchObject({ status: 'pending', pending: true })
     const retry = database.db.prepare(`
       SELECT launch_id FROM content_launches
       WHERE session_id = ? AND status = 'pending'
@@ -615,6 +663,8 @@ describe('durable author-content finalization', () => {
     ])
 
     expect(maxActiveLaunches).toBe(1)
+    // Both launches discovered their call rows, so both are full responses.
+    if ('pending' in first || 'pending' in second) throw new Error('expected both launches to resolve a call id')
     expect(jobs.getContentJob(first.call_id)?.sessionId).toBe('session-a')
     expect(jobs.getContentJob(second.call_id)?.sessionId).toBe('session-b')
   })
