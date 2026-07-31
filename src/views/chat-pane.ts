@@ -264,6 +264,52 @@ const MAX_INPUT_PX = 210
 // keeps the transcript following new replies.
 const STICK_TO_BOTTOM_PX = 40
 
+// Must match the placeholder in the composer markup, since the authoring state
+// swaps it out and has to put it back.
+const DEFAULT_COMPOSER_PLACEHOLDER = 'Message…'
+
+// agent-interface writes started_at as a naive ISO in LOCAL time, and refresh()
+// sorts the merged transcript by comparing those strings. Anything this pane
+// mints has to use the same shape or it sorts into the wrong place.
+function localNaiveTimestamp(d: Date = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+    + `T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+// Consensus results survive a session switch: the debate takes minutes and the
+// pane is reused, so the result has to outlive the transcript it was started
+// from. Keyed by the synthetic row id, held against the session that asked.
+const consensusResults = new Map<string, { session: string, prompt: string, synthesis: string }>()
+
+// Put a held result back into the transcript of the session that owns it.
+// Called on completion when that session is on screen, and on open() when the
+// person returns to it.
+function attachConsensusResult(id: string): void {
+  const held = consensusResults.get(id)
+  if (!held || held.session !== currentSession) return
+  repliesById.set(id, held.synthesis)
+  const idx = messages.findIndex((m) => m.id === id)
+  if (idx >= 0) {
+    messages[idx] = { ...messages[idx], status: 'completed', response: id }
+  } else {
+    messages.push({
+      id,
+      session_id: held.session,
+      prompt: held.prompt,
+      started_at: localNaiveTimestamp(),
+      status: 'completed',
+      response: id,
+      error: '',
+    })
+    messages.sort((a, b) => (a.started_at || '').localeCompare(b.started_at || ''))
+  }
+}
+
+function attachHeldConsensusResults(): void {
+  for (const id of consensusResults.keys()) attachConsensusResult(id)
+}
+
 // The pane was a fixed 25vw, which is a reasonable default and a poor
 // constraint: an agent reply with a code block or a table needs more room than
 // a card comment does, and there was no way to give it any. The width is
@@ -871,12 +917,16 @@ async function send() {
 // the editor only; the chat history shows nothing for it.
 async function sendContent(topic: string) {
   if (!currentSession || !inputEl || !sendBtn) return
-  sendBtn.disabled = true
-  inputEl.disabled = true
-  // Briefly indicate we're authoring; the editor view will take over
-  // once the response is ready.
-  const prevPlaceholder = inputEl.placeholder
-  inputEl.placeholder = 'Authoring…'
+  // Authoring takes minutes, and the composer used to be disabled for all of
+  // it — not just for this session, but for every chat, because the pane
+  // reuses one composer and switching sessions never re-enabled it. So firing
+  // /content locked the person out of typing anywhere in the app for up to ten
+  // minutes with a stale "Authoring…" placeholder and no explanation. The run
+  // is tracked by session; the composer is only dressed while that session is
+  // the one on screen, and open() restores it for any other.
+  const owner = currentSession
+  contentRunSession = owner
+  applyContentComposerState()
   try {
     const res = await fetch('/api/chat-content', {
       method: 'POST',
@@ -904,18 +954,36 @@ async function sendContent(topic: string) {
     // Refresh once more so the running row flips to completed (with
     // its link card) before we hand off to the editor.
     void refresh().then(schedulePoll)
-    window.dispatchEvent(new CustomEvent('poise:open-editor-doc', { detail: { slug } }))
+    // Only take the person to the article if they are still sitting on the
+    // chat that asked for it. Authoring runs for minutes; jumping the whole
+    // app to the editor while they are reading Swarm or editing a different
+    // document is not a handoff, it is an interruption. The completed row in
+    // the transcript carries a link card either way.
+    if (isOpen() && currentSession === owner) {
+      window.dispatchEvent(new CustomEvent('poise:open-editor-doc', { detail: { slug } }))
+    }
   } catch (err) {
     console.error('[chat] /content failed:', err)
-    alert(`Couldn't author content: ${(err as Error).message}`)
+    if (currentSession === owner) alert(`Couldn't author content: ${(err as Error).message}`)
   } finally {
-    if (inputEl) {
-      inputEl.placeholder = prevPlaceholder
-      inputEl.disabled = false
-      inputEl.focus()
-    }
-    if (sendBtn) sendBtn.disabled = false
+    if (contentRunSession === owner) contentRunSession = null
+    applyContentComposerState()
+    attachHeldConsensusResults()
   }
+}
+
+// The composer is disabled only while the session that started an authoring run
+// is the one on screen. Called on send, on completion, and whenever the pane
+// switches session.
+let contentRunSession: string | null = null
+
+function applyContentComposerState(): void {
+  if (!inputEl || !sendBtn) return
+  const busy = !!contentRunSession && contentRunSession === currentSession
+  inputEl.disabled = busy
+  sendBtn.disabled = busy
+  inputEl.placeholder = busy ? 'Authoring…' : DEFAULT_COMPOSER_PLACEHOLDER
+  if (!busy) inputEl.focus()
 }
 
 async function pollContentUntilDone(callId: string): Promise<string | null> {
@@ -952,6 +1020,7 @@ async function pollContentUntilDone(callId: string): Promise<string | null> {
 async function sendConsensus(topic: string) {
   if (!currentSession || !inputEl || !sendBtn) return
   const consensusId = '__consensus-' + Date.now()
+  const owner = currentSession
   // Optimistic push so the user bubble + running placeholder land
   // immediately. The synthesis fills in when Confab completes the
   // multi-model review (~3–10 min in practice).
@@ -959,7 +1028,12 @@ async function sendConsensus(topic: string) {
     id: consensusId,
     session_id: currentSession,
     prompt: topic,
-    started_at: new Date().toISOString(),
+    // Naive local, matching the shape agent-interface writes. Stamping this
+    // UTC-with-a-Z made the lexicographic sort in refresh() place the turn by
+    // its UTC hour among rows written in local time, so on the first poll the
+    // most expensive turn in the pane jumped backwards by the UTC offset and
+    // wedged itself among hours-old messages.
+    started_at: localNaiveTimestamp(),
     status: 'running',
     response: '',
     error: '',
@@ -986,19 +1060,26 @@ async function sendConsensus(topic: string) {
     // Park the synthesis into the existing reply cache so
     // renderMessages picks it up via its standard
     // "completed → mono pre" branch — no new render path needed.
-    repliesById.set(consensusId, synthesis)
-    const idx = messages.findIndex((m) => m.id === consensusId)
-    if (idx >= 0) {
-      messages[idx] = { ...messages[idx], status: 'completed', response: consensusId }
+    // A debate runs for minutes, and clicking another card's chat while waiting
+    // is the obvious thing to do. open() clears messages and repliesById for
+    // the new session, so findIndex came back -1 and the synthesis — the most
+    // expensive result the pane can produce — was dropped with no message, and
+    // nothing had persisted it server-side either. Hold it against its own
+    // session and re-attach when that session is next opened.
+    consensusResults.set(consensusId, { session: owner, prompt: topic, synthesis })
+    if (currentSession === owner) {
+      attachConsensusResult(consensusId)
+      renderMessages()
     }
-    renderMessages()
   } catch (err) {
     console.error('[chat] /consensus failed:', err)
-    const idx = messages.findIndex((m) => m.id === consensusId)
-    if (idx >= 0) {
-      messages[idx] = { ...messages[idx], status: 'failed', error: (err as Error).message }
+    if (currentSession === owner) {
+      const idx = messages.findIndex((m) => m.id === consensusId)
+      if (idx >= 0) {
+        messages[idx] = { ...messages[idx], status: 'failed', error: (err as Error).message }
+      }
+      renderMessages()
     }
-    renderMessages()
   } finally {
     if (inputEl) {
       inputEl.disabled = false
@@ -1063,6 +1144,10 @@ export async function open(sessionId: string, label: string, draft?: string, opt
       inputEl.value = ''
       autoResize()
     }
+    // A different session must not inherit the authoring lock from the one
+    // that started it — the composer was left disabled here, so every other
+    // chat became untypeable for the length of the run.
+    applyContentComposerState()
   }
   // parseEdits + the four edit callbacks are per-session config —
   // re-evaluate on every open so a host can change its mind across

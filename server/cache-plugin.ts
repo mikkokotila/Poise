@@ -361,7 +361,10 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
             const topic   = String(body.topic   || '')
             const session = String(body.session || '')
             const job = await launchAndEnqueueContentJob(topic, session)
-            return json(res, 200, job)
+            // 202 when the agent is running but its call row has not been
+            // identified yet — the recovery pass links it shortly. It is not a
+            // failure and must not be reported as one.
+            return json(res, (job as { pending?: boolean }).pending ? 202 : 200, job)
           } catch (err: any) {
             const status = err instanceof ProcessLockError
               ? 503
