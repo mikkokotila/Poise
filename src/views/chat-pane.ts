@@ -1,3 +1,5 @@
+import { renderMarkdown, escapeHtml } from '../markdown'
+
 // Chat pane — slides in from the LEFT, occupies ~25vw (min 360px).
 // Each card has a deterministic session id; the pane reuses or starts
 // the conversation tied to that id whenever the card's chat icon is
@@ -110,7 +112,7 @@ function renderStructuredReply(reply: StructuredReply, msgId: string): string {
   if (reply.chat) {
     parts.push(`
       <div class="chat-msg chat-msg-agent">
-        <pre class="chat-msg-body chat-msg-mono">${escapeHtml(reply.chat)}</pre>
+        <div class="chat-msg-body chat-msg-md">${renderMarkdown(reply.chat)}</div>
       </div>
     `)
   }
@@ -248,15 +250,70 @@ const MAX_INPUT_PX = 210
 // Attribute-safe HTML escape. textContent → innerHTML only escapes &,
 // <, >, which is fine for text content but NOT for attribute values:
 // an unescaped " in `data-draft="..."` would close the attribute and
-// truncate the draft. We use this for both attributes and text.
-function escapeHtml(s: string): string {
-  return String(s).replace(/[&<>"']/g, (c) => (
-    c === '&' ? '&amp;' :
-    c === '<' ? '&lt;' :
-    c === '>' ? '&gt;' :
-    c === '"' ? '&quot;' :
-                '&#39;'
-  ))
+// truncate the draft. We use this for both attributes and text. It comes from
+// the markdown module so the renderer and the pane cannot drift apart on what
+// "escaped" means.
+
+// How close to the bottom still counts as "reading the newest message", and so
+// keeps the transcript following new replies.
+const STICK_TO_BOTTOM_PX = 40
+
+// The pane was a fixed 25vw, which is a reasonable default and a poor
+// constraint: an agent reply with a code block or a table needs more room than
+// a card comment does, and there was no way to give it any. The width is
+// draggable and remembered.
+const CHAT_WIDTH_KEY = 'poise-chat-width'
+const CHAT_MIN_PX = 360
+
+function maxChatWidth(): number { return Math.round(window.innerWidth * 0.9) }
+
+function applyChatWidth(px: number): void {
+  const clamped = Math.max(CHAT_MIN_PX, Math.min(px, maxChatWidth()))
+  document.documentElement.style.setProperty('--chat-w', `${clamped}px`)
+}
+
+function loadChatWidth(): void {
+  const raw = Number(localStorage.getItem(CHAT_WIDTH_KEY))
+  // No stored width leaves the CSS default (25vw) in place rather than pinning
+  // a pixel value the viewport may not have room for.
+  if (Number.isFinite(raw) && raw >= CHAT_MIN_PX) applyChatWidth(raw)
+}
+
+function attachResize(panel: HTMLElement): void {
+  const handle = panel.querySelector<HTMLElement>('.chat-resize')
+  if (!handle) return
+
+  const drag = (startX: number, startWidth: number) => {
+    document.body.classList.add('chat-resizing')
+    handle.classList.add('dragging')
+    const onMove = (e: PointerEvent) => applyChatWidth(startWidth + (e.clientX - startX))
+    const onUp = () => {
+      document.removeEventListener('pointermove', onMove)
+      document.removeEventListener('pointerup', onUp)
+      document.body.classList.remove('chat-resizing')
+      handle.classList.remove('dragging')
+      const settled = panel.getBoundingClientRect().width
+      localStorage.setItem(CHAT_WIDTH_KEY, String(Math.round(settled)))
+    }
+    document.addEventListener('pointermove', onMove)
+    document.addEventListener('pointerup', onUp)
+  }
+
+  handle.addEventListener('pointerdown', (e) => {
+    e.preventDefault()
+    drag(e.clientX, panel.getBoundingClientRect().width)
+  })
+
+  // Keyboard equivalent, so the pane is not mouse-only to resize.
+  handle.addEventListener('keydown', (e) => {
+    const step = e.shiftKey ? 80 : 20
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+    e.preventDefault()
+    const next = panel.getBoundingClientRect().width + (e.key === 'ArrowRight' ? step : -step)
+    applyChatWidth(next)
+    localStorage.setItem(CHAT_WIDTH_KEY, String(Math.round(
+      Math.max(CHAT_MIN_PX, Math.min(next, maxChatWidth())))))
+  })
 }
 
 const ICON_CLOSE = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
@@ -275,6 +332,7 @@ function renderShell() {
     .map((m) => `<option value="${m}"${m === DEFAULT_MODEL ? ' selected' : ''}>${m}</option>`)
     .join('')
   panelEl.innerHTML = `
+    <div class="chat-resize" role="separator" aria-orientation="vertical" aria-label="Resize chat pane" tabindex="0"></div>
     <header class="chat-header">
       <span class="chat-title"></span>
       <button class="chat-close" aria-label="Close chat">${ICON_CLOSE}</button>
@@ -299,6 +357,8 @@ function renderShell() {
     </form>
   `
   document.body.appendChild(panelEl)
+  loadChatWidth()
+  attachResize(panelEl)
 
   titleEl = panelEl.querySelector('.chat-title')!
   bodyEl  = panelEl.querySelector('.chat-body')!
@@ -599,7 +659,7 @@ function renderMessages() {
       } else {
         parts.push(`
           <div class="chat-msg chat-msg-agent">
-            <pre class="chat-msg-body chat-msg-mono">${escapeHtml(reply)}</pre>
+            <div class="chat-msg-body chat-msg-md">${renderMarkdown(reply)}</div>
           </div>
         `)
       }
@@ -612,8 +672,19 @@ function renderMessages() {
       `)
     }
   }
-  bodyEl.innerHTML = parts.join('')
-  bodyEl.scrollTop = bodyEl.scrollHeight
+  // Scrolling up to re-read an earlier reply used to be undone within seconds:
+  // every poll rewrote the transcript and forced the scroll to the bottom
+  // whether or not anything had changed, so reading back through a long
+  // conversation was impossible — it always snapped down again. Follow the
+  // bottom only for someone who is already there, which is what "stick to the
+  // newest message" actually means.
+  const html = parts.join('')
+  if (bodyEl.innerHTML === html) return
+  const distanceFromBottom = bodyEl.scrollHeight - bodyEl.scrollTop - bodyEl.clientHeight
+  const wasAtBottom = distanceFromBottom <= STICK_TO_BOTTOM_PX
+  const previousTop = bodyEl.scrollTop
+  bodyEl.innerHTML = html
+  bodyEl.scrollTop = wasAtBottom ? bodyEl.scrollHeight : previousTop
 }
 
 async function fetchReply(callId: string): Promise<string> {
@@ -640,6 +711,7 @@ function setChatError(message: string | null): void {
 
 async function refresh() {
   if (!currentSession) return
+  const sessionAtStart = currentSession
   inflight = true
   try {
     const res = await fetch(`/api/chat?session=${encodeURIComponent(currentSession)}`)
@@ -650,6 +722,7 @@ async function refresh() {
       const detail = await res.text().catch(() => '')
       let reason = `HTTP ${res.status}`
       try { reason = JSON.parse(detail)?.error || reason } catch { /* keep the status */ }
+      if (currentSession !== sessionAtStart) return
       setChatError(`Not updating — ${reason}`)
       if (!messages.length && bodyEl) bodyEl.innerHTML = '<div class="chat-empty">Could not load this conversation.</div>'
       return
@@ -661,9 +734,23 @@ async function refresh() {
     // Preserve consensus rows (tagged `__consensus-*`) across the
     // refresh, sorting the merged set by started_at so timeline order
     // stays correct.
+    // The read was started for whatever session was open at the time. Clicking
+    // another card's chat while it is in flight used to render the previous
+    // card's whole transcript under the new card's title — the reader is then
+    // looking at one conversation and composing into another.
+    if (currentSession !== sessionAtStart) return
     const consensusKept = messages.filter((m) => m.id.startsWith('__consensus-'))
     const serverMessages = (data.messages || []) as ChatLogEntry[]
-    messages = [...serverMessages, ...consensusKept]
+    // A just-sent message is held until the server's own row for it appears.
+    // The optimistic bubble used to be dropped unconditionally, so if
+    // agent-interface had not yet written the row — 800ms is optimistic — the
+    // message and its thinking dots vanished for up to twenty seconds with no
+    // error. The natural response to that is to send again, which spawns a
+    // second paid call and duplicates the turn.
+    const optimisticKept = messages.filter((m) =>
+      m.id.startsWith('__optimistic-')
+      && !serverMessages.some((sm) => sm.prompt === m.prompt))
+    messages = [...serverMessages, ...consensusKept, ...optimisticKept]
       .sort((a, b) => (a.started_at || '').localeCompare(b.started_at || ''))
     // Resolve replies for every completed entry whose body we don't
     // have cached yet. Fire in parallel — tiny payloads, server-side
