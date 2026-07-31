@@ -304,10 +304,9 @@ async function readUtf8Bounded(path: string, maxBytes: number, label: string): P
 const EDITOR_RESPONSE_FORMAT = [
   '[Response format]',
   'For free-form discussion, questions, or feedback: reply with plain prose.',
-  'For one or more specific edits to the document: reply with a single JSON object — no prose around it:',
+  'For any change to the document, however large: reply with a single JSON object — no prose around it:',
   '{"chat": "<your message to the user>", "edits": [{"description": "<short summary>", "context_before": "<short snippet just before the change>", "old": "<exact text to replace, verbatim from the document>", "new": "<replacement text>", "context_after": "<short snippet just after the change>"}]}',
-  'For a full document rewrite: reply with JSON:',
-  '{"chat": "<your message>", "document": "<full new markdown>"}',
+  'Rewriting the whole document is just a large set of edits — return them in the same `edits` array, one per passage you are changing, so each can be reviewed and accepted on its own. Do not return a whole-document field.',
   'Rules: "old" must be a verbatim substring of the current document. Pure insertions use "old": "". Pure deletions use "new": "". context_before and context_after are short (a few words) and only needed to disambiguate when "old" appears more than once.',
 ].join('\n')
 

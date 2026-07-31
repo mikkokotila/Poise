@@ -150,12 +150,18 @@ function renderStructuredReply(reply: StructuredReply, msgId: string): string {
     }).join('')
     parts.push(`<div class="chat-edit-cards">${cards}</div>`)
   }
-  // `document` (full rewrite) is parsed but not yet displayed — the
-  // viewer for full rewrites belongs in a later slice. We still
-  // surface a small badge so the user sees the model proposed one
-  // rather than thinking the reply was empty.
+  // A whole-document rewrite has no reviewable form here: there is one accept
+  // button and no way to see what changed, so it was never wired up and the
+  // badge said so — which read as a broken feature every time a whole-document
+  // request made the model choose that shape. The response contract no longer
+  // offers it (see EDITOR_RESPONSE_FORMAT in server/chat.ts: a rewrite is a
+  // large set of edits, returned one per passage so each can be reviewed).
+  // A model can still ignore that, so say something true and actionable rather
+  // than leaving a dead badge.
   if (reply.document) {
-    parts.push(`<div class="chat-edit-cards"><div class="chat-edit-card" data-kind="rewrite"><div class="chat-edit-card-desc">Full document rewrite proposed (viewer not yet wired)</div></div></div>`)
+    parts.push(`<div class="chat-edit-cards"><div class="chat-edit-card" data-kind="rewrite">`
+      + `<div class="chat-edit-card-desc">The agent replied with a whole-document rewrite, which cannot be reviewed passage by passage. Ask it for specific edits and it will return them as cards you can accept individually.</div>`
+      + `</div></div>`)
   }
   return parts.join('')
 }
