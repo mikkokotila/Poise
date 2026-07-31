@@ -178,7 +178,7 @@ function ownerCell(item: PrRow): string {
   const src = item.owner_avatar && item.owner_avatar.length > 0 ? item.owner_avatar : humanAvatarFallback(name)
   const classes = ['last-avatar']
   if (isBot) classes.push('is-bot')
-  return `<img class="${classes.join(' ')}" src="${safeHttpsUrl(src)}" alt="${escapeHtml(name)}" title="${escapeHtml(name)}" loading="lazy" decoding="async" onerror="this.classList.add('broken')" />`
+  return `<img class="${classes.join(' ')}" src="${safeHttpsUrl(src)}" alt="${escapeHtml(name)}" title="${escapeHtml(name)}" loading="lazy" decoding="async" />`
 }
 
 // The column this fills was headed "Last", which reads as "who acted last".
@@ -193,7 +193,7 @@ function lastCell(item: PrRow): string {
   const src = humanAvatarFallback(name)
   const classes = ['last-avatar']
   if (isBot) classes.push('is-bot')
-  return `<img class="${classes.join(' ')}" src="${safeHttpsUrl(src)}" alt="${escapeHtml(name)}" title="${escapeHtml(name)}" loading="lazy" decoding="async" onerror="this.classList.add('broken')" />`
+  return `<img class="${classes.join(' ')}" src="${safeHttpsUrl(src)}" alt="${escapeHtml(name)}" title="${escapeHtml(name)}" loading="lazy" decoding="async" />`
 }
 
 // Stable identity for a row across refreshes. Matches the format Current

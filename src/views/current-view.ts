@@ -770,7 +770,16 @@ async function pollLiveTick() {
   try {
     await fetchLive()
     renderLiveOnly({ animate: true })
-  } catch { /* network blip — try again next tick */ }
+    // A refresh that starts working again has to clear the notice it left —
+    // otherwise the first failure's message stays on screen for the rest of
+    // the session, outliving the problem it described.
+    showLoadError('')
+  } catch (err) {
+    // Swallowed entirely before, so a GitHub cache that had gone away left the
+    // lanes frozen on the last good data with no indication: the board looked
+    // current and quietly was not.
+    showLoadError(`Not updating — ${(err as Error).message}`)
+  }
   try {
     await fetchPrStatus()
   } catch { /* same */ }

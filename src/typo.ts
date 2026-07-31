@@ -309,7 +309,9 @@ function apply() {
 function buildPanel(): HTMLElement {
   const panel = document.createElement('aside')
   panel.id = 'typo-panel'
-  panel.innerHTML = `<div class="tp-header"><span class="tp-title">Typography</span></div><div class="tp-body"></div>`
+  panel.innerHTML = `<div class="tp-header"><span class="tp-title">Typography</span>`
+    + `<button class="tp-close" type="button" aria-label="Close typography">&times;</button></div>`
+    + `<div class="tp-body"></div>`
 
   const body = panel.querySelector('.tp-body')!
 
@@ -388,11 +390,20 @@ function buildPanel(): HTMLElement {
     panel.remove()
     panelEl = buildPanel()
     parent.appendChild(panelEl)
+    panelEl.removeAttribute('inert')
+    panelEl.removeAttribute('aria-hidden')
     panelEl.classList.add('open')
+    wireCloseButton(panelEl)
   })
   body.appendChild(reset)
 
+  wireCloseButton(panel)
   return panel
+}
+
+function wireCloseButton(panel: HTMLElement): void {
+  panel.querySelector<HTMLButtonElement>('.tp-close')
+    ?.addEventListener('click', () => closeTypographyPanel())
 }
 
 export function initTypography() {
@@ -400,13 +411,47 @@ export function initTypography() {
   apply()
 
   panelEl = buildPanel()
+  // Built closed, and closed means out of the way: the panel is only
+  // translated off-screen, so without this its fifteen controls sat in the tab
+  // order from the moment the app loaded. Tabbing through the page walked into
+  // sliders nobody could see, and a screen reader announced all of them.
+  markPanelClosed(panelEl)
   document.body.appendChild(panelEl)
 }
 
+function markPanelClosed(panel: HTMLElement): void {
+  panel.setAttribute('inert', '')
+  panel.setAttribute('aria-hidden', 'true')
+}
+
+function onTypoKeydown(e: KeyboardEvent) {
+  if (e.key !== 'Escape') return
+  if (!panelEl?.classList.contains('open')) return
+  e.preventDefault()
+  closeTypographyPanel()
+}
+
 export function openTypographyPanel() {
-  if (panelEl) panelEl.classList.add('open')
+  if (!panelEl) return
+  panelEl.removeAttribute('inert')
+  panelEl.removeAttribute('aria-hidden')
+  panelEl.classList.add('open')
+  document.addEventListener('keydown', onTypoKeydown)
+}
+
+// There was no way to dismiss this panel from the keyboard, and no close
+// button — in the editor's writer mode, where the chrome is hidden, the burger
+// that opened it is gone too, so the only exit was leaving the view.
+export function closeTypographyPanel() {
+  if (!panelEl) return
+  if (panelEl.contains(document.activeElement)) (document.activeElement as HTMLElement | null)?.blur()
+  panelEl.classList.remove('open')
+  markPanelClosed(panelEl)
+  document.removeEventListener('keydown', onTypoKeydown)
 }
 
 export function toggleTypographyPanel() {
-  if (panelEl) panelEl.classList.toggle('open')
+  if (!panelEl) return
+  if (panelEl.classList.contains('open')) closeTypographyPanel()
+  else openTypographyPanel()
 }

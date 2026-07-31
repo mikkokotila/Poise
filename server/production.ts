@@ -128,13 +128,27 @@ async function proxyConfab(
   if (accept) headers.set('Accept', Array.isArray(accept) ? accept[0] : accept)
   if (apiKey) headers.set('Authorization', `Bearer ${apiKey}`)
 
-  const upstream = await fetch(target, {
-    method,
-    headers,
-    body: requestBody,
-    redirect: 'manual',
-    signal: AbortSignal.timeout(120_000),
-  })
+  // A consensus review regularly runs longer than two minutes. When the budget
+  // was exceeded the abort surfaced as a plain 502, indistinguishable from
+  // Confab being down or rejecting the request — so a review that was still
+  // running was reported as a definite failure, and the natural response is to
+  // fire it again. Say which of the two happened.
+  let upstream: Response
+  try {
+    upstream = await fetch(target, {
+      method,
+      headers,
+      body: requestBody,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(CONFAB_PROXY_TIMEOUT_MS),
+    })
+  } catch (error) {
+    if ((error as { name?: string })?.name === 'TimeoutError' || (error as { name?: string })?.name === 'AbortError') {
+      throw new HttpError(504, `Confab did not answer within ${Math.round(CONFAB_PROXY_TIMEOUT_MS / 1000)}s.`
+        + ' The review may still be running — check Swarm before starting another.')
+    }
+    throw error
+  }
   const responseBody = await readFetchResponse(upstream)
   res.statusCode = upstream.status
   setApiHeaders(res)
@@ -142,6 +156,8 @@ async function proxyConfab(
   if (responseType) res.setHeader('Content-Type', responseType)
   res.end(responseBody)
 }
+
+const CONFAB_PROXY_TIMEOUT_MS = 120_000
 
 function safeStaticPath(staticDir: string, pathname: string): string | null {
   let decoded: string
