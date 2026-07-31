@@ -108,3 +108,86 @@ describe('a duplicate trigger does not wedge every save', () => {
     expect(reread.snippets.map((s) => s.trigger)).toEqual([';sig', ';other', ';added'])
   })
 })
+
+// Poise owns the trigger/replace pair, not the other espanso options a person
+// may have put on that same entry. Those used to be destroyed by the next save
+// from the UI: the owned entries were filtered out and re-emitted as fresh
+// two-key nodes, so the trigger survived in the list while quietly losing the
+// `vars` block that made it expand to anything.
+describe('an entry Poise owns keeps the espanso options it did not write', () => {
+  it('preserves vars, word, propagate_case and label through a save', async () => {
+    await writeFile(FILE(), [
+      'matches:',
+      '  - trigger: ";date"',
+      '    replace: "Today is {{mydate}}"',
+      '    word: true',
+      '    propagate_case: true',
+      '    label: "insert the date"',
+      '    vars:',
+      '      - name: mydate',
+      '        type: date',
+      '        params:',
+      '          format: "%d/%m/%Y"',
+    ].join('\n'), 'utf8')
+    snippets = await loadWith(dir)
+
+    const state = await snippets.readSnippetState()
+    // It still reads as an ordinary pair — the UI is unchanged.
+    expect(state.snippets.map((s) => s.trigger)).toEqual([';date'])
+
+    // Adding an unrelated snippet rewrites the file.
+    await snippets.saveSnippets(
+      [...state.snippets, { trigger: ';sig', replace: 'Best regards' }],
+      state.version,
+    )
+
+    const after = await readFile(FILE(), 'utf8')
+    expect(after).toContain('vars:')
+    expect(after).toContain('mydate')
+    expect(after).toContain('%d/%m/%Y')
+    expect(after).toContain('word: true')
+    expect(after).toContain('propagate_case: true')
+    expect(after).toContain('insert the date')
+    expect(after).toContain(';sig')
+  })
+
+  it('applies an edit to the body without disturbing the options beside it', async () => {
+    await writeFile(FILE(), [
+      'matches:',
+      '  - trigger: ";date"',
+      '    replace: "old body {{mydate}}"',
+      '    vars:',
+      '      - name: mydate',
+      '        type: date',
+    ].join('\n'), 'utf8')
+    snippets = await loadWith(dir)
+    const state = await snippets.readSnippetState()
+
+    await snippets.saveSnippets([{ trigger: ';date', replace: 'new body {{mydate}}' }], state.version)
+
+    const after = await readFile(FILE(), 'utf8')
+    expect(after).toContain('new body')
+    expect(after).not.toContain('old body')
+    expect(after).toContain('vars:')
+    expect(after).toContain('mydate')
+  })
+
+  it('lets a trigger the person removed actually go', async () => {
+    await writeFile(FILE(), [
+      'matches:',
+      '  - trigger: ";gone"',
+      '    replace: "bye"',
+      '    word: true',
+      '  - trigger: ";kept"',
+      '    replace: "hello"',
+    ].join('\n'), 'utf8')
+    snippets = await loadWith(dir)
+    const state = await snippets.readSnippetState()
+
+    await snippets.saveSnippets([{ trigger: ';kept', replace: 'hello' }], state.version)
+
+    const after = await readFile(FILE(), 'utf8')
+    expect(after).not.toContain(';gone')
+    expect(after).toContain(';kept')
+  })
+})

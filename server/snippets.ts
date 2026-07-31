@@ -190,10 +190,34 @@ async function renderSnippetFile(snippets: Snippet[]): Promise<string> {
     doc.set('matches', snippets)
     return String(doc)
   }
-  // Drop the pairs Poise owns, keep everything else in place, then append the
-  // current set in order.
-  seq.items = seq.items.filter((item) => !isSimpleMatch(doc.createNode(item).toJSON()))
-  for (const snip of snippets) seq.items.push(doc.createNode(snip))
+  // Poise owns the trigger/replace pair. It does NOT own the other espanso
+  // options a person may have added to that same entry — `vars` for a date or
+  // clipboard expansion, `word`, `propagate_case`, `label`. Those used to be
+  // destroyed on the next save from the UI: the owned entries were filtered
+  // out wholesale and re-emitted as fresh two-key nodes, so `;date` survived
+  // in the list while quietly losing the `vars` block that made it expand to
+  // anything. Silent, unbacked (the file is replaced by rename) and invisible
+  // until the expansion came out as literal `{{mydate}}`.
+  //
+  // Keep each entry's own node and set `replace` on it, so everything else it
+  // carries comes through untouched. Only a trigger the person actually
+  // removed loses its node.
+  const ownedByTrigger = new Map<string, unknown>()
+  seq.items = seq.items.filter((item) => {
+    const plain = doc.createNode(item).toJSON()
+    if (!isSimpleMatch(plain)) return true
+    if (!ownedByTrigger.has(plain.trigger)) ownedByTrigger.set(plain.trigger, item)
+    return false
+  })
+  for (const snip of snippets) {
+    const existing = ownedByTrigger.get(snip.trigger)
+    if (existing !== undefined && isMap(existing)) {
+      existing.set('replace', snip.replace)
+      seq.items.push(existing)
+    } else {
+      seq.items.push(doc.createNode(snip))
+    }
+  }
   return String(doc)
 }
 
