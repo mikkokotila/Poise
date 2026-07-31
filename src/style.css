@@ -3056,8 +3056,11 @@ tr:hover .replay-btn { opacity: 1; }
      without shortening the height pushes the composer off the bottom. */
   top: var(--app-bar-h, 96px);
   left: 0;
-  width: 25vw;
+  /* Width is draggable — the handle on the trailing edge writes --chat-w, and
+     chat-pane.ts persists it. 25vw is only the starting point. */
+  width: var(--chat-w, 25vw);
   min-width: 360px;
+  max-width: 90vw;
   height: calc(100vh - var(--app-bar-h, 96px));
   background: var(--surface);
   border-right: 1px solid var(--border);
@@ -3071,6 +3074,24 @@ tr:hover .replay-btn { opacity: 1; }
 }
 
 #chat-panel.open { transform: translateX(0); }
+
+/* Drag handle on the trailing edge. Sits inside the pane so it cannot be
+   painted over by page content, and widens its hit area on hover. */
+.chat-resize {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 2;
+  background: transparent;
+  transition: background var(--t-quick) ease;
+}
+.chat-resize:hover,
+.chat-resize.dragging { background: var(--a1); opacity: 0.35; }
+/* While dragging, stop the pointer selecting text across the whole document. */
+body.chat-resizing { user-select: none; cursor: col-resize; }
 
 .chat-header {
   display: flex;
@@ -3137,8 +3158,8 @@ tr:hover .replay-btn { opacity: 1; }
 .chat-msg-agent { align-items: flex-start; }
 
 .chat-msg-body {
-  font-size: 0.8125rem;
-  line-height: 1.55;
+  font-size: 0.9375rem;
+  line-height: 1.65;
   color: var(--text);
   white-space: pre-wrap;
   word-break: break-word;
@@ -3162,9 +3183,51 @@ tr:hover .replay-btn { opacity: 1; }
 }
 .chat-msg-mono {
   font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
-  font-size: 0.75rem;
-  line-height: 1.55;
+  font-size: 0.875rem;
+  line-height: 1.6;
 }
+
+/* Rendered markdown in an agent reply. Agent output is markdown by convention
+   and used to be dumped into a <pre>, so a formatted answer arrived as a wall
+   of asterisks and backticks. Spacing here is tighter than document prose —
+   these are chat bubbles, not an article. */
+.chat-msg-md > *:first-child { margin-top: 0; }
+.chat-msg-md > *:last-child  { margin-bottom: 0; }
+.chat-msg-md p { margin: 0 0 var(--sp-2); }
+.chat-msg-md .md-h {
+  margin: var(--sp-3) 0 var(--sp-2);
+  font-size: 1em;
+  font-weight: 650;
+  line-height: 1.35;
+}
+.chat-msg-md h1.md-h { font-size: 1.15em; }
+.chat-msg-md h2.md-h { font-size: 1.08em; }
+.chat-msg-md .md-list { margin: 0 0 var(--sp-2); padding-left: 1.35em; }
+.chat-msg-md .md-list li { margin: 2px 0; }
+.chat-msg-md .md-quote {
+  margin: 0 0 var(--sp-2);
+  padding-left: var(--sp-3);
+  border-left: 2px solid var(--border);
+  color: var(--text-secondary);
+}
+.chat-msg-md .md-hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-3) 0; }
+.chat-msg-md code {
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-size: 0.875em;
+  background: var(--hover);
+  border-radius: var(--r-sm);
+  padding: 1px 4px;
+}
+.chat-msg-md .md-code {
+  margin: 0 0 var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--hover);
+  border-radius: var(--r-sm);
+  overflow-x: auto;
+  white-space: pre;
+}
+.chat-msg-md .md-code code { background: none; padding: 0; }
+.chat-msg-md a { color: var(--a1); text-decoration: underline; text-underline-offset: 2px; }
 
 /* Errors keep the red accent but stay within the prose layout. */
 .chat-msg-error .chat-msg-body {
