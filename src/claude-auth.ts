@@ -54,6 +54,12 @@ const DEGRADED_STATE: ClaudeAuthState = {
   reason: 'status_check_failed',
 }
 
+// Not reaching Poise's own API says nothing about the Claude subscription, but
+// it was rendered as "Claude subscription verification failed" — pointing at
+// the wrong system entirely, and inviting a re-authentication that could not
+// have helped. Kept separate, and the detail is shown rather than swallowed.
+let localFailureDetail = ''
+
 let initialized = false
 let bannerEl: HTMLElement | null = null
 let pollTimer: number | null = null
@@ -113,6 +119,12 @@ function bannerCopy(status: ClaudeAuthStatus): { title: string, message: string 
       message: 'Poise cannot reach Claude Code on this computer. It will keep checking automatically.',
     }
   }
+  if (localFailureDetail) {
+    return {
+      title: 'Poise could not check the Claude subscription',
+      message: `Claude-backed work is paused. ${localFailureDetail}. This is a problem reaching Poise's own server, not necessarily the subscription.`,
+    }
+  }
   return {
     title: 'Claude subscription verification failed',
     message: 'Claude-backed work is paused. Reconnect the subscription now, or let Poise keep retrying automatically.',
@@ -138,7 +150,7 @@ function renderBanner(): void {
 
   // Polls must not rewrite an unchanged live region: doing so would cause
   // screen readers to announce the same alert every two seconds.
-  if (bannerEl?.dataset.status === status) return
+  if (bannerEl?.dataset.status === status && bannerEl.dataset.detail === localFailureDetail) return
 
   if (!bannerEl) {
     bannerEl = document.createElement('section')
@@ -149,6 +161,7 @@ function renderBanner(): void {
     document.body.appendChild(bannerEl)
   }
 
+  if (bannerEl) bannerEl.dataset.detail = localFailureDetail
   const copy = bannerCopy(status)
   bannerEl.dataset.status = status
   const text = document.createElement('div')
@@ -197,9 +210,11 @@ async function refreshAuthState(): Promise<void> {
     if (!response.ok) throw new Error(`Claude auth status ${response.status}`)
     const next = parseState(await response.json())
     if (epoch !== stateEpoch) return
+    localFailureDetail = ''
     currentState = next
-  } catch {
+  } catch (err) {
     if (epoch !== stateEpoch) return
+    localFailureDetail = (err as Error)?.message || 'the Poise server did not answer'
     currentState = DEGRADED_STATE
   } finally {
     refreshInProgress = false
@@ -221,9 +236,19 @@ async function startLogin(): Promise<void> {
       method: 'POST',
       headers: { Accept: 'application/json' },
     })
-    if (!response.ok) throw new Error(`Claude sign-in ${response.status}`)
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '')
+      let reason = `HTTP ${response.status}`
+      try { reason = JSON.parse(detail)?.error || reason } catch { /* keep the status */ }
+      throw new Error(reason)
+    }
+    localFailureDetail = ''
     currentState = parseState(await response.json())
-  } catch {
+  } catch (err) {
+    // A failed sign-in used to leave no trace anywhere the person could see —
+    // the banner showed the same generic line as every other degraded state,
+    // and the reason went nowhere. Clicking again just respawned the CLI.
+    localFailureDetail = (err as Error)?.message || 'sign-in did not start'
     currentState = DEGRADED_STATE
   } finally {
     loginRequestInProgress = false

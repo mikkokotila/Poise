@@ -847,6 +847,8 @@ function schedulePoll() {
 
 async function send() {
   if (!currentSession || !inputEl || !sendBtn) return
+  // A closed pane is not a place a message can come from.
+  if (!isOpen()) return
   const text = inputEl.value.trim()
   if (!text) return
   // /content takes a different path — calls agent-interface
@@ -1095,7 +1097,14 @@ function isOpen(): boolean {
 
 export function close() {
   if (!panelEl) return
+  // Off-screen is not gone. The closed pane kept its whole composer — textarea,
+  // model select, attach and send — in the tab order and the accessibility
+  // tree, so tabbing through a view walked into a conversation nobody could
+  // see, and send() would happily post from it.
+  if (panelEl.contains(document.activeElement)) (document.activeElement as HTMLElement | null)?.blur()
   panelEl.classList.remove('open')
+  panelEl.setAttribute('inert', '')
+  panelEl.setAttribute('aria-hidden', 'true')
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null }
 }
 
@@ -1130,6 +1139,8 @@ export async function open(sessionId: string, label: string, draft?: string, opt
   // across cards. Reopening the same session preserves all of it —
   // including whatever the user had typed but not sent and any
   // chips they'd added.
+  panelEl?.removeAttribute('inert')
+  panelEl?.removeAttribute('aria-hidden')
   if (currentSession !== sessionId) {
     currentSession = sessionId
     messages = []

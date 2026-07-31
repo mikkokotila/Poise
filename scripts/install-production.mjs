@@ -304,21 +304,50 @@ async function bootstrap(path) {
   throw lastError
 }
 
+// Two different outcomes were treated as one. /api/health answers 503 with
+// `status: 'degraded'` for ordinary, fixable reasons — a Claude subscription
+// that needs signing in, a Caller release that needs updating — and the service
+// answering at all means it started. Aborting there left the service
+// bootstrapped and running while telling the operator the install had failed,
+// and the monitor and updater jobs that come after were never bootstrapped.
+//
+// A service that never answers is a genuine install failure. A service that
+// answers degraded is installed, and the operator needs to know what to fix.
 async function waitForHealthyProduction() {
   const url = `http://127.0.0.1:${process.env.POISE_PORT || '5555'}/api/health`
   let lastError = 'service did not respond'
+  let lastBody = null
   for (let attempt = 0; attempt < 30; attempt += 1) {
     try {
       const response = await fetch(url, { signal: AbortSignal.timeout(2_000) })
       const body = await response.json()
-      if (response.ok && body?.status === 'ok') return
+      if (response.ok && body?.status === 'ok') return { healthy: true }
+      lastBody = body
       lastError = `health returned HTTP ${response.status}`
     } catch (error) {
+      lastBody = null
       lastError = error instanceof Error ? error.message : String(error)
     }
     if (attempt < 29) await delay(1_000)
   }
-  throw new Error(`Production service did not become healthy: ${lastError}`)
+  if (!lastBody) throw new Error(`Production service did not start: ${lastError}`)
+  return { healthy: false, body: lastBody }
+}
+
+function describeDegraded(body) {
+  const reasons = []
+  if (body?.scheduler?.status && body.scheduler.status !== 'ok') {
+    reasons.push(`behaviour runtime: ${body.scheduler.status}`)
+    if (body.scheduler.identity?.error) reasons.push(`  ${body.scheduler.identity.error}`)
+    if (body.scheduler.datastore?.error) reasons.push(`  ${body.scheduler.datastore.error}`)
+  }
+  if (body?.claudeAuth?.status && body.claudeAuth.status !== 'authenticated') {
+    reasons.push(`Claude subscription: ${body.claudeAuth.status}`)
+  }
+  if (body?.callerRelease?.status && body.callerRelease.status !== 'valid') {
+    reasons.push(`Caller release: ${body.callerRelease.status}`)
+  }
+  return reasons.length ? reasons.join('\n  ') : 'no specific reason reported'
 }
 
 async function main() {
@@ -445,10 +474,18 @@ async function main() {
   await run('/bin/launchctl', ['enable', `${domain}/${monitorLabel}`])
   await run('/bin/launchctl', ['enable', `${domain}/${updaterLabel}`])
   await bootstrap(servicePlist)
-  await waitForHealthyProduction()
+  const health = await waitForHealthyProduction()
+  // The service is up either way at this point, so the monitor and the updater
+  // are bootstrapped regardless — leaving them out was what made a degraded
+  // install a half-install.
   await bootstrap(monitorPlist)
   if (!selfUpdating) await bootstrap(updaterPlist)
   console.log(`Installed ${serviceLabel} with Caller ${manifest.commit}`)
+  if (!health.healthy) {
+    console.warn('\nThe service is installed and running, but reports degraded:')
+    console.warn(`  ${describeDegraded(health.body)}`)
+    console.warn('\nFix the above and it will clear on its own — no reinstall needed.')
+  }
 }
 
 await main()

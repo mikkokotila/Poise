@@ -1,6 +1,6 @@
 import './style.css'
-import { initTypography, toggleTypographyPanel } from './typo'
-import { initSettings, toggleSettingsPanel, openSettingsPanel, isFullyConfigured } from './settings'
+import { initTypography, toggleTypographyPanel, closeTypographyPanel } from './typo'
+import { initSettings, toggleSettingsPanel, openSettingsPanel, closeSettingsPanel, isFullyConfigured } from './settings'
 import { initMenu } from './menu'
 import { initMainView, refreshMainView, stopMainRefresh } from './views/main-view'
 import { initCurrentView, stopCurrentPolling } from './views/current-view'
@@ -8,7 +8,7 @@ import { initSwarmView, stopSwarmRefresh, focusRow as focusSwarmRow } from './vi
 import { initBehaviorsView, stopBehaviorsRefresh } from './views/behaviors-view'
 import { initSnippetsView } from './views/snippets-view'
 import { initEditorView, stopEditorRefresh } from './views/editor-view'
-import { toggle as toggleChat } from './views/chat-pane'
+import { toggle as toggleChat, close as closeChatPane } from './views/chat-pane'
 import { loadSettings, startRefreshTicker, applyTheme, getTheme } from './config'
 import { initClaudeAuth } from './claude-auth'
 
@@ -63,6 +63,12 @@ function showView(v: ViewSlug) {
   // And Archive, the fourth and last. Every view in this app shipped a
   // leave-cleanup that nothing invoked.
   if (v !== 'main') stopMainRefresh()
+  // The chat pane is bound to whatever card or document opened it, so it does
+  // not belong to the next view. It had no leave-cleanup at all: it stayed
+  // open over whatever came next, kept polling for the rest of the session,
+  // and its composer stayed in the tab order — so a message could be sent
+  // into a conversation the person had navigated away from.
+  closeChatPane()
 
   // Initialize the target first so content exists before the animation starts
   if (v === 'main')           initMainView()
@@ -89,6 +95,18 @@ function showView(v: ViewSlug) {
 // Apply the saved theme as early as possible so the first paint matches
 // the user's preference (no light → dark flash on dark-mode boots).
 applyTheme(getTheme())
+
+// Avatars fall back to a styled placeholder when the image 404s — a GitHub App
+// has no `<login>.png`, for instance. That was an inline onerror attribute,
+// which production's `script-src 'self'` blocks outright, so in production the
+// fallback never ran and a broken-image icon showed instead. `error` does not
+// bubble, so this listens in the capture phase, once, for every avatar in the
+// app.
+document.addEventListener('error', (e) => {
+  const el = e.target as HTMLElement | null
+  if (el?.tagName === 'IMG' && el.classList.contains('last-avatar')) el.classList.add('broken')
+}, true)
+
 initClaudeAuth()
 
 // Init order: typography → settings → menu → initial view
@@ -99,6 +117,7 @@ const menu = initMenu({
   onSelectView: (v) => showView(v),
   onOpenTypography: () => toggleTypographyPanel(),
   onOpenSettings: () => toggleSettingsPanel(),
+  onClosePanels: () => { closeTypographyPanel(); closeSettingsPanel() },
 })
 
 // On load: pull settings first so views render with the correct org/me/timezone,

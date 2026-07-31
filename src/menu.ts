@@ -44,17 +44,23 @@ export interface MenuCallbacks {
   onSelectView: (view: ViewName) => void
   onOpenTypography: () => void
   onOpenSettings: () => void
+  /** Close whatever panel is open, through its own close path. The burger
+   *  used to strip the `open` class off the panels directly, which skipped
+   *  the close functions and left them focusable and announced while
+   *  off-screen — the exact invariant those functions exist to maintain. */
+  onClosePanels: () => void
 }
 
 function anyPanelOpen(): boolean {
   return !!document.querySelector('#typo-panel.open, #settings-panel.open')
 }
+let closePanelsCallback: (() => void) | null = null
 function closeAllPanels() {
-  document.querySelector('#typo-panel.open')?.classList.remove('open')
-  document.querySelector('#settings-panel.open')?.classList.remove('open')
+  closePanelsCallback?.()
 }
 
 export function initMenu(callbacks: MenuCallbacks): { switchTo: (v: ViewName) => void; currentView: () => ViewName } {
+  closePanelsCallback = callbacks.onClosePanels
   let current: ViewName = loadView()
 
   // View-nav — the right-hand half of the control bar.

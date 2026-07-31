@@ -48,7 +48,7 @@ function ownerCell(username: string | null): string {
   const src = humanAvatarFallback(username)
   return `
     <span class="behavior-owner">
-      <img class="${classes.join(' ')}" src="${src}" alt="${escapeHtml(username)}" title="${escapeHtml(username)}" loading="lazy" decoding="async" onerror="this.classList.add('broken')" />
+      <img class="${classes.join(' ')}" src="${src}" alt="${escapeHtml(username)}" title="${escapeHtml(username)}" loading="lazy" decoding="async" />
       <span class="behavior-owner-name">${escapeHtml(username)}</span>
     </span>
   `
