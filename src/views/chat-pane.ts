@@ -623,12 +623,38 @@ async function fetchReply(callId: string): Promise<string> {
   return String(data.body || '')
 }
 
+// Say when what the pane is showing has stopped being live, rather than
+// leaving a stale transcript that reads as current.
+function setChatError(message: string | null): void {
+  if (!panelEl) return
+  let el = panelEl.querySelector<HTMLElement>('.chat-error')
+  if (!message) { el?.remove(); return }
+  if (!el) {
+    el = document.createElement('div')
+    el.className = 'chat-error st-help st-help-error'
+    el.setAttribute('role', 'status')
+    bodyEl?.insertAdjacentElement('beforebegin', el)
+  }
+  el.textContent = message
+}
+
 async function refresh() {
   if (!currentSession) return
   inflight = true
   try {
     const res = await fetch(`/api/chat?session=${encodeURIComponent(currentSession)}`)
-    if (!res.ok) return
+    if (!res.ok) {
+      // A bare `return` here left the pane on "Loading…" forever with the
+      // composer enabled and nothing said — which is exactly what a missing
+      // or failing agent-interface looks like from the outside.
+      const detail = await res.text().catch(() => '')
+      let reason = `HTTP ${res.status}`
+      try { reason = JSON.parse(detail)?.error || reason } catch { /* keep the status */ }
+      setChatError(`Not updating — ${reason}`)
+      if (!messages.length && bodyEl) bodyEl.innerHTML = '<div class="chat-empty">Could not load this conversation.</div>'
+      return
+    }
+    setChatError(null)
     const data = await res.json()
     // /consensus → agent-interface --debate doesn't write a row in
     // --logs, so the server's chat history wouldn't include it.
@@ -664,8 +690,19 @@ function schedulePoll() {
   const hasInflight = messages.some((m) => m.status === 'running' || m.status === 'pending')
   const delay = hasInflight ? FAST_POLL_MS : SLOW_POLL_MS
   pollTimer = setTimeout(async () => {
-    if (!inflight) await refresh()
-    schedulePoll()
+    // schedulePoll() used to sit after the await with no catch, so a single
+    // rejected read — a dev reload, a production restart — ended the chain for
+    // good. The pane then sat on a stale transcript that read as live, and no
+    // later action revived it: every other restart point is
+    // `.then(schedulePoll)`, which does not run on rejection either. Chain the
+    // next tick whatever happened.
+    try {
+      if (!inflight) await refresh()
+    } catch (err) {
+      setChatError(`Not updating — ${(err as Error).message}`)
+    } finally {
+      schedulePoll()
+    }
   }, delay)
 }
 

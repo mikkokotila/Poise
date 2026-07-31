@@ -3153,6 +3153,19 @@ async function fetchPanelReply(callId: string): Promise<string> {
   return String(data.body || '')
 }
 
+function setPanelChatError(message: string | null): void {
+  if (!panelEl) return
+  let el = panelEl.querySelector<HTMLElement>('.ann-chat-error')
+  if (!message) { el?.remove(); return }
+  if (!el) {
+    el = document.createElement('div')
+    el.className = 'ann-chat-error st-help st-help-error'
+    el.setAttribute('role', 'status')
+    panelEl.appendChild(el)
+  }
+  el.textContent = message
+}
+
 async function refreshPanelChat(sessionId: string): Promise<void> {
   if (panelPollInflight) return
   panelPollInflight = true
@@ -3164,7 +3177,13 @@ async function refreshPanelChat(sessionId: string): Promise<void> {
     // for the annotation on screen.
     const ownerAtStart = panelForId
     const res = await fetch(`/api/chat?session=${encodeURIComponent(sessionId)}`)
-    if (!res.ok) return
+    if (!res.ok) {
+      // Silent before, so an unreachable agent-interface left the panel on
+      // "Loading…" with nothing to explain it.
+      if (panelForId === ownerAtStart) setPanelChatError(`Not updating — HTTP ${res.status}`)
+      return
+    }
+    setPanelChatError(null)
     const data = await res.json()
     if (panelForId !== ownerAtStart) return
     const stillOpen = annotations.find((a) => a.id === panelForId)
@@ -3189,8 +3208,14 @@ function schedulePanelPoll(sessionId: string): void {
   const hasInflight = panelMessages.some((m) => m.status === 'running')
   const delay = hasInflight ? PANEL_FAST_POLL_MS : PANEL_SLOW_POLL_MS
   panelPollTimer = setTimeout(async () => {
-    await refreshPanelChat(sessionId)
-    schedulePanelPoll(sessionId)
+    // Same defect the chat pane had: with schedulePanelPoll after an unguarded
+    // await, one rejected read ended the chain permanently and the panel sat
+    // on a stale transcript that read as live. Chain the next tick regardless.
+    try {
+      await refreshPanelChat(sessionId)
+    } finally {
+      schedulePanelPoll(sessionId)
+    }
   }, delay)
 }
 
