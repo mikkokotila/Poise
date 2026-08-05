@@ -26,6 +26,32 @@
 // line-height. The native caret rides the rendered text because there's
 // no mirror to drift against; this replaces an earlier textarea+mirror
 // approach where different per-line font-sizes broke cursor alignment.
+//
+// The line model stays flat — `#editor-doc`'s children are lines and
+// nothing else — which is why a pipe table is rendered as a run of
+// sibling rows sharing one grid template rather than as a <table>.
+//
+// What markdown the writer may type is NOT decided here. The grammar
+// lives in src/markdown-syntax.ts and is shared with the chat pane's
+// renderer, so the two surfaces can never drift into supporting
+// different markdown. This file decides only how the editor draws it.
+
+import {
+  type BlockKind,
+  type InlineSegment,
+  blockMarkerLength,
+  blockTrailingMarkerLength,
+  classifyLines,
+  emptyTableRowText,
+  inlineSource,
+  isTableDelimText,
+  isTableRowText,
+  isWhollyHidden,
+  parseInline,
+  parseTableAligns,
+  splitTableRow,
+  tableDelimTextFor,
+} from '../markdown-syntax'
 
 interface DocSummary {
   slug: string
@@ -353,275 +379,228 @@ function renderShell(): string {
   `
 }
 
-// Line-kind taxonomy. Block-level kinds the editor recognises:
-//   - h1 / h2 / body: classified per-line from the leading `#` / `##`.
-//   - list-item: a line whose text starts with `- ` (hyphen + space).
-//     The `- ` marker is hidden (same .md-marker rule as headings) and
-//     a styled bullet renders via ::before; CSS gives the line a
-//     leading indent so the bullet sits at the left margin and the
-//     content reads as visually nested.
-//   - code-fence-open / code-fence-close / code-content: triple-backtick
-//     fenced code block. The opening fence is a line whose text starts
-//     with ```` (optionally followed by a language tag); the closing
-//     fence is a line whose text equals exactly ```` (no language).
-//     Lines between are code-content. Detection requires looking at
-//     surrounding lines, not just one — see classifyAllLines.
-type LineKind = 'h1' | 'h2' | 'body' | 'list-item' | 'code-fence-open' | 'code-fence-close' | 'code-content'
-
-// Classify a single line by its leading markdown token. Only `# ` and
-// `## ` produce headings — H3+ isn't supported (intentional: the
-// editor's spec is "minimal markup"). List items come in two flavours:
-//   `- ` (bullet) and `N. ` / `N) ` (numbered). For numbered lists the
-// writer's choice of `.` vs `)` is preserved as the visual delimiter.
-// Bare `#`, `##`, `-`, or `1.` without a trailing space stay as body
-// until the user adds the space, matching CommonMark / iA Writer
-// behaviour. Code-block kinds are NOT computed here — they need
-// cross-line state from classifyAllLines.
-function lineKindFor(text: string): 'h1' | 'h2' | 'body' | 'list-item' {
-  if (/^## /.test(text))          return 'h2'
-  if (/^# /.test(text))           return 'h1'
-  if (/^- /.test(text))           return 'list-item'
-  if (/^\d+[.)] /.test(text))     return 'list-item'
-  return 'body'
-}
-
-// Walk a list of line texts in order and produce one kind per line.
-// State machine: outside a code block, lines are h1/h2/body via
-// lineKindFor; encountering a line that starts with ```` opens a
-// block, lines between are code-content, and a line whose text is
-// exactly ```` closes the block. Unclosed openers run to end-of-doc
-// (everything past the open is code-content) — which is the same
-// behaviour CommonMark / iA Writer / Typora exhibit.
+// How the editor draws each of the shared grammar's kinds. The grammar
+// itself — what counts as a heading, a quote, a link — lives in
+// src/markdown-syntax.ts and is shared with the chat renderer, so the
+// two can never disagree about what the writer is allowed to type.
 //
-// `graceIdx`: when ≥ 0, that line's fence-open / fence-close detection
-// is SKIPPED. This is the "caret is currently in this line" case: the
-// fence kinds hide the entire textContent inside a `display:none`
-// marker span, so promoting the line to fence-* the moment the user
-// types the third backtick would strand the caret outside the line
-// (Chrome can't position inside hidden text) — subsequent keystrokes
-// land in the wrong DOM position and the markdown text reverses
-// ("```js" becomes "j```" because 'j' gets inserted before the hidden
-// marker). Treating the active line as if it had no fence prefix
-// keeps it as a body line during editing, with `````` visible; the
-// next reclassify (fires on the keystroke that moves the caret off
-// the line — usually Enter) promotes it to its real fence kind and
-// hides the marker as designed. Subsequent lines re-classify under
-// the now-correct in/out-of-block state.
-function classifyAllLines(texts: string[], graceIdx: number = -1): LineKind[] {
-  const out: LineKind[] = []
-  let inBlock = false
-  for (let i = 0; i < texts.length; i++) {
-    const text = texts[i]
-    const grace = i === graceIdx
-    if (inBlock) {
-      if (text === '```' && !grace) { out.push('code-fence-close'); inBlock = false }
-      else                          { out.push('code-content') }
-    } else {
-      if (/^```/.test(text) && !grace) { out.push('code-fence-open'); inBlock = true }
-      else                              { out.push(lineKindFor(text)) }
-    }
-  }
-  return out
+// The difference between the two renderers is what they do with a
+// marker. The chat pane throws it away: `# ` becomes an <h1> tag and the
+// characters are gone. The editor keeps every character in the DOM and
+// hides the marker with CSS, because the line's textContent IS the
+// saved file, and because caret offsets, annotation anchors and the
+// copy handler all count in source characters.
+//
+// So, per kind:
+//   - h1…h6 / list-item / quote: leading marker in a hidden span, the
+//     rest parsed for inline runs. CSS sizes the line and draws the
+//     bullet or the quote bar in the marker's place.
+//   - rule: the whole line (`---`) is marker; CSS draws the line.
+//   - code fences and a table's delimiter row: the whole line is marker
+//     too, but with nothing drawn in its place.
+//   - code-content: plain text, no inline parsing — asterisks and
+//     backticks inside code are literal.
+//   - table-head / table-row: pipes become hidden markers and each cell
+//     becomes a `<span class="editor-cell">`. CSS puts the cells on a
+//     grid; applyTableLayout gives every row of a table the same tracks.
+type LineKind = BlockKind
+
+function isTableRowKind(kind: LineKind): boolean {
+  return kind === 'table-head' || kind === 'table-row'
 }
 
-// The visible-prefix length each kind hides. CSS sets the marker span
-// to `display: none`, so the user only sees the "rest" of the line.
-// For code-fence kinds, the entire line is the marker — markerLengthFor
-// returns the length so callers (snap logic) treat the whole line as
-// a hidden prefix.
-function markerLengthFor(kind: LineKind, lineText: string = ''): number {
-  if (kind === 'h1') return 2
-  if (kind === 'h2') return 3
-  if (kind === 'list-item') {
-    // List markers vary in length. `- ` is 2 chars; numbered markers
-    // are 3 + digit_count chars for `N. ` / `N) ` (e.g. `1. ` = 3,
-    // `12. ` = 4, `99) ` = 4). Match against the actual line text so
-    // each list-item line reports its own marker length; callers
-    // should always pass lineText for list-item to get this right.
-    const m = lineText.match(/^(?:- |\d+[.)] )/)
-    return m ? m[0].length : 2
-  }
-  if (kind === 'code-fence-open' || kind === 'code-fence-close') return lineText.length
-  return 0
+// Kinds whose marker is a leading run the writer can delete their way
+// out of, demoting the line to prose. The whole-line markers (fences,
+// rules, delimiter rows) are deliberately not in this set: there is no
+// "rest of the line" left behind to demote to.
+function hasStrippableMarker(kind: LineKind): boolean {
+  return kind === 'list-item' || kind === 'quote'
+    || (kind.length === 2 && kind[0] === 'h')
 }
 
-// Inline-segment model. A line's "rest" (everything after the optional
-// block marker) is parsed into a flat sequence of plain text, bold
-// (`**…**`) and code (`` `…` ``) runs. Italic isn't in the spec,
-// which removes the parser's need to disambiguate `*` vs `**`. Code
-// and bold can't nest — whichever delimiter opens first wins, and
-// the other delimiter inside that run stays as literal text. Pairs
-// are matched greedy left-to-right; unmatched delimiters and empty
-// pairs (`****`, ` `` `) stay as plain text.
-type InlineSegment =
-  | { kind: 'text', text: string }
-  | { kind: 'bold', text: string }
-  | { kind: 'code', text: string }
+// Column weights for the shared grid template. Every row of a table is
+// its own grid container — they are sibling line divs, and wrapping
+// them in one element would break the flat line model the whole editor
+// is built on — so the columns only line up if each row is handed the
+// same explicit track list.
+//
+// Widths come from the longest cell in each column, measured in
+// characters. That is deliberate: measuring rendered boxes would mean
+// a layout read on every keystroke, and a character count is stable,
+// cheap, and close enough for prose. The clamp keeps a `Yes`/`No`
+// column from collapsing to a sliver and a paragraph-in-a-cell from
+// starving its neighbours.
+const TABLE_COL_MIN = 4
+const TABLE_COL_MAX = 24
 
-function parseInline(text: string): InlineSegment[] {
-  const out: InlineSegment[] = []
-  let i = 0
-  while (i < text.length) {
-    // Pick the nearest opener. Bold (`**`) and code (`` ` ``) compete
-    // by position; ties prefer bold (rare since `**` is two chars).
-    const boldOpen = text.indexOf('**', i)
-    const codeOpen = text.indexOf('`', i)
-    let openType: 'bold' | 'code' | null = null
-    let openAt = -1
-    if (boldOpen !== -1 && (codeOpen === -1 || boldOpen <= codeOpen)) {
-      openType = 'bold'
-      openAt = boldOpen
-    } else if (codeOpen !== -1) {
-      openType = 'code'
-      openAt = codeOpen
-    }
-    if (openType === null) { out.push({ kind: 'text', text: text.slice(i) }); break }
-    if (openAt > i) out.push({ kind: 'text', text: text.slice(i, openAt) })
-
-    if (openType === 'bold') {
-      const close = text.indexOf('**', openAt + 2)
-      if (close === -1) { out.push({ kind: 'text', text: text.slice(openAt) }); break }
-      const inner = text.slice(openAt + 2, close)
-      if (inner === '') {
-        out.push({ kind: 'text', text: text.slice(openAt, close + 2) })
-      } else {
-        out.push({ kind: 'bold', text: inner })
-      }
-      i = close + 2
-    } else {
-      const close = text.indexOf('`', openAt + 1)
-      if (close === -1) { out.push({ kind: 'text', text: text.slice(openAt) }); break }
-      const inner = text.slice(openAt + 1, close)
-      if (inner === '') {
-        out.push({ kind: 'text', text: text.slice(openAt, close + 1) })
-      } else {
-        out.push({ kind: 'code', text: inner })
-      }
-      i = close + 1
-    }
+export function tableColumnTemplate(rows: string[]): string {
+  const widths: number[] = []
+  for (const row of rows) {
+    const parts = splitTableRow(row)
+    if (!parts) continue
+    parts.cells.forEach((cell, i) => {
+      const len = cell.length
+      if (widths[i] === undefined || len > widths[i]) widths[i] = len
+    })
   }
-  // Coalesce consecutive plain-text runs so the DOM stays minimal —
-  // adjacent text nodes confuse cursor accounting and offer no benefit.
-  const merged: InlineSegment[] = []
-  for (const seg of out) {
-    const last = merged[merged.length - 1]
-    if (seg.kind === 'text' && last && last.kind === 'text') {
-      last.text += seg.text
-    } else {
-      merged.push(seg)
-    }
-  }
-  return merged
+  if (widths.length === 0) return ''
+  return widths
+    .map((w) => `minmax(0, ${Math.max(TABLE_COL_MIN, Math.min(TABLE_COL_MAX, w))}fr)`)
+    .join(' ')
 }
 
-// Build an inline wrapper element (<strong> or <code>) with the
-// leading + trailing markers in hidden spans flanking the visible
-// inner text. The marker text differs (`**` for bold, `` ` `` for
-// code) but the structure is the same — three children, marker /
-// text / marker — so the rest of the editor can treat them as one
-// shape via `wrap.tagName === 'STRONG' || wrap.tagName === 'CODE'`.
-function buildInlineWrap(tag: 'strong' | 'code', marker: string, inner: string): HTMLElement {
-  const wrap = document.createElement(tag)
-  const open = document.createElement('span')
-  open.className = 'md-marker'
-  open.textContent = marker
-  const text = document.createTextNode(inner)
-  const close = document.createElement('span')
-  close.className = 'md-marker'
-  close.textContent = marker
-  wrap.appendChild(open)
-  wrap.appendChild(text)
-  wrap.appendChild(close)
+// Every inline run renders as a wrapper holding three children — the
+// opening marker, the visible text, the closing marker — with both
+// markers in hidden spans. Only the tag and the marker strings differ,
+// so the rest of the editor can treat them as one shape.
+//
+// A link is the same shape with a lopsided closing marker: `[` opens
+// it, and `](https://…)` closes it. That is exactly why a link's source
+// has to be reachable — see the reveal handling in buildLineEl.
+interface InlineWrapSpec { tag: string, open: string, close: string }
+
+function inlineWrapSpec(seg: InlineSegment): InlineWrapSpec | null {
+  switch (seg.kind) {
+    case 'bold':   return { tag: 'STRONG', open: '**',          close: '**' }
+    case 'italic': return { tag: 'EM',     open: seg.marker,    close: seg.marker }
+    case 'code':   return { tag: 'CODE',   open: '`',           close: '`' }
+    case 'link':   return { tag: 'A',      open: '[',           close: `](${seg.url})` }
+    default:       return null
+  }
+}
+
+function isInlineWrap(el: Element | null): boolean {
+  const tag = el?.tagName
+  return tag === 'STRONG' || tag === 'EM' || tag === 'CODE' || tag === 'A'
+}
+
+function buildMarkerEl(text: string): HTMLElement {
+  const span = document.createElement('span')
+  span.className = 'md-marker'
+  span.textContent = text
+  return span
+}
+
+function buildInlineWrap(spec: InlineWrapSpec, inner: string): HTMLElement {
+  const wrap = document.createElement(spec.tag)
+  wrap.appendChild(buildMarkerEl(spec.open))
+  wrap.appendChild(document.createTextNode(inner))
+  wrap.appendChild(buildMarkerEl(spec.close))
   return wrap
 }
 
-function buildBoldEl(inner: string): HTMLElement { return buildInlineWrap('strong', '**', inner) }
-function buildCodeEl(inner: string): HTMLElement { return buildInlineWrap('code',  '`',  inner) }
+// Does this line hold a link? Used to decide whether moving the caret
+// onto or off it needs a rebuild, so it has to be cheap enough to run
+// on every cursor move — hence a regex over the source rather than a
+// parse.
+const LINK_HINT_RE = /\[[^\]\n]+\]\(/
 
-// Build a fresh line element. Behaviour by kind:
-//   - h1 / h2 / list-item: the leading `# ` / `## ` / `- ` prefix is
-//     wrapped in a hidden marker span; the rest is parsed for inline
-//     bold/code and split into text nodes + <strong> / <code>
-//     wrappers. Lines ending in a wrapper get an empty-text sentinel
-//     for caret anchoring.
-//   - body: as h1/h2/list-item but no leading marker.
-//   - code-fence-open / code-fence-close: the WHOLE textContent is
-//     the marker — wrapped in `<span class="md-marker">` so the
-//     fence text disappears visually. The line div itself is still
-//     in the DOM; CSS gives it min-height so it occupies a blank
-//     line of vertical space, framing the code block.
-//   - code-content: plain text in monospace, no inline parsing
-//     (asterisks/backticks inside code are literal).
-// All marker text stays in textContent so save and copy round-trip
-// the true markdown.
-function buildLineEl(text: string, kind: LineKind): HTMLDivElement {
+// Fill a container with the inline-parsed form of `text`.
+//
+// `revealLinks` renders a link as its own source instead of as a hidden
+// URL. A link is the one run whose marker is arbitrarily long, so a
+// caret that cannot reach it means a mistyped URL can only be fixed by
+// deleting the whole link and starting again. The editor therefore
+// shows the source of any link on the line the caret is on, and hides
+// it again the moment the caret leaves — the same bargain the table
+// delimiter row strikes. Bold, italic and code keep their markers
+// hidden throughout: those are one or two characters sitting right
+// against their text, and backspacing through them already works.
+//
+// An empty container still gets an empty text node: without one there
+// is no anchor for the caret to land on, and a fresh table row is
+// nothing but empty cells. The trailing sentinel after a wrapped run is
+// the same device, for the same reason — typing after a bold run must
+// not extend it.
+function fillInline(el: HTMLElement, text: string, revealLinks: boolean): void {
+  if (text === '') {
+    el.appendChild(document.createTextNode(''))
+    return
+  }
+  const segs = parseInline(text)
+  let lastWasWrap = false
+  for (const seg of segs) {
+    const spec = revealLinks && seg.kind === 'link' ? null : inlineWrapSpec(seg)
+    if (spec) {
+      el.appendChild(buildInlineWrap(spec, seg.text))
+      lastWasWrap = true
+    } else {
+      el.appendChild(document.createTextNode(inlineSource(seg)))
+      lastWasWrap = false
+    }
+  }
+  if (lastWasWrap) el.appendChild(document.createTextNode(''))
+}
+
+
+// Build a fresh line element. Every marker character stays in
+// textContent — hidden, but present — so save, copy and the caret all
+// still see real markdown. `revealLinks` is set for the line the caret
+// is on; see fillInline.
+function buildLineEl(text: string, kind: LineKind, revealLinks: boolean = false): HTMLDivElement {
   const div = document.createElement('div')
   div.className = 'editor-line'
   div.dataset.kind = kind
 
-  if (kind === 'code-fence-open' || kind === 'code-fence-close') {
-    if (text === '') {
-      div.appendChild(document.createElement('br'))
-    } else {
-      const span = document.createElement('span')
-      span.className = 'md-marker'
-      span.textContent = text
-      div.appendChild(span)
-    }
+  // Kinds whose entire line is marker. A fence, a rule and a table's
+  // delimiter row have no content of their own to show: CSS draws
+  // whatever stands in their place, or nothing at all.
+  if (kind === 'code-fence-open' || kind === 'code-fence-close'
+      || kind === 'rule' || kind === 'table-delim') {
+    if (text === '') div.appendChild(document.createElement('br'))
+    else             div.appendChild(buildMarkerEl(text))
     return div
   }
 
-  if (kind === 'code-content') {
+  // Kinds shown as their own source: code, and the delimiter row the
+  // caret is currently on.
+  if (kind === 'code-content' || kind === 'source') {
     if (text === '') div.appendChild(document.createElement('br'))
     else             div.appendChild(document.createTextNode(text))
     return div
   }
 
-  const prefixLen = markerLengthFor(kind, text)
-  const prefix = text.slice(0, prefixLen)
-  const rest = text.slice(prefixLen)
-  if (prefix) {
-    const span = document.createElement('span')
-    span.className = 'md-marker'
-    span.textContent = prefix
-    div.appendChild(span)
+  if (isTableRowKind(kind)) {
+    const parts = splitTableRow(text)
+    // classifyLines only hands out row kinds to text that splits, so the
+    // fallback is unreachable in practice; keeping it means a line that
+    // somehow arrives malformed renders as its own source rather than as
+    // an empty row the writer cannot recover.
+    if (!parts) {
+      if (text === '') div.appendChild(document.createElement('br'))
+      else             div.appendChild(document.createTextNode(text))
+      return div
+    }
+    parts.markers.forEach((marker, i) => {
+      div.appendChild(buildMarkerEl(marker))
+      if (i < parts.cells.length) {
+        const cell = document.createElement('span')
+        cell.className = 'editor-cell'
+        fillInline(cell, parts.cells[i], revealLinks)
+        div.appendChild(cell)
+      }
+    })
+    if (revealLinks && LINK_HINT_RE.test(text)) div.dataset.reveal = 'links'
+    return div
   }
+
+  const prefix = text.slice(0, blockMarkerLength(kind, text))
+  const rest = text.slice(prefix.length)
+  if (prefix) div.appendChild(buildMarkerEl(prefix))
   // For list-item lines, publish the visual marker the ::before
   // pseudo-element should display. Bullet lines (`- `) render as a
-  // designed `•` glyph; numbered lines preserve the writer's
-  // delimiter choice (`1.` vs `1)`), which preserves the typographic
-  // distinction those two punctuations make.
+  // designed `•` glyph; numbered lines preserve the writer's delimiter
+  // choice (`1.` vs `1)`), which preserves the typographic distinction
+  // those two punctuations make.
   if (kind === 'list-item') {
-    if (prefix.startsWith('-')) {
-      div.dataset.listMarker = '•'
-    } else {
-      // Numbered: prefix is like "1. " or "42) " — strip the trailing
-      // space and use the number + its delimiter as-is.
-      div.dataset.listMarker = prefix.trimEnd()
-    }
+    div.dataset.listMarker = prefix.startsWith('-') ? '•' : prefix.trimEnd()
   }
   if (rest === '') {
     div.appendChild(document.createElement('br'))
     return div
   }
-  const segs = parseInline(rest)
-  for (const seg of segs) {
-    if      (seg.kind === 'text') div.appendChild(document.createTextNode(seg.text))
-    else if (seg.kind === 'bold') div.appendChild(buildBoldEl(seg.text))
-    else                          div.appendChild(buildCodeEl(seg.text))
-  }
-  // Sentinel: when the line ends in a <strong> or <code>, append an
-  // empty text node so the caret has a non-wrapper anchor at
-  // end-of-line. Without this, Chrome treats a line-level caret
-  // position immediately after a <strong>/<code> as "inside the
-  // previous element" for typing purposes and routes characters back
-  // into the wrapper's inner text — silently extending the bold/code
-  // run. The empty text node is invisible, contributes zero to
-  // textContent, and is allowed by lineMatchesModel.
-  const last = segs[segs.length - 1]
-  if (last && (last.kind === 'bold' || last.kind === 'code')) {
-    div.appendChild(document.createTextNode(''))
-  }
+  fillInline(div, rest, revealLinks)
+  if (revealLinks && LINK_HINT_RE.test(rest)) div.dataset.reveal = 'links'
   return div
 }
 
@@ -650,12 +629,37 @@ function setCursorOffsetInLine(line: HTMLElement, offset: number) {
   const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT)
   let acc = 0
   let node: Node | null
+  let prev: Node | null = null
   const sel = window.getSelection()
+  const place = (target: Node, at: number) => {
+    const r = document.createRange()
+    r.setStart(target, at)
+    r.collapse(true)
+    if (sel) { sel.removeAllRanges(); sel.addRange(r) }
+  }
   while ((node = walker.nextNode())) {
     const len = (node.textContent || '').length
     if (acc + len >= offset) {
       const localOffset = offset - acc
       const range = document.createRange()
+
+      // Table rows hide a pipe marker between every pair of cells, so
+      // the offset that starts a cell is also the offset that ends the
+      // marker before it — and this walk, taking the first node that
+      // reaches the offset, lands in the marker. That is a text node
+      // the caret cannot be seen in and typing there would grow the
+      // pipe rather than the cell, so step to the neighbouring cell's
+      // own text instead: forward normally, back for the closing pipe
+      // at end-of-row, which has no cell after it. Scoped to table
+      // lines on purpose — heading and list markers sit at the very
+      // start of a line, and the inline-wrapper case below wants the
+      // sentinel rather than the next node.
+      if (localOffset === len && isTableRowKind((line.dataset.kind || 'body') as LineKind)
+          && (node.parentNode as HTMLElement | null)?.classList?.contains('md-marker')) {
+        const next = walker.nextNode()
+        if (next)      { place(next, 0); return }
+        if (prev)      { place(prev, (prev.textContent || '').length); return }
+      }
 
       // Edge: when the cursor is exactly at the end of the trailing
       // marker of a <strong>/<code>, placing it inside that marker
@@ -672,7 +676,7 @@ function setCursorOffsetInLine(line: HTMLElement, offset: number) {
         const markerSpan = node.parentNode as HTMLElement
         if (markerSpan.classList && markerSpan.classList.contains('md-marker')) {
           const wrap = markerSpan.parentNode as HTMLElement | null
-          if (wrap && (wrap.tagName === 'STRONG' || wrap.tagName === 'CODE') && markerSpan === wrap.lastElementChild) {
+          if (wrap && isInlineWrap(wrap) && markerSpan === wrap.lastElementChild) {
             const sentinel = wrap.nextSibling
             if (sentinel && sentinel.nodeType === Node.TEXT_NODE) {
               range.setStart(sentinel, 0)
@@ -696,6 +700,7 @@ function setCursorOffsetInLine(line: HTMLElement, offset: number) {
       return
     }
     acc += len
+    prev = node
   }
   // Fallback: place caret at end of line
   const range = document.createRange()
@@ -747,8 +752,7 @@ function inlineWrapAncestorOf(node: Node | null): HTMLElement | null {
   while (n) {
     if (n === docEl) return null
     if (n.nodeType === Node.ELEMENT_NODE) {
-      const tag = (n as HTMLElement).tagName
-      if (tag === 'STRONG' || tag === 'CODE') return n as HTMLElement
+      if (isInlineWrap(n as Element)) return n as HTMLElement
     }
     n = n.parentNode
   }
@@ -794,7 +798,7 @@ function inlineWrapAtCaretEdge(range: Range): HTMLElement | null {
         && node.previousSibling
         && node.previousSibling.nodeType === Node.ELEMENT_NODE) {
       const prev = node.previousSibling as HTMLElement
-      if (prev.tagName === 'STRONG' || prev.tagName === 'CODE') return prev
+      if (isInlineWrap(prev)) return prev
     }
     return null
   }
@@ -1002,12 +1006,14 @@ function reconstructMarkdownFromRange(range: Range): string | null {
     // round-trip.) Code-content lines have only visible text and no
     // hidden markers, so the standard slice produces the right text
     // without any marker snap.
-    if (kind === 'code-fence-open' || kind === 'code-fence-close') {
+    if (kind === 'code-fence-open' || kind === 'code-fence-close'
+      || kind === 'rule' || kind === 'table-delim') {
       out.push(lineText)
       continue
     }
 
-    const markerLen = markerLengthFor(kind, lineText)
+    const markerLen = blockMarkerLength(kind, lineText)
+    const trailingLen = blockTrailingMarkerLength(kind, lineText)
 
     let startOffset = 0
     let endOffset = lineText.length
@@ -1019,25 +1025,34 @@ function reconstructMarkdownFromRange(range: Range): string | null {
     }
 
     // Block-level snap: include the heading marker only if the slice
-    // covers the line's full visible content.
-    const coversWholeVisible = startOffset <= markerLen && endOffset >= lineText.length
+    // covers the line's full visible content. For a table row the
+    // visible content stops short of the closing pipe, so a whole-row
+    // selection is measured against that instead of the raw length —
+    // otherwise the outer pipes would be dropped and the copied text
+    // would no longer be a table.
+    const visibleEnd = lineText.length - trailingLen
+    const coversWholeVisible = startOffset <= markerLen && endOffset >= visibleEnd
     let s = coversWholeVisible ? 0 : Math.max(startOffset, markerLen)
-    let e = endOffset
+    let e = coversWholeVisible ? lineText.length : endOffset
 
-    // Inline snap: for each inline wrapper (<strong> or <code>) in
-    // the line, if the slice covers its full visible inner text,
-    // expand outward to include the surrounding markers (`**` for
-    // strong, `` ` `` for code). We use the original startOffset/
-    // endOffset (visible bounds) for the comparison so the heading
-    // snap above doesn't double-count. Code-content lines have no
-    // inline wrappers, so this loop is a no-op for them.
-    for (const wrap of Array.from(line.querySelectorAll('strong, code'))) {
+    // Inline snap: for each inline wrapper in the line, if the slice
+    // covers its full visible inner text, expand outward to include the
+    // surrounding markers — so selecting the word inside `**bold**`
+    // copies the asterisks with it, and selecting a link's text copies
+    // the address it points at. We use the original startOffset /
+    // endOffset (visible bounds) for the comparison so the block-marker
+    // snap above doesn't double-count. The two markers are measured
+    // from the DOM rather than assumed, because a link's are lopsided:
+    // `[` opening, `](https://…)` closing. Lines with no inline
+    // wrappers make this loop a no-op.
+    for (const wrap of Array.from(line.querySelectorAll('strong, em, code, a'))) {
       const wrapStart = offsetOfNodeInLine(line, wrap)
       if (wrapStart < 0) continue
       const wrapEnd = wrapStart + (wrap.textContent || '').length
-      const m = wrap.tagName === 'CODE' ? 1 : 2   // marker length
-      const innerStart = wrapStart + m
-      const innerEnd   = wrapEnd - m
+      const openLen  = (wrap.firstElementChild?.textContent || '').length
+      const closeLen = (wrap.lastElementChild?.textContent || '').length
+      const innerStart = wrapStart + openLen
+      const innerEnd   = wrapEnd - closeLen
       if (startOffset <= innerStart && endOffset >= innerEnd) {
         if (wrapStart < s) s = wrapStart
         if (wrapEnd   > e) e = wrapEnd
@@ -1064,10 +1079,11 @@ function loadIntoEditor(content: string) {
   if (!docEl) return
   docEl.innerHTML = ''
   const lines = content === '' ? [''] : content.split('\n')
-  const kinds = classifyAllLines(lines)
+  const kinds = classifyLines(lines)
   for (let i = 0; i < lines.length; i++) {
     docEl.appendChild(buildLineEl(lines[i], kinds[i]))
   }
+  applyTableLayout()
   updateEmptyState()
 }
 
@@ -1340,8 +1356,8 @@ function mergeLineBackward(line: HTMLElement): void {
   if (!keep) return
   const kind = (line.dataset.kind || 'body') as LineKind
   const text = line.textContent || ''
-  const dropLen = (kind === 'h1' || kind === 'h2' || kind === 'list-item')
-    ? markerLengthFor(kind, text)
+  const dropLen = hasStrippableMarker(kind)
+    ? blockMarkerLength(kind, text)
     : 0
   replaceSourceRange(keep, (keep.textContent || '').length, line, dropLen, '')
 }
@@ -1355,7 +1371,7 @@ function mergeLineBackward(line: HTMLElement): void {
 function stripBlockMarker(line: HTMLElement): void {
   const kind = (line.dataset.kind || 'body') as LineKind
   const text = line.textContent || ''
-  const len = markerLengthFor(kind, text)
+  const len = blockMarkerLength(kind, text)
   if (len <= 0) return
   replaceSourceRange(line, 0, line, len, '')
 }
@@ -1379,13 +1395,67 @@ function updateEmptyState() {
 //   - any segment got split across multiple text nodes from browser
 //     edit operations (cursor offset accounting depends on each
 //     segment being a single text node).
-// `kind` is supplied by the caller (classifyAllLines) because code-
+// `kind` is supplied by the caller (classifyLines) because code-
 // block kinds depend on cross-line state and can't be derived from
 // the line's own text alone.
-function lineMatchesModel(line: HTMLElement, kind: LineKind): boolean {
+// Does one DOM node match what fillInline would have built for one
+// parsed segment? A plain run is a single text node; every wrapped run
+// is its tag holding marker / text / marker. A link on a revealed line
+// is rendered as its own source, so it matches a plain text node too.
+function inlineSegMatches(node: Node | undefined, seg: InlineSegment, revealLinks: boolean): boolean {
+  if (!node) return false
+  const spec = revealLinks && seg.kind === 'link' ? null : inlineWrapSpec(seg)
+  if (!spec) {
+    return node.nodeType === Node.TEXT_NODE && node.textContent === inlineSource(seg)
+  }
+  if (node.nodeType !== Node.ELEMENT_NODE) return false
+  const el = node as HTMLElement
+  if (el.tagName !== spec.tag) return false
+  if (el.childNodes.length !== 3) return false
+  const [open, inner, close] = Array.from(el.childNodes)
+  if (open.nodeType !== Node.ELEMENT_NODE || !(open as HTMLElement).classList.contains('md-marker') || open.textContent !== spec.open) return false
+  if (close.nodeType !== Node.ELEMENT_NODE || !(close as HTMLElement).classList.contains('md-marker') || close.textContent !== spec.close) return false
+  return inner.nodeType === Node.TEXT_NODE && inner.textContent === seg.text
+}
+
+// Whether fillInline would have closed this run of segments with the
+// empty-text sentinel it appends after a wrapped run.
+function endsInWrap(segs: InlineSegment[], revealLinks: boolean): boolean {
+  const last = segs[segs.length - 1]
+  if (!last) return false
+  return !!(revealLinks && last.kind === 'link' ? null : inlineWrapSpec(last))
+}
+
+// Validates a run of nodes filled by fillInline — a table cell's
+// children, or what follows an ordinary line's block marker.
+function inlineMatchesModel(children: Node[], text: string, revealLinks: boolean): boolean {
+  if (text === '') {
+    return children.length === 1
+      && children[0].nodeType === Node.TEXT_NODE
+      && children[0].textContent === ''
+  }
+  const segs = parseInline(text)
+  const sentinel = endsInWrap(segs, revealLinks)
+  if (children.length !== segs.length && !(sentinel && children.length === segs.length + 1)) return false
+  for (let i = 0; i < segs.length; i++) {
+    if (!inlineSegMatches(children[i], segs[i], revealLinks)) return false
+  }
+  if (children.length > segs.length) {
+    const tail = children[segs.length]
+    if (tail.nodeType !== Node.TEXT_NODE || tail.textContent !== '') return false
+  }
+  return true
+}
+
+function lineMatchesModel(line: HTMLElement, kind: LineKind, revealLinks: boolean): boolean {
   if (line.dataset.kind !== kind) return false
   const txt = line.textContent || ''
   const children = Array.from(line.childNodes)
+
+  // The caret arriving on or leaving a line that holds a link changes
+  // how that link is drawn, so it has to force a rebuild.
+  const wantReveal = revealLinks && LINK_HINT_RE.test(txt)
+  if ((line.dataset.reveal === 'links') !== wantReveal) return false
 
   // For list-item lines, the visual marker shown by ::before is
   // carried in data-list-marker. If the writer edited the number
@@ -1393,12 +1463,13 @@ function lineMatchesModel(line: HTMLElement, kind: LineKind): boolean {
   // attribute would stay stale unless we force a rebuild. Validate
   // the attribute matches what buildLineEl would emit for this text.
   if (kind === 'list-item') {
-    const prefix = txt.slice(0, markerLengthFor(kind, txt))
+    const prefix = txt.slice(0, blockMarkerLength(kind, txt))
     const expectedMarker = prefix.startsWith('-') ? '•' : prefix.trimEnd()
     if (line.dataset.listMarker !== expectedMarker) return false
   }
 
-  if (kind === 'code-fence-open' || kind === 'code-fence-close') {
+  if (kind === 'code-fence-open' || kind === 'code-fence-close'
+      || kind === 'rule' || kind === 'table-delim') {
     if (txt === '') {
       return children.length === 1
         && children[0].nodeType === Node.ELEMENT_NODE
@@ -1410,7 +1481,7 @@ function lineMatchesModel(line: HTMLElement, kind: LineKind): boolean {
       && children[0].textContent === txt
   }
 
-  if (kind === 'code-content') {
+  if (kind === 'code-content' || kind === 'source') {
     if (txt === '') {
       return children.length === 1
         && children[0].nodeType === Node.ELEMENT_NODE
@@ -1421,7 +1492,32 @@ function lineMatchesModel(line: HTMLElement, kind: LineKind): boolean {
       && children[0].textContent === txt
   }
 
-  const prefixLen = markerLengthFor(kind, txt)
+  if (isTableRowKind(kind)) {
+    const parts = splitTableRow(txt)
+    if (!parts) {
+      // Mirrors buildLineEl's unreachable fallback: one plain text node.
+      return children.length === 1
+        && children[0].nodeType === Node.TEXT_NODE
+        && children[0].textContent === txt
+    }
+    if (children.length !== parts.markers.length + parts.cells.length) return false
+    for (let m = 0; m < parts.markers.length; m++) {
+      const marker = children[m * 2]
+      if (marker.nodeType !== Node.ELEMENT_NODE) return false
+      const me = marker as HTMLElement
+      if (!me.classList.contains('md-marker')) return false
+      if (me.textContent !== parts.markers[m]) return false
+      if (m >= parts.cells.length) continue
+      const cell = children[m * 2 + 1]
+      if (cell.nodeType !== Node.ELEMENT_NODE) return false
+      const ce = cell as HTMLElement
+      if (!ce.classList.contains('editor-cell')) return false
+      if (!inlineMatchesModel(Array.from(ce.childNodes), parts.cells[m], revealLinks)) return false
+    }
+    return true
+  }
+
+  const prefixLen = blockMarkerLength(kind, txt)
   const expectedPrefix = txt.slice(0, prefixLen)
   const rest = txt.slice(prefixLen)
   let i = 0
@@ -1442,59 +1538,21 @@ function lineMatchesModel(line: HTMLElement, kind: LineKind): boolean {
     return br.nodeType === Node.ELEMENT_NODE && (br as HTMLElement).tagName === 'BR'
   }
 
-  const segs = parseInline(rest)
-  // Lines that end in bold or code carry a trailing empty-text
-  // sentinel (see buildLineEl) so the caret has a non-wrapper anchor
-  // at end-of-line. Accept either segment-count OR segment-count+1
-  // children remaining.
-  const remaining = children.length - i
-  const lastSeg = segs[segs.length - 1]
-  const endsInWrap = !!lastSeg && (lastSeg.kind === 'bold' || lastSeg.kind === 'code')
-  if (remaining !== segs.length && !(endsInWrap && remaining === segs.length + 1)) return false
-
-  for (const seg of segs) {
-    const node = children[i++]
-    if (seg.kind === 'text') {
-      // Plain segment: a single text node with the exact text.
-      if (node.nodeType !== Node.TEXT_NODE) return false
-      if (node.textContent !== seg.text) return false
-    } else {
-      // Inline wrapper segment: <strong> for bold or <code> for code,
-      // each with three children — open marker, inner text, close
-      // marker. The marker character differs (`**` vs `` ` ``), but
-      // the structure is identical.
-      if (node.nodeType !== Node.ELEMENT_NODE) return false
-      const el = node as HTMLElement
-      const expectedTag = seg.kind === 'bold' ? 'STRONG' : 'CODE'
-      const expectedMarker = seg.kind === 'bold' ? '**' : '`'
-      if (el.tagName !== expectedTag) return false
-      if (el.childNodes.length !== 3) return false
-      const open = el.childNodes[0]
-      const inner = el.childNodes[1]
-      const close = el.childNodes[2]
-      if (open.nodeType !== Node.ELEMENT_NODE || !(open as HTMLElement).classList.contains('md-marker') || open.textContent !== expectedMarker) return false
-      if (close.nodeType !== Node.ELEMENT_NODE || !(close as HTMLElement).classList.contains('md-marker') || close.textContent !== expectedMarker) return false
-      if (inner.nodeType !== Node.TEXT_NODE || inner.textContent !== seg.text) return false
-    }
-  }
-
-  // Sentinel check: when present, must be an empty text node.
-  if (i < children.length) {
-    const sentinel = children[i]
-    if (sentinel.nodeType !== Node.TEXT_NODE || sentinel.textContent !== '') return false
-  }
-
-  return true
+  // Everything after the block marker is one inline run, validated the
+  // same way a table cell's is.
+  return inlineMatchesModel(children.slice(i), rest, revealLinks)
 }
 
 // Rebuild a line in place at the given kind, preserving cursor offset
 // (in textContent coordinates, including any hidden marker characters).
 // Replacing only the line's children (not the line div itself) keeps
 // any external references to the div alive.
-function rebuildLineInPlace(line: HTMLElement, kind: LineKind) {
+function rebuildLineInPlace(line: HTMLElement, kind: LineKind, revealLinks: boolean = false) {
   const txt = line.textContent || ''
   const cursor = getCursorOffsetInLine(line)
-  const fresh = buildLineEl(txt, kind)
+  const fresh = buildLineEl(txt, kind, revealLinks)
+  if (fresh.dataset.reveal !== undefined) line.dataset.reveal = fresh.dataset.reveal
+  else                                    delete line.dataset.reveal
   line.dataset.kind = fresh.dataset.kind!
   // Mirror list-item's data-list-marker attribute from the fresh
   // element. When a line transitions out of list-item (back to body,
@@ -1565,7 +1623,7 @@ function reclassifyLines() {
   // bare text nodes (e.g. when typing into an empty doc) or stray <br>s
   // at the root. Wrap any of those in editor-line divs so the
   // per-line model stays consistent. We don't yet know each new line's
-  // kind here — body is a safe placeholder; classifyAllLines below
+  // kind here — body is a safe placeholder; classifyLines below
   // will produce the real kind and trigger a rebuild if needed.
   for (const node of Array.from(docEl.childNodes)) {
     if (node.nodeType === Node.TEXT_NODE) {
@@ -1588,10 +1646,11 @@ function reclassifyLines() {
   // rebuild any line whose DOM doesn't match its expected shape.
   const lines = Array.from(docEl.children) as HTMLElement[]
   const texts = lines.map((l) => l.textContent || '')
-  // Find which line currently holds the caret. classifyAllLines will
-  // grant that line a "still being typed" pass on fence promotion so
-  // the user can finish typing `\`\`\`lang` without the marker
-  // snapping to display:none mid-keystroke.
+  // Find which line currently holds the caret. It gets two things no
+  // other line does: classifyLines returns it as `source` if it would
+  // otherwise be markup from end to end, and buildLineEl shows the
+  // source of any link on it. Both exist so the writer can see and edit
+  // characters that are hidden everywhere else.
   let caretLineIdx = -1
   {
     const sel = window.getSelection()
@@ -1602,11 +1661,15 @@ function reclassifyLines() {
       }
     }
   }
-  const kinds = classifyAllLines(texts, caretLineIdx)
+  const kinds = classifyLines(texts, caretLineIdx)
   for (let idx = 0; idx < lines.length; idx++) {
     const el = lines[idx]
-    if (!lineMatchesModel(el, kinds[idx])) {
-      rebuildLineInPlace(el, kinds[idx])
+    // The caret's line shows the source of any link it holds, so the
+    // writer can reach a URL that is otherwise hidden. Every other line
+    // keeps its links rendered.
+    const reveal = idx === caretLineIdx
+    if (!lineMatchesModel(el, kinds[idx], reveal)) {
+      rebuildLineInPlace(el, kinds[idx], reveal)
     }
     // Ensure empty lines have a <br> filler.
     if ((el.textContent || '') === '' && !el.querySelector('br')) {
@@ -1617,6 +1680,394 @@ function reclassifyLines() {
   // so the cursor has a place to live.
   if (docEl.children.length === 0) {
     docEl.appendChild(buildLineEl('', 'body'))
+  }
+  applyTableLayout()
+}
+
+function clearTableLayout(line: HTMLElement): void {
+  if (line.style.gridTemplateColumns) line.style.gridTemplateColumns = ''
+}
+
+// Hand every row of a table the same grid tracks, and each cell its
+// column's alignment. This is a separate pass from the rebuild above
+// because it depends on the whole block rather than on one line, and
+// because column widths change far more often than DOM structure does
+// — typing a longer word only shifts the tracks.
+function applyTableLayout(): void {
+  if (!docEl) return
+  const lines = Array.from(docEl.children) as HTMLElement[]
+  let i = 0
+  while (i < lines.length) {
+    if (lines[i].dataset.kind !== 'table-head') {
+      clearTableLayout(lines[i])
+      i++
+      continue
+    }
+    const rows: HTMLElement[] = [lines[i]]
+    let delimText = ''
+    let j = i + 1
+    const delimKind = lines[j]?.dataset.kind
+    if (delimKind === 'table-delim' || delimKind === 'source') {
+      delimText = lines[j].textContent || ''
+      clearTableLayout(lines[j])
+      j++
+    }
+    while (lines[j]?.dataset.kind === 'table-row') { rows.push(lines[j]); j++ }
+
+    const template = tableColumnTemplate(rows.map((row) => row.textContent || ''))
+    const aligns = parseTableAligns(delimText)
+    for (const row of rows) {
+      if (row.style.gridTemplateColumns !== template) row.style.gridTemplateColumns = template
+      row.querySelectorAll<HTMLElement>(':scope > .editor-cell').forEach((cell, c) => {
+        const want = aligns[c] ?? ''
+        if (cell.style.textAlign !== want) cell.style.textAlign = want
+      })
+    }
+    i = j
+  }
+}
+
+// ── Table editing ────────────────────────────────────────────────────
+//
+// Everything below works in source-offset coordinates and rebuilds
+// through the same reclassify pass as the rest of the editor, so a
+// table row is never a special case for save, undo or annotations —
+// only for the gestures a grid of cells needs and prose doesn't.
+
+// Where each cell's content sits in the row's source text. Offsets are
+// textContent coordinates, the same ones the caret helpers speak.
+function tableCellSpans(text: string): { start: number, end: number }[] {
+  const parts = splitTableRow(text)
+  if (!parts) return []
+  const spans: { start: number, end: number }[] = []
+  let at = 0
+  parts.markers.forEach((marker, i) => {
+    at += marker.length
+    if (i < parts.cells.length) {
+      spans.push({ start: at, end: at + parts.cells[i].length })
+      at += parts.cells[i].length
+    }
+  })
+  return spans
+}
+
+
+
+function isTableLine(el: Element | null): boolean {
+  const kind = (el as HTMLElement | null)?.dataset?.kind
+  return kind === 'table-head' || kind === 'table-row'
+    || kind === 'table-delim' || kind === 'source'
+}
+
+// The next / previous line that holds cells, stepping over the
+// delimiter row (which sits between the header and the first body row
+// and has no cells of its own).
+function nextTableRowLine(line: HTMLElement): HTMLElement | null {
+  let el = line.nextElementSibling as HTMLElement | null
+  while (el && (el.dataset.kind === 'table-delim' || el.dataset.kind === 'source')) {
+    el = el.nextElementSibling as HTMLElement | null
+  }
+  return el && isTableRowKind(el.dataset.kind as LineKind) ? el : null
+}
+
+function prevTableRowLine(line: HTMLElement): HTMLElement | null {
+  let el = line.previousElementSibling as HTMLElement | null
+  while (el && (el.dataset.kind === 'table-delim' || el.dataset.kind === 'source')) {
+    el = el.previousElementSibling as HTMLElement | null
+  }
+  return el && isTableRowKind(el.dataset.kind as LineKind) ? el : null
+}
+
+function lastTableLineOf(line: HTMLElement): HTMLElement {
+  let el = line
+  while (isTableLine(el.nextElementSibling)) el = el.nextElementSibling as HTMLElement
+  return el
+}
+
+function placeCaretInTableCell(line: HTMLElement, index: number, at: 'start' | 'end' = 'start'): void {
+  const spans = tableCellSpans(line.textContent || '')
+  const span = spans[index]
+  setCursorOffsetInLine(line, span ? (at === 'start' ? span.start : span.end) : (line.textContent || '').length)
+}
+
+// Every table gesture rewrites the DOM directly rather than going
+// through beforeinput, so each one closes the same post-edit loop the
+// input handler would have run.
+function afterTableEdit(): void {
+  reclassifyLines()
+  updateEmptyState()
+  scheduleSave()
+  renderAnnotationOverlay()
+}
+
+function insertTableRowAfter(anchor: HTMLElement, columns: number): HTMLElement {
+  const row = buildLineEl(emptyTableRowText(columns), 'table-row')
+  anchor.parentNode!.insertBefore(row, anchor.nextSibling)
+  return row
+}
+
+// Enter inside a table, and the one gesture that creates a table. Returns
+// true when it handled the key.
+function handleTableEnter(): boolean {
+  if (!docEl) return false
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0) return false
+  const range = sel.getRangeAt(0)
+  if (!range.collapsed) return false
+  const line = lineElOf(range.startContainer)
+  if (!line || line.parentElement !== docEl) return false
+  const kind = (line.dataset.kind || 'body') as LineKind
+  const text = line.textContent || ''
+
+  if (isTableRowKind(kind)) {
+    const parts = splitTableRow(text)
+    if (!parts) return false
+    // A trailing blank row means the writer is done with the table, the
+    // same way a blank list item means they are done with the list: the
+    // row goes and an empty paragraph takes its place.
+    if (kind === 'table-row' && parts.cells.every((c) => c === '') && !nextTableRowLine(line)) {
+      recordHistoryPoint()
+      const fresh = buildLineEl('', 'body')
+      line.replaceWith(fresh)
+      setCursorOffsetInLine(fresh, 0)
+      afterTableEdit()
+      return true
+    }
+    recordHistoryPoint()
+    // From the header the new row belongs under the delimiter, not
+    // between the header and it.
+    const anchor = kind === 'table-head'
+      ? (line.nextElementSibling as HTMLElement | null) ?? line
+      : line
+    placeCaretInTableCell(insertTableRowAfter(anchor, parts.cells.length), 0)
+    afterTableEdit()
+    return true
+  }
+
+  // A finished pipe line that isn't a table yet: write the delimiter row
+  // for it. Typing `| --- | --- |` by hand is the least loved part of
+  // table markdown and getting its column count wrong is the usual
+  // reason a table renders as prose.
+  if (kind === 'body' && isTableRowText(text)) {
+    const offset = offsetInLineFor(line, range.startContainer, range.startOffset)
+    if (offset !== text.length) return false
+    const parts = splitTableRow(text)
+    if (!parts) return false
+    const below = line.nextElementSibling as HTMLElement | null
+    if (below && isTableDelimText(below.textContent || '')) return false
+    recordHistoryPoint()
+    const delim = buildLineEl(tableDelimTextFor(parts.cells.length), 'table-delim')
+    line.parentNode!.insertBefore(delim, line.nextSibling)
+    placeCaretInTableCell(insertTableRowAfter(delim, parts.cells.length), 0)
+    afterTableEdit()
+    return true
+  }
+  return false
+}
+
+// Tab / Shift+Tab walk the cells. Inside a table the key never reaches
+// the browser's focus handling — losing the caret to the next control
+// mid-table would be a far worse outcome than a swallowed Tab.
+function handleTableTab(back: boolean): boolean {
+  if (!docEl) return false
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0) return false
+  const line = lineElOf(sel.getRangeAt(0).startContainer)
+  if (!line || line.parentElement !== docEl) return false
+  if (!isTableRowKind((line.dataset.kind || 'body') as LineKind)) return false
+  const spans = tableCellSpans(line.textContent || '')
+  if (spans.length === 0) return false
+
+  const range = sel.getRangeAt(0)
+  const offset = offsetInLineFor(line, range.startContainer, range.startOffset)
+  let index = spans.findIndex((s) => offset >= s.start && offset <= s.end)
+  // A caret parked inside a pipe belongs to whichever edge we're heading
+  // away from.
+  if (index < 0) index = back ? spans.length - 1 : 0
+
+  if (back) {
+    if (index > 0) { placeCaretInTableCell(line, index - 1, 'end'); return true }
+    const prev = prevTableRowLine(line)
+    if (prev) placeCaretInTableCell(prev, tableCellSpans(prev.textContent || '').length - 1, 'end')
+    return true
+  }
+  if (index < spans.length - 1) { placeCaretInTableCell(line, index + 1, 'end'); return true }
+  const next = nextTableRowLine(line)
+  if (next) { placeCaretInTableCell(next, 0, 'end'); return true }
+  // Past the last cell of the last row — grow the table. The anchor is
+  // the block's last line so tabbing out of a header with no body rows
+  // yet lands below the delimiter.
+  recordHistoryPoint()
+  placeCaretInTableCell(insertTableRowAfter(lastTableLineOf(line), spans.length), 0)
+  afterTableEdit()
+  return true
+}
+
+// Is the caret on the cell's first (up) or last (down) visual line? A
+// cell whose text has wrapped has line boxes of its own to move through
+// before "down" can mean the next row.
+//
+// The comparison is against the text's own line fragments rather than
+// the cell's box: a caret rect is only as tall as the glyphs, while the
+// box adds padding and the full line-height on top, so measuring to the
+// box's edge would report "not at the bottom" on a cell of one line.
+// Half a line of tolerance absorbs the small differences between a
+// caret and an inline run of another size, such as a `code` span.
+function caretAtCellEdge(range: Range, cell: HTMLElement, down: boolean): boolean {
+  const caret = range.getBoundingClientRect()
+  // A caret in an empty cell has no rect to measure; it is on the only
+  // line the cell has, which is both its first and its last.
+  if (caret.height === 0) return true
+  const probe = document.createRange()
+  probe.selectNodeContents(cell)
+  const rects = Array.from(probe.getClientRects()).filter((r) => r.height > 0)
+  if (rects.length === 0) return true
+  const slack = (parseFloat(getComputedStyle(cell).lineHeight) || caret.height) / 2
+  return down
+    ? caret.bottom >= Math.max(...rects.map((r) => r.bottom)) - slack
+    : caret.top    <= Math.min(...rects.map((r) => r.top))    + slack
+}
+
+// Up / Down inside a table. Every cell is a grid item, so Chrome counts
+// each one as a line of its own and the default walks the row cell by
+// cell before dropping to the next: three presses to get from a header
+// to the row under it, through two columns nobody asked for. Move by
+// column instead — which is what up and down mean in a grid of cells —
+// and leave movement inside a wrapped cell to the browser.
+function handleTableVerticalMove(down: boolean): boolean {
+  if (!docEl) return false
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0) return false
+  const range = sel.getRangeAt(0)
+  if (!range.collapsed) return false
+  const line = lineElOf(range.startContainer)
+  if (!line || line.parentElement !== docEl) return false
+  if (!isTableRowKind((line.dataset.kind || 'body') as LineKind)) return false
+
+  const spans = tableCellSpans(line.textContent || '')
+  const offset = offsetInLineFor(line, range.startContainer, range.startOffset)
+  const index = spans.findIndex((s) => offset >= s.start && offset <= s.end)
+  if (index < 0) return false
+  const cell = line.querySelectorAll<HTMLElement>(':scope > .editor-cell')[index]
+  if (cell && !caretAtCellEdge(range, cell, down)) return false
+
+  // Nothing above or below inside the table: let the default carry the
+  // caret out into the prose on either side.
+  const target = down ? nextTableRowLine(line) : prevTableRowLine(line)
+  if (!target) return false
+  const targetSpans = tableCellSpans(target.textContent || '')
+  const to = targetSpans[Math.min(index, targetSpans.length - 1)]
+  if (!to) return false
+  // Hold the same depth into the cell, so arrowing down a column of
+  // similar values keeps reading as a column.
+  setCursorOffsetInLine(target, Math.min(to.start + (offset - spans[index].start), to.end))
+  return true
+}
+
+// Backspace / Delete sitting on a cell boundary. Chrome treats the
+// hidden pipe between two cells as zero-width and deletes straight
+// through it, taking the pipe and a visible character from the
+// neighbouring cell in one keystroke — which silently welds two columns
+// together. Owning both boundary positions means the row's shape only
+// ever changes deliberately:
+//   - into a neighbouring cell that has content: eat one character of it
+//   - into an empty row: drop that row
+//   - into an empty cell, or across a row boundary: step the caret over
+//   - at the outer edge of the first / last row: drop the outer pipe, so
+//     the row falls out of the table. This is the table's answer to
+//     backspacing a heading's `# ` away, and at the top-left corner it
+//     is how a whole table is unmade.
+//
+// 'moved' and 'edited' are told apart so the caret-only cases don't
+// leave an undo step behind that undoes nothing when pressed.
+type BoundaryDelete = false | 'moved' | 'edited'
+
+function handleTableBoundaryDelete(line: HTMLElement, forward: boolean, offset: number): BoundaryDelete {
+  const text = line.textContent || ''
+  const kind = (line.dataset.kind || 'body') as LineKind
+  const spans = tableCellSpans(text)
+  const index = spans.findIndex((s) => offset >= s.start && offset <= s.end)
+  if (index < 0) return false
+
+  const step = (target: HTMLElement, cellIndex: number, at: 'start' | 'end'): BoundaryDelete => {
+    placeCaretInTableCell(target, cellIndex, at)
+    return 'moved'
+  }
+  const dropRowInto = (row: HTMLElement, target: HTMLElement): BoundaryDelete => {
+    recordHistoryPoint()
+    row.remove()
+    placeCaretInTableCell(target, tableCellSpans(target.textContent || '').length - 1, 'end')
+    afterTableEdit()
+    return 'edited'
+  }
+  const isBlankRow = (row: HTMLElement): boolean => {
+    const parts = splitTableRow(row.textContent || '')
+    return !!parts && parts.cells.every((c) => c === '')
+  }
+  // replaceSourceRange reclassifies on its own; the rest of the post-edit
+  // loop still has to run.
+  const cut = (from: number, to: number): BoundaryDelete => {
+    recordHistoryPoint()
+    replaceSourceRange(line, from, line, to, '')
+    updateEmptyState()
+    scheduleSave()
+    renderAnnotationOverlay()
+    return 'edited'
+  }
+
+  if (!forward && offset === spans[index].start) {
+    if (index > 0) {
+      const before = spans[index - 1]
+      return before.end > before.start
+        ? cut(before.end - 1, before.end)
+        : step(line, index - 1, 'end')
+    }
+    const prev = prevTableRowLine(line)
+    if (!prev) return cut(0, blockMarkerLength(kind, text))
+    if (kind === 'table-row' && isBlankRow(line)) return dropRowInto(line, prev)
+    return step(prev, tableCellSpans(prev.textContent || '').length - 1, 'end')
+  }
+
+  if (forward && offset === spans[index].end) {
+    if (index < spans.length - 1) {
+      const after = spans[index + 1]
+      return after.end > after.start
+        ? cut(after.start, after.start + 1)
+        : step(line, index + 1, 'start')
+    }
+    const next = nextTableRowLine(line)
+    if (!next) return cut(text.length - blockTrailingMarkerLength(kind, text), text.length)
+    if (isBlankRow(next)) return dropRowInto(next, line)
+    return step(next, 0, 'start')
+  }
+  return false
+}
+
+// Two things on the caret's line show their source while it is there
+// and hide it again once the caret leaves: a line that is marker from
+// end to end (a fence, a rule, a table's delimiter row), and any link,
+// whose address would otherwise be unreachable hidden text.
+// The caret can arrive and depart by click or arrow key, neither of
+// which fires `input`, so reclassify alone would leave the line a
+// keystroke behind.
+//
+// This runs on every selectionchange — every cursor move, every frame
+// of a drag-select — so the guard has to be cheap: one attribute query,
+// one walk up from the anchor, and a regex only on the line the caret
+// is actually on. The reclassify behind it can only run on a crossing.
+function refreshCaretLineReveal(): void {
+  if (!docEl) return
+  const sel = window.getSelection()
+  const anchor = sel && sel.rangeCount > 0 ? sel.anchorNode : null
+  const line = anchor ? lineElOf(anchor) : null
+  const open = docEl.querySelector<HTMLElement>(
+    '.editor-line[data-kind="source"], .editor-line[data-reveal="links"]',
+  )
+  if (open && open !== line) { reclassifyLines(); return }
+  if (!line) return
+  if (isWhollyHidden((line.dataset.kind || 'body') as LineKind)
+      || (line.dataset.reveal !== 'links' && LINK_HINT_RE.test(line.textContent || ''))) {
+    reclassifyLines()
   }
 }
 
@@ -3671,10 +4122,18 @@ function attachHandlers() {
           if (line && line.parentElement === docEl) {
             const kind = (line.dataset.kind || 'body') as LineKind
             const text = line.textContent || ''
-            const markerLen = markerLengthFor(kind, text)
+            const markerLen = blockMarkerLength(kind, text)
             const off = offsetInLineFor(line, range.startContainer, range.startOffset)
             const hasBlockMarker = markerLen > 0
-              && (kind === 'h1' || kind === 'h2' || kind === 'list-item')
+              && hasStrippableMarker(kind)
+            const boundary = isTableRowKind(kind)
+              ? handleTableBoundaryDelete(line, t === 'deleteContentForward', off)
+              : false
+            if (boundary) {
+              e.preventDefault()
+              if (boundary === 'edited') commitHistoryBatch(true)
+              return
+            }
             if (t === 'deleteContentBackward' && off <= markerLen && hasBlockMarker) {
               e.preventDefault()
               stripBlockMarker(line)
@@ -3718,9 +4177,9 @@ function attachHandlers() {
           if (line && line.parentElement === docEl) {
             const kind = (line.dataset.kind || 'body') as LineKind
             const text = line.textContent || ''
-            const markerLen = markerLengthFor(kind, text)
+            const markerLen = blockMarkerLength(kind, text)
             const hasBlockMarker = markerLen > 0
-              && (kind === 'h1' || kind === 'h2' || kind === 'list-item')
+              && hasStrippableMarker(kind)
             if (hasBlockMarker
                 && offsetInLineFor(line, range.startContainer, range.startOffset) === markerLen) {
               e.preventDefault()
@@ -3965,6 +4424,7 @@ function attachHandlers() {
       hideSelectionActions()
       return
     }
+    refreshCaretLineReveal()
     updateCommentButtonForSelection()
   })
 
@@ -4059,7 +4519,7 @@ function attachHandlers() {
           if (node.nodeType === Node.TEXT_NODE) {
             const parent = node.parentNode as HTMLElement | null
             if (parent
-                && (parent.tagName === 'STRONG' || parent.tagName === 'CODE')
+                && isInlineWrap(parent)
                 && range.startOffset === (node.textContent || '').length
                 && node.nextSibling
                 && node.nextSibling.nodeType === Node.ELEMENT_NODE
@@ -4092,7 +4552,27 @@ function attachHandlers() {
     //   - Cursor inside / before the marker prefix: leave default Enter
     //     behaviour alone. The user is editing the prefix itself; we
     //     shouldn't try to split there.
+    if ((e.key === 'ArrowDown' || e.key === 'ArrowUp')
+        && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (handleTableVerticalMove(e.key === 'ArrowDown')) {
+        e.preventDefault()
+        return
+      }
+    }
+    // Tab walks table cells and does nothing anywhere else — the editor
+    // has no indent gesture, so outside a table the key keeps its normal
+    // "move focus on" meaning.
+    if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (handleTableTab(e.shiftKey)) {
+        e.preventDefault()
+        return
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (handleTableEnter()) {
+        e.preventDefault()
+        return
+      }
       const sel = window.getSelection()
       if (sel && sel.rangeCount > 0) {
         const range = sel.getRangeAt(0)
@@ -4153,7 +4633,7 @@ function attachHandlers() {
                   newMarker = `${nextNum}${numMatch[2]} `
                 }
                 // Rebuild current line with the `before` text.
-                const beforeKind = lineKindFor(before)
+                const beforeKind = classifyLines([before])[0]
                 const freshBefore = buildLineEl(before, beforeKind)
                 line.dataset.kind = freshBefore.dataset.kind!
                 if (freshBefore.dataset.listMarker !== undefined) {
@@ -4165,7 +4645,7 @@ function attachHandlers() {
                 while (freshBefore.firstChild) line.appendChild(freshBefore.firstChild)
                 // Create the new line with `newMarker + after`.
                 const newLineText = newMarker + after
-                const newKind = lineKindFor(newLineText)
+                const newKind = classifyLines([newLineText])[0]
                 const newLine = buildLineEl(newLineText, newKind)
                 line.parentNode!.insertBefore(newLine, line.nextSibling)
                 setCursorOffsetInLine(newLine, newMarker.length)
