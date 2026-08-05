@@ -33,6 +33,43 @@ describe('block structure', () => {
   })
 })
 
+describe('tables', () => {
+  const TABLE = '| Task | Owner |\n| --- | --- |\n| Ship it | Ada |'
+
+  it('renders a header and its rows', () => {
+    expect(renderMarkdown(TABLE)).toBe(
+      '<table class="md-table">'
+      + '<thead><tr><th>Task</th><th>Owner</th></tr></thead>'
+      + '<tbody><tr><td>Ship it</td><td>Ada</td></tr></tbody>'
+      + '</table>',
+    )
+  })
+
+  it('renders a header with no rows under it', () => {
+    expect(renderMarkdown('| a |\n| --- |')).toBe(
+      '<table class="md-table"><thead><tr><th>a</th></tr></thead></table>',
+    )
+  })
+
+  it('carries the delimiter row\'s alignment onto every cell', () => {
+    const html = renderMarkdown('| l | c | r |\n| :-- | :-: | --: |\n| 1 | 2 | 3 |')
+    expect(html).toContain('<th style="text-align:left">l</th>')
+    expect(html).toContain('<th style="text-align:center">c</th>')
+    expect(html).toContain('<td style="text-align:right">3</td>')
+  })
+
+  it('formats inside a cell, and escapes it', () => {
+    const html = renderMarkdown('| a | b |\n| --- | --- |\n| **x** | <img> |')
+    expect(html).toContain('<td><strong>x</strong></td>')
+    expect(html).toContain('&lt;img&gt;')
+    expect(html).not.toContain('<img>')
+  })
+
+  it('leaves a pipe line that has no delimiter row as prose', () => {
+    expect(renderMarkdown('| a | b |')).toBe('<p>| a | b |</p>')
+  })
+})
+
 describe('inline formatting', () => {
   it('renders bold, italic and code', () => {
     expect(renderMarkdown('**b**')).toBe('<p><strong>b</strong></p>')

@@ -3228,6 +3228,38 @@ body.chat-resizing { user-select: none; cursor: col-resize; }
 }
 .chat-msg-md .md-code code { background: none; padding: 0; }
 .chat-msg-md a { color: var(--a1); text-decoration: underline; text-underline-offset: 2px; }
+/* Tables in a reply. These have to opt out of the app-wide `table` and
+   `thead th` rules above: those dress a data grid — full width, fixed
+   layout, uppercase tracked-out column labels — and a table inside an
+   agent's prose is prose, so its header should read like the sentence
+   before it. A bubble is also narrow, so the table scrolls inside its
+   own row rather than widening the message. */
+.chat-msg-md .md-table {
+  display: block;
+  width: auto;
+  table-layout: auto;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 0 0 var(--sp-2);
+}
+.chat-msg-md .md-table th,
+.chat-msg-md .md-table td {
+  padding: 3px var(--sp-3) 3px 0;
+  text-align: left;
+  vertical-align: top;
+  border: none;
+  overflow: visible;
+  white-space: normal;
+}
+.chat-msg-md .md-table th {
+  font-size: inherit;
+  font-weight: 650;
+  text-transform: none;
+  letter-spacing: normal;
+  color: inherit;
+  border-bottom: 1px solid var(--border);
+}
+.chat-msg-md .md-table tbody tr + tr td { border-top: 1px solid var(--hairline); }
 
 /* Errors keep the red accent but stay within the prose layout. */
 .chat-msg-error .chat-msg-body {
@@ -4120,6 +4152,68 @@ body.chat-resizing { user-select: none; cursor: col-resize; }
   margin-top:    var(--editor-heading-spacing, 0.3em);
   margin-bottom: var(--editor-heading-spacing, 0.3em);
 }
+/* H3–H6. There is only ~3px between H2 and body at default settings,
+   so size cannot carry four more levels — weight and colour do it
+   instead, stepping down monotonically so the hierarchy still reads.
+   They keep the heading font so they group with H1/H2 rather than
+   looking like bolded prose. */
+.editor-line[data-kind="h3"],
+.editor-line[data-kind="h4"],
+.editor-line[data-kind="h5"],
+.editor-line[data-kind="h6"] {
+  font-family: var(--typo-heading, 'Iowan Old Style', 'Palatino', 'Palatino Linotype', Georgia, serif);
+  font-size: var(--editor-body-size, 19px);
+  line-height: var(--editor-body-lh, 32px);
+  margin-top:    var(--editor-heading-spacing, 0.3em);
+  margin-bottom: var(--editor-heading-spacing, 0.3em);
+}
+.editor-line[data-kind="h3"] { font-weight: 700; }
+.editor-line[data-kind="h4"] { font-weight: 600; }
+.editor-line[data-kind="h5"] { font-weight: 600; color: var(--text-secondary); }
+.editor-line[data-kind="h6"] { font-weight: 600; color: var(--text-tertiary); }
+
+/* Blockquote — the `> ` marker is hidden like every other, and a bar
+   at the page margin stands in for it. Same indent as a list item so
+   quoted prose and nested prose line up with each other. */
+.editor-line[data-kind="quote"] {
+  position: relative;
+  padding-left: 2.2em;
+  color: var(--text-secondary);
+  font-style: italic;
+}
+.editor-line[data-kind="quote"]::before {
+  content: '';
+  position: absolute;
+  left: 0.7em;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--border);
+  pointer-events: none;
+}
+/* Consecutive quote lines read as one block, so only the last one
+   takes the paragraph gap that leads back out into prose. */
+.editor-line[data-kind="quote"]:not(:has(+ .editor-line[data-kind="quote"])) {
+  margin-bottom: var(--editor-paragraph-spacing, 0);
+}
+
+/* Horizontal rule — the whole line (`---`) is hidden marker, so the
+   rule itself is a border drawn across the row. The row keeps a real
+   height so the caret has somewhere visible to sit. */
+.editor-line[data-kind="rule"] {
+  min-height: var(--editor-body-lh, 32px);
+  display: flex;
+  align-items: center;
+  margin-bottom: var(--editor-paragraph-spacing, 0);
+}
+.editor-line[data-kind="rule"]::before {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+  pointer-events: none;
+}
+
 /* First line never carries a top margin — the bar sits right above
    it and we don't want a heading-line first row to push the writing
    area down further than a body-first row. */
@@ -4225,6 +4319,22 @@ body.chat-resizing { user-select: none; cursor: col-resize; }
   border-radius: 3px;
 }
 
+/* Inline italic — the parser wraps `*…*` and `_…_` runs in <em>. */
+.editor-line em { font-style: italic; }
+
+/* Inline link. The <a> deliberately carries no href: this is a writing
+   surface, and a click inside it belongs to the caret, not to
+   navigation. Colour and underline are what tell the writer the run is
+   a link — the `[…](…)` around it is hidden, except on the line the
+   caret is on, where the source comes back so the address can be
+   edited at all. */
+.editor-line a {
+  color: var(--a1);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: text;
+}
+
 /* ── Fenced code block ──
    Three line kinds form a contiguous region:
      code-fence-open  — line whose content is ```... (open fence)
@@ -4252,6 +4362,85 @@ body.chat-resizing { user-select: none; cursor: col-resize; }
   /* Hold a row of vertical space for the (visually empty) fence so
      the block boundary reads as a soft top/bottom edge. */
   min-height: 32px;
+}
+
+/* ── Pipe tables ──
+   Four line kinds form a contiguous region:
+     table-head       — the header row
+     table-delim      — the `| --- | --- |` row, hidden entirely
+     source           — any of the above while the caret is on it
+     table-row        — a body row
+   Every row is its own grid container: the rows are sibling line divs
+   (wrapping them in one element would break the flat line model the
+   editor is built on), so columns only line up because editor-view.ts
+   hands each row of a table the same grid-template-columns. Widths come
+   from the longest cell per column, measured in characters — see
+   tableColumnTemplate.
+
+   The pipes themselves are .md-marker spans, hidden by the universal
+   rule above, so textContent still round-trips real markdown. What
+   remains between them are the .editor-cell spans, which become the
+   grid items. */
+.editor-line[data-kind="table-head"],
+.editor-line[data-kind="table-row"] {
+  display: grid;
+  /* Fallback for the moment before the layout pass runs — a single
+     column is never wrong, just not yet aligned. */
+  grid-template-columns: minmax(0, 1fr);
+  align-items: baseline;
+  margin: 0;
+}
+/* Header: heavier, and it carries the rule under itself rather than
+   letting the delimiter row draw it. The delimiter expands to its
+   source whenever the caret arrives, and a rule that vanished on the
+   way past would make the table jump. */
+.editor-line[data-kind="table-head"] {
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+.editor-line[data-kind="table-row"] {
+  border-bottom: 1px solid var(--hairline);
+}
+/* Last row of the table: the wider paragraph gap for the transition
+   back out into prose, mirroring the list-item rule above. */
+.editor-line[data-kind="table-row"]:not(:has(+ .editor-line[data-kind="table-row"])) {
+  margin-bottom: var(--editor-paragraph-spacing, 0);
+}
+.editor-cell {
+  /* min-width lets long cell text wrap inside its track instead of
+     forcing the track wider and pushing the table past the page. */
+  min-width: 0;
+  padding: 0.25em 0.7em 0.25em 0;
+  /* An empty cell holds no text, and a zero-width grid item is a cell
+     the writer cannot click into. */
+  min-height: 1em;
+}
+/* A row's children run marker / cell / marker / … / marker, so the last
+   cell is always the second-to-last child. Dropping its right padding
+   keeps a right-aligned final column flush with the table's edge. */
+.editor-line > .editor-cell:nth-last-child(2) { padding-right: 0; }
+/* The delimiter row has no visible content at all — the header's own
+   border is the rule the reader sees. line-height: 0 stops the empty
+   block from reserving a text line, and the small min-height does two
+   jobs: it is breathing room under the header rule, and it is a target
+   the writer can click when they want to set column alignment, which
+   is the only reason to visit this row. Arrow keys step over it. */
+.editor-line[data-kind="table-delim"] {
+  line-height: 0;
+  min-height: 8px;
+  margin: 0;
+}
+/* A line that is markup from end to end — a code fence, a rule, a
+   table's delimiter row — has nothing of its own to show, so the caret
+   would sit in text CSS has hidden: invisible, on a line the writer then
+   cannot edit. Whichever one the caret is on comes back as `source` and
+   shows the characters that produced it. Monospace and dimmed, because
+   that is what it is: syntax, briefly on display. */
+.editor-line[data-kind="source"] {
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.92em;
+  color: var(--text-tertiary);
+  margin: 0;
 }
 
 /* Copy-button success tint while the checkmark is showing.
