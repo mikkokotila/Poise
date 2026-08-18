@@ -492,8 +492,11 @@ async function main() {
     key('StandardErrorPath', `<string>${xml(join(logRoot, 'caller-update.err.log'))}</string>`),
   ])
   const datastoreCommand = (args) => [
+    'set -euo pipefail',
     `export PATH=${shell(path)}`,
-    `export GH_TOKEN="$(gh auth token --user ${shell(githubUser)})"`,
+    `GH_TOKEN="$(gh auth token --user ${shell(githubUser)})"`,
+    '[[ -n "$GH_TOKEN" ]]',
+    'export GH_TOKEN',
     `exec ${shell(join(binRoot, 'github-datastore'))} --db ${shell(datastoreDb)} ${args.map(shell).join(' ')}`,
   ].join('; ')
   const datastoreSync = plist([
