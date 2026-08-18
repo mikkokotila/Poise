@@ -36,6 +36,8 @@ import {
   listSnapshotOnlySeen,
   markBehaviorLaunchIntentOwned,
   recordBehaviorDeadLetter,
+  retireBehaviorDeadLetter,
+  retireBehaviorDeadLettersForClosedPrs,
   recordSeen,
   releaseSeen,
   releaseSeenOwned,
@@ -423,7 +425,10 @@ async function reconcileBehaviorLaunchClaims(
   behavior: ActiveClaim['behavior'],
 ): Promise<void> {
   const claims = listBehaviorLaunchClaims(behavior)
-  if (claims.length === 0) return
+  const deadLetters = listBehaviorDeadLetters(500).filter(
+    (letter) => letter.behavior === behavior && letter.callId !== null,
+  )
+  if (claims.length === 0 && deadLetters.length === 0) return
 
   let logs: Awaited<ReturnType<typeof fetchAgentLogs>>
   try {
@@ -432,6 +437,33 @@ async function reconcileBehaviorLaunchClaims(
     const message = `agent log reconciliation unavailable: ${error instanceof Error ? error.message : String(error)}`
     for (const claim of claims) retainClaimSafely(claim, message)
     throw error
+  }
+
+  let recoveredDeadLetter = false
+  const expectedActions = behavior === 'review-new-prs'
+    ? new Map([['reviewed_clean', 'clean'], ['requested_changes', 'changes_requested']])
+    : new Map([['approved', 'approved'], ['requested_changes', 'changes_requested']])
+  for (const letter of deadLetters) {
+    const call = logs.find((row) => row.id.toLowerCase() === letter.callId)
+    const completedAt = String(call?.completed_at || '')
+    const action = String(call?.action || '')
+    const outcome = String(call?.outcome || '')
+    if (call?.status.toLowerCase() === 'completed'
+      && call.behavior === upstreamBehavior(behavior)
+      && call.repo === letter.repo
+      && String(call.pr_id || '') === String(letter.pr)
+      && String(call.actor || '').toLowerCase() === String(letter.actor || '').toLowerCase()
+      && call.source === letter.source
+      && call.correlation_id === letter.correlationId
+      && expectedActions.get(action) === outcome
+      && SHA_PATTERN.test(String(call.head_sha || '').toLowerCase())
+      && Number.isFinite(Date.parse(completedAt))) {
+      recoveredDeadLetter = retireBehaviorDeadLetter(letter.id) || recoveredDeadLetter
+    }
+  }
+  if (recoveredDeadLetter
+    && !listBehaviorDeadLetters(500).some((letter) => letter.behavior === behavior)) {
+    clearBehaviorFailure(behavior)
   }
 
   for (const claim of claims) {
@@ -462,10 +494,15 @@ async function reconcileBehaviorLaunchClaims(
 
     if (!call) {
       if (claim.launchCallId) {
-        deadLetterClaim(
-          claim,
-          'linked agent call is missing from the durable log; retained to prevent duplicate launch',
-        )
+        const ageMs = Date.now() - requestedAtMs
+        if (ageMs < BEHAVIOR_CLAIM_RENEWAL_MS) {
+          retainClaimSafely(claim, 'awaiting linked agent call visibility')
+        } else {
+          deadLetterClaim(
+            claim,
+            'linked agent call remained missing for the full launch lease; retained to prevent duplicate launch',
+          )
+        }
         continue
       }
       if (candidates.length > 1) {
@@ -707,31 +744,34 @@ async function listOpenPrsByAuthor(author: string): Promise<DatastorePr[]> {
   await requireFreshDatastore()
   const { stdout } = await runFile(
     DATASTORE,
-    ['view', 'pr', '--status', 'open', '--author', author, '--format', 'json'],
+    ['view', 'pr', '--status', 'open', '--format', 'json'],
     { timeoutMs: 30_000, maxOutputBytes: 32 * 1024 * 1024, signal: behaviorSignal() },
   )
   const parsed = parseJson(stdout, 'github-datastore view pr')
   if (!Array.isArray(parsed)) throw new Error('github-datastore view pr returned a non-array')
   const seen = new Set<string>()
-  return parsed.map((row, index) => {
+  const prs = parsed.map((row, index) => {
     const value = objectValue(row, `github-datastore PR row ${index}`)
     const repo = String(value.repo || '')
     const number = safeInteger(value.number, `github-datastore PR row ${index} number`)
     const url = String(value.url || '')
+    const prAuthor = String(value.author || '')
     const draft = safeInteger(value.draft, `github-datastore PR row ${index} draft`)
     if (!/^[^/\s]+\/[^/\s]+$/.test(repo)
       || number < 1
       || draft > 1
       || value.status !== 'open'
-      || value.author !== author
+      || !prAuthor
       || url !== `https://github.com/${repo}/pull/${number}`) {
       throw new Error(`github-datastore PR row ${index} violates the candidate contract`)
     }
     const key = `${repo}#${number}`
     if (seen.has(key)) throw new Error(`github-datastore returned duplicate PR ${key}`)
     seen.add(key)
-    return { repo, number, url, draft: draft === 1 }
-  }).filter((pr) => !pr.draft)
+    return { repo, number, url, draft: draft === 1, author: prAuthor }
+  })
+  retireBehaviorDeadLettersForClosedPrs(seen)
+  return prs.filter((pr) => pr.author === author && !pr.draft)
 }
 
 async function localCheckoutPath(owner: string, repo: string): Promise<string> {

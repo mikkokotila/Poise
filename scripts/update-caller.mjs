@@ -62,6 +62,34 @@ async function productionInstall(run) {
   })
 }
 
+async function datastoreServicesCurrent({ home, commit }) {
+  const executable = join(
+    home,
+    '.poise',
+    'releases',
+    'caller',
+    commit,
+    'venv',
+    'bin',
+    'github-datastore',
+  )
+  const launchAgents = join(home, 'Library', 'LaunchAgents')
+  const labels = [
+    'com.vaquum.github-datastore.sync',
+    'com.vaquum.github-datastore.reconcile',
+    'com.vaquum.github-datastore.health',
+  ]
+  try {
+    const services = await Promise.all(labels.map((label) => readFile(
+      join(launchAgents, `${label}.plist`),
+      'utf8',
+    )))
+    return services.every((service) => service.includes(executable))
+  } catch {
+    return false
+  }
+}
+
 function requireCommit(value, label) {
   const commit = value.trim().toLowerCase()
   if (!validCommit(commit)) throw new Error(`${label} did not resolve to a commit SHA`)
@@ -76,6 +104,7 @@ export async function reconcileRuntime(options = {}) {
   const run = options.run || output
   const readHealth = options.readHealth || callerHealth
   const hookCurrent = options.hookCurrent || stopGateIsCurrent
+  const datastoreCurrent = options.datastoreCurrent || datastoreServicesCurrent
   const repairHookConfiguration = options.repairHookConfiguration || configureStopGate
   const install = options.install || (() => productionInstall(run))
   const log = options.log || console.log
@@ -124,15 +153,17 @@ export async function reconcileRuntime(options = {}) {
     '--jq',
     '.sha',
   ])).stdout, `Caller ${release.ref}`)
-  const [localCaller, currentHook] = await Promise.all([
+  const [localCaller, currentHook, currentDatastore] = await Promise.all([
     readHealth(),
     hookCurrent({ home, manifest: { ...release, commit: remoteCaller } }),
+    datastoreCurrent({ home, commit: remoteCaller }),
   ])
 
-  if (localCaller !== remoteCaller || !currentHook) {
+  if (localCaller !== remoteCaller || !currentHook || !currentDatastore) {
     log(
       `Reconciling Caller/runtime from ${localCaller || 'unknown'} to ${remoteCaller}`
-      + (currentHook ? '' : ' and repairing agent hooks'),
+      + (currentHook ? '' : ' and repairing agent hooks')
+      + (currentDatastore ? '' : ' and repairing datastore services'),
     )
     await install()
     return { action: 'reconciled-runtime', callerCommit: remoteCaller }

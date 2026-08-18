@@ -96,7 +96,8 @@ db.exec(`
     correlation_id TEXT,
     call_id TEXT,
     error TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    retired_at TEXT
   );
 
   CREATE TABLE IF NOT EXISTS content_jobs (
@@ -203,6 +204,7 @@ const migrateSchema = db.transaction(() => {
   ensureColumn('behavior_seen', 'launch_source', 'launch_source TEXT')
   ensureColumn('behavior_seen', 'launch_correlation_id', 'launch_correlation_id TEXT')
   ensureColumn('behavior_seen', 'launch_action', 'launch_action TEXT')
+  ensureColumn('behavior_dead_letters', 'retired_at', 'retired_at TEXT')
   const behaviorLaunchTrackingMigrated = db.prepare(
     'SELECT 1 FROM meta WHERE key = ?',
   ).get(BEHAVIOR_LAUNCH_TRACKING_MIGRATION_KEY)
@@ -803,6 +805,33 @@ export function recordBehaviorDeadLetter(
   return id
 }
 
+export function retireBehaviorDeadLetter(id: string): boolean {
+  return db.prepare(`
+    UPDATE behavior_dead_letters
+    SET retired_at = ?
+    WHERE id = ? AND retired_at IS NULL
+  `).run(new Date().toISOString(), id).changes === 1
+}
+
+export function retireBehaviorDeadLettersForClosedPrs(
+  openTargets: ReadonlySet<string>,
+): number {
+  const rows = db.prepare(`
+    SELECT id, repo, pr
+    FROM behavior_dead_letters
+    WHERE retired_at IS NULL AND repo IS NOT NULL AND pr IS NOT NULL
+  `).all() as Array<{ id: string, repo: string, pr: number }>
+  const retire = db.prepare(`
+    UPDATE behavior_dead_letters SET retired_at = ?
+    WHERE id = ? AND retired_at IS NULL
+  `)
+  const retiredAt = new Date().toISOString()
+  return db.transaction(() => rows.reduce((count, row) => {
+    if (openTargets.has(`${row.repo}#${row.pr}`)) return count
+    return count + retire.run(retiredAt, row.id).changes
+  }, 0))()
+}
+
 export function listBehaviorDeadLetters(limit = 50): BehaviorDeadLetter[] {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
     throw new Error('dead-letter limit must be between 1 and 500')
@@ -811,7 +840,8 @@ export function listBehaviorDeadLetters(limit = 50): BehaviorDeadLetter[] {
     SELECT id, behavior, target, repo, pr, actor, source, correlation_id,
            call_id, error, created_at
     FROM behavior_dead_letters AS dead
-    WHERE NOT EXISTS (
+    WHERE dead.retired_at IS NULL
+      AND NOT EXISTS (
       SELECT 1
       FROM behavior_seen AS recovered
       WHERE recovered.key = dead.behavior

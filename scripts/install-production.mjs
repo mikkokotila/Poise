@@ -43,9 +43,15 @@ const launchAgents = join(home, 'Library', 'LaunchAgents')
 const serviceLabel = 'com.vaquum.poise'
 const monitorLabel = 'com.vaquum.poise.health'
 const updaterLabel = 'com.vaquum.poise.caller-update'
+const datastoreSyncLabel = 'com.vaquum.github-datastore.sync'
+const datastoreReconcileLabel = 'com.vaquum.github-datastore.reconcile'
+const datastoreHealthLabel = 'com.vaquum.github-datastore.health'
 const servicePlist = join(launchAgents, `${serviceLabel}.plist`)
 const monitorPlist = join(launchAgents, `${monitorLabel}.plist`)
 const updaterPlist = join(launchAgents, `${updaterLabel}.plist`)
+const datastoreSyncPlist = join(launchAgents, `${datastoreSyncLabel}.plist`)
+const datastoreReconcilePlist = join(launchAgents, `${datastoreReconcileLabel}.plist`)
+const datastoreHealthPlist = join(launchAgents, `${datastoreHealthLabel}.plist`)
 const logRoot = join(stateRoot, 'logs')
 const domain = `gui/${process.getuid()}`
 const dotenvPath = join(projectRoot, '.env')
@@ -243,6 +249,10 @@ function xml(value) {
     .replaceAll("'", '&apos;')
 }
 
+function shell(value) {
+  return `'${String(value).replaceAll("'", `'\\''`)}'`
+}
+
 function array(values) {
   return `<array>${values.map((value) => `<string>${xml(value)}</string>`).join('')}</array>`
 }
@@ -363,6 +373,26 @@ async function main() {
     process.env.REVIEW_AGENT_USERNAME || '',
   )) throw new Error('REVIEW_AGENT_USERNAME must be configured before production installation')
 
+  const datastoreDb = process.env.POISE_DATASTORE_DB
+    || join(home, 'dev', 'caller', 'github_datastore', 'github_datastore.sqlite')
+  let datastoreStat
+  try {
+    datastoreStat = await stat(datastoreDb)
+  } catch (error) {
+    throw new Error(
+      `POISE_DATASTORE_DB does not exist: ${datastoreDb}`,
+      { cause: error },
+    )
+  }
+  if (!datastoreStat.isFile()) {
+    throw new Error('POISE_DATASTORE_DB must point to an initialized github-datastore database')
+  }
+  const githubUser = process.env.POISE_GITHUB_USER
+    || await commandOutput('gh', ['api', 'user', '--jq', '.login'])
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?$/.test(githubUser)) {
+    throw new Error('POISE_GITHUB_USER must be a GitHub username')
+  }
+
   const [node, python] = await Promise.all([supportedNode(), python313()])
   await installCallerRelease(python)
   await installStopGate({
@@ -411,6 +441,7 @@ async function main() {
     NODE_ENV: 'production',
     PATH: path,
     POISE_ENFORCE_CALLER_RELEASE: '1',
+    ...(process.env.POISE_DB ? { POISE_DB: process.env.POISE_DB } : {}),
     TMPDIR: process.env.TMPDIR || '/tmp',
   }
   const service = plist([
@@ -460,19 +491,73 @@ async function main() {
     key('StandardOutPath', `<string>${xml(join(logRoot, 'caller-update.out.log'))}</string>`),
     key('StandardErrorPath', `<string>${xml(join(logRoot, 'caller-update.err.log'))}</string>`),
   ])
+  const datastoreCommand = (args) => [
+    `export PATH=${shell(path)}`,
+    `export GH_TOKEN="$(gh auth token --user ${shell(githubUser)})"`,
+    `exec ${shell(join(binRoot, 'github-datastore'))} --db ${shell(datastoreDb)} ${args.map(shell).join(' ')}`,
+  ].join('; ')
+  const datastoreSync = plist([
+    key('Label', `<string>${datastoreSyncLabel}</string>`),
+    key('ProgramArguments', array([
+      '/bin/zsh', '-lc', datastoreCommand(['sync', '--workers', '12']),
+    ])),
+    key('WorkingDirectory', `<string>${xml(dirname(datastoreDb))}</string>`),
+    key('RunAtLoad', '<true/>'),
+    key('StartInterval', '<integer>60</integer>'),
+    key('StandardOutPath', `<string>${xml(join(logRoot, 'datastore-sync.out.log'))}</string>`),
+    key('StandardErrorPath', `<string>${xml(join(logRoot, 'datastore-sync.err.log'))}</string>`),
+  ])
+  const datastoreReconcile = plist([
+    key('Label', `<string>${datastoreReconcileLabel}</string>`),
+    key('ProgramArguments', array([
+      '/bin/zsh', '-lc', datastoreCommand([
+        'sync', '--workers', '1', '--reconcile', '--reconcile-sleep', '17',
+      ]),
+    ])),
+    key('WorkingDirectory', `<string>${xml(dirname(datastoreDb))}</string>`),
+    key('StartCalendarInterval', '<dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>'),
+    key('StandardOutPath', `<string>${xml(join(logRoot, 'datastore-reconcile.out.log'))}</string>`),
+    key('StandardErrorPath', `<string>${xml(join(logRoot, 'datastore-reconcile.err.log'))}</string>`),
+  ])
+  const datastoreHealth = plist([
+    key('Label', `<string>${datastoreHealthLabel}</string>`),
+    key('ProgramArguments', array([
+      join(binRoot, 'github-datastore'),
+      '--db', datastoreDb,
+      'health', '--max-age-seconds', '120',
+    ])),
+    key('WorkingDirectory', `<string>${xml(dirname(datastoreDb))}</string>`),
+    key('EnvironmentVariables', dictionary({ HOME: home, PATH: path })),
+    key('RunAtLoad', '<true/>'),
+    key('StartInterval', '<integer>60</integer>'),
+    key('StandardOutPath', `<string>${xml(join(logRoot, 'datastore-health.out.log'))}</string>`),
+    key('StandardErrorPath', `<string>${xml(join(logRoot, 'datastore-health.err.log'))}</string>`),
+  ])
   await Promise.all([
     atomicWrite(servicePlist, service),
     atomicWrite(monitorPlist, monitor),
     atomicWrite(updaterPlist, updater),
+    atomicWrite(datastoreSyncPlist, datastoreSync),
+    atomicWrite(datastoreReconcilePlist, datastoreReconcile),
+    atomicWrite(datastoreHealthPlist, datastoreHealth),
   ])
   const selfUpdating = process.env.POISE_RUNTIME_RECONCILER === '1'
     || process.env.POISE_CALLER_UPDATER === '1'
   if (!selfUpdating) await bootout(updaterLabel)
   await bootout(monitorLabel)
   await bootout(serviceLabel)
+  await bootout(datastoreReconcileLabel)
+  await bootout(datastoreSyncLabel)
+  await bootout(datastoreHealthLabel)
   await run('/bin/launchctl', ['enable', `${domain}/${serviceLabel}`])
   await run('/bin/launchctl', ['enable', `${domain}/${monitorLabel}`])
   await run('/bin/launchctl', ['enable', `${domain}/${updaterLabel}`])
+  await run('/bin/launchctl', ['enable', `${domain}/${datastoreSyncLabel}`])
+  await run('/bin/launchctl', ['enable', `${domain}/${datastoreReconcileLabel}`])
+  await run('/bin/launchctl', ['enable', `${domain}/${datastoreHealthLabel}`])
+  await bootstrap(datastoreSyncPlist)
+  await bootstrap(datastoreReconcilePlist)
+  await bootstrap(datastoreHealthPlist)
   await bootstrap(servicePlist)
   const health = await waitForHealthyProduction()
   // The service is up either way at this point, so the monitor and the updater

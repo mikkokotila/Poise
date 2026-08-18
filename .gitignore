@@ -4,6 +4,7 @@ dist/
 .env
 .env.*
 !.env.example
+.poise-dev/
 
 # Test and browser-runner output
 coverage/
