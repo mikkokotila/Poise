@@ -1576,6 +1576,54 @@ describe('behavior launch claims', () => {
       SELECT lease_until FROM behavior_seen WHERE key = 'review-new-prs' AND target = ?
     `).pluck().get(launched.target) as number
     expect(leaseUntil).toBeGreaterThan(Date.now())
+
+    agentLogs = []
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(db.db.prepare(`
+      SELECT claim_id, launch_call_id, launch_error
+      FROM behavior_seen WHERE key = 'review-new-prs' AND target = ?
+    `).get(launched.target)).toMatchObject({
+      claim_id: expect.any(String),
+      launch_call_id: callId,
+      launch_error: 'awaiting linked agent call visibility',
+    })
+    expect(db.listBehaviorDeadLetters()).toEqual([])
+  })
+
+  it('retires a false dead letter when its exact durable call completes', async () => {
+    const launched = await launchReviewBeforeCrash()
+    const callId = '7'.repeat(32)
+    expect(launched.database.linkBehaviorLaunchCallOwned(
+      'review-new-prs', launched.target, launched.correlationId, callId,
+    )).toBe(true)
+    const claim = launched.database.listBehaviorLaunchClaims('review-new-prs')[0]
+    launched.database.recordBehaviorDeadLetter(claim, 'transient log miss')
+    expect(launched.database.completeSeenOwned(
+      'review-new-prs', launched.target, launched.correlationId,
+    )).toBe(true)
+    agentLogs = [agentLog({
+      id: callId,
+      started_at: new Date(Date.parse(launched.requestedAt) + 1_000).toISOString(),
+      started_at_precise: new Date(Date.parse(launched.requestedAt) + 1_001).toISOString(),
+      completed_at: new Date(Date.parse(launched.requestedAt) + 2_000).toISOString(),
+      status: 'completed',
+      action: 'requested_changes',
+      outcome: 'changes_requested',
+      head_sha: launched.expectedHead,
+      expected_head: launched.expectedHead,
+      actor: launched.actor,
+      source: launched.source,
+      correlation_id: launched.correlationId,
+    })]
+
+    const { database: db, behaviors: runtime } = await restartModules()
+    await runtime.runEnabledBehaviorsOnce()
+
+    expect(db.listBehaviorDeadLetters()).toEqual([])
+    expect(db.db.prepare(`
+      SELECT retired_at FROM behavior_dead_letters WHERE call_id = ?
+    `).pluck().get(callId)).toEqual(expect.any(String))
   })
 
   it('caps an unknown worker state by local launch time despite a future timestamp', async () => {

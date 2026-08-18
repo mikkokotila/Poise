@@ -280,4 +280,42 @@ describe('behavior database lifecycle', () => {
     expect(db.prepare('SELECT count(*) FROM behavior_dead_letters').pluck().get())
       .toBe(1)
   })
+
+  it('retires closed-PR dead letters without deleting their audit rows', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'poise-db-test-'))
+    const {
+      claimSeenOwnedAs,
+      completeSeenOwned,
+      listBehaviorDeadLetters,
+      listBehaviorLaunchClaims,
+      markBehaviorLaunchIntentOwned,
+      recordBehaviorDeadLetter,
+      retireBehaviorDeadLettersForClosedPrs,
+      db,
+    } = await loadIsolatedDb(join(tempRoot, 'cache.db'))
+    const claimId = 'd'.repeat(32)
+    expect(claimSeenOwnedAs('approve-prs', 'Vaquum/repo#12@head=old', claimId))
+      .toBe(claimId)
+    expect(markBehaviorLaunchIntentOwned({
+      key: 'approve-prs',
+      target: 'Vaquum/repo#12@head=old',
+      claimId,
+      launchBehavior: 'pr_approve',
+      repo: 'Vaquum/repo',
+      pr: 12,
+      requestedAt: '2026-08-01T12:00:00.000Z',
+      expectedHead: '1'.repeat(40),
+      actor: 'bit-mis',
+      source: 'poise:approve-prs',
+      correlationId: claimId,
+    })).toBe(true)
+    recordBehaviorDeadLetter(listBehaviorLaunchClaims('approve-prs')[0], 'old failure')
+    expect(completeSeenOwned('approve-prs', 'Vaquum/repo#12@head=old', claimId)).toBe(true)
+
+    expect(retireBehaviorDeadLettersForClosedPrs(new Set())).toBe(1)
+    expect(listBehaviorDeadLetters()).toEqual([])
+    expect(db.prepare(`
+      SELECT count(*) FROM behavior_dead_letters WHERE retired_at IS NOT NULL
+    `).pluck().get()).toBe(1)
+  })
 })

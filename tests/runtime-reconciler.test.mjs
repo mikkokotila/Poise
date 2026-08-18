@@ -53,6 +53,7 @@ function harness(overrides = {}) {
       install: vi.fn(),
       readHealth: vi.fn().mockResolvedValue(overrides.localCaller ?? C),
       hookCurrent: vi.fn().mockResolvedValue(overrides.hookCurrent ?? true),
+      datastoreCurrent: vi.fn().mockResolvedValue(overrides.datastoreCurrent ?? true),
       repairHookConfiguration: vi.fn(),
       log: vi.fn(),
     },
@@ -105,6 +106,14 @@ describe('production runtime reconciliation', () => {
 
   it('repairs a missing or stale stop-gate runtime', async () => {
     const test = harness({ hookCurrent: false })
+    const result = await reconcileRuntime(test.options)
+
+    expect(result.action).toBe('reconciled-runtime')
+    expect(test.options.install).toHaveBeenCalledOnce()
+  })
+
+  it('repairs datastore services pinned to a stale Caller release', async () => {
+    const test = harness({ datastoreCurrent: false })
     const result = await reconcileRuntime(test.options)
 
     expect(result.action).toBe('reconciled-runtime')
