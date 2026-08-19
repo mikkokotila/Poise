@@ -84,6 +84,19 @@ npm ci
 npm run install:production
 ```
 
+The installer also creates `~/.local/bin/poise`. Keep `~/.local/bin` on
+`PATH`, then use one command whether Poise is stopped, starting, degraded, or
+already open:
+
+```bash
+poise
+```
+
+The command verifies the Poise health contract, starts or repairs only the
+managed `com.vaquum.poise` launchd service when needed, and opens the dashboard.
+It never starts the development server or kills an arbitrary process on port
+5555. `poise --check` performs the same recovery without opening a browser.
+
 The macOS installer builds Poise, resolves the tracked Caller ref in
 `config/caller-release.json` to an immutable release, installs the Claude and
 Codex stop gates, and registers three per-user launchd services. They keep
