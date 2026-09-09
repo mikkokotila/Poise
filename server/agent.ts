@@ -49,6 +49,7 @@ export interface LogEntry {
   action: 'reviewed_clean' | 'requested_changes' | 'approved' | 'not_started' | null
   response: string | null // upstream 8-char availability marker; read by full `id`
   error: string
+  error_code?: string | null
 }
 
 export async function fetchAgentLogs(
@@ -176,6 +177,7 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
     action: action as LogEntry['action'],
     response: optionalString('response'),
     error,
+    error_code: optionalString('error_code'),
   }
 }
 
