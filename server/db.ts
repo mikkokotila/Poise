@@ -775,6 +775,7 @@ export interface BehaviorDeadLetter {
   callId: string | null
   error: string
   createdAt: string
+  attemptCount?: number
 }
 
 export function recordBehaviorDeadLetter(
@@ -799,7 +800,7 @@ export function recordBehaviorDeadLetter(
     claim.launchSource || null,
     claim.launchCorrelationId || null,
     callId,
-    String(error).slice(0, 4_000),
+    String(error).slice(-4_000),
     createdAt,
   )
   return id
@@ -833,12 +834,20 @@ export function retireBehaviorDeadLettersForClosedPrs(
 }
 
 export function listBehaviorDeadLetters(limit = 50): BehaviorDeadLetter[] {
+  return readBehaviorDeadLetters(limit, false)
+}
+
+export function listBehaviorIncidents(limit = 50): BehaviorDeadLetter[] {
+  return readBehaviorDeadLetters(limit, true)
+}
+
+function readBehaviorDeadLetters(limit: number, grouped: boolean): BehaviorDeadLetter[] {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
     throw new Error('dead-letter limit must be between 1 and 500')
   }
   const rows = db.prepare(`
-    SELECT id, behavior, target, repo, pr, actor, source, correlation_id,
-           call_id, error, created_at
+    WITH active AS (
+    SELECT dead.*
     FROM behavior_dead_letters AS dead
     WHERE dead.retired_at IS NULL
       AND NOT EXISTS (
@@ -850,9 +859,19 @@ export function listBehaviorDeadLetters(limit = 50): BehaviorDeadLetter[] {
         AND recovered.launch_outcome IS NOT NULL
         AND julianday(recovered.launch_completed_at) > julianday(dead.created_at)
     )
-    ORDER BY dead.created_at DESC, dead.id DESC
+    ), ranked AS (
+      SELECT *,
+        COUNT(*) OVER (PARTITION BY behavior, COALESCE(repo || '#' || pr, target)) AS attempt_count,
+        ROW_NUMBER() OVER (
+          PARTITION BY behavior, COALESCE(repo || '#' || pr, target)
+          ORDER BY created_at DESC, id DESC
+        ) AS rank
+      FROM active
+    )
+    SELECT * FROM ranked WHERE ? = 0 OR rank = 1
+    ORDER BY created_at DESC, id DESC
     LIMIT ?
-  `).all(limit) as Array<{
+  `).all(Number(grouped), limit) as Array<{
     id: string
     behavior: string
     target: string
@@ -864,6 +883,7 @@ export function listBehaviorDeadLetters(limit = 50): BehaviorDeadLetter[] {
     call_id: string | null
     error: string
     created_at: string
+    attempt_count: number
   }>
   return rows.map((row) => ({
     id: row.id,
@@ -877,6 +897,7 @@ export function listBehaviorDeadLetters(limit = 50): BehaviorDeadLetter[] {
     callId: row.call_id,
     error: row.error,
     createdAt: row.created_at,
+    ...(grouped ? { target: row.repo && row.pr ? `${row.repo}#${row.pr}` : row.target, attemptCount: row.attempt_count } : {}),
   }))
 }
 

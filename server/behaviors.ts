@@ -20,6 +20,7 @@ import { mkdir } from 'node:fs/promises'
 import { fetchAgentLogs } from './agent'
 import { claudeAuth } from './claude-auth'
 import {
+  db,
   claimPrOperationOwned,
   claimSeenOwnedAs,
   clearSeenExceptLaunched,
@@ -32,6 +33,7 @@ import {
   linkBehaviorLaunchCallOwned,
   listBehaviorLaunchClaims,
   listBehaviorDeadLetters,
+  listBehaviorIncidents,
   listSeenTargets,
   listSnapshotOnlySeen,
   markBehaviorLaunchIntentOwned,
@@ -333,7 +335,7 @@ function completeOwnedClaim(behavior: ActiveClaim['behavior'], target: string, c
 export const BEHAVIOR_REGISTRATION_GRACE_MS = 5 * 60_000
 const BEHAVIOR_CLAIM_RENEWAL_MS = 2 * 60 * 60_000
 const PR_OPERATION_EVALUATION_LEASE_MS = 65_000
-const APPROVAL_PR_OPERATION_WAIT_MS = 10_000
+const PR_OPERATION_WAIT_MS = 10_000
 const PR_OPERATION_RETRY_MS = 50
 const RUNNING_AGENT_STATUSES = new Set(['pending', 'queued', 'running', 'in_progress'])
 const FAILED_AGENT_STATUSES = new Set([
@@ -350,9 +352,9 @@ function upstreamBehavior(behavior: ActiveClaim['behavior']): BehaviorAgentLaunc
   return behavior === 'review-new-prs' ? 'pr_review' : 'pr_approve'
 }
 
-async function claimEligibleApprovalOperation(target: string): Promise<string | null> {
-  const deadline = Date.now() + APPROVAL_PR_OPERATION_WAIT_MS
-  while (!behaviorAborted() && isEnabled('approve-prs')) {
+async function claimEligiblePrOperation(behavior: ActiveClaim['behavior'], target: string): Promise<string | null> {
+  const deadline = Date.now() + PR_OPERATION_WAIT_MS
+  while (!behaviorAborted() && isEnabled(behavior)) {
     const operationId = claimPrOperationOwned(target, PR_OPERATION_EVALUATION_LEASE_MS)
     if (operationId) return operationId
     const remaining = deadline - Date.now()
@@ -568,9 +570,19 @@ async function reconcileBehaviorLaunchClaims(
       && !call.head_sha
     if (preflightFailed) {
       const message = call.error || 'agent preflight failed before any action'
-      recordBehaviorDeadLetter(claim, message, call.id)
-      if (releaseOwnedClaim(behavior, claim.target, claim.claimId)) {
-        recordBehaviorFailure(behavior, 'worker')
+      if (call.error_code === 'review_packet_too_large') {
+        // This input cannot improve through retry. Retain the launch proof and
+        // block this PR/head only; other targets continue normally.
+        db.transaction(() => {
+          if (deadLetterClaim(claim, message)) {
+            setMeta(packetBlockKey(behavior, claim.launchRepo, claim.launchPr), claim.launchExpectedHead)
+          }
+        })()
+      } else {
+        recordBehaviorDeadLetter(claim, message, call.id)
+        if (releaseOwnedClaim(behavior, claim.target, claim.claimId)) {
+          recordBehaviorFailure(behavior, 'worker')
+        }
       }
       continue
     }
@@ -1038,10 +1050,16 @@ async function tickReviewNewPrs(): Promise<void> {
     await Promise.all(prs.map(async (pr) => {
       if (!isEnabled('review-new-prs') || behaviorAborted()) return
       const key = `${pr.repo}#${pr.number}`
-      const operationId = claimPrOperationOwned(key, PR_OPERATION_EVALUATION_LEASE_MS)
-      if (!operationId) return
+      if (hasSeen('review-new-prs', key) && !getFailedBehaviorLaunch('review-new-prs', key)) return
+      let operationId: string | null = null
       let launched = false
       try {
+        if (await packetBlocked('review-new-prs', pr.repo, pr.number)) return
+        operationId = await claimEligiblePrOperation('review-new-prs', key)
+        if (!operationId) {
+          console.log(`[behaviors] review-new-prs deferred for ${key}: PR operation busy`)
+          return
+        }
         // Atomic claim: exactly one caller succeeds for any given key
         // across all concurrent runtimes. Losers skip silently.
         let claimId = claimSeenOwnedAs('review-new-prs', key, operationId)
@@ -1103,7 +1121,7 @@ async function tickReviewNewPrs(): Promise<void> {
         console.error(`[behaviors] review-new-prs step failed for ${pr.repo}#${pr.number}:`, err)
         failure ??= err
       } finally {
-        if (!launched) releasePrOperationOwned(operationId)
+        if (!launched && operationId) releasePrOperationOwned(operationId)
       }
     }))
     if (failure) throw failure
@@ -1250,6 +1268,24 @@ async function checkReviewActivity(
   }
 }
 
+function packetBlockKey(behavior: string, repo: string, number: number): string {
+  return `packet_block:${behavior}:${repo}#${number}`
+}
+
+async function packetBlocked(
+  behavior: ActiveClaim['behavior'], repo: string, number: number, head?: string,
+): Promise<boolean> {
+  const key = packetBlockKey(behavior, repo, number)
+  const blockedHead = getMeta(key)
+  if (!blockedHead) return false
+  const current = head ?? await currentHeadSha(repo, number, configuredReviewer())
+  if (current === blockedHead) return true
+  // A changed head is new input. The old launch remains in the audit trail;
+  // initial-review recovery still verifies its exact no-action provenance.
+  setMeta(key, '')
+  return false
+}
+
 async function releaseFailedBehaviorIfNoAction(
   behavior: ActiveClaim['behavior'],
   repo: string,
@@ -1277,11 +1313,17 @@ async function releaseFailedBehaviorIfNoAction(
     || call.source !== failed.launchSource
     || call.correlation_id !== failed.launchCorrelationId
     || call.expected_head !== failed.launchExpectedHead
-    || call.action !== null
-    || call.outcome !== null
     || call.head_sha !== null) {
     return false
   }
+  const blockedPacket = call.action === 'not_started'
+    && call.outcome === 'preflight_failed'
+    && call.error_code === 'review_packet_too_large'
+  if (blockedPacket) {
+    if (await currentHeadSha(repo, number, failed.launchActor) === failed.launchExpectedHead) return false
+    return releaseFailedBehaviorLaunch(behavior, target, failed.launchCallId, failed.launchExpectedHead)
+  }
+  if (call.action !== null || call.outcome !== null) return false
   const startedAt = agentCallStartedAt(call)
   if (!Number.isFinite(Date.parse(startedAt))) return false
   const activity = await checkReviewActivity(
@@ -1458,6 +1500,7 @@ async function tickApprovePrs(): Promise<void> {
       let check: ChangesAddressedResult
       try {
         check = await checkChangesAddressed(pr.repo, pr.number, reviewer)
+        if (await packetBlocked('approve-prs', pr.repo, pr.number, check.headSha)) return
       } catch (err) {
         if (behaviorAborted()) return
         console.error(`[behaviors] approve-prs check failed for ${pr.repo}#${pr.number}:`, err)
@@ -1466,7 +1509,7 @@ async function tickApprovePrs(): Promise<void> {
       }
       if (!check.hasChangeRequest && !latestApprovalBasisLaunch(pr.repo, pr.number)) return
       if (hasActiveAgentLaunchForPr(pr.repo, pr.number)) return
-      const operationId = await claimEligibleApprovalOperation(prTarget)
+      const operationId = await claimEligiblePrOperation('approve-prs', prTarget)
       if (!operationId) {
         console.log(`[behaviors] approve-prs deferred for ${prTarget}: PR operation busy`)
         return
@@ -1722,12 +1765,15 @@ async function tickResolveUnblocking(): Promise<void> {
     await Promise.all(prs.map(async (pr) => {
       if (!isEnabled('resolve-unblocking') || behaviorAborted()) return
       const key = `${pr.repo}#${pr.number}`
-      const operationId = claimPrOperationOwned(
-        key,
-        PR_OPERATION_EVALUATION_LEASE_MS,
-      )
-      if (!operationId) return
+      let operationId: string | null = null
       try {
+        // A read cannot resolve anything. Avoid occupying the mutation lock
+        // when the PR has no unresolved conversations to act on.
+        const activity = await checkReviewActivity(pr.repo, pr.number, configuredReviewer(), '1970-01-01T00:00:00Z')
+        if (activity.state !== 'OPEN' || activity.draft || activity.unresolvedConversationCount === 0) return
+        if (!isEnabled('resolve-unblocking') || behaviorAborted()) return
+        operationId = claimPrOperationOwned(key, PR_OPERATION_EVALUATION_LEASE_MS)
+        if (!operationId) return
         // This CLI performs the mutation itself. The synchronous flag check
         // immediately before invocation prevents a disabled behavior from
         // starting another resolve operation.
@@ -1756,7 +1802,7 @@ async function tickResolveUnblocking(): Promise<void> {
         console.error(`[behaviors] resolve-unblocking failed for ${pr.repo}#${pr.number}:`, err)
         failure ??= err
       } finally {
-        releasePrOperationOwned(operationId)
+        if (operationId) releasePrOperationOwned(operationId)
       }
     }))
     if (failure) throw failure
@@ -1973,7 +2019,7 @@ export interface BehaviorsRuntimeHealth {
     actor: string | null
     error: string | null
   }
-  deadLetters: ReturnType<typeof listBehaviorDeadLetters>
+  deadLetters: ReturnType<typeof listBehaviorIncidents>
 }
 
 export function getBehaviorsRuntimeHealth(): BehaviorsRuntimeHealth {
@@ -2047,7 +2093,7 @@ export function getBehaviorsRuntimeHealth(): BehaviorsRuntimeHealth {
     failures,
     datastore: { ...datastoreFreshness },
     identity,
-    deadLetters: listBehaviorDeadLetters(),
+    deadLetters: listBehaviorIncidents(),
   }
 }
 

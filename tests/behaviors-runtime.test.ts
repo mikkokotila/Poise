@@ -569,6 +569,35 @@ describe('behavior launch claims', () => {
     expect(mocks.spawnDetached.mock.calls[0][1]).toContain('--pr-approve')
   })
 
+  it('waits for a busy per-PR lock before initial review', async () => {
+    arrangeCli(false)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
+    db.setMeta('behavior_review_new_prs_enabled', '1')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
+    const blocker = db.claimPrOperationOwned(`${pr.repo}#${pr.number}`, 65_000)
+    if (!blocker) throw new Error('could not arrange competing operation')
+    setTimeout(() => db.releasePrOperationOwned(blocker), 25)
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(mocks.spawnDetached.mock.calls[0][1]).toContain('--pr-review')
+  })
+
+  it('does not take a resolver mutation lock when there are no conversations', async () => {
+    arrangeCli(false)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_resolve_unblocking_enabled', '1')
+    const claim = vi.spyOn(db, 'claimPrOperationOwned')
+    await runtime.runEnabledBehaviorsOnce()
+    expect(claim).not.toHaveBeenCalled()
+    expect(mocks.runFile.mock.calls.some(([, args]) => args[0] === '--resolve-nonblocking-conversations-if-ready')).toBe(false)
+  })
+
   it('does not debounce recent PR activity', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
@@ -1035,7 +1064,7 @@ describe('behavior launch claims', () => {
   })
 
   it('keeps GitHub-only unblocking active during a Claude auth outage', async () => {
-    arrangeCli(false)
+    arrangeCli(false, false, { unresolvedConversationCount: 1 })
     const { database: db, behaviors: runtime } = await loadModules()
     runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
     db.setMeta('me', 'poise-user')
@@ -1265,7 +1294,7 @@ describe('behavior launch claims', () => {
   })
 
   it('treats a typed resolver head supersession as a safe no-op', async () => {
-    arrangeCli(false, false, { resolveSuperseded: true })
+    arrangeCli(false, false, { resolveSuperseded: true, unresolvedConversationCount: 1 })
     const { database: db, behaviors: runtime } = await loadModules()
     db.setMeta('me', 'poise-user')
     db.setMeta('behavior_resolve_unblocking_enabled', '1')
@@ -1283,6 +1312,7 @@ describe('behavior launch claims', () => {
   it('logs the exact resolver blockers for unresolved conversations', async () => {
     arrangeCli(false, false, {
       resolveUnresolvedCount: 1,
+      unresolvedConversationCount: 1,
       resolveBlockers: ['reviewer_not_approved_current_head'],
     })
     const log = vi.spyOn(console, 'log').mockImplementation(() => {})
@@ -1799,6 +1829,40 @@ describe('behavior launch claims', () => {
     await runtime.runEnabledBehaviorsOnce()
 
     expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['review-new-prs', 'approve-prs'] as const)('holds an oversized %s packet across restart until the head changes', async (behavior) => {
+    const launched = behavior === 'review-new-prs'
+      ? await launchReviewBeforeCrash() : await launchApprovalBeforeCrash()
+    agentLogs = [agentLog({
+      id: 'f'.repeat(32),
+      behavior: behavior === 'review-new-prs' ? 'pr_review' : 'pr_approve',
+      started_at: new Date(Date.parse(launched.requestedAt) + 1_000).toISOString(),
+      status: 'failed', action: 'not_started', outcome: 'preflight_failed',
+      error_code: 'review_packet_too_large', error: 'remaining review input is too large',
+      expected_head: launched.expectedHead, actor: launched.actor,
+      source: launched.source, correlation_id: launched.correlationId,
+    })]
+    let modules = await restartModules()
+    modules.behaviors.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    await modules.behaviors.runEnabledBehaviorsOnce()
+    expect(modules.database.hasSeen(behavior, launched.target)).toBe(true)
+    expect(modules.database.listBehaviorDeadLetters()).toHaveLength(1)
+    expect(modules.behaviors.getBehaviorsRuntimeHealth().failures).toEqual([])
+    expect(mocks.observeAuthFailure).not.toHaveBeenCalled()
+    modules = await restartModules()
+    modules.behaviors.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    await modules.behaviors.runEnabledBehaviorsOnce()
+    await modules.behaviors.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(modules.database.listBehaviorDeadLetters()).toHaveLength(1)
+    listedPrs = [pr, { ...pr, number: 18, url: 'https://github.com/Vaquum/poise-test/pull/18' }]
+    await modules.behaviors.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+    expect(mocks.spawnDetached.mock.calls[1][1]).toContain('#18')
+    arrangeCli(behavior === 'approve-prs', false, { headSha: NEXT_HEAD_SHA })
+    await modules.behaviors.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(3)
   })
 
   it('recovers a terminal failed approval only after GitHub proves no reviewer action', async () => {

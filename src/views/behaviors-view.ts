@@ -563,6 +563,13 @@ async function fetchBehaviorOwners() {
   }
 }
 
+function diagnosticCause(error: string): string {
+  const lines = error.trim().split('\n').filter((line) => line.trim())
+  const cause = [...lines].reverse().find((line) => /(?:Error|Timeout|review_packet_too_large):?/.test(line))
+    ?? lines[lines.length - 1] ?? error
+  return cause.trim().slice(0, 300)
+}
+
 function renderDiagnostics() {
   const el = viewEl.querySelector<HTMLElement>('#behavior-diagnostics')
   if (!el) return
@@ -587,12 +594,12 @@ function renderDiagnostics() {
     ...diagnostics.failures.map((failure) =>
       `${failure.behavior}: ${failure.consecutiveFailures} consecutive ${failure.kind} failure(s)`),
     ...diagnostics.deadLetters.slice(0, DEAD_LETTERS_SHOWN).map((letter) =>
-      `${letter.behavior} ${letter.target}: ${letter.error}`),
+      `${letter.behavior} ${letter.target}: ${diagnosticCause(letter.error)}${(letter.attemptCount ?? 1) > 1 ? ` (${letter.attemptCount} attempts)` : ''}`),
     // A dead letter is a target the behaviour permanently gave up on. Showing
     // the newest few and nothing else made an older one drop off the only
     // surface that names it, with the panel reading as if it were complete.
     diagnostics.deadLetters.length > DEAD_LETTERS_SHOWN
-      ? `${diagnostics.deadLetters.length - DEAD_LETTERS_SHOWN} older abandoned target(s) not shown`
+      ? `${diagnostics.deadLetters.length - DEAD_LETTERS_SHOWN} more affected PR(s) not shown`
       : '',
   ].filter(Boolean)
   if (messages.length === 0) {

@@ -281,6 +281,27 @@ describe('behavior database lifecycle', () => {
       .toBe(1)
   })
 
+  it('groups repeated failures before limiting diagnostics and preserves audit rows', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'poise-db-test-'))
+    const store = await loadIsolatedDb(join(tempRoot, 'cache.db'))
+    const insert = store.db.prepare(`
+      INSERT INTO behavior_dead_letters(id, behavior, target, repo, pr, error, created_at)
+      VALUES (?, 'review-new-prs', ?, 'Vaquum/repo', ?, ?, ?)
+    `)
+    insert.run('older', 'Vaquum/repo#2', 2, 'other failure', '2026-01-01T00:00:00Z')
+    for (let n = 0; n < 55; n++) {
+      insert.run(`repeated-${n}`, `Vaquum/repo#1@attempt=${n}`, 1, `timeout ${n}`, `2026-01-02T00:00:${String(n).padStart(2, '0')}Z`)
+    }
+    expect(store.listBehaviorIncidents(2)).toEqual([
+      expect.objectContaining({ target: 'Vaquum/repo#1', attemptCount: 55, error: 'timeout 54' }),
+      expect.objectContaining({ target: 'Vaquum/repo#2', attemptCount: 1, error: 'other failure' }),
+    ])
+    expect(store.listBehaviorDeadLetters(500)).toHaveLength(56)
+    store.retireBehaviorDeadLetter('older')
+    expect(store.listBehaviorIncidents()).toHaveLength(1)
+    expect(store.db.prepare('SELECT count(*) FROM behavior_dead_letters').pluck().get()).toBe(56)
+  })
+
   it('retires closed-PR dead letters without deleting their audit rows', async () => {
     tempRoot = await mkdtemp(join(tmpdir(), 'poise-db-test-'))
     const {

@@ -60,6 +60,7 @@ export interface BehaviorDiagnostics {
     target: string
     error: string
     createdAt: string
+    attemptCount?: number
   }>
 }
 
