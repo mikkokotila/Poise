@@ -76,12 +76,16 @@ npm run dev
 Open <http://localhost:5555>. Configure the GitHub organization, username,
 timezone, refresh interval, and theme in Settings.
 
-Settings → PR reviews → Review model selects **Opus 5 — max** (default) or
+Settings → PR reviews → Review model selects **Opus 5 — high** (default) or
 **GPT-6 Astra — extra high** for new automatic/manual reviews, approvals, and
 replays. Save to apply; running reviews retain their model. Astra requires
 Codex CLI 0.154.0 or newer and a Codex sign-in. Install Caller with support for
 `agent-interface --review-models` before this Poise version; unsupported model
-selection fails before launching a worker.
+selection fails before launching a worker. The compatible Caller policy is
+`bounded-v1`: reviews have a total 23m33s budget. On output exhaustion, Opus may
+recover once with Astra xhigh after GitHub proves no review action occurred.
+Timeouts and failed recovery remain visible and are held across restarts for the
+same input/model; new commits, new approval input, or a model change can be retried.
 
 ## Production
 
@@ -161,6 +165,10 @@ provider event age, and the current stage deadline. Active runs refresh every 15
 seconds while Swarm is visible. Missing heartbeats, provider silence, incomplete
 events, and runs without instrumentation are labeled explicitly. These labels
 report observations; they do not change review outcomes or trigger retries.
+Each minute records whether new reasoning activity arrived. Expand **Provider
+reasoning** to read the latest 65,536 characters exposed by the provider, when
+available. These details load on demand, outside the main log payload. Polling
+updates existing rows and text in place, preserving expansion and scroll position.
 
 ## License
 

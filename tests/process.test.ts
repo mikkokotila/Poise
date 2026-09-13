@@ -416,7 +416,7 @@ process.stdout.write(JSON.stringify(observed))
       })
       const secondSettings = JSON.stringify({
         permissions: { allow: ['Bash(git status)'] },
-        env: { FORWARDED_SETTING_TWO: 'preserved-two' },
+        env: { FORWARDED_SETTING_TWO: 'preserved-two', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '64000' },
       })
       const result = await runFile(
         CLAUDE_SUBSCRIPTION_CLI,
@@ -431,6 +431,7 @@ process.stdout.write(JSON.stringify(observed))
       )
       const observed = JSON.parse(result.stdout)
       const settings = JSON.parse(observed.args[1])
+      expect(settings.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe('64000')
       expect((await readFile(callLog, 'utf8')).trim().split('\n')).toEqual(['status', 'model'])
       expect(observed).toMatchObject({
         args: ['--settings', expect.any(String), '--print', '--', 'literal prompt'],

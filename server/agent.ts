@@ -53,6 +53,8 @@ export interface LogEntry {
   action: 'reviewed_clean' | 'requested_changes' | 'approved' | 'not_started' | null
   response: string | null // upstream 8-char availability marker; read by full `id`
   error: string
+  review_policy?: string | null
+  recovery_model?: string | null
   error_code?: string | null
 }
 
@@ -183,6 +185,8 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
     response: optionalString('response'),
     error,
     error_code: optionalString('error_code'),
+    review_policy: optionalString('review_policy'),
+    recovery_model: optionalString('recovery_model'),
   }
 }
 
@@ -196,6 +200,14 @@ export async function fetchAgentResponse(callId: string): Promise<{ id: string, 
     cwd: agentCwd(),
     timeoutMs: 30_000,
     maxOutputBytes: 32 * 1024 * 1024,
+  })
+  return { id: callId, body: stdout }
+}
+
+export async function fetchAgentReasoning(callId: string): Promise<{ id: string, body: string }> {
+  if (!/^[0-9a-fA-F]{32}$/.test(callId)) throw new Error('invalid agent call id')
+  const { stdout } = await runFile(CLI, ['--read-reasoning', callId.toLowerCase()], {
+    cwd: agentCwd(), timeoutMs: 30_000, maxOutputBytes: 512 * 1024,
   })
   return { id: callId, body: stdout }
 }

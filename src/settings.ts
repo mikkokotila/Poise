@@ -161,7 +161,7 @@ function buildPanel(): HTMLElement {
       <div class="tp-section">
         <label class="tp-label" for="st-review-model">Review model</label>
         <select id="st-review-model" class="st-select">
-          <option value="opus">Opus 5 — max</option>
+          <option value="opus">Opus 5 — high</option>
           <option value="astra">GPT-6 Astra — extra high</option>
         </select>
         <div class="st-help st-help-info">Applies to new reviews and approvals, including manual runs and replays. Running reviews keep their model. Uses your Claude or Codex sign-in.</div>
