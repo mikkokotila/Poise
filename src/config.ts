@@ -11,6 +11,7 @@ export interface AppSettings {
 
 let current: AppSettings = { org: '', me: '', timezone: '' }
 let loaded = false
+let savedRevision = 0
 
 // Whether the last read actually reached the server. A failed read used to be
 // indistinguishable from an empty one: `current` kept its blank defaults,
@@ -21,16 +22,21 @@ let loadOk = false
 export function settingsLoadOk(): boolean { return loadOk }
 
 export async function loadSettings(): Promise<AppSettings> {
+  const revision = savedRevision
   try {
     const res = await fetch('/api/settings')
     if (res.ok) {
-      current = await res.json()
-      loadOk = true
-    } else {
+      const settings = await res.json()
+      // A refresh started before Save must not restore the previous model.
+      if (revision === savedRevision) {
+        current = settings
+        loadOk = true
+      }
+    } else if (revision === savedRevision) {
       loadOk = false
     }
   } catch {
-    loadOk = false
+    if (revision === savedRevision) loadOk = false
   }
   loaded = true
   return current
@@ -49,6 +55,8 @@ export function settingsReady(): boolean {
 }
 
 export function setLocalSettings(s: AppSettings) {
+  savedRevision += 1
+  loadOk = true
   current = s
 }
 
