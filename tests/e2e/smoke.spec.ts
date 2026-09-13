@@ -161,3 +161,28 @@ test('keeps the empty dashboard layout visually stable', async ({ page }) => {
     fullPage: true,
   })
 })
+
+test('saves the review model and restores it after reload', async ({ page }) => {
+  let settings = { org: 'acme', me: 'octocat', timezone: 'UTC', reviewModel: 'opus' }
+  await page.route('**/api/settings', async (route) => {
+    if (route.request().method() === 'POST') settings = { ...settings, ...route.request().postDataJSON() }
+    await route.fulfill({ json: settings })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Menu', exact: true }).click()
+  await page.locator('[data-action="settings"]').click()
+  const model = page.getByLabel('Review model')
+  await expect(model).toHaveValue('opus')
+  await model.selectOption('astra')
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page.locator('.st-status')).toHaveText('Saved.')
+  expect(settings.reviewModel).toBe('astra')
+  await page.reload()
+  await page.getByRole('button', { name: 'Menu', exact: true }).click()
+  await page.locator('[data-action="settings"]').click()
+  await expect(page.getByLabel('Review model')).toHaveValue('astra')
+  await page.getByLabel('Review model').selectOption('opus')
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page.locator('.st-status')).toHaveText('Saved.')
+  expect(settings.reviewModel).toBe('opus')
+})

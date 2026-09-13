@@ -11,6 +11,8 @@ import { getSettings as getCachedSettings, setLocalSettings, loadSettings, setti
 let panelEl: HTMLElement | null = null
 let orgInput: HTMLInputElement | null = null
 let meInput: HTMLInputElement | null = null
+let modelSelect: HTMLSelectElement | null = null
+let modelDirty = false
 let tzSelect: HTMLSelectElement | null = null
 let saveBtn: HTMLButtonElement | null = null
 let helpEl: HTMLElement | null = null
@@ -27,6 +29,7 @@ function syncFieldsFromCache() {
   // first characters someone has already typed into an empty field. Only fill
   // a field the person is not currently in.
   const active = document.activeElement
+  if (modelSelect && !modelDirty) modelSelect.value = s.reviewModel || 'opus'
   if (orgInput && orgInput !== active) orgInput.value = s.org
   if (meInput && meInput !== active) meInput.value = s.me
   if (tzSelect && tzSelect !== active) {
@@ -72,12 +75,13 @@ let saving = false
 const GITHUB_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
 
 async function saveAll() {
-  if (!saveBtn || !orgInput || !meInput || !tzSelect) return
+  if (!saveBtn || !orgInput || !meInput || !tzSelect || !modelSelect) return
   if (saving) return
 
   const org = orgInput.value.trim()
   const me = meInput.value.trim()
   const tz = tzSelect.value
+  const reviewModel = modelSelect.value
 
   if (!org || !me) {
     setHelp('Org and username are required.', 'error')
@@ -100,13 +104,14 @@ async function saveAll() {
   try {
     const res = await fetch('/api/settings', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ org, me, timezone: tz }),
+      body: JSON.stringify({ org, me, timezone: tz, reviewModel }),
     })
     const data = await res.json()
     if (!res.ok) {
       setHelp(data.error || 'Failed to save settings', 'error')
       return
     }
+    modelDirty = modelSelect.value !== reviewModel
     setLocalSettings(data)
     setHelp('Saved.', 'ok')
     window.dispatchEvent(new CustomEvent('poise:synced'))
@@ -151,6 +156,17 @@ function buildPanel(): HTMLElement {
         <div class="st-help st-help-info">Scopes Current and Archive to your user-footprint (PRs and issues you're involved in). GitHub auth is handled by the local <code>github-datastore</code> CLI.</div>
       </div>
 
+      <div class="tp-group-label">PR reviews</div>
+
+      <div class="tp-section">
+        <label class="tp-label" for="st-review-model">Review model</label>
+        <select id="st-review-model" class="st-select">
+          <option value="opus">Opus 5 — max</option>
+          <option value="astra">GPT-6 Astra — extra high</option>
+        </select>
+        <div class="st-help st-help-info">Applies to new reviews and approvals, including manual runs and replays. Running reviews keep their model. Uses your Claude or Codex sign-in.</div>
+      </div>
+
       <div class="tp-group-label">Time</div>
 
       <div class="tp-section">
@@ -185,7 +201,7 @@ function buildPanel(): HTMLElement {
       </div>
 
       <div class="tp-hint">
-        Organization, username and timezone are stored in
+        Organization, username, timezone and review model are stored in
         <code>~/.poise/cache.db</code>. Refresh rate and theme are kept by this
         browser, so they do not follow you to another one.
       </div>
@@ -195,6 +211,8 @@ function buildPanel(): HTMLElement {
   orgInput = panel.querySelector('.st-input-org') as HTMLInputElement
   meInput = panel.querySelector('.st-input-me') as HTMLInputElement
   tzSelect = panel.querySelector('.st-input-tz') as HTMLSelectElement
+  modelSelect = panel.querySelector('#st-review-model') as HTMLSelectElement
+  modelSelect.addEventListener('change', () => { modelDirty = true })
   saveBtn = panel.querySelector('.st-save') as HTMLButtonElement
   // This used to be `panel.querySelector('.st-help')`, which is the Username
   // explainer — the first element of that class in the panel. Every "Saved."

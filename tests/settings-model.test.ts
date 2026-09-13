@@ -23,7 +23,7 @@ beforeEach(() => {
 describe('what the settings model accepts', () => {
   it('stores a well-formed org, username and timezone', () => {
     const s = setSettings({ org: ' Vaquum ', me: ' mikkokotila ', timezone: 'Europe/Helsinki' })
-    expect(s).toEqual({ org: 'Vaquum', me: 'mikkokotila', timezone: 'Europe/Helsinki' })
+    expect(s).toEqual({ org: 'Vaquum', me: 'mikkokotila', timezone: 'Europe/Helsinki', reviewModel: 'opus' })
   })
 
   it('refuses a pasted URL rather than storing something no query can use', () => {
@@ -55,7 +55,7 @@ describe('a rejected save changes nothing at all', () => {
     setSettings({ org: 'Vaquum', me: 'mikkokotila', timezone: 'UTC' })
     expect(() => setSettings({ timezone: 'Europe/Berlin', org: 'not a valid org' })).toThrow()
     // The timezone in the same call must not have landed.
-    expect(getSettings()).toEqual({ org: 'Vaquum', me: 'mikkokotila', timezone: 'UTC' })
+    expect(getSettings()).toEqual({ org: 'Vaquum', me: 'mikkokotila', timezone: 'UTC', reviewModel: 'opus' })
   })
 })
 
@@ -83,5 +83,23 @@ describe('readiness', () => {
     expect(isReady()).toBe(false)
     setSettings({ me: 'mikkokotila' })
     expect(isReady()).toBe(true)
+  })
+})
+
+
+describe('PR review model', () => {
+  it('defaults to Opus and persists Astra across unrelated saves', () => {
+    expect(getSettings().reviewModel).toBe('opus')
+    expect(setSettings({ reviewModel: 'astra' }).reviewModel).toBe('astra')
+    expect(setSettings({ timezone: 'UTC' }).reviewModel).toBe('astra')
+    expect(setSettings({ reviewModel: 'opus' }).reviewModel).toBe('opus')
+  })
+
+  it('rejects unsupported models without partially saving other settings', () => {
+    for (const value of ['fable', 'gpt', '', null, 1]) {
+      expect(() => setSettings({ org: 'Vaquum', reviewModel: value as any })).toThrow(/reviewModel/)
+      expect(getSettings().org).toBe('')
+      expect(getSettings().reviewModel).toBe('opus')
+    }
   })
 })

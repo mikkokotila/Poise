@@ -76,6 +76,13 @@ npm run dev
 Open <http://localhost:5555>. Configure the GitHub organization, username,
 timezone, refresh interval, and theme in Settings.
 
+Settings → PR reviews → Review model selects **Opus 5 — max** (default) or
+**GPT-6 Astra — extra high** for new automatic/manual reviews, approvals, and
+replays. Save to apply; running reviews retain their model. Astra requires
+Codex CLI 0.154.0 or newer and a Codex sign-in. Install Caller with support for
+`agent-interface --review-models` before this Poise version; unsupported model
+selection fails before launching a worker.
+
 ## Production
 
 ```bash

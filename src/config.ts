@@ -6,6 +6,7 @@ export interface AppSettings {
   org: string
   me: string
   timezone: string
+  reviewModel?: 'opus' | 'astra'
 }
 
 let current: AppSettings = { org: '', me: '', timezone: '' }

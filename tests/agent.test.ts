@@ -2,7 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   runFile: vi.fn(),
+  reviewModel: 'opus',
 }))
+
+vi.mock('../server/settings', () => ({ getReviewModel: () => mocks.reviewModel }))
 
 vi.mock('../server/process', () => ({
   claudeSubscriptionEnvironment: vi.fn(),
@@ -142,5 +145,42 @@ describe('agent log compatibility', () => {
       outcome: 'superseded',
       head_sha: 'c'.repeat(40),
     }])
+  })
+})
+
+describe('manual review model selection', () => {
+  beforeEach(async () => {
+    mocks.reviewModel = 'opus'
+    mocks.runFile.mockReset().mockResolvedValue({ stdout: JSON.stringify({ opus: 'opus-5-max', astra: 'gpt-6-astra-xhigh' }), stderr: '' })
+    const gh = await import('../server/gh')
+    vi.mocked(gh.getHeadSha).mockResolvedValue('a'.repeat(40))
+    vi.mocked(gh.getReviewAgentUsername).mockReturnValue('bit-mis')
+    vi.mocked(gh.localCheckoutPath).mockResolvedValue('/repo')
+    const { spawnDetached } = await import('../server/process')
+    vi.mocked(spawnDetached).mockReset().mockResolvedValue(undefined)
+    const { claudeAuth } = await import('../server/claude-auth')
+    vi.mocked(claudeAuth.requireReady).mockReset().mockResolvedValue(undefined)
+  })
+
+  it.each(['opus', 'astra'])('uses %s for manual reviews and approval replays', async (model) => {
+    mocks.reviewModel = model
+    const { triggerPrReview, replayAgentJob } = await import('../server/agent')
+    const { spawnDetached } = await import('../server/process')
+    const { claudeAuth } = await import('../server/claude-auth')
+    await triggerPrReview('https://github.com/o/r/pull/12')
+    await replayAgentJob({ behavior: 'pr_approve', repo: 'o/r', pr_id: 12 })
+    expect(spawnDetached).toHaveBeenCalledTimes(2)
+    for (const [, args] of vi.mocked(spawnDetached).mock.calls) {
+      expect(args).toEqual(expect.arrayContaining(['--model', model, '--actor', 'bit-mis', '--expected-head', 'a'.repeat(40)]))
+    }
+    expect(claudeAuth.requireReady).toHaveBeenCalledTimes(model === 'opus' ? 4 : 0)
+  })
+
+  it('does not launch against Caller that cannot honor the selection', async () => {
+    mocks.runFile.mockResolvedValue({ stdout: '{}', stderr: '' })
+    const { triggerPrReview } = await import('../server/agent')
+    const { spawnDetached } = await import('../server/process')
+    await expect(triggerPrReview('https://github.com/o/r/pull/12')).rejects.toThrow(/Update Caller/)
+    expect(spawnDetached).not.toHaveBeenCalled()
   })
 })

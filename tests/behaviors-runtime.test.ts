@@ -141,6 +141,9 @@ function arrangeCli(
         stderr: '',
       }
     }
+    if (command === 'agent-interface' && args[0] === '--review-models') {
+      return { stdout: JSON.stringify({ opus: 'opus-5-max', astra: 'gpt-6-astra-xhigh' }), stderr: '' }
+    }
     if (command === 'github-interface' && args[0] === '--head-sha') {
       const cwdParts = String(options?.cwd || '').split('/')
       const repository = cwdParts.length >= 2
@@ -2143,5 +2146,40 @@ describe('behavior launch claims', () => {
 
     expect(mocks.spawnDetached).not.toHaveBeenCalled()
     expect(runtime.isEnabled('review-new-prs')).toBe(false)
+  })
+})
+
+describe('scheduled review model selection', () => {
+  it.each(['review-new-prs', 'approve-prs'] as const)('runs %s with Astra during a Claude outage', async (behavior) => {
+    arrangeCli(behavior === 'approve-prs')
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    mocks.authStatus = 'reauth_required'
+    const { database: db, behaviors: runtime } = await loadModules()
+    db.setMeta('me', 'poise-user')
+    db.setMeta('reviewModel', 'astra')
+    db.setMeta(`behavior_${behavior.replace(/-/g, '_')}_enabled`, '1')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(1)
+    expect(mocks.spawnDetached.mock.calls[0][1]).toEqual(expect.arrayContaining(['--model', 'astra']))
+    expect(mocks.requireAuth).not.toHaveBeenCalled()
+  })
+
+  it('does not launch an outdated selection when it changes during preflight', async () => {
+    arrangeCli(false)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_review_new_prs_enabled', '1')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
+    mocks.requireAuth.mockImplementation(() => { db.setMeta('reviewModel', 'astra') })
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached.mock.calls[0][1]).toEqual(expect.arrayContaining(['--model', 'astra']))
   })
 })
