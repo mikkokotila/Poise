@@ -4858,3 +4858,17 @@ body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
    to real pull requests, so an unknown state is shown as unavailable rather
    than as a confident "off". */
 .toggle-unknown { opacity: 0.45; cursor: not-allowed; }
+
+/* Provider observations stay subordinate to the authoritative run outcome. */
+.agent-progress-summary {
+  margin-top: 5px;
+  max-width: 300px;
+  white-space: normal;
+  line-height: 1.4;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+.agent-progress-detail { margin-bottom: 16px; font-size: 0.8125rem; }
+.agent-progress-detail p { margin: 0 0 10px; color: var(--text-secondary); }
+.agent-progress-detail ol { margin: 0; padding: 0; list-style: none; line-height: 1.7; }
+.agent-progress-detail time { color: var(--text-tertiary); margin-right: 12px; font-variant-numeric: tabular-nums; }

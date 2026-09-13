@@ -186,3 +186,89 @@ test('saves the review model and restores it after reload', async ({ page }) => 
   await expect(page.locator('.st-status')).toHaveText('Saved.')
   expect(settings.reviewModel).toBe('opus')
 })
+
+test('shows live activity, preserves its expansion, and loads the final response', async ({ page }) => {
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString()
+  const id = 'a'.repeat(32)
+  let row = {
+    id, pr_id: '320', repo: 'Vaquum/Origo', actor: 'bit-mis', model: 'opus-5-max',
+    behavior: 'pr_approve', session_id: null, prompt: '', started_at: ago(30 * 60_000),
+    started_at_precise: ago(30 * 60_000), completed_at: null as string | null,
+    time_elapsed: '30m', status: 'running', outcome: null as string | null, response: '', error: '',
+    progress: {
+      version: 1, phase: 'reasoning', phase_started_at: ago(20 * 60_000), heartbeat_at: ago(1_000),
+      last_provider_event_at: ago(7 * 60_000), deadline_at: new Date(Date.now() + 22 * 60_000).toISOString(),
+      warning: null, events: [{ at: ago(7 * 60_000), message: 'Provider reported reasoning activity' }],
+    },
+  }
+  let requests = 0
+  await page.route('**/api/agent-logs', async (route) => {
+    requests += 1
+    await route.fulfill({ json: { logs: [row] } })
+  })
+  await page.route(`**/api/agent-response/${id}`, (route) => route.fulfill({ json: { id, body: 'Approval confirmed on GitHub.' } }))
+  await page.clock.install()
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Swarm', exact: true }).click()
+  const main = page.locator(`.agent-row[data-id="${id}"]`)
+  await expect(main).toContainText('No provider update for 7m')
+  await main.getByRole('button', { name: 'Toggle detail' }).click()
+  const detail = page.locator(`.agent-expand-row[data-expand-for="${id}"]`)
+  await expect(detail).toContainText('Worker heartbeat')
+  await expect(detail).toContainText('Stage deadline in 22m')
+  await expect(detail).toContainText('Provider reported reasoning activity')
+  await page.screenshot({ path: test.info().outputPath('live-progress.png'), fullPage: true })
+
+  row.progress = { ...row.progress, phase: 'submitting', phase_started_at: ago(0), last_provider_event_at: ago(0),
+    events: [...row.progress.events, { at: ago(0), message: 'GitHub command in progress' }] }
+  await page.clock.fastForward(15_001)
+  await expect(main).toContainText('GitHub command in progress')
+  await expect(detail).toContainText('GitHub command in progress')
+  await expect(main.getByRole('button', { name: 'Toggle detail' })).toHaveAttribute('aria-expanded', 'true')
+
+  row = { ...row, status: 'completed', outcome: 'approved', completed_at: ago(0), response: id.slice(0, 8),
+    progress: { ...row.progress, phase: 'completed', events: [...row.progress.events, { at: ago(0), message: 'Run completed' }] } }
+  await page.evaluate(() => window.dispatchEvent(new Event('poise:refresh-tick')))
+  await expect(main).toContainText('approved')
+  await expect(detail).toContainText('Approval confirmed on GitHub.')
+  await expect(detail).toContainText('Run completed')
+  await page.getByRole('button', { name: 'Archive', exact: true }).click()
+  const leftAt = requests
+  await page.clock.fastForward(30_000)
+  expect(requests).toBe(leftAt)
+})
+
+test('shows missing worker heartbeat, refreshes failures, and stops polling when hidden', async ({ page }) => {
+  const now = new Date().toISOString()
+  const logs = [
+    { id: 'a'.repeat(32), model: 'opus-5-max', behavior: 'pr_review', repo: 'o/r', pr_id: '1',
+      status: 'running', started_at: now, started_at_precise: now, response: '', error: '',
+      progress: { version: 1, phase: 'waiting_provider', phase_started_at: now,
+        heartbeat_at: new Date(Date.now() - 120_000).toISOString(), last_provider_event_at: null,
+        deadline_at: null, warning: null, events: [{ at: now, message: 'Waiting for provider' }] } },
+    { id: 'b'.repeat(32), model: 'astra', behavior: 'pr_review', repo: 'o/r', pr_id: '2',
+      status: 'running', started_at: now, started_at_precise: now, response: '', error: '' },
+  ]
+  let requests = 0
+  await page.route('**/api/agent-logs', (route) => {
+    requests += 1
+    return route.fulfill({ json: { logs } })
+  })
+  await page.clock.install()
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Swarm', exact: true }).click()
+  const main = page.locator('.agent-row').first()
+  await expect(main).toContainText('Worker heartbeat missing for 2m')
+  await expect(page.locator('.agent-row').nth(1)).toContainText('Progress unavailable for this run')
+  await main.getByRole('button', { name: 'Toggle detail' }).click()
+  logs[0].status = 'failed'
+  const failure = "API Error: Claude's response exceeded the 64000 output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable."
+  logs[0].error = failure
+  await page.clock.fastForward(15_001)
+  await expect(page.locator('.agent-expand-row')).toContainText(failure)
+  await page.getByRole('button', { name: 'Archive', exact: true }).click()
+  const leftAt = requests
+  await page.clock.fastForward(30_000)
+  await page.evaluate(() => window.dispatchEvent(new Event('poise:refresh-tick')))
+  expect(requests).toBe(leftAt)
+})

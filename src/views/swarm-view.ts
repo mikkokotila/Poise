@@ -11,6 +11,8 @@
 // FLIP-style row preservation.
 
 
+import { PHASE_LABELS, type ModelProgress } from '../agent-progress'
+
 interface LogEntry {
   id: string
   pr_id: string | null
@@ -29,6 +31,7 @@ interface LogEntry {
   completed_at: string | null
   time_elapsed: string
   status: string
+  progress?: ModelProgress | null
   // The verdict of a finished review. 'completed' alone does not say whether
   // the agent approved or demanded changes.
   outcome: 'clean' | 'changes_requested' | 'approved' | 'superseded' | 'preflight_failed' | null
@@ -98,9 +101,10 @@ let entries: LogEntry[] = []
 let searchQuery = ''
 let searchDebounce: ReturnType<typeof setTimeout> | null = null
 // Tick listener — installed on view init, removed on view leave.
-// Single shared clock — see startRefreshTicker() in src/config.ts.
+// The shared refresh clock still refreshes history; active runs poll every 15s.
 const onSwarmTick = () => pollOnce()
 let swarmListening = false
+let progressPoll: ReturnType<typeof setInterval> | null = null
 const expanded = new Map<string, { body: string | null, loading: boolean }>()
 
 
@@ -141,6 +145,49 @@ function statusCell(e: LogEntry): string {
   const verdict = e.outcome ? OUTCOME_LABEL[e.outcome] : null
   if (!verdict) return pill
   return `${pill} <span class="state ${verdict.cls} state-outcome" title="Outcome: ${escapeHtml(e.outcome!)}">${escapeHtml(verdict.text)}</span>`
+}
+
+function isRunning(e: LogEntry): boolean {
+  return e.status === 'running' && !e.completed_at
+}
+
+function progressText(e: LogEntry): string {
+  if (!isRunning(e)) return ''
+  const p = e.progress
+  if (!p) return 'Progress unavailable for this run'
+  const heartbeatAge = Date.now() - Date.parse(p.heartbeat_at)
+  const providerAge = p.last_provider_event_at ? Date.now() - Date.parse(p.last_provider_event_at) : null
+  const label = PHASE_LABELS[p.phase] || 'Unknown activity'
+  if (heartbeatAge > 30_000) return `Worker heartbeat missing for ${relFromMs(Date.parse(p.heartbeat_at))}; last: ${label.toLowerCase()}`
+  if (p.warning) return `Progress incomplete; last: ${label.toLowerCase()}`
+  if (providerAge !== null && providerAge > 60_000 && ['waiting_provider', 'reasoning', 'responding', 'retrying', 'preparing_tool', 'tool_requested'].includes(p.phase)) {
+    return `No provider update for ${relFromMs(Date.parse(p.last_provider_event_at!))}; last: ${label.toLowerCase()}`
+  }
+  return `${label} · ${relFromMs(Date.parse(p.phase_started_at))} in stage`
+}
+
+function progressCell(e: LogEntry): string {
+  const text = progressText(e)
+  return text ? `<div class="agent-progress-summary">${escapeHtml(text)}</div>` : ''
+}
+
+function progressDetail(e: LogEntry): string {
+  const p = e.progress
+  if (!p) return ''
+  const live = isRunning(e)
+  const heartbeat = live ? `Worker heartbeat ${relFromMs(Date.parse(p.heartbeat_at))} ago` : `Last worker heartbeat: ${p.heartbeat_at}`
+  const provider = p.last_provider_event_at
+    ? (live ? `Last provider event ${relFromMs(Date.parse(p.last_provider_event_at))} ago` : `Last provider event: ${p.last_provider_event_at}`)
+    : 'No provider event received'
+  let deadline = ''
+  if (live && p.deadline_at) {
+    const left = Date.parse(p.deadline_at) - Date.now()
+    deadline = left > 0 ? `Stage deadline in ${Math.ceil(left / 60_000)}m` : 'Stage deadline passed; awaiting worker outcome'
+  }
+  const facts = [heartbeat, provider, deadline].filter(Boolean).map(escapeHtml).join(' · ')
+  const warning = p.warning ? `<p class="agent-response-error">${escapeHtml(p.warning)}</p>` : ''
+  const events = p.events.map((event) => `<li><time datetime="${escapeHtml(event.at)}">${escapeHtml(new Date(event.at).toLocaleTimeString())}</time> ${escapeHtml(event.message)}</li>`).join('')
+  return `<section class="agent-progress-detail" aria-label="Run activity"><p>${facts}</p>${warning}<ol>${events}</ol></section>`
 }
 
 function modelCell(s: string): string {
@@ -316,21 +363,21 @@ function renderShell() {
 // A failed row is now expandable whether or not a response body exists; the
 // error is what its expansion shows.
 function hasDetail(e: LogEntry): boolean {
-  return !!e.response || !!e.error
+  return !!e.response || !!e.error || !!e.progress
 }
 
 function mainRowInnerHTML(e: LogEntry): string {
   const isOpen = expanded.has(e.id)
   const btn = hasDetail(e)
     ? `<button class="expand-btn${isOpen ? ' open' : ''}" aria-expanded="${isOpen}"`
-      + ` title="${isOpen ? 'Hide detail' : (e.response ? 'View response' : 'View error')}"`
+      + ` title="${isOpen ? 'Hide detail' : (e.progress ? 'View activity' : e.response ? 'View response' : 'View error')}"`
       + ` aria-label="Toggle detail">${CHEV_SVG}</button>`
     : ''
   return `
     <td>${modelCell(e.model)}</td>
     <td>${behaviorCell(e.behavior)}</td>
     <td>${targetCell(e)}</td>
-    <td>${statusCell(e)}</td>
+    <td class="agent-status-cell">${statusCell(e)}${progressCell(e)}</td>
     <td class="started-cell"><span class="date">${escapeHtml(startedRel(e))}</span></td>
     <td class="elapsed-cell"><span class="date">${escapeHtml(elapsedText(e))}</span></td>
     <td class="replay-cell">${replayCell(e)}</td>
@@ -354,12 +401,32 @@ function setExpandContent(tr: HTMLTableRowElement, id: string) {
   const errorBlock = entry?.error
     ? `<pre class="agent-response-error">${escapeHtml(entry.error)}</pre>`
     : ''
+  const activity = entry ? progressDetail(entry) : ''
   const inner = state.loading
     ? '<div class="agent-response-loading">Loading…</div>'
     : (state.body
         ? `<pre class="agent-response-body">${escapeHtml(state.body)}</pre>`
-        : (errorBlock ? '' : '<div class="agent-response-empty">No response body.</div>'))
-  tr.innerHTML = `<td colspan="8">${errorBlock}${inner}</td>`
+        : (errorBlock || activity ? '' : '<div class="agent-response-empty">No response body.</div>'))
+  tr.innerHTML = `<td colspan="8">${activity}${errorBlock}${inner}</td>`
+}
+
+function refreshRunDetail(row: HTMLTableRowElement, entry: LogEntry): void {
+  const section = row.querySelector<HTMLElement>('.agent-progress-detail')
+  const next = progressDetail(entry)
+  if (section) {
+    const selection = window.getSelection()
+    const selected = selection && !selection.isCollapsed && selection.anchorNode && section.contains(selection.anchorNode)
+    if (!selected && section.outerHTML !== next) section.outerHTML = next
+  } else if (next) {
+    row.querySelector('td')?.insertAdjacentHTML('afterbegin', next)
+  }
+  const error = row.querySelector<HTMLElement>('td > .agent-response-error')
+  const nextError = entry.error ? `<pre class="agent-response-error">${escapeHtml(entry.error)}</pre>` : ''
+  if (error) {
+    if (error.outerHTML !== nextError) error.outerHTML = nextError
+  } else if (nextError) {
+    row.querySelector('td')?.insertAdjacentHTML('beforeend', nextError)
+  }
 }
 
 function buildExpandRow(e: LogEntry): HTMLTableRowElement {
@@ -426,6 +493,7 @@ function applySwarmFlip(nextEntries: LogEntry[]) {
     }
     if (expanded.has(e.id)) {
       const ex = existingExpand.get(e.id)
+      if (ex) refreshRunDetail(ex, e)
       fragment.appendChild(ex || buildExpandRow(e))
     }
   }
@@ -532,7 +600,7 @@ function render(opts: { animate?: boolean } = {}) {
   else renderRowsPlain(list)
 }
 
-async function loadResponse(id: string) {
+async function loadResponse(id: string, refresh = false) {
   const e = entries.find((x) => x.id === id)
   // A failed run often has no response body at all — its detail is the error,
   // which is already in hand. Show it without a round trip that would 404.
@@ -543,7 +611,11 @@ async function loadResponse(id: string) {
   // the user sees the loading state immediately. The next poll's FLIP
   // will preserve the row by id.
   const mainRow = bodyEl.querySelector<HTMLTableRowElement>(`.agent-row[data-id="${id}"]`)
-  if (mainRow && e) mainRow.insertAdjacentElement('afterend', buildExpandRow(e))
+  if (mainRow && e && !refresh) mainRow.insertAdjacentElement('afterend', buildExpandRow(e))
+  if (refresh) {
+    const row = bodyEl.querySelector<HTMLTableRowElement>(`.agent-expand-row[data-expand-for="${id}"]`)
+    if (row) setExpandContent(row, id)
+  }
   if (!bodyAvailable) return
 
   let next: { body: string | null, loading: boolean }
@@ -743,6 +815,10 @@ function pollOnce(): Promise<void> {
       lastLoadError = null
       lastLoadedAt = Date.now()
       render({ animate: true })
+      for (const entry of entries) {
+        const state = expanded.get(entry.id)
+        if (state && !state.loading && state.body === null && entry.response) void loadResponse(entry.id, true)
+      }
       renderStaleBanner()
     } catch (err) {
       lastLoadError = (err as Error).message
@@ -787,11 +863,11 @@ function renderStaleBanner(): void {
 // The Started column shows a relative time ("3m") computed at render.
 // Polling only re-renders every 1–5 min, so between polls every
 // Started cell is stale. This ticker re-derives just the Started text
-// from data already in hand — no fetch — every 30s, so the column
+// from data already in hand — no fetch — every 5s, so the column
 // stays live. A changed value gets a `.date-tick` class for a soft
 // fade. Created once; cheap enough (a handful of text comparisons) to
 // leave running for the app's lifetime.
-const STARTED_TICK_MS = 30_000
+const STARTED_TICK_MS = 5_000
 let startedTickTimer: ReturnType<typeof setInterval> | null = null
 
 function refreshStartedCells(): void {
@@ -821,6 +897,15 @@ function refreshStartedCells(): void {
       if (elapsedEl.textContent !== nextElapsed) elapsedEl.textContent = nextElapsed
     }
   }
+  for (const row of bodyEl.querySelectorAll<HTMLElement>('.agent-row')) {
+    const e = byId.get(row.dataset.id || '')
+    const summary = row.querySelector<HTMLElement>('.agent-progress-summary')
+    if (e && summary) summary.textContent = progressText(e)
+  }
+  for (const row of bodyEl.querySelectorAll<HTMLTableRowElement>('.agent-expand-row')) {
+    const e = byId.get(row.dataset.expandFor || '')
+    if (e) refreshRunDetail(row, e)
+  }
   renderStaleBanner()
 }
 
@@ -837,6 +922,8 @@ export async function initSwarmView() {
 }
 
 export function stopSwarmRefresh() {
+  if (progressPoll) clearInterval(progressPoll)
+  progressPoll = null
   if (swarmListening) {
     window.removeEventListener('poise:refresh-tick', onSwarmTick)
     swarmListening = false
@@ -846,5 +933,8 @@ export function stopSwarmRefresh() {
 function startSwarmPolling() {
   if (swarmListening) return
   window.addEventListener('poise:refresh-tick', onSwarmTick)
+  progressPoll = setInterval(() => {
+    if (!viewEl.hidden && entries.some(isRunning)) void pollOnce()
+  }, 15_000)
   swarmListening = true
 }

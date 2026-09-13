@@ -8,6 +8,7 @@
 // Everything is hash-routed now — Poise never touches the filesystem
 // the agent-interface project owns.
 
+import { parseProgress, type ModelProgress } from '../src/agent-progress'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
@@ -43,6 +44,7 @@ export interface LogEntry {
   completed_at?: string | null
   time_elapsed: string
   status: string
+  progress?: ModelProgress | null
   outcome: 'clean' | 'changes_requested' | 'approved' | 'superseded' | 'preflight_failed' | null
   head_sha: string | null
   expected_head: string | null
@@ -171,6 +173,7 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
     completed_at: completedAt,
     time_elapsed: requiredString('time_elapsed'),
     status,
+    progress: parseProgress(row.progress),
     outcome: outcome as LogEntry['outcome'],
     head_sha: headSha,
     expected_head: expectedHead,
