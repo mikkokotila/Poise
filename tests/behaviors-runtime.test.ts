@@ -142,7 +142,7 @@ function arrangeCli(
       }
     }
     if (command === 'agent-interface' && args[0] === '--review-models') {
-      return { stdout: JSON.stringify({ opus: 'opus-5-max', astra: 'gpt-6-astra-xhigh' }), stderr: '' }
+      return { stdout: JSON.stringify({ opus: 'opus-5-high', astra: 'gpt-6-astra-xhigh', policy: 'bounded-v1' }), stderr: '' }
     }
     if (command === 'github-interface' && args[0] === '--head-sha') {
       const cwdParts = String(options?.cwd || '').split('/')
@@ -1843,6 +1843,41 @@ describe('behavior launch claims', () => {
       started_at: new Date(Date.parse(launched.requestedAt) + 1_000).toISOString(),
       status: 'failed', action: 'not_started', outcome: 'preflight_failed',
       error_code: 'review_packet_too_large', error: 'remaining review input is too large',
+      expected_head: launched.expectedHead, actor: launched.actor,
+      source: launched.source, correlation_id: launched.correlationId,
+    })]
+    let modules = await restartModules()
+    modules.behaviors.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    await modules.behaviors.runEnabledBehaviorsOnce()
+    expect(modules.database.hasSeen(behavior, launched.target)).toBe(true)
+    expect(modules.database.listBehaviorDeadLetters()).toHaveLength(1)
+    expect(modules.behaviors.getBehaviorsRuntimeHealth().failures).toEqual([])
+    expect(mocks.observeAuthFailure).not.toHaveBeenCalled()
+    modules = await restartModules()
+    modules.behaviors.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    await modules.behaviors.runEnabledBehaviorsOnce()
+    await modules.behaviors.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(modules.database.listBehaviorDeadLetters()).toHaveLength(1)
+    listedPrs = [pr, { ...pr, number: 18, url: 'https://github.com/Vaquum/poise-test/pull/18' }]
+    await modules.behaviors.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+    expect(mocks.spawnDetached.mock.calls[1][1]).toContain('#18')
+    arrangeCli(behavior === 'approve-prs', false, { headSha: NEXT_HEAD_SHA })
+    await modules.behaviors.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(3)
+  })
+
+  it.each(['model_output_limit', 'review_budget_exhausted', 'review_recovery_failed'])('holds %s across restarts, without blocking another PR or a new head', async (code) => {
+    const behavior = 'approve-prs' as 'review-new-prs' | 'approve-prs'
+    const launched = behavior === 'review-new-prs'
+      ? await launchReviewBeforeCrash() : await launchApprovalBeforeCrash()
+    agentLogs = [agentLog({
+      id: 'f'.repeat(32),
+      behavior: behavior === 'review-new-prs' ? 'pr_review' : 'pr_approve',
+      started_at: new Date(Date.parse(launched.requestedAt) + 1_000).toISOString(),
+      status: 'failed', action: null, outcome: null, model: 'opus-5-high', review_policy: 'bounded-v1',
+      error_code: code, error: 'Review needs attention',
       expected_head: launched.expectedHead, actor: launched.actor,
       source: launched.source, correlation_id: launched.correlationId,
     })]

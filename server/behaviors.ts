@@ -17,10 +17,10 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { mkdir } from 'node:fs/promises'
-import { fetchAgentLogs } from './agent'
+import { fetchAgentLogs, type LogEntry } from './agent'
 import { claudeAuth } from './claude-auth'
 import { getReviewModel } from './settings'
-import { requireReviewModelSupport } from './review-model'
+import { requireReviewModelSupport, REVIEW_MODELS, REVIEW_POLICY } from './review-model'
 import {
   db,
   claimPrOperationOwned,
@@ -564,6 +564,10 @@ async function reconcileBehaviorLaunchClaims(
       console.log(
         `[behaviors] ${behavior} superseded for ${claim.launchRepo}#${claim.launchPr}; current head will be reconsidered`,
       )
+      continue
+    }
+    if (FAILED_AGENT_STATUSES.has(status) && boundedReviewFailure(call)) {
+      deadLetterClaim(claim, call.error || 'Review needs attention')
       continue
     }
     const preflightFailed = FAILED_AGENT_STATUSES.has(status)
@@ -1293,6 +1297,11 @@ async function packetBlocked(
   return false
 }
 
+function boundedReviewFailure(call: LogEntry): boolean {
+  return call.review_policy === REVIEW_POLICY
+    && ['model_output_limit', 'review_budget_exhausted', 'review_recovery_failed'].includes(call.error_code || '')
+}
+
 async function releaseFailedBehaviorIfNoAction(
   behavior: ActiveClaim['behavior'],
   repo: string,
@@ -1323,6 +1332,10 @@ async function releaseFailedBehaviorIfNoAction(
     || call.head_sha !== null) {
     return false
   }
+  // A bounded attempt already used its recovery. Hold this input across
+  // restarts; a different head or an explicit model change can be reconsidered.
+  if (boundedReviewFailure(call) && call.model === REVIEW_MODELS[getReviewModel()]
+    && await currentHeadSha(repo, number, failed.launchActor) === failed.launchExpectedHead) return false
   const blockedPacket = call.action === 'not_started'
     && call.outcome === 'preflight_failed'
     && call.error_code === 'review_packet_too_large'

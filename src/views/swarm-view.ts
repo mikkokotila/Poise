@@ -8,7 +8,7 @@
 //
 // Refresh: re-fetch the log list every 15s. The expanded-response state
 // is keyed by id and survives the refresh — opens stay open through a
-// FLIP-style row preservation.
+// stable in-place row updates.
 
 
 import { PHASE_LABELS, type ModelProgress } from '../agent-progress'
@@ -19,6 +19,7 @@ interface LogEntry {
   repo: string | null
   actor: string | null      // null on chat rows — nothing here may assume it is set
   model: string
+  recovery_model?: string | null
   behavior: string | null   // agent-interface behavior name (pr-review, mergeable, etc.)
   // Chat runs are not tied to a repo or PR; this is what identifies them, and
   // it is the same id the chat pane opens a conversation by.
@@ -185,9 +186,71 @@ function progressDetail(e: LogEntry): string {
     deadline = left > 0 ? `Stage deadline in ${Math.ceil(left / 60_000)}m` : 'Stage deadline passed; awaiting worker outcome'
   }
   const facts = [heartbeat, provider, deadline].filter(Boolean).map(escapeHtml).join(' · ')
-  const warning = p.warning ? `<p class="agent-response-error">${escapeHtml(p.warning)}</p>` : ''
+  const warning = `<p class="agent-response-error"${p.warning ? '' : ' hidden'}>${escapeHtml(p.warning || '')}</p>`
   const events = p.events.map((event) => `<li><time datetime="${escapeHtml(event.at)}">${escapeHtml(new Date(event.at).toLocaleTimeString())}</time> ${escapeHtml(event.message)}</li>`).join('')
-  return `<section class="agent-progress-detail" aria-label="Run activity"><p>${facts}</p>${warning}<ol>${events}</ol></section>`
+  return `<section class="agent-progress-detail" aria-label="Run activity"><p>${facts}</p>${warning}<ol>${events}</ol>${reasoningDetail(e)}</section>`
+}
+
+const reasoning = new Map<string, { chars: number, body: string, loading: boolean }>()
+
+function reasoningDetail(e: LogEntry): string {
+  if (e.progress?.reasoning_available === undefined) return ''
+  const saved = reasoning.get(e.id)
+  const body = saved?.body || (e.progress.reasoning_available ? 'Open to load provider reasoning.' : 'The provider has not exposed reasoning text.')
+  return `<details class="agent-reasoning" data-reasoning-id="${escapeHtml(e.id)}"><summary>Provider reasoning</summary><p>Latest 65,536 characters supplied by the provider.</p><pre class="agent-reasoning-body">${escapeHtml(body)}</pre></details>`
+}
+
+async function loadReasoning(id: string): Promise<void> {
+  const entry = entries.find((e) => e.id === id)
+  const details = bodyEl.querySelector<HTMLDetailsElement>(`details[data-reasoning-id="${id}"]`)
+  if (!details?.open || !entry?.progress?.reasoning_available) return
+  const saved = reasoning.get(id)
+  const chars = entry.progress.reasoning_chars || 0
+  if (saved?.loading || saved?.chars === chars) return
+  reasoning.set(id, { chars: saved?.chars ?? -1, body: saved?.body || 'Loading…', loading: true })
+  try {
+    const response = await fetch(`/api/agent-reasoning/${encodeURIComponent(id)}`)
+    if (!response.ok) throw new Error(`Could not load reasoning (${response.status})`)
+    const data = await response.json()
+    if (typeof data.body !== 'string') throw new Error('Invalid reasoning response')
+    reasoning.set(id, { chars, body: data.body || 'No reasoning text available.', loading: false })
+  } catch (error) {
+    reasoning.set(id, { chars: -1, body: (error as Error).message, loading: false })
+  }
+  const row = bodyEl.querySelector<HTMLTableRowElement>(`.agent-expand-row[data-expand-for="${id}"]`)
+  if (row) refreshRunDetail(row, entry)
+}
+
+// Patch only changed attributes/text. Keeping existing nodes preserves focus,
+// selection, open details, and scroll positions during the five-second tick.
+function patchNode(current: Node, next: Node): void {
+  if (current.nodeType !== next.nodeType || current.nodeName !== next.nodeName) {
+    current.parentNode?.replaceChild(next.cloneNode(true), current)
+    return
+  }
+  if (current instanceof Element && next instanceof Element) {
+    for (const attr of [...current.attributes]) {
+      if (current instanceof HTMLDetailsElement && attr.name === 'open') continue
+      if (!next.hasAttribute(attr.name)) current.removeAttribute(attr.name)
+    }
+    for (const attr of [...next.attributes]) {
+      if (current.getAttribute(attr.name) !== attr.value) current.setAttribute(attr.name, attr.value)
+    }
+  } else if (current.nodeValue !== next.nodeValue) {
+    const selection = window.getSelection()
+    if (selection && !selection.isCollapsed && (selection.anchorNode === current || selection.focusNode === current)) return
+    current.nodeValue = next.nodeValue
+  }
+  const old = [...current.childNodes]
+  const fresh = [...next.childNodes]
+  fresh.forEach((child, index) => old[index] ? patchNode(old[index], child) : current.appendChild(child.cloneNode(true)))
+  old.slice(fresh.length).forEach((child) => child.parentNode?.removeChild(child))
+}
+
+function patchContent(element: Element, markup: string): void {
+  const next = element.cloneNode(false) as Element
+  next.innerHTML = markup
+  patchNode(element, next)
 }
 
 function modelCell(s: string): string {
@@ -350,7 +413,7 @@ function renderShell() {
 }
 
 // Cell markup for one agent-call row. Split out from buildMainRow so
-// the FLIP path can refresh an *existing* row's cells in place — every
+// the refresh path can update an *existing* row's cells in place — every
 // value here (status, started, elapsed) is recomputed each call, so a
 // reused row stops freezing at its first-render values.
 // Prompt column dropped — agent-interface behaviors are mostly
@@ -374,7 +437,7 @@ function mainRowInnerHTML(e: LogEntry): string {
       + ` aria-label="Toggle detail">${CHEV_SVG}</button>`
     : ''
   return `
-    <td>${modelCell(e.model)}</td>
+    <td>${modelCell(e.recovery_model ? `${e.model} → ${e.recovery_model}` : e.model)}</td>
     <td>${behaviorCell(e.behavior)}</td>
     <td>${targetCell(e)}</td>
     <td class="agent-status-cell">${statusCell(e)}${progressCell(e)}</td>
@@ -407,7 +470,7 @@ function setExpandContent(tr: HTMLTableRowElement, id: string) {
     : (state.body
         ? `<pre class="agent-response-body">${escapeHtml(state.body)}</pre>`
         : (errorBlock || activity ? '' : '<div class="agent-response-empty">No response body.</div>'))
-  tr.innerHTML = `<td colspan="8">${activity}${errorBlock}${inner}</td>`
+  patchContent(tr, `<td colspan="8">${activity}${errorBlock}${inner}</td>`)
 }
 
 function refreshRunDetail(row: HTMLTableRowElement, entry: LogEntry): void {
@@ -416,7 +479,11 @@ function refreshRunDetail(row: HTMLTableRowElement, entry: LogEntry): void {
   if (section) {
     const selection = window.getSelection()
     const selected = selection && !selection.isCollapsed && selection.anchorNode && section.contains(selection.anchorNode)
-    if (!selected && section.outerHTML !== next) section.outerHTML = next
+    if (!selected && section.outerHTML !== next) {
+      const template = document.createElement('template')
+      template.innerHTML = next
+      if (template.content.firstChild) patchNode(section, template.content.firstChild)
+    }
   } else if (next) {
     row.querySelector('td')?.insertAdjacentHTML('afterbegin', next)
   }
@@ -437,135 +504,36 @@ function buildExpandRow(e: LogEntry): HTMLTableRowElement {
   return tr
 }
 
-// FLIP — same standard Current uses for its live lanes. Both main rows
-// and their (optional) expand-row siblings get rect-captured before the
-// reorder, then translated back to their old positions and animated
-// home over 700ms. Expand rows ride along with their main rows so the
-// pair never visually detaches during the animation.
-const FLIP_MS = 700
-
-function applySwarmFlip(nextEntries: LogEntry[]) {
-  // 1. First — capture rects of every existing row.
-  const firstRects = new Map<string, DOMRect>()        // keyed `m:<id>` for main, `e:<id>` for expand
-  const existingMain = new Map<string, HTMLTableRowElement>()
-  const existingExpand = new Map<string, HTMLTableRowElement>()
-  for (const el of [...bodyEl.children] as HTMLTableRowElement[]) {
-    if (el.classList.contains('agent-row')) {
-      const id = el.dataset.id
-      if (!id) continue
-      firstRects.set(`m:${id}`, el.getBoundingClientRect())
-      existingMain.set(id, el)
-    } else if (el.classList.contains('agent-expand-row')) {
-      const forId = el.dataset.expandFor
-      if (!forId) continue
-      firstRects.set(`e:${forId}`, el.getBoundingClientRect())
-      existingExpand.set(forId, el)
-    }
+// Stable keyed rows: unchanged rows are never detached or animated on refresh.
+function reconcileRows(nextEntries: LogEntry[]): void {
+  const main = new Map<string, HTMLTableRowElement>()
+  const detail = new Map<string, HTMLTableRowElement>()
+  for (const row of [...bodyEl.children] as HTMLTableRowElement[]) {
+    if (row.dataset.id) main.set(row.dataset.id, row)
+    if (row.dataset.expandFor) detail.set(row.dataset.expandFor, row)
   }
-
-  // 2. Last — drop departed rows, then reorder/insert.
-  const newIds = new Set(nextEntries.map((e) => e.id))
-  for (const [id, el] of existingMain)   if (!newIds.has(id))    el.remove()
-  for (const [forId, el] of existingExpand) if (!newIds.has(forId)) el.remove()
-
-  const fragment = document.createDocumentFragment()
-  for (const e of nextEntries) {
-    const main = existingMain.get(e.id)
-    if (main) {
-      // Reused row: refresh its cells from the latest data. Without
-      // this the row keeps its first-render values forever (Started
-      // frozen, status stuck at 'running'). The <tr> element identity
-      // is preserved, so the FLIP slide animation is unaffected — only
-      // the innards are swapped. dataset.callId too: a row going
-      // running→completed becomes eligible for a full-id response read.
-      main.dataset.callId = e.response ? e.id : ''
-      // Rewriting the innards destroys any text the person has selected inside
-      // this row, and the poll does it once a minute — so a selection made to
-      // copy an id or a target could vanish before the copy. Skip the rewrite
-      // when nothing in the row has actually changed, which is the common case.
-      const next = mainRowInnerHTML(e)
-      if (main.innerHTML !== next) main.innerHTML = next
-      fragment.appendChild(main)
-    } else {
-      const row = buildMainRow(e)
-      row.classList.add('new')                     // fade-in (shared rowIn keyframe)
-      fragment.appendChild(row)
-    }
-    if (expanded.has(e.id)) {
-      const ex = existingExpand.get(e.id)
-      if (ex) refreshRunDetail(ex, e)
-      fragment.appendChild(ex || buildExpandRow(e))
-    }
+  const ids = new Set(nextEntries.map((e) => e.id))
+  for (const [id, row] of main) if (!ids.has(id)) row.remove()
+  for (const [id, row] of detail) if (!ids.has(id) || !expanded.has(id)) row.remove()
+  let cursor: ChildNode | null = bodyEl.firstChild
+  const place = (row: HTMLTableRowElement) => {
+    if (cursor !== row) bodyEl.insertBefore(row, cursor)
+    cursor = row.nextSibling
   }
-  bodyEl.appendChild(fragment)
-
-  // 3. Invert — main rows and their expand siblings together.
-  const movers: HTMLTableRowElement[] = []
-  for (const e of nextEntries) {
-    const mainEl = existingMain.get(e.id)
-    if (mainEl) {
-      const first = firstRects.get(`m:${e.id}`)
-      if (first) {
-        const last = mainEl.getBoundingClientRect()
-        const dy = first.top - last.top
-        if (Math.abs(dy) >= 0.5) {
-          mainEl.style.transition = 'none'
-          mainEl.style.transform = `translateY(${dy}px)`
-          movers.push(mainEl)
-        }
-      }
+  for (const entry of nextEntries) {
+    const row = main.get(entry.id) || buildMainRow(entry)
+    row.dataset.callId = entry.response ? entry.id : ''
+    patchContent(row, mainRowInnerHTML(entry))
+    place(row)
+    if (expanded.has(entry.id)) {
+      const expandedRow = detail.get(entry.id) || buildExpandRow(entry)
+      refreshRunDetail(expandedRow, entry)
+      place(expandedRow)
     }
-    if (expanded.has(e.id)) {
-      const exEl = existingExpand.get(e.id)
-      if (exEl) {
-        const first = firstRects.get(`e:${e.id}`)
-        if (first) {
-          const last = exEl.getBoundingClientRect()
-          const dy = first.top - last.top
-          if (Math.abs(dy) >= 0.5) {
-            exEl.style.transition = 'none'
-            exEl.style.transform = `translateY(${dy}px)`
-            movers.push(exEl)
-          }
-        }
-      }
-    }
-  }
-
-  // 4. Play — flush layout, then animate transforms back to identity.
-  if (movers.length > 0) {
-    void bodyEl.offsetHeight
-    requestAnimationFrame(() => {
-      for (const el of movers) {
-        el.style.transition = `transform ${FLIP_MS}ms cubic-bezier(0.4, 0, 0.2, 1)`
-        el.style.transform = ''
-      }
-      window.setTimeout(() => {
-        for (const el of movers) {
-          el.style.transition = ''
-          el.style.transform = ''
-        }
-      }, FLIP_MS + 50)
-    })
   }
 }
 
-// FLIP is right for a poll that reorders a few rows. It is wrong for filtering,
-// where hundreds of surviving rows slide 700ms at once — and at typing speed
-// each keystroke restarts the slide before the last one settles, so the table
-// churns while the person is trying to narrow it. Worse, a row that survives a
-// filter is measured against its old position tens of thousands of pixels down
-// the page and animates in from off-screen, so results look missing.
-function renderRowsPlain(list: LogEntry[]) {
-  const frag = document.createDocumentFragment()
-  for (const e of list) {
-    frag.appendChild(buildMainRow(e))
-    if (expanded.has(e.id)) frag.appendChild(buildExpandRow(e))
-  }
-  bodyEl.replaceChildren(frag)
-}
-
-function render(opts: { animate?: boolean } = {}) {
+function render() {
   // Nothing to paint into while the view is hidden. Swarm kept rebuilding all
   // ~1000 rows on every tick for the rest of the session after one visit —
   // a fetch, a parse and a full table rebuild every minute, on the main thread,
@@ -596,8 +564,7 @@ function render(opts: { animate?: boolean } = {}) {
   }
   table.hidden = false
   empty.hidden = true
-  if (opts.animate) applySwarmFlip(list)
-  else renderRowsPlain(list)
+  reconcileRows(list)
 }
 
 async function loadResponse(id: string, refresh = false) {
@@ -642,6 +609,10 @@ async function loadResponse(id: string, refresh = false) {
 }
 
 function attachClicks() {
+  bodyEl.addEventListener('toggle', (event) => {
+    const details = event.target
+    if (details instanceof HTMLDetailsElement && details.dataset.reasoningId && details.open) void loadReasoning(details.dataset.reasoningId)
+  }, true)
   bodyEl.addEventListener('click', async (ev) => {
     const target = ev.target as HTMLElement
 
@@ -814,9 +785,10 @@ function pollOnce(): Promise<void> {
       entries = (data.logs || []) as LogEntry[]
       lastLoadError = null
       lastLoadedAt = Date.now()
-      render({ animate: true })
+      render()
       for (const entry of entries) {
         const state = expanded.get(entry.id)
+        if (state) void loadReasoning(entry.id)
         if (state && !state.loading && state.body === null && entry.response) void loadResponse(entry.id, true)
       }
       renderStaleBanner()
@@ -864,8 +836,7 @@ function renderStaleBanner(): void {
 // Polling only re-renders every 1–5 min, so between polls every
 // Started cell is stale. This ticker re-derives just the Started text
 // from data already in hand — no fetch — every 5s, so the column
-// stays live. A changed value gets a `.date-tick` class for a soft
-// fade. Created once; cheap enough (a handful of text comparisons) to
+// stays live. Created once; cheap enough (a handful of text comparisons) to
 // leave running for the app's lifetime.
 const STARTED_TICK_MS = 5_000
 let startedTickTimer: ReturnType<typeof setInterval> | null = null
@@ -883,9 +854,6 @@ function refreshStartedCells(): void {
       const next = startedRel(e)
       if (cell.textContent !== next) {
         cell.textContent = next
-        cell.classList.remove('date-tick')
-        void cell.offsetWidth                        // restart the keyframe
-        cell.classList.add('date-tick')
       }
     }
     // Elapsed ticks alongside Started for a run still going. It used to hold

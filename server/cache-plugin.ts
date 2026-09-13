@@ -5,7 +5,7 @@ import { claudeAuth, type ClaudeAuthSnapshot } from './claude-auth'
 import { getCallerReleaseHealth } from './caller-release'
 import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, type Lane } from './current'
 import { handleGhBody, listOrgRepos, setReviewAgentUsername } from './gh'
-import { fetchAgentLogs, fetchAgentResponse, triggerPrReview, replayAgentJob } from './agent'
+import { fetchAgentLogs, fetchAgentResponse, fetchAgentReasoning, triggerPrReview, replayAgentJob } from './agent'
 import { listChatHistory, sendChat, saveAttachment, runDebate } from './chat'
 import { listDocs, readDoc, writeDoc, deleteDoc, newSlug, readAnnotations, writeAnnotations, getOrCreateChatSession, MAX_DOC_BYTES, MAX_ANNOTATIONS_BYTES, EditorConflictError } from './editor'
 import { readSnippetState, saveSnippets, addSnippet, espansoDetected, SnippetConflictError } from './snippets'
@@ -581,6 +581,15 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
             const stderr = err?.stderr?.toString?.() || ''
             const msg = stderr || err?.message || String(err)
             return json(res, 502, { error: 'agent-interface --read-response failed: ' + msg })
+          }
+        }
+
+        const reasoningMatch = url.match(/^\/api\/agent-reasoning\/([0-9a-fA-F]{32})(?:\?|$)/)
+        if (reasoningMatch && req.method === 'GET') {
+          try {
+            return json(res, 200, await fetchAgentReasoning(reasoningMatch[1]))
+          } catch (err: any) {
+            return json(res, 502, { error: 'agent-interface --read-reasoning failed: ' + (err.message || String(err)) })
           }
         }
 

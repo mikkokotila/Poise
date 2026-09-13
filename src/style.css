@@ -4872,3 +4872,7 @@ body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
 .agent-progress-detail p { margin: 0 0 10px; color: var(--text-secondary); }
 .agent-progress-detail ol { margin: 0; padding: 0; list-style: none; line-height: 1.7; }
 .agent-progress-detail time { color: var(--text-tertiary); margin-right: 12px; font-variant-numeric: tabular-nums; }
+
+.agent-reasoning { margin-top: 12px; }
+.agent-reasoning summary { cursor: pointer; }
+.agent-reasoning-body { max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

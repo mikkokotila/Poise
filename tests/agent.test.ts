@@ -24,7 +24,7 @@ vi.mock('../server/gh', () => ({
   localCheckoutPath: vi.fn(),
 }))
 
-import { fetchAgentLogs } from '../server/agent'
+import { fetchAgentLogs, fetchAgentReasoning } from '../server/agent'
 
 function logRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -151,7 +151,7 @@ describe('agent log compatibility', () => {
 describe('manual review model selection', () => {
   beforeEach(async () => {
     mocks.reviewModel = 'opus'
-    mocks.runFile.mockReset().mockResolvedValue({ stdout: JSON.stringify({ opus: 'opus-5-max', astra: 'gpt-6-astra-xhigh' }), stderr: '' })
+    mocks.runFile.mockReset().mockResolvedValue({ stdout: JSON.stringify({ opus: 'opus-5-high', astra: 'gpt-6-astra-xhigh', policy: 'bounded-v1' }), stderr: '' })
     const gh = await import('../server/gh')
     vi.mocked(gh.getHeadSha).mockResolvedValue('a'.repeat(40))
     vi.mocked(gh.getReviewAgentUsername).mockReturnValue('bit-mis')
@@ -211,5 +211,28 @@ describe('progress data does not determine review status', () => {
   ])('invalid observation data cannot hide the run or override its outcome', async (progress) => {
     mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([logRow({ progress, status: 'completed', outcome: 'approved' })]), stderr: '' })
     await expect(fetchAgentLogs()).resolves.toMatchObject([{ status: 'completed', outcome: 'approved', progress: null }])
+  })
+})
+
+
+describe('provider reasoning reads', () => {
+  beforeEach(() => mocks.runFile.mockReset())
+  it('reads only a full call id and bounds the CLI output', async () => {
+    mocks.runFile.mockResolvedValue({ stdout: 'exposed reasoning' })
+    await expect(fetchAgentReasoning('A'.repeat(32))).resolves.toMatchObject({ body: 'exposed reasoning' })
+    expect(mocks.runFile).toHaveBeenCalledWith('agent-interface', ['--read-reasoning', 'a'.repeat(32)], expect.objectContaining({ maxOutputBytes: 512 * 1024 }))
+    mocks.runFile.mockClear()
+    for (const id of ['../secret', 'a'.repeat(8)]) await expect(fetchAgentReasoning(id)).rejects.toThrow('invalid agent call id')
+    expect(mocks.runFile).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('review policy compatibility', () => {
+  it('rejects a Caller release without the bounded review policy', async () => {
+    const { requireReviewModelSupport } = await import('../server/review-model')
+    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify({ opus: 'opus-5-high', astra: 'gpt-6-astra-xhigh' }) })
+    await expect(requireReviewModelSupport('opus')).rejects.toThrow('Update Caller')
+    await expect(requireReviewModelSupport('astra')).rejects.toThrow('Update Caller')
   })
 })

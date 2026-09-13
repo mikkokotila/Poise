@@ -272,3 +272,57 @@ test('shows missing worker heartbeat, refreshes failures, and stops polling when
   await page.evaluate(() => window.dispatchEvent(new Event('poise:refresh-tick')))
   expect(requests).toBe(leftAt)
 })
+
+
+test('updates activity without detaching rows or collapsing provider reasoning', async ({ page }) => {
+  const id = 'c'.repeat(32)
+  const now = new Date().toISOString()
+  const row = { id, model: 'opus-5-high', behavior: 'pr_approve', repo: 'Vaquum/Origo', pr_id: '320',
+    status: 'running', started_at: now, started_at_precise: now, response: '', error: '',
+    progress: { version: 1, phase: 'reasoning', phase_started_at: now, heartbeat_at: now,
+      last_provider_event_at: now, deadline_at: null, warning: null, reasoning_available: true, reasoning_chars: 10,
+      events: [{ at: now, message: 'Past minute: new reasoning activity (12 events)' }] } }
+  let text = '<script>provider text</script>\n' + 'Evidence from the changed contract.\n'.repeat(100)
+  let reads = 0
+  await page.route('**/api/agent-logs', (route) => route.fulfill({ json: { logs: [row] } }))
+  await page.route(`**/api/agent-reasoning/${id}`, (route) => {
+    reads += 1
+    return route.fulfill({ json: { id, body: text } })
+  })
+  await page.clock.install()
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Swarm', exact: true }).click()
+  const main = page.locator(`.agent-row[data-id="${id}"]`)
+  await main.getByRole('button', { name: 'Toggle detail' }).click()
+  await expect(page.locator('.agent-progress-detail')).toContainText('new reasoning activity (12 events)')
+  await page.locator('.agent-reasoning summary').click()
+  const reasoning = page.locator('.agent-reasoning-body')
+  await expect(reasoning).toContainText('<script>provider text</script>')
+  await expect(reasoning.locator('script')).toHaveCount(0)
+  await page.evaluate(() => {
+    const nodes = [...document.querySelectorAll('.agent-row, .agent-row td, .agent-row button, .agent-expand-row, .agent-reasoning, .agent-reasoning-body')]
+    const pre = document.querySelector<HTMLElement>('.agent-reasoning-body')!
+    pre.scrollTop = 70
+    const removed: Node[] = []
+    new MutationObserver((records) => records.forEach((record) => removed.push(...record.removedNodes)))
+      .observe(document.querySelector('#swarm-body') || document.querySelector('.agent-row')!.parentNode!, { childList: true, subtree: true })
+    Object.assign(window, { stableNodes: nodes, removedNodes: removed })
+  })
+  row.progress.events.push({ at: now, message: 'Past minute: no new reasoning activity' })
+  await page.clock.fastForward(15_001)
+  await expect(page.locator('.agent-progress-detail')).toContainText('no new reasoning activity')
+  await expect(page.locator('.agent-reasoning')).toHaveAttribute('open', '')
+  expect(reads).toBe(1)
+  expect(await page.evaluate(() => {
+    const state = window as unknown as { stableNodes: Node[], removedNodes: Node[] }
+    return state.stableNodes.every((node) => node.isConnected && !state.removedNodes.includes(node))
+  })).toBe(true)
+  expect(await reasoning.evaluate((el) => el.scrollTop)).toBe(70)
+  row.progress.reasoning_chars = 20
+  text += 'New provider evidence.'
+  await page.clock.fastForward(15_001)
+  await expect(reasoning).toContainText('New provider evidence.')
+  expect(reads).toBe(2)
+  await expect(page.locator('.agent-reasoning')).toHaveAttribute('open', '')
+  expect(await reasoning.evaluate((el) => el.scrollTop)).toBe(70)
+})
