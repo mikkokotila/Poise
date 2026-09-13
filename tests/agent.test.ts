@@ -184,3 +184,32 @@ describe('manual review model selection', () => {
     expect(spawnDetached).not.toHaveBeenCalled()
   })
 })
+
+describe('progress data does not determine review status', () => {
+  const now = '2026-09-13T11:00:00.000Z'
+  const progress = {
+    version: 1, phase: 'waiting_provider', phase_started_at: now,
+    heartbeat_at: now, last_provider_event_at: null, deadline_at: null,
+    warning: null, events: [{ at: now, message: 'Waiting for provider' }],
+  }
+
+  it('preserves current progress and keeps rows from older Caller versions readable', async () => {
+    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([
+      logRow({ progress }), logRow({ id: 'b'.repeat(32) }),
+    ]), stderr: '' })
+    const rows = await fetchAgentLogs()
+    expect(rows[0].progress).toBeNull()
+    expect(rows[1].progress).toEqual(progress)
+  })
+
+  it.each([
+    { ...progress, version: 2 },
+    { ...progress, heartbeat_at: 'invalid' },
+    { ...progress, events: Array(21).fill({ at: now, message: 'event' }) },
+    { ...progress, events: [{ at: now, message: 'x'.repeat(161) }] },
+    { ...progress, phase: '__proto__' },
+  ])('invalid observation data cannot hide the run or override its outcome', async (progress) => {
+    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([logRow({ progress, status: 'completed', outcome: 'approved' })]), stderr: '' })
+    await expect(fetchAgentLogs()).resolves.toMatchObject([{ status: 'completed', outcome: 'approved', progress: null }])
+  })
+})

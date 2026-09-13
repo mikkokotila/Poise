@@ -7,7 +7,7 @@ with a framework-free browser client, a Node server, and a small SQLite store.
 ## Capabilities
 
 - **Current** — manual idea/concept/plan cards beside live issues and PRs.
-- **Swarm** — agent run status, responses, and safe replay controls.
+- **Swarm** — agent run status, live review activity, responses, and safe replay controls.
 - **Archive** — searchable GitHub issue and PR history.
 - **Behaviors** — scheduled review, approval, and unblocking automations.
 - **Snippets** — simple Espanso trigger management.
@@ -152,6 +152,19 @@ also runs the browser suite and uploads its report.
 - `tests/` — unit, integration, browser, and visual regression coverage.
 
 See [SECURITY.md](SECURITY.md) for the supported trust boundary.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+## Review activity in Swarm
+
+With a current Caller release, Opus and Astra review/approval rows show the last
+observed stage. Expand a row for timestamped activity, worker heartbeat age, last
+provider event age, and the current stage deadline. Active runs refresh every 15
+seconds while Swarm is visible. Missing heartbeats, provider silence, incomplete
+events, and runs without instrumentation are labeled explicitly. These labels
+report observations; they do not change review outcomes or trigger retries.
 
 ## License
 

@@ -16,6 +16,8 @@ type Helpers = {
   startedAtMs: (e: any) => number
   elapsedText: (e: any) => string
   hasDetail: (e: any) => boolean
+  progressText: (e: any) => string
+  progressDetail: (e: any) => string
 }
 
 async function loadHelpers(): Promise<Helpers> {
@@ -24,7 +26,7 @@ async function loadHelpers(): Promise<Helpers> {
   // otherwise only reachable through a DOM input event.
   const patched = source + `
 export const __test = {
-  sessionLabel, targetText, matchesSearch, startedAtMs, elapsedText, hasDetail,
+  sessionLabel, targetText, matchesSearch, startedAtMs, elapsedText, hasDetail, progressText, progressDetail,
   setSearch: (q: string) => { searchQuery = q },
 }
 `
@@ -152,5 +154,49 @@ describe('a failed run can be opened', () => {
 
   it('offers nothing when there is neither a body nor an error', () => {
     expect(helpers.hasDetail(entry({ response: '', error: '' }))).toBe(false)
+  })
+})
+
+
+describe('progress reports observations without inventing model activity', () => {
+  function running(overrides: Record<string, unknown> = {}) {
+    const now = new Date().toISOString()
+    return entry({ status: 'running', progress: {
+      version: 1, phase: 'reasoning', phase_started_at: now, heartbeat_at: now,
+      last_provider_event_at: now, deadline_at: null, warning: null,
+      events: [{ at: now, message: 'Provider reported reasoning activity' }],
+      ...overrides,
+    } })
+  }
+
+  it('separates a fresh worker heartbeat from an unresponsive provider', () => {
+    const row = running({ last_provider_event_at: new Date(Date.now() - 7 * 60_000).toISOString() })
+    expect(helpers.progressText(row)).toContain('No provider update for 7m')
+    expect(helpers.progressDetail(row)).toContain('Worker heartbeat 0s ago')
+  })
+
+  it('shows a lost worker heartbeat explicitly without declaring an outcome', () => {
+    const row = running({ heartbeat_at: new Date(Date.now() - 90_000).toISOString() })
+    expect(helpers.progressText(row)).toContain('Worker heartbeat missing for 1m')
+    expect(row.status).toBe('running')
+  })
+
+  it('does not imply activity for old runs without instrumentation', () => {
+    expect(helpers.progressText(entry({ status: 'running' }))).toBe('Progress unavailable for this run')
+    expect(helpers.progressText(entry({ status: 'completed' }))).toBe('')
+  })
+
+  it('makes active runs expandable and escapes activity messages', () => {
+    const row = running({ events: [{ at: new Date().toISOString(), message: '<img src=x onerror=alert(1)>' }] })
+    expect(helpers.hasDetail(row)).toBe(true)
+    expect(helpers.progressDetail(row)).not.toContain('<img')
+    expect(helpers.progressDetail(row)).toContain('&lt;img')
+  })
+
+  it('reports observation failure and overdue deadlines without claiming a failed review', () => {
+    const row = running({ warning: 'Progress stream incomplete', deadline_at: new Date(Date.now() - 1_000).toISOString() })
+    expect(helpers.progressText(row)).toContain('Progress incomplete')
+    expect(helpers.progressDetail(row)).toContain('Stage deadline passed; awaiting worker outcome')
+    expect(row.status).toBe('running')
   })
 })
