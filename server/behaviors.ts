@@ -19,6 +19,8 @@ import { tmpdir, homedir } from 'node:os'
 import { mkdir } from 'node:fs/promises'
 import { fetchAgentLogs } from './agent'
 import { claudeAuth } from './claude-auth'
+import { getReviewModel } from './settings'
+import { requireReviewModelSupport } from './review-model'
 import {
   db,
   claimPrOperationOwned,
@@ -591,7 +593,7 @@ async function reconcileBehaviorLaunchClaims(
       const message = `behavior launch exceeded ${BEHAVIOR_CLAIM_RENEWAL_MS}ms running limit`
       if (deadLetterClaim(claim, message)) {
         recordBehaviorFailure(behavior, 'worker')
-        claudeAuth.observeProcessFailure({ code: 1, signal: null, error: new Error(message) })
+        if (!call.model.startsWith('gpt-')) claudeAuth.observeProcessFailure({ code: 1, signal: null, error: new Error(message) })
       }
       continue
     }
@@ -638,7 +640,7 @@ async function reconcileBehaviorLaunchClaims(
       const message = call.error || `agent call terminated with status ${status}`
       if (deadLetterClaim(claim, message)) {
         recordBehaviorFailure(behavior, 'worker')
-        claudeAuth.observeProcessFailure(message)
+        if (!call.model.startsWith('gpt-')) claudeAuth.observeProcessFailure(message)
       }
     } else if (RUNNING_AGENT_STATUSES.has(status)) {
       setBehaviorLaunchErrorOwned(claim.key, claim.target, claim.claimId, null)
@@ -653,7 +655,7 @@ async function reconcileBehaviorLaunchClaims(
       const message = `unrecognized agent call status "${status || 'missing'}"`
       if (deadLetterClaim(claim, message)) {
         recordBehaviorFailure(behavior, 'worker')
-        claudeAuth.observeProcessFailure(message)
+        if (!call.model.startsWith('gpt-')) claudeAuth.observeProcessFailure(message)
       }
     }
   }
@@ -877,14 +879,16 @@ async function fireReview(
   const m = pr.url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
   if (!m) throw new Error('not a github PR url: ' + pr.url)
   const [, owner, repo, num] = m
+  const model = getReviewModel()
+  await waitForBehavior(requireReviewModelSupport(model))
   const actor = configuredReviewer()
-  await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
+  if (model === 'opus') await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   const pwd = await localCheckoutPath(owner, repo)
   // mkdir the cwd hack dir — agent-interface needs it to exist for
   // --pwd resolution behavior identical to triggerPrReview in agent.ts.
   await mkdir(join(GH_INTERFACE_CWD_ROOT, owner, repo), { recursive: true })
   if (!isEnabled('review-new-prs')) return false
-  await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
+  if (model === 'opus') await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   if (!isEnabled('review-new-prs') || behaviorAborted()) return false
   const expectedHead = await currentHeadSha(pr.repo, pr.number, actor)
   // The head-SHA lookup above is a subprocess with a 30s timeout, so the user
@@ -902,10 +906,13 @@ async function fireReview(
   // Pass the priority ceiling through as `--p`. agent-interface forwards
   // it to github-interface as `--p <value>`; for review-new-prs the
   // possible values are p0 / p1 / p2.
+  if (model !== getReviewModel()) return false
   const source = 'poise:review-new-prs'
   const args = [
     '--pr-review',
     `#${num}`,
+    '--model',
+    model,
     '--actor',
     actor,
     '--expected-head',
@@ -1427,12 +1434,14 @@ async function fireApprove(
   const m = pr.url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
   if (!m) throw new Error('not a github PR url: ' + pr.url)
   const [, owner, repo, num] = m
+  const model = getReviewModel()
+  await waitForBehavior(requireReviewModelSupport(model))
   const actor = configuredReviewer()
-  await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
+  if (model === 'opus') await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   const pwd = await localCheckoutPath(owner, repo)
   await mkdir(join(GH_INTERFACE_CWD_ROOT, owner, repo), { recursive: true })
   if (!isEnabled('approve-prs')) return false
-  await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
+  if (model === 'opus') await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   if (!isEnabled('approve-prs') || behaviorAborted()) return false
   const currentHead = await currentHeadSha(pr.repo, pr.number, actor)
   // The head-SHA lookup above is a subprocess with a 30s timeout, so the user
@@ -1445,10 +1454,13 @@ async function fireApprove(
       `approval head changed before launch: expected ${expectedHead}, got ${currentHead}`,
     )
   }
+  if (model !== getReviewModel()) return false
   const source = 'poise:approve-prs'
   const args = [
     '--pr-approve',
     `#${num}`,
+    '--model',
+    model,
     '--actor',
     actor,
     '--expected-head',
@@ -1941,7 +1953,7 @@ export async function runEnabledBehaviorsOnce(
       return await withBehaviorProcessLock('review-new-prs', async () => {
         await reconcileBehaviorLaunchClaims('review-new-prs')
         if (!behaviorRetryDue('review-new-prs')) return false
-        if (claudeAuth.snapshot().status !== 'authenticated') return false
+        if (getReviewModel() === 'opus' && claudeAuth.snapshot().status !== 'authenticated') return false
         await tickReviewNewPrs()
         return listBehaviorLaunchClaims('review-new-prs').length === 0
       })
@@ -1953,7 +1965,7 @@ export async function runEnabledBehaviorsOnce(
       return await withBehaviorProcessLock('approve-prs', async () => {
         await reconcileBehaviorLaunchClaims('approve-prs')
         if (!behaviorRetryDue('approve-prs')) return false
-        if (claudeAuth.snapshot().status !== 'authenticated') return false
+        if (getReviewModel() === 'opus' && claudeAuth.snapshot().status !== 'authenticated') return false
         await tickApprovePrs()
         return listBehaviorLaunchClaims('approve-prs').length === 0
       })

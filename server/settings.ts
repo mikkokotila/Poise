@@ -7,25 +7,38 @@ import { invalidateRepoListCache } from './gh'
 // back empty with no indication why.
 const GITHUB_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/
 
+export type ReviewModel = 'opus' | 'astra'
+
+export function getReviewModel(): ReviewModel {
+  const value = getMeta('reviewModel') || 'opus'
+  if (value !== 'opus' && value !== 'astra') throw new Error('reviewModel must be opus or astra')
+  return value
+}
+
 export interface Settings {
   org: string
   me: string
   timezone: string
+  reviewModel: ReviewModel
 }
 
-const KEYS: Array<keyof Settings> = ['org', 'me', 'timezone']
+const KEYS: Array<keyof Settings> = ['org', 'me', 'timezone', 'reviewModel']
 
 export function getSettings(): Settings {
   return {
     org: getMeta('org') || '',
     me: getMeta('me') || '',
     timezone: getMeta('timezone') || '',
+    reviewModel: getReviewModel(),
   }
 }
 
 export function setSettings(partial: Partial<Settings>): Settings {
   // Validate everything before writing anything: the loop below writes key by
   // key, so a value rejected halfway used to leave the earlier ones applied.
+  if ('reviewModel' in partial && partial.reviewModel !== 'opus' && partial.reviewModel !== 'astra') {
+    throw new Error('reviewModel must be opus or astra')
+  }
   const next: Partial<Settings> = {}
   for (const k of KEYS) {
     const v = partial[k]
@@ -34,7 +47,8 @@ export function setSettings(partial: Partial<Settings>): Settings {
     if ((k === 'org' || k === 'me') && trimmed && !GITHUB_NAME.test(trimmed)) {
       throw new Error(`${k} must be a GitHub name: letters, digits and single hyphens`)
     }
-    next[k] = trimmed
+    if (k === 'reviewModel') next.reviewModel = partial.reviewModel
+    else next[k] = trimmed
   }
   const orgChanged = typeof next.org === 'string' && next.org !== (getMeta('org') || '')
   for (const k of KEYS) {

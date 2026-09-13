@@ -38,6 +38,18 @@ describe('settings cache', () => {
     expect(config.settingsReady()).toBe(true)
   })
 
+  it('does not overwrite a saved model with an older in-flight refresh', async () => {
+    const previous = { org: 'acme', me: 'octocat', timezone: 'UTC', reviewModel: 'opus' as const }
+    const saved = { ...previous, reviewModel: 'astra' as const }
+    let resolve!: (value: Response) => void
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((done) => { resolve = done })))
+    const loading = config.loadSettings()
+    config.setLocalSettings(saved)
+    resolve(new Response(JSON.stringify(previous), { status: 200 }))
+    await expect(loading).resolves.toEqual(saved)
+    expect(config.getSettings().reviewModel).toBe('astra')
+  })
+
   it('keeps the prior cache when the settings request fails', async () => {
     const prior = { org: 'acme', me: 'octocat', timezone: 'UTC' }
     config.setLocalSettings(prior)
