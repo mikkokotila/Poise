@@ -1868,6 +1868,27 @@ describe('behavior launch claims', () => {
     expect(mocks.spawnDetached).toHaveBeenCalledTimes(3)
   })
 
+  it('allows an explicit model change after a bounded no-action failure', async () => {
+    const launched = await launchApprovalBeforeCrash()
+    agentLogs = [agentLog({
+      id: 'f'.repeat(32), behavior: 'pr_approve',
+      started_at: new Date(Date.parse(launched.requestedAt) + 1_000).toISOString(),
+      status: 'failed', action: null, outcome: null, model: 'opus-5-high',
+      review_policy: 'bounded-v1', error_code: 'review_budget_exhausted', error: 'Review needs attention',
+      expected_head: launched.expectedHead, actor: launched.actor,
+      source: launched.source, correlation_id: launched.correlationId,
+    })]
+    const modules = await restartModules()
+    modules.behaviors.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    await modules.behaviors.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    modules.database.setMeta('reviewModel', 'astra')
+    await modules.behaviors.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+    const args = mocks.spawnDetached.mock.calls[1][1]
+    expect(args[args.indexOf('--model') + 1]).toBe('astra')
+  })
+
   it.each(['model_output_limit', 'review_budget_exhausted', 'review_recovery_failed'])('holds %s across restarts, without blocking another PR or a new head', async (code) => {
     const behavior = 'approve-prs' as 'review-new-prs' | 'approve-prs'
     const launched = behavior === 'review-new-prs'
