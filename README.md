@@ -153,10 +153,6 @@ also runs the browser suite and uploads its report.
 
 See [SECURITY.md](SECURITY.md) for the supported trust boundary.
 
-## License
-
-MIT — see [LICENSE](LICENSE).
-
 ## Review activity in Swarm
 
 With a current Caller release, Opus and Astra review/approval rows show the last
