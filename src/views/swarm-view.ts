@@ -359,7 +359,7 @@ function matchesSearch(e: LogEntry): boolean {
   if (!searchQuery) return true
   const q = searchQuery.toLowerCase()
   return [
-    e.id, e.model, e.behavior, e.prompt, e.status, e.actor, e.repo, e.pr_id,
+    e.id, e.model, e.recovery_model, e.behavior, e.prompt, e.status, e.actor, e.repo, e.pr_id,
     targetText(e), e.session_id, e.outcome, e.error,
   ].some((f) => (f || '').toLowerCase().includes(q))
 }
