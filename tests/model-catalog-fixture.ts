@@ -1,0 +1,36 @@
+// What `agent-interface --models` prints for the catalog shipped with Caller
+// 0.3.0: one row per identity <family>-<version>-<effort>, the top two efforts
+// of the latest model per family, and the default per Caller behavior.
+
+export const CATALOG = {
+  schema_version: 2,
+  path: '/caller/agent_interface/models.toml',
+  models: [
+    { identity: 'opus-5-max', provider: 'claude', selector: 'claude-opus-5', effort: 'max' },
+    { identity: 'opus-5-xhigh', provider: 'claude', selector: 'claude-opus-5', effort: 'xhigh' },
+    { identity: 'fable-5.1-max', provider: 'claude', selector: 'claude-fable-5-1', effort: 'max' },
+    { identity: 'fable-5.1-xhigh', provider: 'claude', selector: 'claude-fable-5-1', effort: 'xhigh' },
+    { identity: 'gpt-6-astra-ultra', provider: 'codex', selector: 'gpt-6-astra', effort: 'ultra' },
+    { identity: 'gpt-6-astra-max', provider: 'codex', selector: 'gpt-6-astra', effort: 'max' },
+    { identity: 'grok-4.6-xhigh', provider: 'grok', selector: 'grok-4.6', effort: 'xhigh' },
+    { identity: 'grok-4.6-high', provider: 'grok', selector: 'grok-4.6', effort: 'high' },
+    { identity: 'gemini-3.8-flash-high', provider: 'antigravity', selector: 'gemini-3.8-flash', effort: 'high' },
+    { identity: 'gemini-3.8-flash-medium', provider: 'antigravity', selector: 'gemini-3.8-flash', effort: 'medium' },
+    { identity: 'muse-spark-1.3-contributor-max', provider: 'muse', selector: 'muse-spark-1.3-contributor', effort: 'max' },
+    { identity: 'muse-spark-1.3-contributor-xhigh', provider: 'muse', selector: 'muse-spark-1.3-contributor', effort: 'xhigh' },
+  ],
+  behaviors: {
+    pr_review: 'opus-5-xhigh',
+    pr_approve: 'opus-5-xhigh',
+    review_recovery: 'gpt-6-astra-ultra',
+    fix_failing_ci: 'opus-5-max',
+    issue_simplify: 'opus-5-max',
+    author_content: 'opus-5-max',
+    debate_moderator: 'opus-5-max',
+  },
+  debate_participants: ['opus-5-max', 'gpt-6-astra-ultra', 'grok-4.6-xhigh', 'gemini-3.8-flash-high', 'muse-spark-1.3-contributor-max'],
+  review_providers: ['claude', 'codex'],
+  policy: 'bounded-v1',
+}
+
+export const CATALOG_STDOUT = JSON.stringify(CATALOG)

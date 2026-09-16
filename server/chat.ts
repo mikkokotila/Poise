@@ -24,21 +24,15 @@ import { readDoc, slugFromEditorSession } from './editor'
 import { HttpError } from './http'
 import { claudeAuth } from './claude-auth'
 import { MAX_PROCESS_ARG_BYTES, claudeSubscriptionEnvironment, runFile, spawnDetached } from './process'
+import { agentInterfaceCwd, catalogModel, isClaudeModel, loadCatalog, resolveChoice } from './models'
+import { launchable } from './review-model'
+import { getModelSettings } from './settings'
 
 const AGENT_INTERFACE = 'agent-interface'
 
-// Models exposed by agent-interface (see agent_interface/chat.py
-// ALIASES). opus = Claude Opus (default — strongest reasoning), gpt =
-// codex CLI, gemini = Gemini Pro, grok = Grok thinking. The frontend
-// surfaces the four as a dropdown in the composer.
-export const VALID_MODELS = ['opus', 'gpt', 'gemini', 'grok'] as const
-export type ChatModel = typeof VALID_MODELS[number]
-const DEFAULT_MODEL: ChatModel = 'opus'
-
-function agentInterfaceCwd(): string {
-  return process.env.AGENT_INTERFACE_ROOT
-    || join(homedir(), 'dev', 'caller', 'agent_interface')
-}
+// Models are identities from Caller's catalog (server/models.ts); the
+// composer offers every catalog row and the settings pane picks the default
+// and fallback per place. Nothing here spells a model name.
 
 // Per-session work tree. agent-interface defaults to a TMPDIR path if
 // --pwd is omitted, but we set it explicitly so the conversation is
@@ -402,17 +396,21 @@ export async function listChatHistory(sessionId: string): Promise<ChatLogEntry[]
 export async function sendChat(
   sessionId: string,
   message: string,
-  model: string = DEFAULT_MODEL,
+  model?: string,
   attachments: string[] = [],
-): Promise<{ ok: true }> {
+): Promise<{ ok: true, model: string }> {
   if (!sessionId) throw new Error('session is required')
   assertHttpArgumentSize(sessionId, 'session')
   const trimmed = String(message || '').trim()
   if (!trimmed) throw new Error('message is required')
-  const chosen: ChatModel = (VALID_MODELS as readonly string[]).includes(model)
-    ? (model as ChatModel)
-    : DEFAULT_MODEL
-  if (chosen === 'opus') await claudeAuth.requireReady()
+  // Size failures are typed and cheap; check before consulting the catalog.
+  assertHttpArgumentSize(trimmed, 'chat prompt')
+  const catalog = await loadCatalog()
+  if (model && !catalogModel(catalog, model)) throw new HttpError(400, `unknown model ${model}`)
+  const place = slugFromEditorSession(sessionId) ? 'editor' : 'chat'
+  const chosen = launchable(catalog, model, resolveChoice(catalog, place, getModelSettings()[place]))
+  const claude = isClaudeModel(catalog, chosen)
+  if (claude) await claudeAuth.requireReady()
 
   await ensureLegacyAttachmentMigration()
   const pwd = chatPwd(sessionId)
@@ -491,17 +489,17 @@ export async function sendChat(
 
   try {
     assertHttpArgumentSize(prompt, 'chat prompt')
-    if (chosen === 'opus') await claudeAuth.requireReady()
+    if (claude) await claudeAuth.requireReady()
     await spawnDetached(
       AGENT_INTERFACE,
       ['--chat', prompt, '--model', chosen, '--session', sessionId, '--pwd', pwd],
       {
         cwd: agentInterfaceCwd(),
-        ...(chosen === 'opus' ? { env: claudeSubscriptionEnvironment() } : {}),
-        ...((contextPath || chosen === 'opus') ? {
+        ...(claude ? { env: claudeSubscriptionEnvironment() } : {}),
+        ...((contextPath || claude) ? {
           onExit: async (result: { code: number | null, signal: NodeJS.Signals | null, error?: Error }) => {
             if (contextPath) await unlink(contextPath).catch(() => undefined)
-            if (chosen === 'opus') claudeAuth.observeProcessFailure(result)
+            if (claude) claudeAuth.observeProcessFailure(result)
           },
         } : {}),
       },
@@ -510,7 +508,7 @@ export async function sendChat(
     if (contextPath) await unlink(contextPath).catch(() => undefined)
     throw error
   }
-  return { ok: true }
+  return { ok: true, model: chosen }
 }
 
 // Save an attachment uploaded by the front-end into the session's

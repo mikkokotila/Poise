@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { CATALOG } from '../model-catalog-fixture'
 
 type ClaudeAuthStatus =
   | 'checking'
@@ -52,8 +53,12 @@ async function installApiRoutes(
     }
     if (url.pathname === '/api/settings') {
       await route.fulfill({
-        json: { org: 'acme', me: 'octocat', timezone: 'UTC' },
+        json: { org: 'acme', me: 'octocat', timezone: 'UTC', models: {} },
       })
+      return
+    }
+    if (url.pathname === '/api/models') {
+      await route.fulfill({ json: modelsResponse({}) })
       return
     }
     if (url.pathname === '/api/gh') {
@@ -63,6 +68,25 @@ async function installApiRoutes(
     }
     await route.fulfill({ json: {} })
   })
+}
+
+// What /api/models answers for the catalog fixture and the given choices:
+// every place resolved to its stored choice or the Caller default.
+function modelsResponse(models: Record<string, { default: string, fallback: string }>) {
+  const places = [
+    { key: 'chat', label: 'Chat', why: 'Card chats.', review: false, seed: 'author_content' },
+    { key: 'editor', label: 'Editor chat', why: 'Editor chats.', review: false, seed: 'author_content' },
+    { key: 'pr_review', label: 'PR review', why: 'Reviews.', review: true, seed: 'pr_review' },
+    { key: 'pr_approve', label: 'PR approval', why: 'Approvals.', review: true, seed: 'pr_approve' },
+  ].map((place) => ({
+    ...place,
+    default: models[place.key]?.default || CATALOG.behaviors[place.seed as keyof typeof CATALOG.behaviors],
+    fallback: models[place.key]?.fallback || CATALOG.behaviors.review_recovery,
+    notes: [],
+    stored: models[place.key] || null,
+  }))
+  const fixed = [{ key: 'content', label: '/content', model: CATALOG.behaviors.author_content, why: 'Set by Caller.' }]
+  return { catalog: CATALOG, places, fixed, refresh: null }
 }
 
 test.beforeEach(async ({ page }) => {
@@ -162,29 +186,37 @@ test('keeps the empty dashboard layout visually stable', async ({ page }) => {
   })
 })
 
-test('saves the review model and restores it after reload', async ({ page }) => {
-  let settings = { org: 'acme', me: 'octocat', timezone: 'UTC', reviewModel: 'opus' }
+test('saves a review model choice and restores it after reload', async ({ page }) => {
+  let settings: { org: string, me: string, timezone: string, models: Record<string, { default: string, fallback: string }> } = { org: 'acme', me: 'octocat', timezone: 'UTC', models: {} }
   await page.route('**/api/settings', async (route) => {
     if (route.request().method() === 'POST') settings = { ...settings, ...route.request().postDataJSON() }
     await route.fulfill({ json: settings })
   })
+  await page.route('**/api/models', async (route) => {
+    await route.fulfill({ json: modelsResponse(settings.models) })
+  })
   await page.goto('/')
   await page.getByRole('button', { name: 'Menu', exact: true }).click()
   await page.locator('[data-action="settings"]').click()
-  const model = page.getByLabel('Review model')
-  await expect(model).toHaveValue('opus')
-  await model.selectOption('astra')
+  await page.getByRole('tab', { name: 'Models' }).click()
+  const model = page.getByLabel('PR review default model')
+  await expect(model).toHaveValue('opus-5-xhigh')
+  await expect(page.getByLabel('PR review fallback model')).toHaveValue('gpt-6-astra-ultra')
+  // Review places offer only Claude and Codex identities; chat offers all of them.
+  await expect(model.locator('option')).toHaveCount(6)
+  await expect(page.getByLabel('Chat default model', { exact: true }).locator('option')).toHaveCount(12)
+  await expect(page.locator('.st-models-fixed')).toContainText('opus-5-max')
+  await model.selectOption('gpt-6-astra-ultra')
+  await page.getByLabel('PR review fallback model').selectOption('opus-5-xhigh')
   await page.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(page.locator('.st-status')).toHaveText('Saved.')
-  expect(settings.reviewModel).toBe('astra')
+  expect(settings.models.pr_review).toEqual({ default: 'gpt-6-astra-ultra', fallback: 'opus-5-xhigh' })
   await page.reload()
   await page.getByRole('button', { name: 'Menu', exact: true }).click()
   await page.locator('[data-action="settings"]').click()
-  await expect(page.getByLabel('Review model')).toHaveValue('astra')
-  await page.getByLabel('Review model').selectOption('opus')
-  await page.getByRole('button', { name: 'Save', exact: true }).click()
-  await expect(page.locator('.st-status')).toHaveText('Saved.')
-  expect(settings.reviewModel).toBe('opus')
+  await page.getByRole('tab', { name: 'Models' }).click()
+  await expect(page.getByLabel('PR review default model')).toHaveValue('gpt-6-astra-ultra')
+  await expect(page.getByLabel('PR review fallback model')).toHaveValue('opus-5-xhigh')
 })
 
 test('shows live activity, preserves its expansion, and loads the final response', async ({ page }) => {

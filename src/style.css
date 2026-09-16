@@ -1952,6 +1952,36 @@ body:has(#behavior-memory-panel.open) #menu-toggle {
 }
 
 .st-help-info  { color: var(--text-tertiary); }
+
+/* Settings tabs: the pill picker, stretched across the panel. */
+.st-tabs {
+  margin-bottom: 16px;
+}
+.st-tabs button {
+  flex: 1;
+}
+
+/* Models tab: a place is a label, why, then its default and fallback. */
+.st-sublabel {
+  display: block;
+  font-size: 0.625rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+  margin-top: 8px;
+}
+.st-fixed-model {
+  margin-top: 4px;
+}
+.st-fixed-model code {
+  font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+  font-size: 0.75rem;
+  color: var(--text);
+}
+.st-row-tight {
+  margin-top: var(--sp-2);
+}
 .st-help-ok    { color: var(--green); }
 .st-help-error { color: var(--red); }
 

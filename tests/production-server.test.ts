@@ -354,7 +354,7 @@ describe('production server', () => {
       ref: release.ref,
       commit: EXPECTED_CALLER_COMMIT,
       packages: {
-        'agent-interface': '0.2.0',
+        'agent-interface': '0.3.0',
         'github-datastore': '0.2.0',
         'github-interface': '0.2.0',
       },

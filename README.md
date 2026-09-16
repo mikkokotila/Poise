@@ -76,16 +76,26 @@ npm run dev
 Open <http://localhost:5555>. Configure the GitHub organization, username,
 timezone, refresh interval, and theme in Settings.
 
-Settings → PR reviews → Review model selects **Opus 5 — high** (default) or
-**GPT-6 Astra — extra high** for new automatic/manual reviews, approvals, and
-replays. Save to apply; running reviews retain their model. Astra requires
-Codex CLI 0.154.0 or newer and a Codex sign-in. Install Caller with support for
-`agent-interface --review-models` before this Poise version; unsupported model
-selection fails before launching a worker. The compatible Caller policy is
-`bounded-v1`: reviews have a total 23m33s budget. On output exhaustion, Opus may
-recover once with Astra xhigh after GitHub proves no review action occurred.
-Timeouts and failed recovery remain visible and are held across restarts for the
-same input/model; new commits, new approval input, or a model change can be retried.
+Models have one name everywhere: the identity `<family>-<version>-<effort>`
+from Caller's catalog (`opus-5-max`, `gpt-6-astra-ultra`, …), the same string
+the Swarm log records. Settings → Models lists every place Poise launches a
+model — Chat, Editor chat, PR review, PR approval — with a default and a
+fallback each, plus the places Caller decides on its own (`/content`,
+`/consensus`, fix failing CI, simplify issue, the sign-in check). Review places
+accept Claude and Codex identities; their fallback is the recovery model Caller
+switches to once after a Claude output limit. For chat places the fallback
+launches when the default's provider is not signed in. A choice the catalog no
+longer contains resolves to the Caller default and says so in the pane.
+
+The catalog holds the latest model of each family with its top two efforts.
+Every morning at 07:00 `com.vaquum.poise.model-catalog` asks each CLI what it
+offers (`agent-interface --refresh-models`) and rewrites the catalog when
+something changed; Settings → Models → Check now does the same on demand and
+shows the last report. Reviews need Caller 0.3.0 or newer (`agent-interface
+--models`); an older Caller fails before launching a worker. The compatible
+review policy is `bounded-v1`: reviews have a total 23m33s budget. Timeouts and
+failed recovery remain visible and are held across restarts for the same
+input/model; new commits, new approval input, or a model change can be retried.
 
 ## Production
 
@@ -159,7 +169,7 @@ See [SECURITY.md](SECURITY.md) for the supported trust boundary.
 
 ## Review activity in Swarm
 
-With a current Caller release, Opus and Astra review/approval rows show the last
+With a current Caller release, review/approval rows show the last
 observed stage. Expand a row for timestamped activity, worker heartbeat age, last
 provider event age, and the current stage deadline. Active runs refresh every 15
 seconds while Swarm is visible. Missing heartbeats, provider silence, incomplete

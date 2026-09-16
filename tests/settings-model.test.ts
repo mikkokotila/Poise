@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { CATALOG } from './model-catalog-fixture'
 
 // server/settings.ts is the whole persisted settings model. It writes through
 // setMeta, and now also drops the org-scoped repo cache when the org changes.
@@ -23,7 +24,7 @@ beforeEach(() => {
 describe('what the settings model accepts', () => {
   it('stores a well-formed org, username and timezone', () => {
     const s = setSettings({ org: ' Vaquum ', me: ' mikkokotila ', timezone: 'Europe/Helsinki' })
-    expect(s).toEqual({ org: 'Vaquum', me: 'mikkokotila', timezone: 'Europe/Helsinki', reviewModel: 'opus' })
+    expect(s).toEqual({ org: 'Vaquum', me: 'mikkokotila', timezone: 'Europe/Helsinki', models: {} })
   })
 
   it('refuses a pasted URL rather than storing something no query can use', () => {
@@ -55,7 +56,7 @@ describe('a rejected save changes nothing at all', () => {
     setSettings({ org: 'Vaquum', me: 'mikkokotila', timezone: 'UTC' })
     expect(() => setSettings({ timezone: 'Europe/Berlin', org: 'not a valid org' })).toThrow()
     // The timezone in the same call must not have landed.
-    expect(getSettings()).toEqual({ org: 'Vaquum', me: 'mikkokotila', timezone: 'UTC', reviewModel: 'opus' })
+    expect(getSettings()).toEqual({ org: 'Vaquum', me: 'mikkokotila', timezone: 'UTC', models: {} })
   })
 })
 
@@ -87,19 +88,41 @@ describe('readiness', () => {
 })
 
 
-describe('PR review model', () => {
-  it('defaults to Opus and persists Astra across unrelated saves', () => {
-    expect(getSettings().reviewModel).toBe('opus')
-    expect(setSettings({ reviewModel: 'astra' }).reviewModel).toBe('astra')
-    expect(setSettings({ timezone: 'UTC' }).reviewModel).toBe('astra')
-    expect(setSettings({ reviewModel: 'opus' }).reviewModel).toBe('opus')
+describe('model choices per place', () => {
+  const catalog = CATALOG as any
+
+  it('stores a default and fallback per place and keeps them across unrelated saves', () => {
+    expect(getSettings().models).toEqual({})
+    const chosen = { pr_review: { default: 'gpt-6-astra-ultra', fallback: 'opus-5-xhigh' } }
+    expect(setSettings({ models: chosen }, catalog).models).toEqual(chosen)
+    expect(setSettings({ timezone: 'UTC' }).models).toEqual(chosen)
+    const more = setSettings({ models: { chat: { default: 'grok-4.6-xhigh', fallback: 'opus-5-max' } } }, catalog).models
+    expect(more).toEqual({ ...chosen, chat: { default: 'grok-4.6-xhigh', fallback: 'opus-5-max' } })
   })
 
-  it('rejects unsupported models without partially saving other settings', () => {
-    for (const value of ['fable', 'gpt', '', null, 1]) {
-      expect(() => setSettings({ org: 'Vaquum', reviewModel: value as any })).toThrow(/reviewModel/)
+  it('reads the pre-identity review preference until it is saved over', () => {
+    mocks.store.set('reviewModel', 'astra')
+    expect(getSettings().models).toEqual({
+      pr_review: { default: 'gpt-6-astra-ultra', fallback: 'opus-5-xhigh' },
+      pr_approve: { default: 'gpt-6-astra-ultra', fallback: 'opus-5-xhigh' },
+    })
+    mocks.store.set('reviewModel', 'opus')
+    expect(getSettings().models).toEqual({})
+  })
+
+  it('rejects choices the catalog cannot honor without partially saving other settings', () => {
+    const cases: Array<[unknown, RegExp]> = [
+      [{ chat: { default: 'opus', fallback: 'opus-5-max' } }, /from the catalog/],
+      [{ pr_review: { default: 'grok-4.6-xhigh', fallback: 'opus-5-xhigh' } }, /claude or codex/],
+      [{ chat: { default: 'opus-5-max', fallback: 'opus-5-max' } }, /differ/],
+      [{ content: { default: 'opus-5-max', fallback: 'opus-5-xhigh' } }, /unknown model place/],
+      [[], /object of places/],
+    ]
+    for (const [models, message] of cases) {
+      expect(() => setSettings({ org: 'Vaquum', models: models as any }, catalog)).toThrow(message)
       expect(getSettings().org).toBe('')
-      expect(getSettings().reviewModel).toBe('opus')
+      expect(getSettings().models).toEqual({})
     }
+    expect(() => setSettings({ models: { chat: { default: 'opus-5-max', fallback: 'grok-4.6-high' } } })).toThrow(/catalog is unavailable/)
   })
 })

@@ -68,15 +68,35 @@ function diagnosticEnvironment(command) {
   return env
 }
 
+// The wrapper probe asks agent-interface for the chat model Caller's catalog
+// names and checks the selector and effort that reach the Claude wrapper are
+// that row's — the same path a real chat takes, with a stand-in for claude.
+function catalogChatModel() {
+  const probe = spawnSync('agent-interface', ['--models'], {
+    encoding: 'utf8',
+    env: diagnosticEnvironment('agent-interface'),
+    timeout: 10_000,
+    windowsHide: true,
+  })
+  if (probe.status !== 0) return null
+  try {
+    const catalog = JSON.parse(probe.stdout)
+    return catalog.models.find((model) => model.identity === catalog.behaviors.author_content) || null
+  } catch {
+    return null
+  }
+}
+const chatModel = catalogChatModel()
 let wrapperProbeDirectory = null
 let wrapperProbe = null
-if (process.platform !== 'win32') {
+if (process.platform !== 'win32' && chatModel) {
   wrapperProbeDirectory = mkdtempSync(join(tmpdir(), 'poise-wrapper-contract-'))
   wrapperProbe = join(wrapperProbeDirectory, 'claude-probe')
   writeFileSync(wrapperProbe, `#!/usr/bin/env node
 const args = process.argv.slice(2)
-if (!args.includes('--model') || !args.includes('opus') || args.at(-1) !== 'Poise wrapper contract probe') {
-  process.stderr.write('invalid wrapper invocation')
+const value = (flag) => args[args.indexOf(flag) + 1]
+if (value('--model') !== ${JSON.stringify(chatModel.selector)} || value('--effort') !== ${JSON.stringify(chatModel.effort)} || args.at(-1) !== 'Poise wrapper contract probe') {
+  process.stderr.write('invalid wrapper invocation: ' + args.join(' '))
   process.exit(64)
 }
 process.stdout.write('POISE_CLAUDE_WRAPPER_CONTRACT_OK')
@@ -169,16 +189,26 @@ const checks = [
       '--debate',
       '--logs',
       '--model',
+      '--models',
       '--note',
       '--p',
       '--pwd',
       '--pr-approve',
       '--pr-review',
       '--read-response',
+      '--recovery-model',
+      '--refresh-models',
       '--rounds',
       '--session',
       '--session-id',
     ],
+  },
+  {
+    command: 'agent-interface',
+    args: ['--models'],
+    label: 'agent-interface model catalog',
+    validateOutput: () => chatModel !== null,
+    validationFailure: 'the catalog names no chat model (Update Caller)',
   },
   ...(wrapperProbe ? [{
     command: 'agent-interface',
@@ -186,7 +216,7 @@ const checks = [
       '--chat',
       'Poise wrapper contract probe',
       '--model',
-      'opus',
+      chatModel.identity,
       '--pwd',
       wrapperProbeDirectory,
       '--no-tools',

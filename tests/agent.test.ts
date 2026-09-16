@@ -2,10 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   runFile: vi.fn(),
-  reviewModel: 'opus',
+  models: {} as Record<string, { default: string, fallback: string }>,
 }))
 
-vi.mock('../server/settings', () => ({ getReviewModel: () => mocks.reviewModel }))
+vi.mock('../server/settings', () => ({ getModelSettings: () => mocks.models }))
 
 vi.mock('../server/process', () => ({
   claudeSubscriptionEnvironment: vi.fn(),
@@ -25,6 +25,7 @@ vi.mock('../server/gh', () => ({
 }))
 
 import { fetchAgentLogs, fetchAgentReasoning } from '../server/agent'
+import { CATALOG_STDOUT } from './model-catalog-fixture'
 
 function logRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -32,7 +33,7 @@ function logRow(overrides: Record<string, unknown> = {}): Record<string, unknown
     pr_id: '12',
     repo: 'owner/repo',
     actor: 'bit-mis',
-    model: 'opus',
+    model: 'opus-5-xhigh',
     behavior: 'pr_review',
     session_id: null,
     prompt: '',
@@ -150,8 +151,10 @@ describe('agent log compatibility', () => {
 
 describe('manual review model selection', () => {
   beforeEach(async () => {
-    mocks.reviewModel = 'opus'
-    mocks.runFile.mockReset().mockResolvedValue({ stdout: JSON.stringify({ opus: 'opus-5-high', astra: 'gpt-6-astra-xhigh', policy: 'bounded-v1' }), stderr: '' })
+    mocks.models = {}
+    mocks.runFile.mockReset().mockResolvedValue({ stdout: CATALOG_STDOUT, stderr: '' })
+    const { invalidateCatalog } = await import('../server/models')
+    invalidateCatalog()
     const gh = await import('../server/gh')
     vi.mocked(gh.getHeadSha).mockResolvedValue('a'.repeat(40))
     vi.mocked(gh.getReviewAgentUsername).mockReturnValue('bit-mis')
@@ -162,8 +165,7 @@ describe('manual review model selection', () => {
     vi.mocked(claudeAuth.requireReady).mockReset().mockResolvedValue(undefined)
   })
 
-  it.each(['opus', 'astra'])('uses %s for manual reviews and approval replays', async (model) => {
-    mocks.reviewModel = model
+  it('launches the catalog default with its recovery model when nothing is chosen', async () => {
     const { triggerPrReview, replayAgentJob } = await import('../server/agent')
     const { spawnDetached } = await import('../server/process')
     const { claudeAuth } = await import('../server/claude-auth')
@@ -171,9 +173,31 @@ describe('manual review model selection', () => {
     await replayAgentJob({ behavior: 'pr_approve', repo: 'o/r', pr_id: 12 })
     expect(spawnDetached).toHaveBeenCalledTimes(2)
     for (const [, args] of vi.mocked(spawnDetached).mock.calls) {
-      expect(args).toEqual(expect.arrayContaining(['--model', model, '--actor', 'bit-mis', '--expected-head', 'a'.repeat(40)]))
+      expect(args).toEqual(expect.arrayContaining(['--model', 'opus-5-xhigh', '--recovery-model', 'gpt-6-astra-ultra', '--actor', 'bit-mis', '--expected-head', 'a'.repeat(40)]))
     }
-    expect(claudeAuth.requireReady).toHaveBeenCalledTimes(model === 'opus' ? 4 : 0)
+    expect(claudeAuth.requireReady).toHaveBeenCalledTimes(4)
+  })
+
+  it('launches the chosen default and fallback, and skips the Claude gate for Codex', async () => {
+    const choice = { default: 'gpt-6-astra-ultra', fallback: 'opus-5-xhigh' }
+    mocks.models = { pr_review: choice, pr_approve: choice }
+    const { triggerPrReview, replayAgentJob } = await import('../server/agent')
+    const { spawnDetached } = await import('../server/process')
+    const { claudeAuth } = await import('../server/claude-auth')
+    await triggerPrReview('https://github.com/o/r/pull/12')
+    await replayAgentJob({ behavior: 'pr_approve', repo: 'o/r', pr_id: 12 })
+    for (const [, args] of vi.mocked(spawnDetached).mock.calls) {
+      expect(args).toEqual(expect.arrayContaining(['--model', 'gpt-6-astra-ultra', '--recovery-model', 'opus-5-xhigh']))
+    }
+    expect(claudeAuth.requireReady).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the catalog default when the chosen model was retired', async () => {
+    mocks.models = { pr_review: { default: 'opus-4.8-max', fallback: 'gpt-6-astra-ultra' } }
+    const { triggerPrReview } = await import('../server/agent')
+    const { spawnDetached } = await import('../server/process')
+    await triggerPrReview('https://github.com/o/r/pull/12')
+    expect(vi.mocked(spawnDetached).mock.calls[0][1]).toEqual(expect.arrayContaining(['--model', 'opus-5-xhigh']))
   })
 
   it('does not launch against Caller that cannot honor the selection', async () => {
@@ -229,10 +253,14 @@ describe('provider reasoning reads', () => {
 
 
 describe('review policy compatibility', () => {
-  it('rejects a Caller release without the bounded review policy', async () => {
-    const { requireReviewModelSupport } = await import('../server/review-model')
-    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify({ opus: 'opus-5-high', astra: 'gpt-6-astra-xhigh' }) })
-    await expect(requireReviewModelSupport('opus')).rejects.toThrow('Update Caller')
-    await expect(requireReviewModelSupport('astra')).rejects.toThrow('Update Caller')
+  it('rejects a Caller release without the bounded review policy or the catalog', async () => {
+    const { reviewChoice } = await import('../server/review-model')
+    const { invalidateCatalog } = await import('../server/models')
+    invalidateCatalog()
+    mocks.runFile.mockResolvedValue({ stdout: CATALOG_STDOUT.replace('"policy":"bounded-v1"', '"policy":"unbounded"'), stderr: '' })
+    await expect(reviewChoice('pr_review')).rejects.toThrow('Update Caller')
+    invalidateCatalog()
+    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify({ opus: 'opus-5-high', astra: 'gpt-6-astra-xhigh', policy: 'bounded-v1' }), stderr: '' })
+    await expect(reviewChoice('pr_review')).rejects.toThrow('Update Caller')
   })
 })
