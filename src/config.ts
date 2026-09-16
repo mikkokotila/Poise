@@ -2,11 +2,18 @@
 // Loaded once at startup from /api/settings, refreshed whenever the user saves
 // in the Settings panel.
 
+export interface ModelChoice {
+  default: string
+  fallback: string
+}
+
 export interface AppSettings {
   org: string
   me: string
   timezone: string
-  reviewModel?: 'opus' | 'astra'
+  // Per place that launches a model (chat, editor, pr_review, pr_approve):
+  // the identities picked as default and fallback. Absent = Caller default.
+  models?: Partial<Record<string, ModelChoice>>
 }
 
 let current: AppSettings = { org: '', me: '', timezone: '' }

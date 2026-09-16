@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { CATALOG_STDOUT } from './model-catalog-fixture'
 
 const mocks = vi.hoisted(() => ({
   fetchAgentLogs: vi.fn(),
@@ -45,7 +46,10 @@ beforeEach(async () => {
   process.env.AGENT_INTERFACE_ROOT = join(root, 'agent-interface')
   process.env.TMPDIR = join(root, 'tmp')
   mocks.fetchAgentLogs.mockReset().mockResolvedValue([])
-  mocks.runFile.mockReset()
+  mocks.runFile.mockReset().mockImplementation(async (command: string, args: string[]) => {
+    if (command === 'agent-interface' && args[0] === '--models') return { stdout: CATALOG_STDOUT, stderr: '' }
+    throw new Error(`unexpected CLI call: ${command} ${args.join(' ')}`)
+  })
   mocks.spawnDetached.mockReset().mockResolvedValue(undefined)
   mocks.authStatus = 'authenticated'
   mocks.requireAuth.mockReset().mockImplementation(() => {
@@ -76,25 +80,39 @@ function worktreeName(session: string): string {
 }
 
 describe('chat runtime hardening', () => {
-  it('gates Opus without blocking non-Claude chat models', async () => {
+  it('gates Claude models without blocking the others, and falls back off Claude when it is signed out', async () => {
     const chat = await import('../server/chat')
     database = await import('../server/db')
     mocks.authStatus = 'reauth_required'
 
-    await expect(chat.sendChat('claude-session', 'hello', 'opus'))
+    // Claude default, Claude fallback: nothing else to launch, so the gate holds.
+    database.setMeta('models', JSON.stringify({ chat: { default: 'opus-5-max', fallback: 'fable-5.1-max' } }))
+    await expect(chat.sendChat('claude-session', 'hello', 'opus-5-max'))
       .rejects.toThrow(/Claude authentication required/)
     expect(mocks.spawnDetached).not.toHaveBeenCalled()
 
-    await expect(chat.sendChat('gpt-session', 'hello', 'gpt')).resolves.toEqual({ ok: true })
+    await expect(chat.sendChat('codex-session', 'hello', 'gpt-6-astra-ultra')).resolves.toEqual({ ok: true, model: 'gpt-6-astra-ultra' })
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
     expect(mocks.spawnDetached.mock.calls[0][2]).not.toHaveProperty('env')
+
+    // A fallback on another provider launches instead of the signed-out default.
+    database.setMeta('models', JSON.stringify({ chat: { default: 'opus-5-max', fallback: 'grok-4.6-xhigh' } }))
+    await expect(chat.sendChat('claude-session', 'hello')).resolves.toEqual({ ok: true, model: 'grok-4.6-xhigh' })
+    expect(mocks.spawnDetached.mock.calls[1][1]).toEqual(expect.arrayContaining(['--model', 'grok-4.6-xhigh']))
+  })
+
+  it('rejects a model the catalog does not know instead of launching another', async () => {
+    const chat = await import('../server/chat')
+    database = await import('../server/db')
+    await expect(chat.sendChat('session', 'hello', 'opus')).rejects.toThrow(/unknown model opus/)
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
   })
 
   it('rechecks Opus immediately before launching the monitored Claude binary', async () => {
     const chat = await import('../server/chat')
     database = await import('../server/db')
 
-    await expect(chat.sendChat('claude-session', 'hello', 'opus')).resolves.toEqual({ ok: true })
+    await expect(chat.sendChat('claude-session', 'hello', 'opus-5-max')).resolves.toEqual({ ok: true, model: 'opus-5-max' })
 
     expect(mocks.requireAuth).toHaveBeenCalledTimes(2)
     expect(mocks.spawnDetached.mock.calls[0][2]).toMatchObject({
@@ -176,7 +194,7 @@ describe('chat runtime hardening', () => {
       .rejects.toMatchObject({ code: 'ENOENT' })
     expect(mocks.spawnDetached).not.toHaveBeenCalled()
 
-    await expect(chat.sendChat('owner/repo', 'hello')).resolves.toEqual({ ok: true })
+    await expect(chat.sendChat('owner/repo', 'hello')).resolves.toEqual({ ok: true, model: 'opus-5-max' })
     await expect(readFile(join(attachments, worktreeName('owner/repo'), 'one.txt'), 'utf8'))
       .resolves.toBe('durable legacy')
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
@@ -208,7 +226,7 @@ describe('chat runtime hardening', () => {
     const chat = await import('../server/chat')
     database = await import('../server/db')
 
-    await chat.sendChat('editor-brief-123', 'Review this draft.', 'gpt')
+    await chat.sendChat('editor-brief-123', 'Review this draft.', 'gpt-6-astra-ultra')
 
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
     const [, args, options] = mocks.spawnDetached.mock.calls[0] as [string, string[], {
@@ -258,7 +276,7 @@ describe('chat runtime hardening', () => {
     const chat = await import('../server/chat')
     database = await import('../server/db')
 
-    await chat.sendChat('ann-qncjuig3', 'What does this passage say?', 'gpt')
+    await chat.sendChat('ann-qncjuig3', 'What does this passage say?', 'gpt-6-astra-ultra')
 
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
     const [, args] = mocks.spawnDetached.mock.calls[0] as [string, string[], unknown]
@@ -277,7 +295,7 @@ describe('chat runtime hardening', () => {
     database = await import('../server/db')
 
     // The shape the editor now mints: `editor-<slug>-<digits>`.
-    await chat.sendChat('editor-passage-1769500000000042', 'What does this passage say?', 'gpt')
+    await chat.sendChat('editor-passage-1769500000000042', 'What does this passage say?', 'gpt-6-astra-ultra')
 
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
     const [, args] = mocks.spawnDetached.mock.calls[0] as [string, string[], unknown]

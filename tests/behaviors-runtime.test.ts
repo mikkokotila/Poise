@@ -2,6 +2,13 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { CATALOG_STDOUT } from './model-catalog-fixture'
+
+// Reading Caller's local model catalog is not external work: no GitHub call,
+// no launch. The pause assertions below ignore it.
+function externalCalls(): unknown[][] {
+  return mocks.runFile.mock.calls.filter(([command, args]: any[]) => !(command === 'agent-interface' && args[0] === '--models'))
+}
 
 const mocks = vi.hoisted(() => ({
   runFile: vi.fn(),
@@ -141,8 +148,8 @@ function arrangeCli(
         stderr: '',
       }
     }
-    if (command === 'agent-interface' && args[0] === '--review-models') {
-      return { stdout: JSON.stringify({ opus: 'opus-5-high', astra: 'gpt-6-astra-xhigh', policy: 'bounded-v1' }), stderr: '' }
+    if (command === 'agent-interface' && args[0] === '--models') {
+      return { stdout: CATALOG_STDOUT, stderr: '' }
     }
     if (command === 'github-interface' && args[0] === '--head-sha') {
       const cwdParts = String(options?.cwd || '').split('/')
@@ -477,7 +484,7 @@ describe('behavior launch claims', () => {
 
     mocks.authStatus = 'reauth_required'
     await runtime.runEnabledBehaviorsOnce()
-    expect(mocks.runFile).not.toHaveBeenCalled()
+    expect(externalCalls()).toEqual([])
     expect(mocks.spawnDetached).not.toHaveBeenCalled()
 
     mocks.authStatus = 'authenticated'
@@ -495,7 +502,7 @@ describe('behavior launch claims', () => {
 
     mocks.authStatus = 'reauth_required'
     await runtime.runEnabledBehaviorsOnce()
-    expect(mocks.runFile).not.toHaveBeenCalled()
+    expect(externalCalls()).toEqual([])
     expect(mocks.spawnDetached).not.toHaveBeenCalled()
 
     mocks.authStatus = 'authenticated'
@@ -1104,7 +1111,7 @@ describe('behavior launch claims', () => {
 
     runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
     await runtime.runEnabledBehaviorsOnce()
-    expect(mocks.runFile).not.toHaveBeenCalled()
+    expect(externalCalls()).toEqual([])
 
     mocks.authStatus = 'authenticated'
     await runtime.runEnabledBehaviorsOnce()
@@ -1873,7 +1880,7 @@ describe('behavior launch claims', () => {
     agentLogs = [agentLog({
       id: 'f'.repeat(32), behavior: 'pr_approve',
       started_at: new Date(Date.parse(launched.requestedAt) + 1_000).toISOString(),
-      status: 'failed', action: null, outcome: null, model: 'opus-5-high',
+      status: 'failed', action: null, outcome: null, model: 'opus-5-xhigh',
       review_policy: 'bounded-v1', error_code: 'review_budget_exhausted', error: 'Review needs attention',
       expected_head: launched.expectedHead, actor: launched.actor,
       source: launched.source, correlation_id: launched.correlationId,
@@ -1882,11 +1889,12 @@ describe('behavior launch claims', () => {
     modules.behaviors.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
     await modules.behaviors.runEnabledBehaviorsOnce()
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
-    modules.database.setMeta('reviewModel', 'astra')
+    modules.database.setMeta('models', JSON.stringify({ pr_approve: { default: 'gpt-6-astra-ultra', fallback: 'opus-5-xhigh' } }))
     await modules.behaviors.runEnabledBehaviorsOnce()
     expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
     const args = mocks.spawnDetached.mock.calls[1][1]
-    expect(args[args.indexOf('--model') + 1]).toBe('astra')
+    expect(args[args.indexOf('--model') + 1]).toBe('gpt-6-astra-ultra')
+    expect(args[args.indexOf('--recovery-model') + 1]).toBe('opus-5-xhigh')
   })
 
   it.each(['model_output_limit', 'review_budget_exhausted', 'review_recovery_failed'])('holds %s across restarts, without blocking another PR or a new head', async (code) => {
@@ -1897,7 +1905,7 @@ describe('behavior launch claims', () => {
       id: 'f'.repeat(32),
       behavior: behavior === 'review-new-prs' ? 'pr_review' : 'pr_approve',
       started_at: new Date(Date.parse(launched.requestedAt) + 1_000).toISOString(),
-      status: 'failed', action: null, outcome: null, model: 'opus-5-high', review_policy: 'bounded-v1',
+      status: 'failed', action: null, outcome: null, model: 'opus-5-xhigh', review_policy: 'bounded-v1',
       error_code: code, error: 'Review needs attention',
       expected_head: launched.expectedHead, actor: launched.actor,
       source: launched.source, correlation_id: launched.correlationId,
@@ -2062,6 +2070,7 @@ describe('behavior launch claims', () => {
         return Promise.resolve(datastoreHealthOutput())
       }
       if (command === 'github-datastore' && args[0] === 'view') return scan.promise
+      if (command === 'agent-interface' && args[0] === '--models') return Promise.resolve({ stdout: CATALOG_STDOUT, stderr: '' })
       throw new Error(`unexpected CLI call: ${command} ${args.join(' ')}`)
     })
     const { database: db, behaviors: runtime } = await loadModules()
@@ -2072,7 +2081,7 @@ describe('behavior launch claims', () => {
     db.recordSeen('review-new-prs', '__snapshot_v3__')
 
     const tick = runtime.runEnabledBehaviorsOnce()
-    await vi.waitFor(() => expect(mocks.runFile).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(externalCalls()).toHaveLength(2))
     const disable = runtime.setEnabled('review-new-prs', false)
     let disabled = false
     void disable.then(() => { disabled = true })
@@ -2219,7 +2228,7 @@ describe('scheduled review model selection', () => {
     runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
     await runtime.runEnabledBehaviorsOnce()
     expect(mocks.spawnDetached).toHaveBeenCalledTimes(1)
-    expect(mocks.spawnDetached.mock.calls[0][1]).toEqual(expect.arrayContaining(['--model', 'astra']))
+    expect(mocks.spawnDetached.mock.calls[0][1]).toEqual(expect.arrayContaining(['--model', 'gpt-6-astra-ultra', '--recovery-model', 'opus-5-xhigh']))
     expect(mocks.requireAuth).not.toHaveBeenCalled()
   })
 
@@ -2231,11 +2240,11 @@ describe('scheduled review model selection', () => {
     db.setMeta('behavior_review_new_prs_enabled', '1')
     db.setMeta('behavior_review_new_prs_keyver', '3')
     db.recordSeen('review-new-prs', '__snapshot_v3__')
-    mocks.requireAuth.mockImplementation(() => { db.setMeta('reviewModel', 'astra') })
+    mocks.requireAuth.mockImplementation(() => { db.setMeta('models', JSON.stringify({ pr_review: { default: 'gpt-6-astra-ultra', fallback: 'opus-5-xhigh' } })) })
     runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
     await runtime.runEnabledBehaviorsOnce()
     expect(mocks.spawnDetached).not.toHaveBeenCalled()
     await runtime.runEnabledBehaviorsOnce()
-    expect(mocks.spawnDetached.mock.calls[0][1]).toEqual(expect.arrayContaining(['--model', 'astra']))
+    expect(mocks.spawnDetached.mock.calls[0][1]).toEqual(expect.arrayContaining(['--model', 'gpt-6-astra-ultra']))
   })
 })

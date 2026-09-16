@@ -1,6 +1,8 @@
 import type { Plugin, Connect } from 'vite'
 import type { ServerResponse } from 'node:http'
-import { getSettings, setSettings } from './settings'
+import { getModelSettings, getSettings, setSettings } from './settings'
+import { MODEL_PLACES, invalidateCatalog, loadCatalog, readCatalogReport, resolveChoice, writeCatalogReport } from './models'
+import { refreshModelCatalog } from './models-refresh'
 import { claudeAuth, type ClaudeAuthSnapshot } from './claude-auth'
 import { getCallerReleaseHealth } from './caller-release'
 import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, type Lane } from './current'
@@ -109,10 +111,47 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
         if (url.startsWith('/api/settings') && req.method === 'POST') {
           try {
             const body = await readJson<any>(req)
-            const settings = setSettings(body)
+            const catalog = body && typeof body === 'object' && 'models' in body ? await loadCatalog() : undefined
+            const settings = setSettings(body, catalog)
             return json(res, 200, settings)
           } catch (err: any) {
             return json(res, httpStatus(err, 400), { error: err.message || String(err) })
+          }
+        }
+
+        // ── Models ──
+        // The catalog Caller exports, the default and fallback resolved for
+        // every place Poise launches a model, the places Caller decides on its
+        // own, and the last daily refresh report.
+        if (url === '/api/models' && req.method === 'GET') {
+          try {
+            const catalog = await loadCatalog()
+            const stored = getModelSettings()
+            const places = MODEL_PLACES.map((place) => ({
+              ...place,
+              ...resolveChoice(catalog, place.key, stored[place.key]),
+              stored: stored[place.key] || null,
+            }))
+            const fixed = [
+              { key: 'content', label: '/content', model: catalog.behaviors.author_content, why: 'Authors content in your voice; set by the Caller catalog.' },
+              { key: 'consensus', label: '/consensus', model: catalog.behaviors.debate_moderator, why: `Moderates the debate; participants: ${catalog.debate_participants.join(', ')}.` },
+              { key: 'fix_failing_ci', label: 'Fix failing CI', model: catalog.behaviors.fix_failing_ci, why: 'Caller behavior; set by the Caller catalog.' },
+              { key: 'issue_simplify', label: 'Simplify issue', model: catalog.behaviors.issue_simplify, why: 'Caller behavior; set by the Caller catalog.' },
+              { key: 'canary', label: 'Sign-in check', model: 'haiku', why: 'One minimal Claude request that proves the Claude.ai sign-in; fixed.' },
+            ]
+            return json(res, 200, { catalog, places, fixed, refresh: await readCatalogReport() })
+          } catch (err: any) {
+            return json(res, httpStatus(err, 503), { error: err.message || String(err) })
+          }
+        }
+        if (url === '/api/models/refresh' && req.method === 'POST') {
+          try {
+            const report = await refreshModelCatalog()
+            await writeCatalogReport(report)
+            invalidateCatalog()
+            return json(res, 200, report)
+          } catch (err: any) {
+            return json(res, httpStatus(err, 502), { error: err.message || String(err) })
           }
         }
 

@@ -9,7 +9,7 @@ export const PHASE_LABELS = {
   tool_requested: 'Tool requested',
   tool_running: 'Tool execution reported',
   retrying: 'Provider retrying',
-  recovering: 'Recovering with Astra',
+  recovering: 'Recovering with the fallback model',
   provider_error: 'Provider reported an error',
   provider_finished: 'Provider returned a result',
   validating: 'Validating result',

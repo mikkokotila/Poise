@@ -43,12 +43,14 @@ const launchAgents = join(home, 'Library', 'LaunchAgents')
 const serviceLabel = 'com.vaquum.poise'
 const monitorLabel = 'com.vaquum.poise.health'
 const updaterLabel = 'com.vaquum.poise.caller-update'
+const catalogLabel = 'com.vaquum.poise.model-catalog'
 const datastoreSyncLabel = 'com.vaquum.github-datastore.sync'
 const datastoreReconcileLabel = 'com.vaquum.github-datastore.reconcile'
 const datastoreHealthLabel = 'com.vaquum.github-datastore.health'
 const servicePlist = join(launchAgents, `${serviceLabel}.plist`)
 const monitorPlist = join(launchAgents, `${monitorLabel}.plist`)
 const updaterPlist = join(launchAgents, `${updaterLabel}.plist`)
+const catalogPlist = join(launchAgents, `${catalogLabel}.plist`)
 const datastoreSyncPlist = join(launchAgents, `${datastoreSyncLabel}.plist`)
 const datastoreReconcilePlist = join(launchAgents, `${datastoreReconcileLabel}.plist`)
 const datastoreHealthPlist = join(launchAgents, `${datastoreHealthLabel}.plist`)
@@ -491,6 +493,19 @@ async function main() {
     key('StandardOutPath', `<string>${xml(join(logRoot, 'caller-update.out.log'))}</string>`),
     key('StandardErrorPath', `<string>${xml(join(logRoot, 'caller-update.err.log'))}</string>`),
   ])
+  // Once a day, first thing in the morning: ask each model CLI for its latest
+  // model and efforts and keep the catalog current. Calendar-only — a caller
+  // update reinstalls these services and must not trigger a fresh round of
+  // model probes each time.
+  const catalog = plist([
+    key('Label', `<string>${catalogLabel}</string>`),
+    key('ProgramArguments', array([node, join(projectRoot, 'scripts', 'refresh-models.mjs')])),
+    key('WorkingDirectory', `<string>${xml(projectRoot)}</string>`),
+    key('EnvironmentVariables', dictionary(environment)),
+    key('StartCalendarInterval', '<dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>'),
+    key('StandardOutPath', `<string>${xml(join(logRoot, 'model-catalog.out.log'))}</string>`),
+    key('StandardErrorPath', `<string>${xml(join(logRoot, 'model-catalog.err.log'))}</string>`),
+  ])
   const datastoreCommand = (args) => [
     'set -euo pipefail',
     `export PATH=${shell(path)}`,
@@ -540,6 +555,7 @@ async function main() {
     atomicWrite(servicePlist, service),
     atomicWrite(monitorPlist, monitor),
     atomicWrite(updaterPlist, updater),
+    atomicWrite(catalogPlist, catalog),
     atomicWrite(datastoreSyncPlist, datastoreSync),
     atomicWrite(datastoreReconcilePlist, datastoreReconcile),
     atomicWrite(datastoreHealthPlist, datastoreHealth),
@@ -549,16 +565,19 @@ async function main() {
   if (!selfUpdating) await bootout(updaterLabel)
   await bootout(monitorLabel)
   await bootout(serviceLabel)
+  await bootout(catalogLabel)
   await bootout(datastoreReconcileLabel)
   await bootout(datastoreSyncLabel)
   await bootout(datastoreHealthLabel)
   await run('/bin/launchctl', ['enable', `${domain}/${serviceLabel}`])
   await run('/bin/launchctl', ['enable', `${domain}/${monitorLabel}`])
   await run('/bin/launchctl', ['enable', `${domain}/${updaterLabel}`])
+  await run('/bin/launchctl', ['enable', `${domain}/${catalogLabel}`])
   await run('/bin/launchctl', ['enable', `${domain}/${datastoreSyncLabel}`])
   await run('/bin/launchctl', ['enable', `${domain}/${datastoreReconcileLabel}`])
   await run('/bin/launchctl', ['enable', `${domain}/${datastoreHealthLabel}`])
   await bootstrap(datastoreSyncPlist)
+  await bootstrap(catalogPlist)
   await bootstrap(datastoreReconcilePlist)
   await bootstrap(datastoreHealthPlist)
   await bootstrap(servicePlist)

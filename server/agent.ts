@@ -14,8 +14,7 @@ import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { getHeadSha, getReviewAgentUsername, localCheckoutPath } from './gh'
 import { claudeAuth } from './claude-auth'
-import { getReviewModel } from './settings'
-import { requireReviewModelSupport } from './review-model'
+import { needsClaude, reviewChoice } from './review-model'
 import { claudeSubscriptionEnvironment, runFile, spawnDetached } from './process'
 
 const CLI = 'agent-interface'
@@ -225,21 +224,23 @@ export async function triggerPrReview(
   const [, owner, repo, num] = m
   const actor = getReviewAgentUsername()
   const repoFullName = `${owner}/${repo}`
-  const model = getReviewModel()
-  await requireReviewModelSupport(model)
-  if (model === 'opus') await claudeAuth.requireReady()
+  const { model, recovery, catalog } = await reviewChoice('pr_review')
+  const claude = needsClaude(catalog, model)
+  if (claude) await claudeAuth.requireReady()
   const pwd = await localCheckoutPath(owner, repo)
   const expectedHead = await getHeadSha(repoFullName, Number(num))
   const source = 'poise:manual-review'
   const correlationId = randomUUID()
 
-  if (model === 'opus') await claudeAuth.requireReady()
-  if (model !== getReviewModel()) throw new Error('Review model changed; retry the request')
+  if (claude) await claudeAuth.requireReady()
+  if ((await reviewChoice('pr_review')).model !== model) throw new Error('Review model changed; retry the request')
   await spawnDetached(CLI, [
     '--pr-review',
     `#${num}`,
     '--model',
     model,
+    '--recovery-model',
+    recovery,
     '--actor',
     actor,
     '--expected-head',
@@ -253,7 +254,7 @@ export async function triggerPrReview(
   ], {
     cwd: agentCwd(),
     env: claudeSubscriptionEnvironment(),
-    onExit: (result) => { if (model === 'opus') claudeAuth.observeProcessFailure(result) },
+    onExit: (result) => { if (claude) claudeAuth.observeProcessFailure(result) },
   })
   return { ok: true, source, correlationId }
 }
@@ -282,22 +283,25 @@ export async function replayAgentJob(input: {
   else if (behavior === 'pr_approve') flag = '--pr-approve'
   else throw new Error(`behavior "${behavior}" is not replayable`)
 
-  const model = getReviewModel()
-  await requireReviewModelSupport(model)
-  if (model === 'opus') await claudeAuth.requireReady()
+  const place = behavior === 'pr_review' ? 'pr_review' : 'pr_approve'
+  const { model, recovery, catalog } = await reviewChoice(place)
+  const claude = needsClaude(catalog, model)
+  if (claude) await claudeAuth.requireReady()
   const [owner, repoName] = repo.split('/', 2)
   const pwd = await localCheckoutPath(owner, repoName)
   const actor = getReviewAgentUsername()
   const expectedHead = await getHeadSha(repo, Number(prId))
   const source = 'poise:replay'
   const correlationId = randomUUID()
-  if (model === 'opus') await claudeAuth.requireReady()
-  if (model !== getReviewModel()) throw new Error('Review model changed; retry the request')
+  if (claude) await claudeAuth.requireReady()
+  if ((await reviewChoice(place)).model !== model) throw new Error('Review model changed; retry the request')
   await spawnDetached(CLI, [
     flag,
     `#${prId}`,
     '--model',
     model,
+    '--recovery-model',
+    recovery,
     '--actor',
     actor,
     '--expected-head',
@@ -311,7 +315,7 @@ export async function replayAgentJob(input: {
   ], {
     cwd: agentCwd(),
     env: claudeSubscriptionEnvironment(),
-    onExit: (result) => { if (model === 'opus') claudeAuth.observeProcessFailure(result) },
+    onExit: (result) => { if (claude) claudeAuth.observeProcessFailure(result) },
   })
   return { ok: true, source, correlationId }
 }

@@ -3,9 +3,10 @@ import { renderMarkdown, escapeHtml } from '../markdown'
 // Chat pane — slides in from the LEFT, occupies ~25vw (min 360px).
 // Each card has a deterministic session id; the pane reuses or starts
 // the conversation tied to that id whenever the card's chat icon is
-// clicked. Messages flow through agent-interface --chat against one
-// of four models (opus default, gpt, gemini, grok). History is
-// persisted server-side; the pane just renders + polls.
+// clicked. Messages flow through agent-interface --chat against a model
+// from Caller's catalog — every identity is offered, the settings pane
+// picks the default per place. History is persisted server-side; the
+// pane just renders + polls.
 //
 // Composer pattern follows Confab's: a single bordered "input wrap"
 // with a focus-within ring, a borderless auto-growing textarea on
@@ -35,9 +36,11 @@ interface Attachment {
   size: number
 }
 
-const MODELS = ['opus', 'gpt', 'gemini', 'grok'] as const
-type ModelKey = typeof MODELS[number]
-const DEFAULT_MODEL: ModelKey = 'opus'
+// Catalog identities and the default for the place this pane is serving
+// (`chat` for cards, `editor` for the doc chat), from /api/models. Empty
+// until loaded; the server resolves the place default when no model is sent.
+let catalogModels: string[] = []
+let placeDefaults: Record<string, string> = {}
 
 // Structured reply shape the parser tries to recover when parseEdits
 // is enabled. Mirrors server/chat.ts EDITOR_RESPONSE_FORMAT — the
@@ -199,7 +202,8 @@ let initialized = false
 let currentSession: string | null = null
 let messages: ChatLogEntry[] = []
 let attachments: Attachment[] = []
-let selectedModel: ModelKey = DEFAULT_MODEL
+// '' = let the server apply the place default (and its fallback rule).
+let selectedModel = ''
 // When opened with { parseEdits: true } (e.g. by the editor view's
 // toolbar chat button) we attempt to read each agent reply as a
 // single JSON object carrying `chat` + optional `edits[]` / `document`
@@ -380,9 +384,6 @@ const ICON_PLUS = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><
 function renderShell() {
   panelEl = document.createElement('aside')
   panelEl.id = 'chat-panel'
-  const modelOptions = MODELS
-    .map((m) => `<option value="${m}"${m === DEFAULT_MODEL ? ' selected' : ''}>${m}</option>`)
-    .join('')
   panelEl.innerHTML = `
     <div class="chat-resize" role="separator" aria-orientation="vertical" aria-label="Resize chat pane" tabindex="0"></div>
     <header class="chat-header">
@@ -398,7 +399,7 @@ function renderShell() {
           <button class="chat-attach" type="button" aria-label="Attach file" title="Attach file">${ICON_PLUS}</button>
           <span class="chat-mode-chip" id="chat-mode-chip" aria-live="polite" hidden></span>
           <div class="chat-model">
-            <select class="chat-model-select" aria-label="Model">${modelOptions}</select>
+            <select class="chat-model-select" aria-label="Model"></select>
             <span class="chat-model-chevron" aria-hidden="true">▾</span>
           </div>
           <span class="chat-controls-spacer"></span>
@@ -509,9 +510,10 @@ function renderShell() {
     if (fileInputEl) fileInputEl.value = ''
   })
   modelSelectEl.addEventListener('change', () => {
-    const v = modelSelectEl?.value as ModelKey
-    if ((MODELS as readonly string[]).includes(v)) selectedModel = v
+    const v = modelSelectEl?.value || ''
+    if (catalogModels.includes(v)) selectedModel = v
   })
+  window.addEventListener('poise:models-changed', () => { void loadModelCatalog(true) })
   chipsEl.addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('.chat-attachment-remove')
     if (!btn) return
@@ -872,7 +874,7 @@ async function send() {
       body: JSON.stringify({
         session: currentSession,
         message: text,
-        model: selectedModel,
+        ...(selectedModel ? { model: selectedModel } : {}),
         attachments: attachments.map((a) => a.name),
       }),
     })
@@ -1129,6 +1131,36 @@ export interface OpenOptions {
   onEditDecline?: (edit: EditProposal, cardKey: string) => void
 }
 
+// Fill the model select from the catalog once (or again after the settings
+// pane saved new defaults); the place default is pre-selected on open.
+let catalogLoaded: Promise<void> | null = null
+async function loadModelCatalog(force = false): Promise<void> {
+  if (catalogLoaded && !force) return catalogLoaded
+  catalogLoaded = (async () => {
+    try {
+      const res = await fetch('/api/models')
+      if (!res.ok) return
+      const data = await res.json() as { catalog: { models: Array<{ identity: string }> }, places: Array<{ key: string, default: string }> }
+      catalogModels = data.catalog.models.map((m) => m.identity)
+      placeDefaults = Object.fromEntries(data.places.map((p) => [p.key, p.default]))
+      if (modelSelectEl) {
+        modelSelectEl.innerHTML = catalogModels
+          .map((m) => `<option value="${m}">${m}</option>`)
+          .join('')
+        applyPlaceDefault()
+      }
+    } catch { /* the server applies the place default when no model is sent */ }
+  })()
+  return catalogLoaded
+}
+
+function applyPlaceDefault() {
+  const wanted = placeDefaults[parseEditsEnabled ? 'editor' : 'chat'] || ''
+  if (!wanted || !catalogModels.includes(wanted)) return
+  selectedModel = wanted
+  if (modelSelectEl) modelSelectEl.value = wanted
+}
+
 export async function open(sessionId: string, label: string, draft?: string, options: OpenOptions = {}) {
   if (!initialized) {
     initialized = true
@@ -1165,6 +1197,7 @@ export async function open(sessionId: string, label: string, draft?: string, opt
   // opens. They track the caller's current intent rather than
   // persisting across pane reuse.
   parseEditsEnabled = !!options.parseEdits
+  void loadModelCatalog().then(applyPlaceDefault)
   hoverCb = options.onEditHover || null
   leaveCb = options.onEditLeave || null
   acceptCb = options.onEditAccept || null

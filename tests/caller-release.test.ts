@@ -42,7 +42,7 @@ async function configureRelease(commit = EXPECTED_COMMIT): Promise<void> {
     ref: 'main',
     commit: EXPECTED_COMMIT,
     packages: {
-      'agent-interface': '0.2.0',
+      'agent-interface': '0.3.0',
       'github-datastore': '0.2.0',
       'github-interface': '0.2.0',
     },

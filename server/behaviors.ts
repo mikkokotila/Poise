@@ -19,8 +19,8 @@ import { tmpdir, homedir } from 'node:os'
 import { mkdir } from 'node:fs/promises'
 import { fetchAgentLogs, type LogEntry } from './agent'
 import { claudeAuth } from './claude-auth'
-import { getReviewModel } from './settings'
-import { requireReviewModelSupport, REVIEW_MODELS, REVIEW_POLICY } from './review-model'
+import { REVIEW_POLICY, needsClaude, reviewChoice } from './review-model'
+import { type Catalog, loadCatalog } from './models'
 import {
   db,
   claimPrOperationOwned,
@@ -442,6 +442,9 @@ async function reconcileBehaviorLaunchClaims(
     for (const claim of claims) retainClaimSafely(claim, message)
     throw error
   }
+  // Which sign-in a failed call counts against is decided by its model's
+  // provider; a log row can name a model the catalog has since retired.
+  const catalogForCalls: Catalog | null = await loadCatalog().catch(() => null)
 
   let recoveredDeadLetter = false
   const expectedActions = behavior === 'review-new-prs'
@@ -597,7 +600,7 @@ async function reconcileBehaviorLaunchClaims(
       const message = `behavior launch exceeded ${BEHAVIOR_CLAIM_RENEWAL_MS}ms running limit`
       if (deadLetterClaim(claim, message)) {
         recordBehaviorFailure(behavior, 'worker')
-        if (!call.model.startsWith('gpt-')) claudeAuth.observeProcessFailure({ code: 1, signal: null, error: new Error(message) })
+        if (needsClaude(catalogForCalls, call.model)) claudeAuth.observeProcessFailure({ code: 1, signal: null, error: new Error(message) })
       }
       continue
     }
@@ -644,7 +647,7 @@ async function reconcileBehaviorLaunchClaims(
       const message = call.error || `agent call terminated with status ${status}`
       if (deadLetterClaim(claim, message)) {
         recordBehaviorFailure(behavior, 'worker')
-        if (!call.model.startsWith('gpt-')) claudeAuth.observeProcessFailure(message)
+        if (needsClaude(catalogForCalls, call.model)) claudeAuth.observeProcessFailure(message)
       }
     } else if (RUNNING_AGENT_STATUSES.has(status)) {
       setBehaviorLaunchErrorOwned(claim.key, claim.target, claim.claimId, null)
@@ -659,7 +662,7 @@ async function reconcileBehaviorLaunchClaims(
       const message = `unrecognized agent call status "${status || 'missing'}"`
       if (deadLetterClaim(claim, message)) {
         recordBehaviorFailure(behavior, 'worker')
-        if (!call.model.startsWith('gpt-')) claudeAuth.observeProcessFailure(message)
+        if (needsClaude(catalogForCalls, call.model)) claudeAuth.observeProcessFailure(message)
       }
     }
   }
@@ -883,16 +886,16 @@ async function fireReview(
   const m = pr.url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
   if (!m) throw new Error('not a github PR url: ' + pr.url)
   const [, owner, repo, num] = m
-  const model = getReviewModel()
-  await waitForBehavior(requireReviewModelSupport(model))
+  const { model, recovery, catalog } = await waitForBehavior(reviewChoice('pr_review'))
+  const claude = needsClaude(catalog, model)
   const actor = configuredReviewer()
-  if (model === 'opus') await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
+  if (claude) await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   const pwd = await localCheckoutPath(owner, repo)
   // mkdir the cwd hack dir — agent-interface needs it to exist for
   // --pwd resolution behavior identical to triggerPrReview in agent.ts.
   await mkdir(join(GH_INTERFACE_CWD_ROOT, owner, repo), { recursive: true })
   if (!isEnabled('review-new-prs')) return false
-  if (model === 'opus') await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
+  if (claude) await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   if (!isEnabled('review-new-prs') || behaviorAborted()) return false
   const expectedHead = await currentHeadSha(pr.repo, pr.number, actor)
   // The head-SHA lookup above is a subprocess with a 30s timeout, so the user
@@ -910,13 +913,15 @@ async function fireReview(
   // Pass the priority ceiling through as `--p`. agent-interface forwards
   // it to github-interface as `--p <value>`; for review-new-prs the
   // possible values are p0 / p1 / p2.
-  if (model !== getReviewModel()) return false
+  if ((await reviewChoice('pr_review')).model !== model) return false
   const source = 'poise:review-new-prs'
   const args = [
     '--pr-review',
     `#${num}`,
     '--model',
     model,
+    '--recovery-model',
+    recovery,
     '--actor',
     actor,
     '--expected-head',
@@ -1334,7 +1339,7 @@ async function releaseFailedBehaviorIfNoAction(
   }
   // A bounded attempt already used its recovery. Hold this input across
   // restarts; a different head or an explicit model change can be reconsidered.
-  if (boundedReviewFailure(call) && call.model === REVIEW_MODELS[getReviewModel()]
+  if (boundedReviewFailure(call) && call.model === (await reviewChoice(launchBehavior === 'pr_approve' ? 'pr_approve' : 'pr_review')).model
     && await currentHeadSha(repo, number, failed.launchActor) === failed.launchExpectedHead) return false
   const blockedPacket = call.action === 'not_started'
     && call.outcome === 'preflight_failed'
@@ -1447,14 +1452,14 @@ async function fireApprove(
   const m = pr.url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
   if (!m) throw new Error('not a github PR url: ' + pr.url)
   const [, owner, repo, num] = m
-  const model = getReviewModel()
-  await waitForBehavior(requireReviewModelSupport(model))
+  const { model, recovery, catalog } = await waitForBehavior(reviewChoice('pr_approve'))
+  const claude = needsClaude(catalog, model)
   const actor = configuredReviewer()
-  if (model === 'opus') await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
+  if (claude) await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   const pwd = await localCheckoutPath(owner, repo)
   await mkdir(join(GH_INTERFACE_CWD_ROOT, owner, repo), { recursive: true })
   if (!isEnabled('approve-prs')) return false
-  if (model === 'opus') await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
+  if (claude) await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   if (!isEnabled('approve-prs') || behaviorAborted()) return false
   const currentHead = await currentHeadSha(pr.repo, pr.number, actor)
   // The head-SHA lookup above is a subprocess with a 30s timeout, so the user
@@ -1467,13 +1472,15 @@ async function fireApprove(
       `approval head changed before launch: expected ${expectedHead}, got ${currentHead}`,
     )
   }
-  if (model !== getReviewModel()) return false
+  if ((await reviewChoice('pr_approve')).model !== model) return false
   const source = 'poise:approve-prs'
   const args = [
     '--pr-approve',
     `#${num}`,
     '--model',
     model,
+    '--recovery-model',
+    recovery,
     '--actor',
     actor,
     '--expected-head',
@@ -1966,7 +1973,7 @@ export async function runEnabledBehaviorsOnce(
       return await withBehaviorProcessLock('review-new-prs', async () => {
         await reconcileBehaviorLaunchClaims('review-new-prs')
         if (!behaviorRetryDue('review-new-prs')) return false
-        if (getReviewModel() === 'opus' && claudeAuth.snapshot().status !== 'authenticated') return false
+        if (await reviewHeldByClaudeAuth('pr_review')) return false
         await tickReviewNewPrs()
         return listBehaviorLaunchClaims('review-new-prs').length === 0
       })
@@ -1978,7 +1985,7 @@ export async function runEnabledBehaviorsOnce(
       return await withBehaviorProcessLock('approve-prs', async () => {
         await reconcileBehaviorLaunchClaims('approve-prs')
         if (!behaviorRetryDue('approve-prs')) return false
-        if (getReviewModel() === 'opus' && claudeAuth.snapshot().status !== 'authenticated') return false
+        if (await reviewHeldByClaudeAuth('pr_approve')) return false
         await tickApprovePrs()
         return listBehaviorLaunchClaims('approve-prs').length === 0
       })
@@ -2205,4 +2212,16 @@ export function getScratchpadMap(): Record<BehaviorKey, string> {
   const out: Record<BehaviorKey, string> = {} as any
   for (const k of BEHAVIOR_KEYS) out[k] = getScratchpad(k)
   return out
+}
+
+// A review tick is held only while its resolved model needs the Claude.ai
+// sign-in and that sign-in is not there; a fallback on another provider runs.
+async function reviewHeldByClaudeAuth(place: 'pr_review' | 'pr_approve'): Promise<boolean> {
+  try {
+    const { model, catalog } = await reviewChoice(place)
+    return needsClaude(catalog, model) && claudeAuth.snapshot().status !== 'authenticated'
+  } catch {
+    // An unavailable catalog is reported by the tick itself.
+    return false
+  }
 }
