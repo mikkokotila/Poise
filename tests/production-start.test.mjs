@@ -82,9 +82,12 @@ describe('ensureFreshBundle', () => {
     expect(rebuilds).toBe(0)
   })
 
+  // The stamp is size plus millisecond mtime, so a same-size write landing in
+  // the same millisecond as the scaffold is invisible to it — on a fast CI
+  // runner that happened. The edits below change the size as well.
   it('rebuilds after a source file changes — the case a plain restart used to miss', async () => {
     await ensureFreshBundle({ root, log: silent, build: async () => writeBundle(root, 'v1\n') })
-    await writeFile(join(root, 'src', 'main.ts'), 'export const a = 2\n')
+    await writeFile(join(root, 'src', 'main.ts'), 'export const a = 22\n')
     const result = await ensureFreshBundle({
       root, log: silent, build: async () => writeBundle(root, 'v2\n'),
     })
@@ -94,7 +97,7 @@ describe('ensureFreshBundle', () => {
 
   it('restores the previous bundle when the rebuild fails', async () => {
     await ensureFreshBundle({ root, log: silent, build: async () => writeBundle(root, 'good\n') })
-    await writeFile(join(root, 'src', 'main.ts'), 'export const a = 3\n')
+    await writeFile(join(root, 'src', 'main.ts'), 'export const a = 33\n')
     const result = await ensureFreshBundle({
       root,
       log: silent,
