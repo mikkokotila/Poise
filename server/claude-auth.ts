@@ -158,7 +158,9 @@ function processFailed(resultOrError: unknown): boolean {
   if (!resultOrError || typeof resultOrError !== 'object') return false
   const result = resultOrError as Record<string, unknown>
   if (result.error) return true
-  if (result.signal) return true
+  // A worker killed by a signal — a stop from Swarm — says nothing about the
+  // provider; an auth or provider failure ends in a non-zero exit code.
+  if (result.signal) return false
   if (typeof result.code === 'number') return result.code !== 0
   return result.code !== undefined && result.code !== null
 }

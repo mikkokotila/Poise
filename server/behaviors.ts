@@ -647,7 +647,8 @@ async function reconcileBehaviorLaunchClaims(
       const message = call.error || `agent call terminated with status ${status}`
       if (deadLetterClaim(claim, message)) {
         recordBehaviorFailure(behavior, 'worker')
-        if (needsClaude(catalogForCalls, call.model)) claudeAuth.observeProcessFailure(message)
+        // A run the user stopped from Swarm says nothing about the provider.
+        if (call.error_code !== 'stopped' && needsClaude(catalogForCalls, call.model)) claudeAuth.observeProcessFailure(message)
       }
     } else if (RUNNING_AGENT_STATUSES.has(status)) {
       setBehaviorLaunchErrorOwned(claim.key, claim.target, claim.claimId, null)
@@ -1302,9 +1303,12 @@ async function packetBlocked(
   return false
 }
 
+// Held like the bounded failures: a run the user stopped from Swarm must not
+// be relaunched on the same head by the next tick; a new head or a replay is
+// a fresh decision.
 function boundedReviewFailure(call: LogEntry): boolean {
   return call.review_policy === REVIEW_POLICY
-    && ['model_output_limit', 'review_budget_exhausted', 'review_recovery_failed'].includes(call.error_code || '')
+    && ['model_output_limit', 'review_budget_exhausted', 'review_recovery_failed', 'stopped'].includes(call.error_code || '')
 }
 
 async function releaseFailedBehaviorIfNoAction(

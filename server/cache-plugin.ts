@@ -7,7 +7,7 @@ import { claudeAuth, type ClaudeAuthSnapshot } from './claude-auth'
 import { getCallerReleaseHealth } from './caller-release'
 import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, type Lane } from './current'
 import { handleGhBody, listOrgRepos, setReviewAgentUsername } from './gh'
-import { fetchAgentLogs, fetchAgentResponse, fetchAgentReasoning, triggerPrReview, replayAgentJob } from './agent'
+import { fetchAgentLogs, fetchAgentResponse, fetchAgentReasoning, triggerPrReview, replayAgentJob, stopAgentJob } from './agent'
 import { listChatHistory, sendChat, saveAttachment, runDebate } from './chat'
 import { listDocs, readDoc, writeDoc, deleteDoc, newSlug, readAnnotations, writeAnnotations, getOrCreateChatSession, MAX_DOC_BYTES, MAX_ANNOTATIONS_BYTES, EditorConflictError } from './editor'
 import { readSnippetState, saveSnippets, addSnippet, espansoDetected, SnippetConflictError } from './snippets'
@@ -474,6 +474,22 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
             const stderr = err?.stderr?.toString?.() || ''
             const msg = stderr || err?.message || String(err)
             return json(res, httpStatus(err, 400), { error: 'agent-replay failed: ' + msg })
+          }
+        }
+
+        // ── /api/agent-stop — interrupt a running agent-interface call ─
+        // Body: { id }. Caller signals the call's process group and closes
+        // the row as failed / "stopped"; the Swarm row settles on the next
+        // poll. Used by the Swarm view's Stop column.
+        if (url === '/api/agent-stop' && req.method === 'POST') {
+          try {
+            const body = await readJson<any>(req)
+            const result = await stopAgentJob(String(body.id || ''))
+            return json(res, 200, result)
+          } catch (err: any) {
+            const stderr = err?.stderr?.toString?.() || ''
+            const msg = (stderr || err?.message || String(err)).trim()
+            return json(res, httpStatus(err, 502), { error: 'agent-stop failed: ' + msg })
           }
         }
 

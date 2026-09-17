@@ -167,6 +167,16 @@ also runs the browser suite and uploads its report.
 
 See [SECURITY.md](SECURITY.md) for the supported trust boundary.
 
+## Stopping a run
+
+Every Swarm row that is still running has a Stop button. The first click arms
+it ("Sure?"), the second click asks Caller to stop the run: `agent-interface
+--stop` signals the call's process group and closes the row as failed with
+`error_code: stopped`. A stopped review or approval is held for that head like
+a bounded failure — it is not relaunched by the next tick; a new head or a
+replay is a fresh decision. A stop is not counted against the Claude sign-in.
+Needs a Caller release with `--stop`; older releases answer "Update Caller".
+
 ## Review activity in Swarm
 
 With a current Caller release, review/approval rows show the last

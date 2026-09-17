@@ -2635,6 +2635,7 @@ body:has(#behavior-memory-panel.open) #menu-toggle {
 .col-started  { text-align: right; }
 .col-elapsed  { text-align: right; }
 .col-replay   { width: 56px; text-align: center; }
+.col-stop     { width: 56px; text-align: center; }
 /* The text-align on the .col-* classes only hits the THs. The TDs need
    their own pin so the values right-align under their headers. Started
    and Elapsed get explicit classes; Replay is centered (overrides the
@@ -2644,6 +2645,7 @@ body:has(#behavior-memory-panel.open) #menu-toggle {
 #view-swarm tbody td.started-cell { text-align: right; }
 #view-swarm tbody td.elapsed-cell { text-align: right; }
 #view-swarm tbody td.replay-cell  { text-align: center; }
+#view-swarm tbody td.stop-cell    { text-align: center; }
 
 /* Soft fade when the 30s ticker advances a Started value (3m → 4m).
    The class is re-added on each change; the keyframe restart trick
@@ -2737,7 +2739,8 @@ button.agent-target:hover {
    The Replay button shares the same vocabulary; both classes pick up
    the same hover/transform behavior. */
 .expand-btn,
-.replay-btn {
+.replay-btn,
+.stop-btn {
   width: 24px;
   height: 24px;
   border: none;
@@ -2753,13 +2756,28 @@ button.agent-target:hover {
   transition: color var(--t-base) ease, background var(--t-base) ease, transform var(--t-quick) ease;
 }
 tr:hover .expand-btn,
-tr:hover .replay-btn { opacity: 1; }
+tr:hover .replay-btn,
+tr:hover .stop-btn { opacity: 1; }
 .expand-btn:hover,
-.replay-btn:hover { color: var(--text); background: var(--hover); }
+.replay-btn:hover,
+.stop-btn:hover { color: var(--text); background: var(--hover); }
 .expand-btn:active,
-.replay-btn:active { transform: scale(0.92); }
-.replay-btn:disabled { cursor: not-allowed; opacity: 0.4; }
-.replay-btn.spinning svg { animation: replay-spin 0.7s linear infinite; }
+.replay-btn:active,
+.stop-btn:active { transform: scale(0.92); }
+.replay-btn:disabled,
+.stop-btn:disabled { cursor: not-allowed; opacity: 0.4; }
+.replay-btn.spinning svg,
+.stop-btn.spinning svg { animation: replay-spin 0.7s linear infinite; }
+/* A running row's stop is always visible; armed it reads "Sure?" in red. */
+.stop-btn { opacity: 0.85; }
+.stop-btn.armed {
+  width: auto;
+  padding: 0 6px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--red);
+  opacity: 1;
+}
 @keyframes replay-spin {
   from { transform: rotate(0deg); }
   to   { transform: rotate(360deg); }
