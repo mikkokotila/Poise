@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import {
   chmodSync,
   closeSync,
@@ -221,6 +221,30 @@ function markFailure() {
   }
 }
 
+// Claude reports a resumed session whose transcript is gone before it makes
+// any provider call, so that failure must not open the breaker: the worker's
+// fresh start under the same id is the turn's first provider call. Only the
+// stderr tail is kept, the message is short and comes last.
+const LOCAL_FAILURE = 'No conversation found with session ID'
+const STDERR_TAIL_BYTES = 4096
+
+function launch(launchArgs) {
+  return new Promise((resolve) => {
+    const child = spawn('claude', launchArgs, {
+      env,
+      stdio: ['inherit', 'inherit', retryProtected ? 'pipe' : 'inherit'],
+      windowsHide: true,
+    })
+    let stderrTail = ''
+    child.stderr?.on('data', (chunk) => {
+      process.stderr.write(chunk)
+      stderrTail = (stderrTail + chunk.toString()).slice(-STDERR_TAIL_BYTES)
+    })
+    child.once('error', (error) => resolve({ error, stderrTail }))
+    child.once('close', (status, signal) => resolve({ status, signal, stderrTail }))
+  })
+}
+
 if (retryProtected && recentFailure()) {
   console.error('[poise] Repeated Claude launch blocked after a recent failure.')
   process.exit(75)
@@ -305,11 +329,7 @@ try {
     console.error('[poise] Claude subscription preflight failed; model launch blocked.')
     exitCode = 77
   } else {
-    const result = spawnSync('claude', ['--settings', settings, ...args], {
-      env,
-      stdio: 'inherit',
-      windowsHide: true,
-    })
+    const result = await launch(['--settings', settings, ...args])
 
     if (result.error) {
       if (retryProtected) markFailure()
@@ -318,7 +338,7 @@ try {
     } else {
       if (retryProtected) {
         if (result.status === 0) rmSync(failureMarker, { force: true })
-        else markFailure()
+        else if (!result.stderrTail.includes(LOCAL_FAILURE)) markFailure()
       }
       exitCode = result.status ?? 1
     }
@@ -326,4 +346,6 @@ try {
 } finally {
   rmSync(anthropicConfigDirectory, { recursive: true, force: true })
 }
-process.exit(exitCode)
+// Let pending stderr writes drain before exiting; the forwarded tail is what
+// callers read as the failure reason.
+process.exitCode = exitCode
