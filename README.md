@@ -81,13 +81,17 @@ from Caller's catalog (`opus-5-max`, `gpt-6-astra-ultra`, …), the same string
 the Swarm log records. Settings → Models lists every place Poise launches a
 model — Chat, Editor chat, PR review, PR approval — with a default and a
 fallback each, plus the places Caller decides on its own (`/content`,
-`/consensus`, fix failing CI, simplify issue, the sign-in check). Review places
-accept Claude and Codex identities; their fallback is the recovery model Caller
+`/consensus`, fix failing CI, simplify issue, the sign-in check). Every place
+offers every catalog model; review places follow the providers Caller lists as
+reviewing (all five since Caller #39: Claude with governed tools, the others
+with a structured verdict), and their fallback is the recovery model Caller
 switches to once after a Claude output limit. For chat places the fallback
 launches when the default's provider is not signed in. A choice the catalog no
 longer contains resolves to the Caller default and says so in the pane.
 
-The catalog holds the latest model of each family with its top two efforts.
+The catalog holds the latest model of each family with its top two efforts
+(three for Claude, so reviews can run at high; Claude keeps Opus and Fable,
+Codex Astra and Sol).
 Every morning at 07:00 `com.vaquum.poise.model-catalog` asks each CLI what it
 offers (`agent-interface --refresh-models`) and rewrites the catalog when
 something changed; Settings → Models → Check now does the same on demand and

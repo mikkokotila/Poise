@@ -202,9 +202,9 @@ test('saves a review model choice and restores it after reload', async ({ page }
   const model = page.getByLabel('PR review default model')
   await expect(model).toHaveValue('opus-5-xhigh')
   await expect(page.getByLabel('PR review fallback model')).toHaveValue('gpt-6-astra-ultra')
-  // Review places offer only Claude and Codex identities; chat offers all of them.
-  await expect(model.locator('option')).toHaveCount(6)
-  await expect(page.getByLabel('Chat default model', { exact: true }).locator('option')).toHaveCount(12)
+  // Every place offers every catalog model; review places follow the providers Caller lists.
+  await expect(model.locator('option')).toHaveCount(14)
+  await expect(page.getByLabel('Chat default model', { exact: true }).locator('option')).toHaveCount(14)
   await expect(page.locator('.st-models-fixed')).toContainText('opus-5-max')
   await model.selectOption('gpt-6-astra-ultra')
   await page.getByLabel('PR review fallback model').selectOption('opus-5-xhigh')

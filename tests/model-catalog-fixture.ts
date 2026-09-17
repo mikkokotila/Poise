@@ -1,6 +1,8 @@
-// What `agent-interface --models` prints for the catalog shipped with Caller
-// 0.3.0: one row per identity <family>-<version>-<effort>, the top two efforts
-// of the latest model per family, and the default per Caller behavior.
+// The shape of what `agent-interface --models` prints: one row per identity
+// <family>-<version>-<effort>, the top efforts of the latest model per family
+// (Claude keeps Opus and Fable, Codex Astra and Sol), the default per Caller
+// behavior, and the providers that can review — every one of them since Caller
+// #39, Claude with governed tools and the others with a structured verdict.
 
 export const CATALOG = {
   schema_version: 2,
@@ -12,6 +14,8 @@ export const CATALOG = {
     { identity: 'fable-5.1-xhigh', provider: 'claude', selector: 'claude-fable-5-1', effort: 'xhigh' },
     { identity: 'gpt-6-astra-ultra', provider: 'codex', selector: 'gpt-6-astra', effort: 'ultra' },
     { identity: 'gpt-6-astra-max', provider: 'codex', selector: 'gpt-6-astra', effort: 'max' },
+    { identity: 'gpt-5.6-sol-ultra', provider: 'codex', selector: 'gpt-5.6-sol', effort: 'ultra' },
+    { identity: 'gpt-5.6-sol-max', provider: 'codex', selector: 'gpt-5.6-sol', effort: 'max' },
     { identity: 'grok-4.6-xhigh', provider: 'grok', selector: 'grok-4.6', effort: 'xhigh' },
     { identity: 'grok-4.6-high', provider: 'grok', selector: 'grok-4.6', effort: 'high' },
     { identity: 'gemini-3.8-flash-high', provider: 'antigravity', selector: 'gemini-3.8-flash', effort: 'high' },
@@ -29,8 +33,12 @@ export const CATALOG = {
     debate_moderator: 'opus-5-max',
   },
   debate_participants: ['opus-5-max', 'gpt-6-astra-ultra', 'grok-4.6-xhigh', 'gemini-3.8-flash-high', 'muse-spark-1.3-contributor-max'],
-  review_providers: ['claude', 'codex'],
+  review_providers: ['antigravity', 'claude', 'codex', 'grok', 'muse'],
   policy: 'bounded-v1',
 }
 
 export const CATALOG_STDOUT = JSON.stringify(CATALOG)
+
+// An older Caller that reviews with Claude and Codex only; Poise reads the
+// list rather than assuming it, so the narrowing still has to hold.
+export const NARROW_CATALOG = { ...CATALOG, review_providers: ['claude', 'codex'] }

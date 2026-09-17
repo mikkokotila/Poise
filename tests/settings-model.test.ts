@@ -113,7 +113,7 @@ describe('model choices per place', () => {
   it('rejects choices the catalog cannot honor without partially saving other settings', () => {
     const cases: Array<[unknown, RegExp]> = [
       [{ chat: { default: 'opus', fallback: 'opus-5-max' } }, /from the catalog/],
-      [{ pr_review: { default: 'grok-4.6-xhigh', fallback: 'opus-5-xhigh' } }, /claude or codex/],
+      [{ pr_review: { default: 'grok-4.6-xhigh', fallback: 'grok-4.6-xhigh' } }, /differ/],
       [{ chat: { default: 'opus-5-max', fallback: 'opus-5-max' } }, /differ/],
       [{ content: { default: 'opus-5-max', fallback: 'opus-5-xhigh' } }, /unknown model place/],
       [[], /object of places/],

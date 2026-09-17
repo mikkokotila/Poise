@@ -98,10 +98,11 @@ export function isReviewModel(catalog: Catalog, identity: string): boolean {
 }
 
 // Every place in Poise that launches a model, with the Caller behavior whose
-// catalog default seeds it. `review` places may only use review providers and
-// their fallback is the recovery model Caller switches to after a Claude
-// output limit; for the others the fallback is used when the default cannot
-// be launched — its provider is not signed in, or a refresh retired it.
+// catalog default seeds it. `review` places follow the providers the catalog
+// lists as reviewing (every one of them since Caller #39) and their fallback
+// is the recovery model Caller switches to after a Claude output limit; for
+// the others the fallback is used when the default cannot be launched — its
+// provider is not signed in, or a refresh retired it.
 export const MODEL_PLACES = [
   {
     key: 'chat',
