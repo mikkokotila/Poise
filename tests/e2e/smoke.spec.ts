@@ -70,18 +70,24 @@ async function installApiRoutes(
   })
 }
 
+type ModelChoice = { default: string, fallback: string, secondary?: string, tertiary?: string }
+
 // What /api/models answers for the catalog fixture and the given choices:
-// every place resolved to its stored choice or the Caller default.
-function modelsResponse(models: Record<string, { default: string, fallback: string }>) {
+// every place resolved to its stored choice or the Caller default, and the
+// PR review place with its secondary and tertiary reviewer.
+function modelsResponse(models: Record<string, ModelChoice>) {
   const places = [
-    { key: 'chat', label: 'Chat', why: 'Card chats.', review: false, seed: 'author_content' },
-    { key: 'editor', label: 'Editor chat', why: 'Editor chats.', review: false, seed: 'author_content' },
-    { key: 'pr_review', label: 'PR review', why: 'Reviews.', review: true, seed: 'pr_review' },
-    { key: 'pr_approve', label: 'PR approval', why: 'Approvals.', review: true, seed: 'pr_approve' },
+    { key: 'chat', label: 'Chat', why: 'Card chats.', review: false, reviewers: false, seed: 'author_content' },
+    { key: 'editor', label: 'Editor chat', why: 'Editor chats.', review: false, reviewers: false, seed: 'author_content' },
+    { key: 'pr_review', label: 'PR review', why: 'Reviews.', review: true, reviewers: true, seed: 'pr_review' },
+    { key: 'pr_approve', label: 'PR approval', why: 'Approvals.', review: true, reviewers: false, seed: 'pr_approve' },
   ].map((place) => ({
     ...place,
     default: models[place.key]?.default || CATALOG.behaviors[place.seed as keyof typeof CATALOG.behaviors],
     fallback: models[place.key]?.fallback || CATALOG.behaviors.review_recovery,
+    ...(place.reviewers
+      ? { secondary: models[place.key]?.secondary || 'gpt-6-astra-ultra', tertiary: models[place.key]?.tertiary || 'grok-4.6-xhigh' }
+      : {}),
     notes: [],
     stored: models[place.key] || null,
   }))
@@ -187,7 +193,7 @@ test('keeps the empty dashboard layout visually stable', async ({ page }) => {
 })
 
 test('saves a review model choice and restores it after reload', async ({ page }) => {
-  let settings: { org: string, me: string, timezone: string, models: Record<string, { default: string, fallback: string }> } = { org: 'acme', me: 'octocat', timezone: 'UTC', models: {} }
+  let settings: { org: string, me: string, timezone: string, models: Record<string, ModelChoice> } = { org: 'acme', me: 'octocat', timezone: 'UTC', models: {} }
   await page.route('**/api/settings', async (route) => {
     if (route.request().method() === 'POST') settings = { ...settings, ...route.request().postDataJSON() }
     await route.fulfill({ json: settings })
@@ -206,17 +212,60 @@ test('saves a review model choice and restores it after reload', async ({ page }
   await expect(model.locator('option')).toHaveCount(14)
   await expect(page.getByLabel('Chat default model', { exact: true }).locator('option')).toHaveCount(14)
   await expect(page.locator('.st-models-fixed')).toContainText('opus-5-max')
+  // Only the PR review place names a secondary and a tertiary reviewer.
+  await expect(page.getByLabel('PR review secondary reviewer')).toHaveValue('gpt-6-astra-ultra')
+  await expect(page.getByLabel('PR review tertiary reviewer')).toHaveValue('grok-4.6-xhigh')
+  await expect(page.getByLabel('PR approval secondary reviewer')).toHaveCount(0)
   await model.selectOption('gpt-6-astra-ultra')
   await page.getByLabel('PR review fallback model').selectOption('opus-5-xhigh')
+  await page.getByLabel('PR review secondary reviewer').selectOption('gpt-6-astra-ultra')
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page.locator('.st-status')).toHaveText('pr_review: the secondary reviewer must differ from the default.')
+  await page.getByLabel('PR review secondary reviewer').selectOption('muse-spark-1.3-contributor-max')
   await page.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(page.locator('.st-status')).toHaveText('Saved.')
-  expect(settings.models.pr_review).toEqual({ default: 'gpt-6-astra-ultra', fallback: 'opus-5-xhigh' })
+  expect(settings.models.pr_review).toEqual({ default: 'gpt-6-astra-ultra', fallback: 'opus-5-xhigh', secondary: 'muse-spark-1.3-contributor-max', tertiary: 'grok-4.6-xhigh' })
   await page.reload()
   await page.getByRole('button', { name: 'Menu', exact: true }).click()
   await page.locator('[data-action="settings"]').click()
   await page.getByRole('tab', { name: 'Models' }).click()
   await expect(page.getByLabel('PR review default model')).toHaveValue('gpt-6-astra-ultra')
   await expect(page.getByLabel('PR review fallback model')).toHaveValue('opus-5-xhigh')
+  await expect(page.getByLabel('PR review secondary reviewer')).toHaveValue('muse-spark-1.3-contributor-max')
+})
+
+test('chooses how many reviewers each new pull request gets from Behaviors', async ({ page }) => {
+  let reviewers = 1
+  const writes: Array<Record<string, unknown>> = []
+  const behavior = (extra: Record<string, unknown>) => ({
+    owner: 'review-bot', enabled: false, setting: null, reviewers: null, scratchpad: '', lastTriggered: null, ...extra,
+  })
+  await page.route('**/api/behaviors', async (route) => {
+    await route.fulfill({ json: {
+      'review-new-prs': behavior({ setting: 'p2', reviewers }),
+      'approve-prs': behavior({}),
+      'resolve-unblocking': behavior({ scratchpad: null }),
+      diagnostics: { status: 'ok', agentLogsError: null, datastore: { status: 'healthy', checkedAt: new Date().toISOString(), ageSeconds: 1, lastSuccessAt: null, error: null }, identity: { status: 'valid', actor: 'review-bot', error: null }, failures: [], deadLetters: [] },
+    } })
+  })
+  await page.route('**/api/behaviors/review-new-prs', async (route) => {
+    const body = route.request().postDataJSON() as Record<string, unknown>
+    writes.push(body)
+    if (typeof body.reviewers === 'number') reviewers = body.reviewers
+    await route.fulfill({ json: { ok: true, enabled: false, setting: 'p2', reviewers, scratchpad: '' } })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Behaviors', exact: true }).click()
+  const select = page.getByLabel('Reviewers for review-new-prs')
+  await expect(select).toHaveValue('1')
+  await expect(page.locator('#behaviors-table thead')).toContainText('Reviewers')
+  // The other behaviors have no reviewer count.
+  await expect(page.getByLabel('Reviewers for approve-prs')).toHaveCount(0)
+  await select.selectOption('3')
+  await expect.poll(() => writes).toEqual([{ reviewers: 3 }])
+  await page.reload()
+  await page.getByRole('button', { name: 'Behaviors', exact: true }).click()
+  await expect(page.getByLabel('Reviewers for review-new-prs')).toHaveValue('3')
 })
 
 test('stops a running run from Swarm after a second click, and settles the row', async ({ page }) => {

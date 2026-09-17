@@ -11,7 +11,7 @@ import { fetchAgentLogs, fetchAgentResponse, fetchAgentReasoning, triggerPrRevie
 import { listChatHistory, sendChat, saveAttachment, runDebate } from './chat'
 import { listDocs, readDoc, writeDoc, deleteDoc, newSlug, readAnnotations, writeAnnotations, getOrCreateChatSession, MAX_DOC_BYTES, MAX_ANNOTATIONS_BYTES, EditorConflictError } from './editor'
 import { readSnippetState, saveSnippets, addSnippet, espansoDetected, SnippetConflictError } from './snippets'
-import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, setScratchpad as setBehaviorScratchpad, getEnabledMap, getSettingMap, getScratchpadMap, getBehaviorsRuntimeHealth, isValidSetting, startBehaviorsRuntime, stopBehaviorsRuntime, getResolveUnblockingLastFired, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
+import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, setScratchpad as setBehaviorScratchpad, setReviewers as setBehaviorReviewers, getEnabledMap, getSettingMap, getScratchpadMap, getReviewers, getBehaviorsRuntimeHealth, isValidSetting, isValidReviewers, startBehaviorsRuntime, stopBehaviorsRuntime, getResolveUnblockingLastFired, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
 import { ContentLaunchPendingError, getContentJobResponse, launchAndEnqueueContentJob, startContentFinalizer, stopContentFinalizer } from './content-jobs'
 import { ProcessLockError } from './process-lock'
 import { ATTACHMENT_MAX_BYTES, enforceApiRequest, httpStatus, readBuffer, readJson, setApiHeaders } from './http'
@@ -229,6 +229,9 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
               owner: opts.reviewAgentUsername || null,
               enabled: enabled['review-new-prs'],
               setting: settings['review-new-prs'],
+              // How many of the PR review place's reviewers (Settings →
+              // Models) review each new pull request, in parallel.
+              reviewers: getReviewers(),
               scratchpad: scratch['review-new-prs'],
               lastTriggered: lastFor('pr_review', 'poise:review-new-prs'),
             },
@@ -239,6 +242,7 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
               owner: opts.reviewAgentUsername || null,
               enabled: enabled['approve-prs'],
               setting: null,
+              reviewers: null,
               scratchpad: scratch['approve-prs'],
               lastTriggered: lastFor('pr_approve', 'poise:approve-prs'),
             },
@@ -253,6 +257,7 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
               owner: opts.reviewAgentUsername || null,
               enabled: enabled['resolve-unblocking'],
               setting: null,
+              reviewers: null,
               scratchpad: null,
               lastTriggered: getResolveUnblockingLastFired(),
             },
@@ -267,8 +272,8 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
           })
         }
 
-        // POST /api/behaviors/<key> { enabled?: bool, setting?: 'p0'|'p1'|'p2' }
-        // — either field optional; both can be sent in one call.
+        // POST /api/behaviors/<key> { enabled?: bool, setting?: 'p0'|'p1'|'p2', reviewers?: 1|2|3 }
+        // — every field optional; several can be sent in one call.
         const behaviorMatch = url.match(/^\/api\/behaviors\/([a-z0-9-]+)(?:\?|$)/)
         if (behaviorMatch && req.method === 'POST') {
           const key = behaviorMatch[1] as BehaviorKey
@@ -291,6 +296,14 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
                 return json(res, 400, { error: 'invalid setting: ' + String(body.setting) })
               }
             }
+            if ('reviewers' in body) {
+              if (key !== 'review-new-prs') {
+                return json(res, 400, { error: 'only review-new-prs has a reviewer count' })
+              }
+              if (!isValidReviewers(body.reviewers)) {
+                return json(res, 400, { error: 'reviewers must be 1, 2 or 3' })
+              }
+            }
             if ('scratchpad' in body) {
               if (typeof body.scratchpad !== 'string') {
                 return json(res, 400, { error: 'scratchpad must be a string' })
@@ -310,12 +323,14 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
             // Persist passive configuration first; enabling last guarantees
             // the first tick observes the submitted setting and memory.
             if ('setting' in body) setBehaviorSetting(key, body.setting)
+            if ('reviewers' in body) setBehaviorReviewers(body.reviewers)
             if ('scratchpad' in body) setBehaviorScratchpad(key, body.scratchpad)
             if ('enabled' in body) await setBehaviorEnabled(key, body.enabled)
             return json(res, 200, {
               ok: true,
               enabled: getEnabledMap()[key],
               setting: getSettingMap()[key],
+              reviewers: key === 'review-new-prs' ? getReviewers() : null,
               scratchpad: getScratchpadMap()[key],
             })
           } catch (err: any) {

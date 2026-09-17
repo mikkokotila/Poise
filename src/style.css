@@ -2858,6 +2858,7 @@ tr:hover .stop-btn { opacity: 1; }
 
 .col-owner-wide { width: 180px; }
 .col-setting    { width: 130px; }
+.col-reviewers  { width: 170px; }
 .col-memory     { width: 110px; }
 .col-last       { width: 130px; }
 .col-active     { width: 120px; }
@@ -2987,7 +2988,8 @@ tr:hover .stop-btn { opacity: 1; }
 /* Setting dropdown — pill-shaped, neutral chrome at rest, matches the
    visual weight of the toggle next to it. Arrow indicator drawn with
    a tiny inline SVG via mask so it tints with theme colour. */
-.behavior-setting {
+.behavior-setting,
+.behavior-reviewers {
   font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace;
   font-size: 0.75rem;
   font-weight: 500;
@@ -3012,11 +3014,13 @@ tr:hover .stop-btn { opacity: 1; }
   background-repeat: no-repeat;
   transition: border-color var(--t-base) ease, color var(--t-base) ease;
 }
-.behavior-setting:hover {
+.behavior-setting:hover,
+.behavior-reviewers:hover {
   border-color: var(--text-tertiary);
   color: var(--text);
 }
-.behavior-setting:focus-visible {
+.behavior-setting:focus-visible,
+.behavior-reviewers:focus-visible {
   outline-width: 2px;
   outline-style: solid;
   outline-color: var(--a1);
