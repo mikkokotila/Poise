@@ -14,6 +14,7 @@ import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { getHeadSha, getReviewAgentUsername, localCheckoutPath } from './gh'
 import { claudeAuth } from './claude-auth'
+import { HttpError } from './http'
 import { needsClaude, reviewChoice } from './review-model'
 import { claudeSubscriptionEnvironment, runFile, spawnDetached } from './process'
 
@@ -209,6 +210,25 @@ export async function fetchAgentReasoning(callId: string): Promise<{ id: string,
     cwd: agentCwd(), timeoutMs: 30_000, maxOutputBytes: 512 * 1024,
   })
   return { id: callId, body: stdout }
+}
+
+// Stop a running call. Caller owns the process: `agent-interface --stop`
+// signals the call's process group and closes its row as failed with
+// error_code "stopped". Used by the Swarm view's Stop column.
+export interface StopResult { id: string, stopped: boolean, status: string, error_code?: string | null }
+
+export async function stopAgentJob(callId: string): Promise<StopResult> {
+  if (!/^[0-9a-fA-F]{32}$/.test(callId)) throw new HttpError(400, 'invalid agent call id')
+  const { stdout } = await runFile(CLI, ['--stop', callId.toLowerCase()], {
+    cwd: agentCwd(), timeoutMs: 30_000, maxOutputBytes: 64 * 1024,
+  })
+  let result: unknown
+  try { result = JSON.parse(stdout) } catch { throw new Error('Update Caller: stopping a run is unavailable') }
+  const value = result as Record<string, unknown>
+  if (typeof value?.id !== 'string' || typeof value.stopped !== 'boolean' || typeof value.status !== 'string') {
+    throw new Error('Update Caller: stopping a run is unavailable')
+  }
+  return { id: value.id, stopped: value.stopped, status: value.status, error_code: typeof value.error_code === 'string' ? value.error_code : null }
 }
 
 // Kick off `agent-interface --pr-review #<num> --pwd <local-checkout>`.

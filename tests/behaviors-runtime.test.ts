@@ -1897,7 +1897,7 @@ describe('behavior launch claims', () => {
     expect(args[args.indexOf('--recovery-model') + 1]).toBe('opus-5-xhigh')
   })
 
-  it.each(['model_output_limit', 'review_budget_exhausted', 'review_recovery_failed'])('holds %s across restarts, without blocking another PR or a new head', async (code) => {
+  it.each(['model_output_limit', 'review_budget_exhausted', 'review_recovery_failed', 'stopped'])('holds %s across restarts, without blocking another PR or a new head', async (code) => {
     const behavior = 'approve-prs' as 'review-new-prs' | 'approve-prs'
     const launched = behavior === 'review-new-prs'
       ? await launchReviewBeforeCrash() : await launchApprovalBeforeCrash()

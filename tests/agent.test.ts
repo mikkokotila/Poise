@@ -239,6 +239,23 @@ describe('progress data does not determine review status', () => {
 })
 
 
+describe('stopping a run', () => {
+  beforeEach(() => mocks.runFile.mockReset())
+  it('asks Caller to stop the call and passes its answer through', async () => {
+    const { stopAgentJob } = await import('../server/agent')
+    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify({ id: 'a'.repeat(32), stopped: true, status: 'failed', error_code: 'stopped' }), stderr: '' })
+    await expect(stopAgentJob('A'.repeat(32))).resolves.toEqual({ id: 'a'.repeat(32), stopped: true, status: 'failed', error_code: 'stopped' })
+    expect(mocks.runFile).toHaveBeenCalledWith('agent-interface', ['--stop', 'a'.repeat(32)], expect.objectContaining({ timeoutMs: 30_000 }))
+  })
+  it('refuses a malformed id before running anything, and an old Caller after', async () => {
+    const { stopAgentJob } = await import('../server/agent')
+    await expect(stopAgentJob('../etc')).rejects.toThrow('invalid agent call id')
+    expect(mocks.runFile).not.toHaveBeenCalled()
+    mocks.runFile.mockResolvedValue({ stdout: 'usage: agent-interface BEHAVIOR', stderr: '' })
+    await expect(stopAgentJob('b'.repeat(32))).rejects.toThrow('Update Caller')
+  })
+})
+
 describe('provider reasoning reads', () => {
   beforeEach(() => mocks.runFile.mockReset())
   it('reads only a full call id and bounds the CLI output', async () => {

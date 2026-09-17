@@ -559,4 +559,19 @@ describe('Claude subscription authentication monitor', () => {
       authStatus: 'reauth_required',
     })
   })
+
+  it('ignores a worker killed by a signal, which is a stop and not a provider failure', async () => {
+    const run = validRun()
+    const monitor = new ClaudeAuthMonitor({ runFile: run, clock: new FakeClock() })
+    await monitor.check({ forceLive: true })
+    expect(monitor.snapshot().status).toBe('authenticated')
+    run.mockReset()
+
+    monitor.observeProcessFailure({ code: null, signal: 'SIGTERM' })
+    expect(monitor.snapshot().status).toBe('authenticated')
+    expect(run).not.toHaveBeenCalled()
+
+    monitor.observeProcessFailure({ code: 1, signal: null })
+    expect(monitor.snapshot().status).toBe('degraded')
+  })
 })

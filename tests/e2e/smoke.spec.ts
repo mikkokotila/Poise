@@ -219,6 +219,43 @@ test('saves a review model choice and restores it after reload', async ({ page }
   await expect(page.getByLabel('PR review fallback model')).toHaveValue('opus-5-xhigh')
 })
 
+test('stops a running run from Swarm after a second click, and settles the row', async ({ page }) => {
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString()
+  const id = 'c'.repeat(32)
+  const done = 'd'.repeat(32)
+  let row = {
+    id, pr_id: '320', repo: 'Vaquum/Origo', actor: 'bit-mis', model: 'opus-5-high',
+    behavior: 'pr_review', session_id: null, prompt: '', started_at: ago(5 * 60_000),
+    started_at_precise: ago(5 * 60_000), completed_at: null as string | null,
+    time_elapsed: '5m', status: 'running', outcome: null as string | null, response: '', error: '', error_code: null as string | null, progress: null,
+  }
+  const finished = { ...row, id: done, status: 'completed', completed_at: ago(60_000), outcome: 'reviewed_clean' }
+  const stops: string[] = []
+  await page.route('**/api/agent-logs', async (route) => {
+    await route.fulfill({ json: { logs: [row, finished] } })
+  })
+  await page.route('**/api/agent-stop', async (route) => {
+    stops.push(route.request().postDataJSON().id)
+    row = { ...row, status: 'failed', completed_at: ago(0), error: 'Stopped by user', error_code: 'stopped' }
+    await route.fulfill({ json: { id, stopped: true, status: 'failed', error_code: 'stopped' } })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Swarm', exact: true }).click()
+  const running = page.locator(`.agent-row[data-id="${id}"]`)
+  const settled = page.locator(`.agent-row[data-id="${done}"]`)
+  // Only a running row can be stopped.
+  await expect(settled.locator('.stop-cell')).toHaveText('—')
+  const stop = running.getByRole('button', { name: 'Stop this run' })
+  await stop.click()
+  expect(stops).toEqual([])
+  await running.getByRole('button', { name: 'Confirm stopping this run' }).click()
+  await expect.poll(() => stops).toEqual([id])
+  await expect(running).toContainText('failed')
+  await expect(running.locator('.stop-cell')).toHaveText('—')
+  await running.getByRole('button', { name: 'Toggle detail' }).click()
+  await expect(page.locator(`.agent-expand-row[data-expand-for="${id}"]`)).toContainText('Stopped by user')
+})
+
 test('shows live activity, preserves its expansion, and loads the final response', async ({ page }) => {
   const ago = (ms: number) => new Date(Date.now() - ms).toISOString()
   const id = 'a'.repeat(32)

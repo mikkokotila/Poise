@@ -329,6 +329,27 @@ const REPLAY_SVG = '<svg width="12" height="12" viewBox="0 0 12 12" fill="none">
 // pr_review and pr_approve have standalone CLI invocations; chat is a
 // continuous session (replay doesn't fit the semantic); other behaviors
 // aren't first-class CLI entry points.
+const STOP_SVG = '<svg width="12" height="12" viewBox="0 0 12 12" fill="none"><rect x="2.5" y="2.5" width="7" height="7" rx="1.2" fill="currentColor"/></svg>'
+
+// Stop is a two-step click: the first arms the button ("Sure?") for a few
+// seconds, the second sends the stop. A review that has run for twenty
+// minutes should not die to a stray click on a live table. Armed and
+// in-flight state lives here, not on the button, for the same reason as
+// replaysInFlight below — a render replaces the node under the cursor.
+const STOP_ARM_MS = 4000
+let armedStop: { id: string, until: number } | null = null
+const stopsInFlight = new Set<string>()
+
+function stopCell(e: LogEntry): string {
+  if (!isRunning(e)) return '<span class="agent-dash">—</span>'
+  const busy = stopsInFlight.has(e.id)
+  const armed = !busy && armedStop?.id === e.id && armedStop.until > Date.now()
+  const label = busy ? 'Stopping…' : armed ? 'Sure?' : 'Stop this run'
+  return `<button class="stop-btn${busy ? ' spinning' : ''}${armed ? ' armed' : ''}"${busy ? ' disabled' : ''}`
+    + ` title="${label}" aria-label="${armed ? 'Confirm stopping this run' : 'Stop this run'}">`
+    + `${armed ? 'Sure?' : STOP_SVG}</button>`
+}
+
 function isReplayable(e: LogEntry): boolean {
   return (e.behavior === 'pr_review' || e.behavior === 'pr_approve')
       && !!e.repo && !!e.pr_id
@@ -389,6 +410,7 @@ function renderShell() {
             <th class="col-started">Started</th>
             <th class="col-elapsed">Elapsed</th>
             <th class="col-replay">Replay</th>
+            <th class="col-stop">Stop</th>
             <th class="col-action"></th>
           </tr>
         </thead>
@@ -444,6 +466,7 @@ function mainRowInnerHTML(e: LogEntry): string {
     <td class="started-cell"><span class="date">${escapeHtml(startedRel(e))}</span></td>
     <td class="elapsed-cell"><span class="date">${escapeHtml(elapsedText(e))}</span></td>
     <td class="replay-cell">${replayCell(e)}</td>
+    <td class="stop-cell">${stopCell(e)}</td>
     <td class="action-cell">${btn}</td>
   `
 }
@@ -615,6 +638,53 @@ function attachClicks() {
   }, true)
   bodyEl.addEventListener('click', async (ev) => {
     const target = ev.target as HTMLElement
+
+    // Stop — first click arms, second click within STOP_ARM_MS stops.
+    // Caller kills the call's process group and closes the row; the next
+    // poll paints the settled row.
+    const stopBtn = target.closest<HTMLButtonElement>('.stop-btn')
+    if (stopBtn) {
+      const tr = stopBtn.closest<HTMLTableRowElement>('tr')!
+      const id = tr.dataset.id || ''
+      const entry = entries.find((e) => e.id === id)
+      if (!entry || stopsInFlight.has(id)) return
+      const armed = armedStop?.id === id && armedStop.until > Date.now()
+      if (!armed) {
+        armedStop = { id, until: Date.now() + STOP_ARM_MS }
+        tr.querySelector('.stop-cell')!.innerHTML = stopCell(entry)
+        window.setTimeout(() => {
+          if (armedStop?.id !== id || armedStop.until > Date.now()) return
+          armedStop = null
+          const cell = bodyEl.querySelector<HTMLElement>(`tr.agent-row[data-id="${id}"] .stop-cell`)
+          if (cell) cell.innerHTML = stopCell(entry)
+        }, STOP_ARM_MS + 50)
+        return
+      }
+      armedStop = null
+      stopsInFlight.add(id)
+      tr.querySelector('.stop-cell')!.innerHTML = stopCell(entry)
+      try {
+        const res = await fetch('/api/agent-stop', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id }),
+        })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(String(data.error || `HTTP ${res.status}`))
+        // Pull the log right away so the row settles without waiting for
+        // the 15s poll.
+        window.setTimeout(() => { void pollOnce() }, 300)
+      } catch (err) {
+        console.error('[swarm] stop failed:', err)
+        alert(`Stop failed: ${(err as Error).message}`)
+      } finally {
+        stopsInFlight.delete(id)
+        const cell = bodyEl.querySelector<HTMLElement>(`tr.agent-row[data-id="${id}"] .stop-cell`)
+        const current = entries.find((e) => e.id === id)
+        if (cell && current) cell.innerHTML = stopCell(current)
+      }
+      return
+    }
 
     // Replay — re-spawns the same agent-interface CLI invocation with
     // the row's behavior/repo/pr_id. The new run lands as a fresh row;
