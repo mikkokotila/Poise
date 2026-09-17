@@ -286,6 +286,21 @@ describe('production server', () => {
     expect(state['review-new-prs'].enabled).toBe(false)
   })
 
+  it('keeps the reviewer count on the initial review only, one to three', async () => {
+    const url = `${baseUrl}/api/behaviors/review-new-prs`
+    const headers = { 'Content-Type': 'application/json' }
+    for (const reviewers of [0, 4, '2', null]) {
+      expect((await fetch(url, { method: 'POST', headers, body: JSON.stringify({ reviewers }) })).status).toBe(400)
+    }
+    expect((await fetch(`${baseUrl}/api/behaviors/approve-prs`, { method: 'POST', headers, body: JSON.stringify({ reviewers: 2 }) })).status).toBe(400)
+    const ok = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ reviewers: 3 }) })
+    expect(ok.status).toBe(200)
+    expect(await ok.json()).toMatchObject({ reviewers: 3 })
+    const state = await (await fetch(`${baseUrl}/api/behaviors`)).json() as Record<string, { reviewers: number | null }>
+    expect(state['review-new-prs'].reviewers).toBe(3)
+    expect(state['approve-prs'].reviewers).toBeNull()
+  })
+
   // Two Poise windows open on the same behavior used to mean the later save
   // silently discarded the earlier one — a memory is prose someone wrote, and
   // losing it leaves no trace that it existed.

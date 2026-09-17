@@ -19,8 +19,8 @@ import { tmpdir, homedir } from 'node:os'
 import { mkdir } from 'node:fs/promises'
 import { fetchAgentLogs, type LogEntry } from './agent'
 import { claudeAuth } from './claude-auth'
-import { REVIEW_POLICY, needsClaude, reviewChoice } from './review-model'
-import { type Catalog, loadCatalog } from './models'
+import { REVIEW_POLICY, needsClaude, reviewChoice, reviewPanel } from './review-model'
+import { type Catalog, type ReviewerSlot, loadCatalog } from './models'
 import {
   db,
   claimPrOperationOwned,
@@ -252,6 +252,39 @@ function setPersistedSetting(key: BehaviorKey, setting: BehaviorSetting) {
 
 export function isValidSetting(v: unknown): v is BehaviorSetting {
   return typeof v === 'string' && (VALID_SETTINGS as string[]).includes(v)
+}
+
+// How many of the PR review place's reviewers (default, secondary, tertiary)
+// review each new pull request — at the same time, each as its own launch.
+// One by default; a wider panel is a deliberate choice in the Behaviors view.
+export type ReviewerCount = 1 | 2 | 3
+const DEFAULT_REVIEWERS: ReviewerCount = 1
+const reviewersKey = `${META_PREFIX}review_new_prs_reviewers`
+
+export function getReviewers(): ReviewerCount {
+  const value = Number(getMeta(reviewersKey) || '')
+  return value === 2 || value === 3 ? value : DEFAULT_REVIEWERS
+}
+
+export function isValidReviewers(v: unknown): v is ReviewerCount {
+  return v === 1 || v === 2 || v === 3
+}
+
+export function setReviewers(count: ReviewerCount): void {
+  setMeta(reviewersKey, String(count))
+}
+
+// The primary reviewer keeps the pull request's own claim key, so ledgers
+// written before panels stay valid; the others claim a suffixed key each.
+export function reviewSlotTarget(key: string, slot: ReviewerSlot): string {
+  return slot === 'primary' ? key : `${key}:${slot}`
+}
+
+function reviewSlotOfTarget(target: string): ReviewerSlot {
+  for (const slot of ['secondary', 'tertiary'] as const) {
+    if (target.endsWith(`:${slot}`)) return slot
+  }
+  return 'primary'
 }
 
 // ── Per-behavior memory (scratchpad) ────────────────────────────────────
@@ -878,16 +911,27 @@ function settleClaimAfterExit(
   }
 }
 
+// The model a reviewer slot launches right now, or null when the panel no
+// longer has that slot — the count was lowered while this tick was waiting.
+async function slotModel(slot: ReviewerSlot): Promise<{ model: string, recovery: string, catalog: Catalog } | null> {
+  const panel = await reviewPanel(getReviewers())
+  const reviewer = panel.reviewers.find((entry) => entry.slot === slot)
+  return reviewer ? { model: reviewer.model, recovery: panel.recovery, catalog: panel.catalog } : null
+}
+
 async function fireReview(
   pr: DatastorePr,
   claimTarget: string,
   claimId: string,
+  slot: ReviewerSlot = 'primary',
 ): Promise<boolean> {
   if (!isEnabled('review-new-prs')) return false
   const m = pr.url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/)
   if (!m) throw new Error('not a github PR url: ' + pr.url)
   const [, owner, repo, num] = m
-  const { model, recovery, catalog } = await waitForBehavior(reviewChoice('pr_review'))
+  const resolved = await waitForBehavior(slotModel(slot))
+  if (!resolved) return false
+  const { model, recovery, catalog } = resolved
   const claude = needsClaude(catalog, model)
   const actor = configuredReviewer()
   if (claude) await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
@@ -914,7 +958,7 @@ async function fireReview(
   // Pass the priority ceiling through as `--p`. agent-interface forwards
   // it to github-interface as `--p <value>`; for review-new-prs the
   // possible values are p0 / p1 / p2.
-  if ((await reviewChoice('pr_review')).model !== model) return false
+  if ((await slotModel(slot))?.model !== model) return false
   const source = 'poise:review-new-prs'
   const args = [
     '--pr-review',
@@ -1063,35 +1107,47 @@ async function tickReviewNewPrs(): Promise<void> {
   try {
     const prs = await listOpenPrsByAuthor(author)
     await recoverSnapshotReviews(prs, reviewer)
+    const slots = (await reviewPanel(getReviewers())).reviewers.map((entry) => entry.slot)
     let failure: unknown
-    await Promise.all(prs.map(async (pr) => {
-      if (!isEnabled('review-new-prs') || behaviorAborted()) return
+    await Promise.all(prs.flatMap((pr) => {
       const key = `${pr.repo}#${pr.number}`
-      if (hasSeen('review-new-prs', key) && !getFailedBehaviorLaunch('review-new-prs', key)) return
+      // A pull request is new to the panel when its primary is: the extra
+      // reviewers ride with a fresh primary and otherwise fire only to
+      // recover their own failed launch, never for a pull request the
+      // primary already handled before the panel grew.
+      const primaryFresh = !hasSeen('review-new-prs', key) || !!getFailedBehaviorLaunch('review-new-prs', key)
+      return slots.filter((slot) => {
+        const target = reviewSlotTarget(key, slot)
+        if (slot === 'primary') return primaryFresh
+        return (primaryFresh && !hasSeen('review-new-prs', target)) || !!getFailedBehaviorLaunch('review-new-prs', target)
+      }).map((slot) => [pr, key, slot] as const)
+    }).map(async ([pr, key, slot]) => {
+      if (!isEnabled('review-new-prs') || behaviorAborted()) return
+      const target = reviewSlotTarget(key, slot)
       let operationId: string | null = null
       let launched = false
       try {
         if (await packetBlocked('review-new-prs', pr.repo, pr.number)) return
-        operationId = await claimEligiblePrOperation('review-new-prs', key)
+        operationId = await claimEligiblePrOperation('review-new-prs', target)
         if (!operationId) {
           console.log(`[behaviors] review-new-prs deferred for ${key}: PR operation busy`)
           return
         }
         // Atomic claim: exactly one caller succeeds for any given key
         // across all concurrent runtimes. Losers skip silently.
-        let claimId = claimSeenOwnedAs('review-new-prs', key, operationId)
+        let claimId = claimSeenOwnedAs('review-new-prs', target, operationId)
         if (!claimId) {
           const recovered = await releaseFailedBehaviorIfNoAction(
             'review-new-prs',
             pr.repo,
             pr.number,
-            key,
+            target,
           )
           if (!recovered) return
-          claimId = claimSeenOwnedAs('review-new-prs', key, operationId)
+          claimId = claimSeenOwnedAs('review-new-prs', target, operationId)
         }
         if (!claimId) return
-        trackClaim('review-new-prs', key, claimId)
+        trackClaim('review-new-prs', target, claimId)
 
         try {
           // Guard against double-firing with approve-prs: if bit-mis has
@@ -1102,40 +1158,40 @@ async function tickReviewNewPrs(): Promise<void> {
             try {
               const ch = await checkChangesAddressed(pr.repo, pr.number, reviewer)
               if (!isEnabled('review-new-prs')) {
-                releaseOwnedClaim('review-new-prs', key, claimId)
+                releaseOwnedClaim('review-new-prs', target, claimId)
                 return
               }
               if (ch.hasChangeRequest) {
-                completeOwnedClaim('review-new-prs', key, claimId)
+                completeOwnedClaim('review-new-prs', target, claimId)
                 console.log(`[behaviors] review-new-prs skipped for ${pr.repo}#${pr.number} — outstanding CHANGES_REQUESTED, approve-prs owns it`)
                 return
               }
             } catch (err) {
               if (behaviorAborted()) {
-                releaseOwnedClaim('review-new-prs', key, claimId)
+                releaseOwnedClaim('review-new-prs', target, claimId)
                 return
               }
-              releaseOwnedClaim('review-new-prs', key, claimId)
+              releaseOwnedClaim('review-new-prs', target, claimId)
               throw err
             }
           }
 
-          const accepted = await fireReview(pr, key, claimId)
+          const accepted = await fireReview(pr, target, claimId, slot)
           if (!accepted) {
-            releaseOwnedClaim('review-new-prs', key, claimId)
+            releaseOwnedClaim('review-new-prs', target, claimId)
             return
           }
           launched = true
-          console.log(`[behaviors] review-new-prs fired for ${pr.repo}#${pr.number} (p=${getSetting('review-new-prs')})`)
+          console.log(`[behaviors] review-new-prs fired for ${pr.repo}#${pr.number} (p=${getSetting('review-new-prs')}, ${slot})`)
         } catch (err) {
           // Pre-launch work and spawn acknowledgement are part of the claim.
           // Release on failure so the next tick can retry this exact target.
-          releaseOwnedClaim('review-new-prs', key, claimId)
+          releaseOwnedClaim('review-new-prs', target, claimId)
           throw err
         }
       } catch (err) {
         if (behaviorAborted()) return
-        console.error(`[behaviors] review-new-prs step failed for ${pr.repo}#${pr.number}:`, err)
+        console.error(`[behaviors] review-new-prs step failed for ${pr.repo}#${pr.number} (${slot}):`, err)
         failure ??= err
       } finally {
         if (!launched && operationId) releasePrOperationOwned(operationId)
@@ -1179,6 +1235,9 @@ interface ReviewActivityResult {
   reviewerLatestState: string | null
   reviewerLatestCommit: string | null
   reviewerReviewsSince: number
+  // The ids of those reviews, once github-interface reports them; null from
+  // an older github-interface, when only the count is known.
+  reviewerReviewIdsSince: number[] | null
   reviewerPendingReviews: number
   latestActivityAt: string | null
 }
@@ -1267,6 +1326,18 @@ async function checkReviewActivity(
     data.reviewer_pending_reviews,
     'review-activity-since reviewer_pending_reviews',
   )
+  let reviewerReviewIdsSince: number[] | null = null
+  if (Array.isArray(data.reviewer_reviews_since_items)) {
+    reviewerReviewIdsSince = data.reviewer_reviews_since_items.map((item: any) => {
+      if (!item || typeof item !== 'object' || !Number.isSafeInteger(item.id) || Number(item.id) <= 0) {
+        throw new Error('github-interface --review-activity-since returned an invalid review id')
+      }
+      return Number(item.id)
+    })
+    if (reviewerReviewIdsSince!.length !== reviewerReviewsSince) {
+      throw new Error('github-interface --review-activity-since review ids do not match their count')
+    }
+  }
   return {
     state: data.state,
     draft: data.draft,
@@ -1280,6 +1351,7 @@ async function checkReviewActivity(
     reviewerLatestState,
     reviewerLatestCommit,
     reviewerReviewsSince,
+    reviewerReviewIdsSince,
     reviewerPendingReviews,
     latestActivityAt,
   }
@@ -1343,7 +1415,10 @@ async function releaseFailedBehaviorIfNoAction(
   }
   // A bounded attempt already used its recovery. Hold this input across
   // restarts; a different head or an explicit model change can be reconsidered.
-  if (boundedReviewFailure(call) && call.model === (await reviewChoice(launchBehavior === 'pr_approve' ? 'pr_approve' : 'pr_review')).model
+  const configuredModel = launchBehavior === 'pr_approve'
+    ? (await reviewChoice('pr_approve')).model
+    : (await slotModel(reviewSlotOfTarget(target)))?.model
+  if (boundedReviewFailure(call) && call.model === configuredModel
     && await currentHeadSha(repo, number, failed.launchActor) === failed.launchExpectedHead) return false
   const blockedPacket = call.action === 'not_started'
     && call.outcome === 'preflight_failed'
@@ -1361,8 +1436,16 @@ async function releaseFailedBehaviorIfNoAction(
     failed.launchActor,
     startedAt,
   )
-  if (activity.reviewerReviewsSince !== 0
-    || activity.reviewerPendingReviews !== 0) {
+  // Reviews the other reviewers of this pull request claim as their own
+  // (Caller's receipts) are not this run's; only an unclaimed one could be
+  // the dead run's own review, posted a moment before it died.
+  const claimed = new Set(logs
+    .filter((row) => row.id !== call.id && row.repo === repo && String(row.pr_id || '') === String(number) && typeof row.review_id === 'number')
+    .map((row) => row.review_id as number))
+  const unclaimed = activity.reviewerReviewIdsSince === null
+    ? activity.reviewerReviewsSince
+    : activity.reviewerReviewIdsSince.filter((id) => !claimed.has(id)).length
+  if (unclaimed !== 0 || activity.reviewerPendingReviews !== 0) {
     return false
   }
   if (behavior === 'approve-prs' && activity.headSha !== failed.launchExpectedHead) {

@@ -46,7 +46,42 @@ describe('the catalog Poise reads from Caller', () => {
 describe('resolving a place against the live catalog', () => {
   it('seeds every place from the Caller default and the recovery model', () => {
     expect(models.resolveChoice(catalog, 'chat', undefined)).toEqual({ default: 'opus-5-max', fallback: 'gpt-6-astra-ultra', notes: [] })
-    expect(models.resolveChoice(catalog, 'pr_review', undefined)).toEqual({ default: 'opus-5-xhigh', fallback: 'gpt-6-astra-ultra', notes: [] })
+    expect(models.resolveChoice(catalog, 'pr_approve', undefined)).toEqual({ default: 'opus-5-xhigh', fallback: 'gpt-6-astra-ultra', notes: [] })
+  })
+
+  it('seeds the PR review panel with one family per reviewer, the default first', () => {
+    expect(models.resolveChoice(catalog, 'pr_review', undefined)).toEqual({
+      default: 'opus-5-xhigh',
+      fallback: 'gpt-6-astra-ultra',
+      secondary: 'gpt-6-astra-ultra',
+      tertiary: 'grok-4.6-xhigh',
+      notes: [],
+    })
+    // A default from another family walks the debate participants from it outward.
+    expect(models.resolveChoice(catalog, 'pr_review', { default: 'grok-4.6-xhigh', fallback: 'opus-5-max' })).toMatchObject({
+      secondary: 'opus-5-max',
+      tertiary: 'gpt-6-astra-ultra',
+    })
+    // Fewer families than seats: the panel is still three different models.
+    const claudeOnly = { ...catalog, review_providers: ['claude'] }
+    expect(models.seedReviewers(claudeOnly, 'opus-5-max')).toEqual({ secondary: 'opus-5-xhigh', tertiary: 'fable-5.1-max' })
+  })
+
+  it('keeps stored reviewers and replaces a retired one with its seed', () => {
+    const stored = { default: 'opus-5-max', fallback: 'gpt-6-astra-ultra', secondary: 'muse-spark-1.3-contributor-max', tertiary: 'gemini-3.8-flash-high' }
+    expect(models.resolveChoice(catalog, 'pr_review', stored)).toEqual({ ...stored, notes: [] })
+    const resolved = models.resolveChoice(catalog, 'pr_review', { ...stored, tertiary: 'gemini-3.1-pro-high' })
+    expect(resolved.tertiary).toBe('grok-4.6-xhigh')
+    expect(resolved.notes).toEqual(['gemini-3.1-pro-high is no longer in the catalog; using grok-4.6-xhigh.'])
+  })
+
+  it('lists the reviewers Behaviors asks for, primary first', () => {
+    const choice = { default: 'opus-5-max', fallback: 'gpt-6-astra-ultra', secondary: 'grok-4.6-xhigh', tertiary: 'muse-spark-1.3-contributor-max' }
+    expect(models.reviewerModels(choice, 1)).toEqual([{ slot: 'primary', model: 'opus-5-max' }])
+    expect(models.reviewerModels(choice, 2)).toEqual([{ slot: 'primary', model: 'opus-5-max' }, { slot: 'secondary', model: 'grok-4.6-xhigh' }])
+    expect(models.reviewerModels(choice, 3).map((r) => r.slot)).toEqual(['primary', 'secondary', 'tertiary'])
+    expect(models.reviewerModels(choice, 7).length).toBe(3)
+    expect(models.reviewerModels({ default: 'opus-5-max', fallback: 'gpt-6-astra-ultra' }, 3)).toEqual([{ slot: 'primary', model: 'opus-5-max' }])
   })
 
   it('keeps a stored choice while the catalog still has it', () => {
@@ -68,8 +103,8 @@ describe('resolving a place against the live catalog', () => {
 
   it('lets a review place use any provider Caller lists as reviewing', () => {
     const stored = { default: 'grok-4.6-xhigh', fallback: 'muse-spark-1.3-contributor-max' }
-    expect(models.resolveChoice(catalog, 'pr_review', stored)).toEqual({ ...stored, notes: [] })
-    expect(models.resolveChoice(catalog, 'pr_approve', { default: 'gemini-3.8-flash-high', fallback: 'gpt-5.6-sol-ultra' }).notes).toEqual([])
+    expect(models.resolveChoice(catalog, 'pr_review', stored)).toMatchObject({ ...stored, notes: [] })
+    expect(models.resolveChoice(catalog, 'pr_approve', { default: 'gemini-3.8-flash-high', fallback: 'gpt-5.6-sol-ultra' })).toEqual({ default: 'gemini-3.8-flash-high', fallback: 'gpt-5.6-sol-ultra', notes: [] })
   })
 
   it('never resolves a review place to a model its providers cannot review with', () => {
@@ -90,6 +125,27 @@ describe('validating what the settings pane saves', () => {
       chat: { default: 'gemini-3.8-flash-high', fallback: 'opus-5-max' },
       pr_review: { default: 'muse-spark-1.3-contributor-max', fallback: 'grok-4.6-high' },
     })
+  })
+
+  it('accepts reviewers for the PR review place only, each a different model', () => {
+    const saved = models.validateModelSettings(catalog, {
+      pr_review: { default: 'opus-5-max', fallback: 'gpt-6-astra-ultra', secondary: 'grok-4.6-xhigh', tertiary: 'muse-spark-1.3-contributor-max' },
+      pr_approve: { default: 'opus-5-max', fallback: 'gpt-6-astra-ultra', secondary: 'grok-4.6-xhigh' },
+    })
+    expect(saved.pr_review).toEqual({ default: 'opus-5-max', fallback: 'gpt-6-astra-ultra', secondary: 'grok-4.6-xhigh', tertiary: 'muse-spark-1.3-contributor-max' })
+    expect(saved.pr_approve).toEqual({ default: 'opus-5-max', fallback: 'gpt-6-astra-ultra' })
+    expect(models.validateModelSettings(catalog, { pr_review: { default: 'opus-5-max', fallback: 'gpt-6-astra-ultra', secondary: 'grok-4.6-xhigh' } }).pr_review)
+      .toEqual({ default: 'opus-5-max', fallback: 'gpt-6-astra-ultra', secondary: 'grok-4.6-xhigh' })
+    for (const [choice, message] of [
+      [{ default: 'opus-5-max', fallback: 'gpt-6-astra-ultra', secondary: 'opus' }, /PR review secondary must be a model from the catalog/],
+      [{ default: 'opus-5-max', fallback: 'gpt-6-astra-ultra', secondary: 'opus-5-max' }, /secondary reviewer must differ from its default/],
+      [{ default: 'opus-5-max', fallback: 'gpt-6-astra-ultra', secondary: 'grok-4.6-xhigh', tertiary: 'grok-4.6-xhigh' }, /tertiary reviewer must differ/],
+      [{ default: 'opus-5-max', fallback: 'gpt-6-astra-ultra', tertiary: 'opus-5-max' }, /tertiary reviewer must differ/],
+    ] as const) {
+      expect(() => models.validateModelSettings(catalog, { pr_review: choice })).toThrow(message)
+    }
+    expect(() => models.validateModelSettings(narrow, { pr_review: { default: 'opus-5-max', fallback: 'gpt-6-astra-ultra', secondary: 'grok-4.6-xhigh' } }))
+      .toThrow(/PR review secondary must be a claude or codex model/)
   })
 
   it('holds a review place to the providers an older Caller lists', () => {

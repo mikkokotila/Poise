@@ -102,6 +102,8 @@ interface ReviewActivityFixture {
   reviewerLatestState?: string | null
   reviewerLatestCommit?: string | null
   reviewerReviewsSince?: number
+  // With ids, as github-interface reports them since Caller #39.
+  reviewerReviewIdsSince?: number[]
   reviewerPendingReviews?: number
   resolveSuperseded?: boolean
   resolveUnresolvedCount?: number
@@ -232,7 +234,10 @@ function arrangeCli(
           reviewer_latest_commit: reviewActivity.reviewerLatestCommit ?? null,
           reviewer_change_requests_since: 0,
           reviewer_approvals_since: 0,
-          reviewer_reviews_since: reviewActivity.reviewerReviewsSince ?? 0,
+          reviewer_reviews_since: reviewActivity.reviewerReviewIdsSince?.length ?? reviewActivity.reviewerReviewsSince ?? 0,
+          ...(reviewActivity.reviewerReviewIdsSince
+            ? { reviewer_reviews_since_items: reviewActivity.reviewerReviewIdsSince.map((id) => ({ id, node_id: `PRR_${id}`, state: 'COMMENTED', commit: HEAD_SHA, submitted_at: new Date().toISOString() })) }
+            : {}),
           reviewer_pending_reviews: reviewActivity.reviewerPendingReviews ?? 0,
           latest_activity_at: reviewActivity.latestActivityAt ?? null,
         }),
@@ -1745,6 +1750,121 @@ describe('behavior launch claims', () => {
       launch_call_id: callId,
       launch_error: null,
     })
+  })
+
+  it('reviews a new pull request with every reviewer Behaviors asks for, at once', async () => {
+    arrangeCli(false)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
+    db.setMeta('behavior_review_new_prs_enabled', '1')
+    db.setMeta('behavior_review_new_prs_reviewers', '3')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
+
+    await runtime.runEnabledBehaviorsOnce()
+
+    // Three launches for one head, at once — each its own claim with its own model.
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(3)
+    const launches = mocks.spawnDetached.mock.calls.map((call) => call[1] as string[])
+    expect(launches.map((args) => args[args.indexOf('--model') + 1]).sort()).toEqual(['gpt-6-astra-ultra', 'grok-4.6-xhigh', 'opus-5-xhigh'])
+    expect(new Set(launches.map((args) => args[args.indexOf('--correlation-id') + 1])).size).toBe(3)
+    for (const args of launches) {
+      expect(args).toEqual(expect.arrayContaining(['--pr-review', `#${pr.number}`, '--expected-head', HEAD_SHA, '--source', 'poise:review-new-prs']))
+    }
+    const key = `${pr.repo}#${pr.number}`
+    expect(db.listSeenTargets('review-new-prs').sort()).toEqual([key, `${key}:secondary`, `${key}:tertiary`, '__snapshot_v3__'].sort())
+
+    // Nothing more on the next tick, and a wider panel later never revisits
+    // a pull request the primary already handled.
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not send extra reviewers after a pull request the primary already reviewed', async () => {
+    arrangeCli(false)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_review_new_prs_keyver', '3')
+    db.setMeta('behavior_review_new_prs_enabled', '1')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(1)
+
+    db.setMeta('behavior_review_new_prs_reviewers', '3')
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(1)
+
+    // A pull request opened after the change gets the whole panel.
+    listedPrs = [pr, { ...pr, number: 18, url: 'https://github.com/Vaquum/poise-test/pull/18' }]
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(4)
+    expect(mocks.spawnDetached.mock.calls.slice(1).every((call) => (call[1] as string[]).includes('#18'))).toBe(true)
+  })
+
+  it('relaunches a dead reviewer once the siblings\' reviews are accounted for', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-17T12:00:00.000Z'))
+    arrangeCli(false)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const loaded = await loadModules()
+    loaded.behaviors.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    loaded.database.setMeta('me', 'poise-user')
+    loaded.database.setMeta('behavior_review_new_prs_keyver', '3')
+    loaded.database.setMeta('behavior_review_new_prs_enabled', '1')
+    loaded.database.setMeta('behavior_review_new_prs_reviewers', '3')
+    loaded.database.recordSeen('review-new-prs', '__snapshot_v3__')
+    await loaded.behaviors.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(3)
+
+    const key = `${pr.repo}#${pr.number}`
+    const requestedAt = new Date(Date.now() - 10_000).toISOString()
+    const claims = new Map<string, string>()
+    for (const target of [key, `${key}:secondary`, `${key}:tertiary`]) {
+      loaded.database.db.prepare(`
+        UPDATE behavior_seen SET launch_requested_at = ?, lease_until = ?
+        WHERE key = 'review-new-prs' AND target = ?
+      `).run(requestedAt, Date.now() - 1, target)
+      const row = loaded.database.db.prepare(
+        'SELECT launch_correlation_id AS correlationId FROM behavior_seen WHERE key = ? AND target = ?',
+      ).get('review-new-prs', target) as { correlationId: string }
+      claims.set(target, row.correlationId)
+    }
+    const startedAt = new Date(Date.parse(requestedAt) + 1_000).toISOString()
+    const row = (id: string, target: string, model: string, overrides: Record<string, unknown>) => agentLog({
+      id, model, started_at: startedAt, started_at_precise: startedAt,
+      correlation_id: claims.get(target), actor: 'review-bot', source: 'poise:review-new-prs', expected_head: HEAD_SHA,
+      ...overrides,
+    })
+    // The primary and the tertiary posted reviews 91 and 92; the secondary died without one.
+    agentLogs = [
+      row('1'.repeat(32), key, 'opus-5-xhigh', { status: 'completed', completed_at: new Date().toISOString(), action: 'reviewed_clean', outcome: 'clean', head_sha: HEAD_SHA, review_id: 91 }),
+      row('2'.repeat(32), `${key}:secondary`, 'gpt-6-astra-ultra', { status: 'failed', error: 'provider unavailable' }),
+      row('3'.repeat(32), `${key}:tertiary`, 'grok-4.6-xhigh', { status: 'completed', completed_at: new Date().toISOString(), action: 'reviewed_clean', outcome: 'clean', head_sha: HEAD_SHA, review_id: 92 }),
+    ]
+
+    // An unclaimed review since the launch could be the dead run's own: hold.
+    const { database: db, behaviors: runtime } = await restartModules()
+    arrangeCli(false, false, { reviewerReviewIdsSince: [91, 92, 93] })
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(3)
+    expect(db.listBehaviorDeadLetters()).toEqual([expect.objectContaining({ target: `${key}:secondary`, error: 'provider unavailable' })])
+    vi.setSystemTime(new Date(Date.now() + runtime.BEHAVIOR_RETRY_BASE_MS))
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(3)
+
+    // Every review since the launch belongs to a sibling: the secondary runs again.
+    arrangeCli(false, false, { reviewerReviewIdsSince: [91, 92] })
+    vi.setSystemTime(new Date(Date.now() + runtime.BEHAVIOR_RETRY_BASE_MS))
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(4)
+    const relaunch = mocks.spawnDetached.mock.calls[3][1] as string[]
+    expect(relaunch[relaunch.indexOf('--model') + 1]).toBe('gpt-6-astra-ultra')
+    expect(relaunch).toEqual(expect.arrayContaining(['--expected-head', HEAD_SHA]))
   })
 
   it('recovers a failed review only after GitHub proves no reviewer action', async () => {

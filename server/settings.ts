@@ -37,7 +37,12 @@ export function getModelSettings(): ModelSettings {
   const models: ModelSettings = {}
   for (const [place, value] of Object.entries(parsed as Record<string, any>)) {
     if (isModelPlace(place) && typeof value?.default === 'string' && typeof value?.fallback === 'string') {
-      models[place] = { default: value.default, fallback: value.fallback }
+      models[place] = {
+        default: value.default,
+        fallback: value.fallback,
+        ...(typeof value.secondary === 'string' ? { secondary: value.secondary } : {}),
+        ...(typeof value.tertiary === 'string' ? { tertiary: value.tertiary } : {}),
+      }
     }
   }
   return models

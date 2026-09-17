@@ -19,11 +19,18 @@ interface ModelPlace {
   label: string
   why: string
   review: boolean
+  // The PR review place also names a secondary and a tertiary reviewer;
+  // Behaviors decides how many of the three review each new pull request.
+  reviewers: boolean
   default: string
   fallback: string
+  secondary?: string
+  tertiary?: string
   notes: string[]
-  stored: { default: string, fallback: string } | null
+  stored: { default: string, fallback: string, secondary?: string, tertiary?: string } | null
 }
+interface ModelChoice { default: string, fallback: string, secondary?: string, tertiary?: string }
+const REVIEWER_SLOTS = ['secondary', 'tertiary'] as const
 interface FixedPlace { key: string, label: string, model: string, why: string }
 interface ModelsResponse {
   catalog: { models: CatalogModel[], review_providers: string[], path: string }
@@ -104,20 +111,35 @@ function modelOptions(models: CatalogModel[], place: ModelPlace, reviewProviders
     .join('')
 }
 
+function sectionChoice(section: HTMLElement): ModelChoice {
+  const choice: ModelChoice = {
+    default: section.querySelector<HTMLSelectElement>('.st-model-default')?.value || '',
+    fallback: section.querySelector<HTMLSelectElement>('.st-model-fallback')?.value || '',
+  }
+  for (const slot of REVIEWER_SLOTS) {
+    const value = section.querySelector<HTMLSelectElement>(`.st-model-${slot}`)?.value
+    if (value) choice[slot] = value
+  }
+  return choice
+}
+
 function renderPlaces(data: ModelsResponse) {
   if (!modelsEl || !fixedEl) return
-  const kept = new Map<string, { default: string, fallback: string }>()
+  const kept = new Map<string, ModelChoice>()
   for (const section of modelsEl.querySelectorAll<HTMLElement>('.st-place')) {
     const key = section.dataset.place || ''
     if (!dirtyModels.has(key)) continue
-    kept.set(key, {
-      default: section.querySelector<HTMLSelectElement>('.st-model-default')?.value || '',
-      fallback: section.querySelector<HTMLSelectElement>('.st-model-fallback')?.value || '',
-    })
+    kept.set(key, sectionChoice(section))
   }
   modelsEl.innerHTML = data.places.map((place) => {
-    const current = kept.get(place.key) || { default: place.default, fallback: place.fallback }
+    const current: ModelChoice = kept.get(place.key)
+      || { default: place.default, fallback: place.fallback, secondary: place.secondary, tertiary: place.tertiary }
     const notes = place.notes.map((n) => `<div class="st-help st-help-error">${escapeHtml(n)}</div>`).join('')
+    const reviewers = place.reviewers
+      ? REVIEWER_SLOTS.map((slot) => `
+        <label class="st-sublabel">${slot === 'secondary' ? 'Secondary reviewer' : 'Tertiary reviewer'}</label>
+        <select class="st-select st-model-${slot}" aria-label="${escapeHtml(place.label)} ${slot} reviewer">${modelOptions(data.catalog.models, place, data.catalog.review_providers, current[slot] || '')}</select>`).join('')
+      : ''
     return `
       <div class="tp-section st-place" data-place="${escapeHtml(place.key)}">
         <label class="tp-label">${escapeHtml(place.label)}</label>
@@ -126,6 +148,7 @@ function renderPlaces(data: ModelsResponse) {
         <select class="st-select st-model-default" aria-label="${escapeHtml(place.label)} default model">${modelOptions(data.catalog.models, place, data.catalog.review_providers, current.default)}</select>
         <label class="st-sublabel">Fallback</label>
         <select class="st-select st-model-fallback" aria-label="${escapeHtml(place.label)} fallback model">${modelOptions(data.catalog.models, place, data.catalog.review_providers, current.fallback)}</select>
+        ${reviewers}
         ${notes}
       </div>`
   }).join('')
@@ -175,15 +198,14 @@ async function loadModels(): Promise<void> {
   }
 }
 
-function collectModels(): Record<string, { default: string, fallback: string }> | null {
+function collectModels(): Record<string, ModelChoice> | null {
   if (!modelsEl) return null
-  const models: Record<string, { default: string, fallback: string }> = {}
+  const models: Record<string, ModelChoice> = {}
   for (const section of modelsEl.querySelectorAll<HTMLElement>('.st-place')) {
     const key = section.dataset.place || ''
-    const def = section.querySelector<HTMLSelectElement>('.st-model-default')?.value
-    const fallback = section.querySelector<HTMLSelectElement>('.st-model-fallback')?.value
-    if (!key || !def || !fallback) continue
-    models[key] = { default: def, fallback }
+    const choice = sectionChoice(section)
+    if (!key || !choice.default || !choice.fallback) continue
+    models[key] = choice
   }
   return Object.keys(models).length ? models : null
 }
@@ -249,6 +271,14 @@ async function saveAll() {
   for (const [key, choice] of Object.entries(models || {})) {
     if (choice.default === choice.fallback) {
       setHelp(`${key}: the fallback must differ from the default.`, 'error')
+      return
+    }
+    if (choice.secondary && choice.secondary === choice.default) {
+      setHelp(`${key}: the secondary reviewer must differ from the default.`, 'error')
+      return
+    }
+    if (choice.tertiary && (choice.tertiary === choice.default || choice.tertiary === choice.secondary)) {
+      setHelp(`${key}: the tertiary reviewer must differ from the default and the secondary.`, 'error')
       return
     }
   }

@@ -14,6 +14,10 @@ export interface BehaviorMeta {
   // The Behaviors view renders an em dash in the Setting cell when
   // this is false.
   hasSetting: boolean
+  // Whether this behavior chooses how many reviewers act on each pull
+  // request (the PR review place's default, secondary and tertiary, in
+  // parallel). Only the initial review does; the others show a dash.
+  hasReviewers: boolean
   // Whether this behavior has a memory scratchpad — true only for the
   // agent-backed behaviors whose prompt the note can be injected into.
   // resolve-unblocking calls github-interface directly with no agent,
@@ -25,12 +29,13 @@ export interface BehaviorMeta {
 // gate-clearing so a human can merge. Order matters for display since
 // the view renders rows in the listed sequence.
 export const BEHAVIORS: BehaviorMeta[] = [
-  { key: 'review-new-prs',     label: 'Review New Pull Requests',      hasSetting: true,  hasMemory: true  },
-  { key: 'approve-prs',        label: 'Approve Pull Requests',         hasSetting: false, hasMemory: true  },
-  { key: 'resolve-unblocking', label: 'Resolve Unblocking Conversations', hasSetting: false, hasMemory: false },
+  { key: 'review-new-prs',     label: 'Review New Pull Requests',      hasSetting: true,  hasReviewers: true,  hasMemory: true  },
+  { key: 'approve-prs',        label: 'Approve Pull Requests',         hasSetting: false, hasReviewers: false, hasMemory: true  },
+  { key: 'resolve-unblocking', label: 'Resolve Unblocking Conversations', hasSetting: false, hasReviewers: false, hasMemory: false },
 ]
 
 export type BehaviorSetting = 'p0' | 'p1' | 'p2' | 'p3' | 'p4'
+export type ReviewerCount = 1 | 2 | 3
 export interface LastTriggered { at: string; target: string }
 export interface BehaviorDiagnostics {
   status: 'ok' | 'degraded'
@@ -68,6 +73,7 @@ export interface BehaviorDiagnostics {
 // /api/behaviors GET on view init and every successful POST.
 const enabledByKey: Partial<Record<BehaviorKey, boolean>> = {}
 const settingByKey: Partial<Record<BehaviorKey, BehaviorSetting>> = {}
+const reviewersByKey: Partial<Record<BehaviorKey, ReviewerCount>> = {}
 const lastByKey: Partial<Record<BehaviorKey, LastTriggered | null>> = {}
 const scratchpadByKey: Partial<Record<BehaviorKey, string>> = {}
 let diagnostics: BehaviorDiagnostics | null = null
@@ -78,6 +84,14 @@ export function isEnabled(key: BehaviorKey): boolean {
 
 export function getSetting(key: BehaviorKey): BehaviorSetting {
   return settingByKey[key] || 'p2'
+}
+
+export function getReviewers(key: BehaviorKey): ReviewerCount {
+  return reviewersByKey[key] || 1
+}
+
+export function isReviewerCount(value: unknown): value is ReviewerCount {
+  return value === 1 || value === 2 || value === 3
 }
 
 export function getLastTriggered(key: BehaviorKey): LastTriggered | null {
@@ -98,7 +112,7 @@ export class BehaviorConflictError extends Error {
   constructor(message: string, readonly current: string) { super(message) }
 }
 
-async function postBehavior(key: BehaviorKey, body: { enabled?: boolean, setting?: BehaviorSetting, scratchpad?: string, scratchpadPrevious?: string }) {
+async function postBehavior(key: BehaviorKey, body: { enabled?: boolean, setting?: BehaviorSetting, reviewers?: ReviewerCount, scratchpad?: string, scratchpadPrevious?: string }) {
   const res = await fetch(`/api/behaviors/${encodeURIComponent(key)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -189,6 +203,30 @@ export function setSetting(key: BehaviorKey, setting: BehaviorSetting): Promise<
   return chained
 }
 
+// The reviewer count is serialized the same way as the ceiling, for the same
+// reason: the last request to arrive is what the server keeps.
+const reviewersWriteChain: Partial<Record<BehaviorKey, Promise<void>>> = {}
+
+export function setReviewers(key: BehaviorKey, reviewers: ReviewerCount): Promise<void> {
+  const run = async () => {
+    const previous = reviewersByKey[key] ?? 1
+    reviewersByKey[key] = reviewers
+    beginWrite(key)
+    try {
+      const data = await postBehavior(key, { reviewers })
+      if (isReviewerCount(data.reviewers)) reviewersByKey[key] = data.reviewers
+    } catch (err) {
+      reviewersByKey[key] = previous
+      throw err
+    } finally {
+      endWrite(key)
+    }
+  }
+  const chained = (reviewersWriteChain[key] ?? Promise.resolve()).then(run, run)
+  reviewersWriteChain[key] = chained.catch(() => {})
+  return chained
+}
+
 // `loaded` is what the caller believed was stored when it began editing. The
 // server refuses the write if that no longer matches, so a second window
 // cannot silently overwrite the first one's memory.
@@ -258,6 +296,7 @@ export async function refreshState(): Promise<void> {
       if (!readIsCurrentFor(k, seen.started, seen.busy)) continue
       enabledByKey[k] = !!data[k]?.enabled
       if (data[k]?.setting) settingByKey[k] = data[k].setting
+      if (isReviewerCount(data[k]?.reviewers)) reviewersByKey[k] = data[k].reviewers
       scratchpadByKey[k] = typeof data[k]?.scratchpad === 'string' ? data[k].scratchpad : ''
     }
     for (const k of keys) {
