@@ -102,13 +102,16 @@ export function isReviewModel(catalog: Catalog, identity: string): boolean {
 // lists as reviewing (every one of them since Caller #39) and their fallback
 // is the recovery model Caller switches to after a Claude output limit; for
 // the others the fallback is used when the default cannot be launched — its
-// provider is not signed in, or a refresh retired it.
+// provider is not signed in, or a refresh retired it. The PR review place
+// also names a secondary and a tertiary reviewer: Behaviors decides how many
+// of the three review each new pull request, at the same time.
 export const MODEL_PLACES = [
   {
     key: 'chat',
     label: 'Chat',
     why: 'Card chats opened from Current, Archive and Swarm.',
     review: false,
+    reviewers: false,
     seed: 'author_content',
   },
   {
@@ -116,13 +119,15 @@ export const MODEL_PLACES = [
     label: 'Editor chat',
     why: 'Document and annotation chats in the Editor. /content and /consensus use the Caller defaults listed below.',
     review: false,
+    reviewers: false,
     seed: 'author_content',
   },
   {
     key: 'pr_review',
     label: 'PR review',
-    why: 'Automatic and manual reviews, including replays. The fallback takes over once if Claude hits its output limit.',
+    why: 'Automatic and manual reviews, including replays. The fallback takes over once if Claude hits its output limit. When Behaviors asks for more than one reviewer, the secondary and tertiary review each new pull request alongside the default, at the same time.',
     review: true,
+    reviewers: true,
     seed: 'pr_review',
   },
   {
@@ -130,9 +135,13 @@ export const MODEL_PLACES = [
     label: 'PR approval',
     why: 'Automatic approvals and approval replays. The fallback takes over once if Claude hits its output limit.',
     review: true,
+    reviewers: false,
     seed: 'pr_approve',
   },
 ] as const
+
+export type ReviewerSlot = 'primary' | 'secondary' | 'tertiary'
+export const REVIEWER_SLOTS: readonly ReviewerSlot[] = ['primary', 'secondary', 'tertiary']
 
 export type ModelPlace = typeof MODEL_PLACES[number]['key']
 export const MODEL_PLACE_KEYS = MODEL_PLACES.map((p) => p.key) as ModelPlace[]
@@ -140,6 +149,9 @@ export const MODEL_PLACE_KEYS = MODEL_PLACES.map((p) => p.key) as ModelPlace[]
 export interface ModelChoice {
   default: string
   fallback: string
+  // Reviewer places only: who reviews alongside the default.
+  secondary?: string
+  tertiary?: string
 }
 
 export type ModelSettings = Partial<Record<ModelPlace, ModelChoice>>
@@ -152,6 +164,29 @@ export function isModelPlace(value: string): value is ModelPlace {
 // refresh can still retire one, so every read resolves again and says so.
 export interface ResolvedChoice extends ModelChoice {
   notes: string[]
+}
+
+// The extra reviewers Poise proposes until the user picks: the debate
+// participants are one top-effort model per family, so walking them from the
+// default's family outward gives a panel of different families. Never the
+// default itself; a family already on the panel only when nothing else is left.
+export function seedReviewers(catalog: Catalog, primary: string): { secondary: string, tertiary: string } {
+  const candidates = [...catalog.debate_participants, ...catalog.models.map((m) => m.identity)]
+    .filter((identity, index, all) => all.indexOf(identity) === index && identity !== primary && isReviewModel(catalog, identity))
+  const chosen: string[] = []
+  const providers = new Set([catalogModel(catalog, primary)?.provider])
+  for (const identity of candidates) {
+    if (chosen.length === 2) break
+    const provider = catalogModel(catalog, identity)!.provider
+    if (providers.has(provider)) continue
+    providers.add(provider)
+    chosen.push(identity)
+  }
+  for (const identity of candidates) {
+    if (chosen.length === 2) break
+    if (!chosen.includes(identity)) chosen.push(identity)
+  }
+  return { secondary: chosen[0] ?? primary, tertiary: chosen[1] ?? chosen[0] ?? primary }
 }
 
 export function resolveChoice(catalog: Catalog, place: ModelPlace, stored: ModelChoice | undefined): ResolvedChoice {
@@ -171,7 +206,28 @@ export function resolveChoice(catalog: Catalog, place: ModelPlace, stored: Model
     if (fallback) notes.push(`${fallback} is no longer in the catalog; using ${seedFallback}.`)
     fallback = seedFallback
   }
-  return { default: chosen!, fallback: fallback!, notes }
+  if (!spec.reviewers) return { default: chosen!, fallback: fallback!, notes }
+  const seeds = seedReviewers(catalog, chosen!)
+  const panel: Pick<ModelChoice, 'secondary' | 'tertiary'> = {}
+  for (const slot of ['secondary', 'tertiary'] as const) {
+    let reviewer = stored?.[slot]
+    if (!usable(reviewer)) {
+      if (reviewer) notes.push(`${reviewer} is no longer in the catalog; using ${seeds[slot]}.`)
+      reviewer = seeds[slot]
+    }
+    panel[slot] = reviewer
+  }
+  return { default: chosen!, fallback: fallback!, ...panel, notes }
+}
+
+// The models that review a new pull request, primary first, for the number
+// of reviewers Behaviors asks for.
+export function reviewerModels(choice: ModelChoice, count: number): Array<{ slot: ReviewerSlot, model: string }> {
+  const models = [choice.default, choice.secondary, choice.tertiary]
+  return REVIEWER_SLOTS
+    .slice(0, Math.max(1, Math.min(REVIEWER_SLOTS.length, count)))
+    .map((slot, index) => ({ slot, model: models[index]! }))
+    .filter((entry) => typeof entry.model === 'string' && entry.model.length > 0)
 }
 
 export function validateModelSettings(catalog: Catalog, models: unknown): ModelSettings {
@@ -183,7 +239,11 @@ export function validateModelSettings(catalog: Catalog, models: unknown): ModelS
     if (!isModelPlace(place)) throw new Error(`unknown model place ${place}`)
     const spec = MODEL_PLACES.find((p) => p.key === place)!
     const choice = value as Record<string, unknown>
-    for (const field of ['default', 'fallback'] as const) {
+    const fields: Array<'default' | 'fallback' | 'secondary' | 'tertiary'> = ['default', 'fallback']
+    if (spec.reviewers) {
+      for (const slot of ['secondary', 'tertiary'] as const) if (choice?.[slot] !== undefined) fields.push(slot)
+    }
+    for (const field of fields) {
       const identity = choice?.[field]
       if (typeof identity !== 'string' || !catalogModel(catalog, identity)) {
         throw new Error(`${spec.label} ${field} must be a model from the catalog`)
@@ -195,7 +255,18 @@ export function validateModelSettings(catalog: Catalog, models: unknown): ModelS
     if (choice.default === choice.fallback) {
       throw new Error(`${spec.label} fallback must differ from its default`)
     }
-    next[place] = { default: choice.default as string, fallback: choice.fallback as string }
+    if (fields.includes('secondary') && choice.secondary === choice.default) {
+      throw new Error(`${spec.label} secondary reviewer must differ from its default`)
+    }
+    if (fields.includes('tertiary') && (choice.tertiary === choice.default || choice.tertiary === choice.secondary)) {
+      throw new Error(`${spec.label} tertiary reviewer must differ from the default and the secondary`)
+    }
+    next[place] = {
+      default: choice.default as string,
+      fallback: choice.fallback as string,
+      ...(fields.includes('secondary') ? { secondary: choice.secondary as string } : {}),
+      ...(fields.includes('tertiary') ? { tertiary: choice.tertiary as string } : {}),
+    }
   }
   return next
 }

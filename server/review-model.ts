@@ -1,5 +1,5 @@
 import { claudeAuth } from './claude-auth'
-import { REVIEW_POLICY, type Catalog, isClaudeModel, loadCatalog, resolveChoice } from './models'
+import { REVIEW_POLICY, type Catalog, type ReviewerSlot, isClaudeModel, loadCatalog, resolveChoice, reviewerModels } from './models'
 import { getModelSettings } from './settings'
 
 export { REVIEW_POLICY }
@@ -18,6 +18,21 @@ export async function reviewChoice(place: 'pr_review' | 'pr_approve'): Promise<R
   if (catalog.policy !== REVIEW_POLICY) throw new Error('Update Caller: PR review model selection is unavailable')
   const choice = resolveChoice(catalog, place, getModelSettings()[place])
   return { model: choice.default, recovery: choice.fallback, catalog }
+}
+
+export interface ReviewPanel {
+  reviewers: Array<{ slot: ReviewerSlot, model: string }>
+  recovery: string
+  catalog: Catalog
+}
+
+// The reviewers of a new pull request, primary first: as many of the PR
+// review place's default, secondary and tertiary as Behaviors asks for.
+export async function reviewPanel(count: number): Promise<ReviewPanel> {
+  const catalog = await loadCatalog()
+  if (catalog.policy !== REVIEW_POLICY) throw new Error('Update Caller: PR review model selection is unavailable')
+  const choice = resolveChoice(catalog, 'pr_review', getModelSettings().pr_review)
+  return { reviewers: reviewerModels(choice, count), recovery: choice.fallback, catalog }
 }
 
 // Whether launching this identity needs the Claude.ai sign-in Poise monitors.

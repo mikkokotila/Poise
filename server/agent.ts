@@ -56,6 +56,9 @@ export interface LogEntry {
   review_policy?: string | null
   recovery_model?: string | null
   error_code?: string | null
+  // The GitHub review this run submitted (Caller's receipt); tells a
+  // reviewer's review apart from a sibling's on the same pull request.
+  review_id?: number | null
 }
 
 export async function fetchAgentLogs(
@@ -187,6 +190,7 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
     error_code: optionalString('error_code'),
     review_policy: optionalString('review_policy'),
     recovery_model: optionalString('recovery_model'),
+    review_id: Number.isSafeInteger(row.review_id) && Number(row.review_id) > 0 ? Number(row.review_id) : null,
   }
 }
 

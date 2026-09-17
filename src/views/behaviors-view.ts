@@ -9,7 +9,7 @@
 // runtime — the view is just a UI for state, not the place where
 // agent automations actually run.
 
-import { BEHAVIORS, isEnabled, setEnabled, getSetting, setSetting, getScratchpad, setScratchpad, getLastTriggered, getBehaviorDiagnostics, refreshState, BehaviorConflictError, type BehaviorKey, type BehaviorSetting, isBehaviorStateLoaded, getBehaviorOwner } from '../behaviors'
+import { BEHAVIORS, isEnabled, setEnabled, getSetting, setSetting, getReviewers, setReviewers, isReviewerCount, getScratchpad, setScratchpad, getLastTriggered, getBehaviorDiagnostics, refreshState, BehaviorConflictError, type BehaviorKey, type BehaviorSetting, type ReviewerCount, isBehaviorStateLoaded, getBehaviorOwner } from '../behaviors'
 
 let viewEl: HTMLElement
 let initialized = false
@@ -227,6 +227,42 @@ function settingCell(meta: typeof BEHAVIORS[number]): string {
       ${opts}
     </select>
   `
+}
+
+// Reviewers cell — how many of the PR review place's models (Settings →
+// Models: default, secondary, tertiary) review each new pull request, all
+// at the same time. One is the default; the others show a dash.
+const REVIEWER_OPTIONS: Array<{ value: ReviewerCount, label: string }> = [
+  { value: 1, label: 'Primary only' },
+  { value: 2, label: 'Primary + secondary' },
+  { value: 3, label: 'All three' },
+]
+const reviewersInFlight = new Set<BehaviorKey>()
+
+function reviewersCell(meta: typeof BEHAVIORS[number]): string {
+  if (!meta.hasReviewers) return '<span class="last-dash">—</span>'
+  const current = getReviewers(meta.key)
+  const opts = REVIEWER_OPTIONS.map((o) =>
+    `<option value="${o.value}"${o.value === current ? ' selected' : ''}>${escapeHtml(o.label)}</option>`
+  ).join('')
+  return `
+    <select class="behavior-reviewers" data-behavior="${escapeHtml(meta.key)}" aria-label="Reviewers for ${escapeHtml(meta.key)}">
+      ${opts}
+    </select>
+  `
+}
+
+function writeReviewers(key: BehaviorKey, value: ReviewerCount): void {
+  reviewersInFlight.add(key)
+  void setReviewers(key, value).catch((err: unknown) => {
+    alert(`Could not update the reviewer count: ${(err as Error).message}`)
+  }).then(() => {
+    reviewersInFlight.delete(key)
+    const current = viewEl?.querySelector<HTMLSelectElement>(
+      `select.behavior-reviewers[data-behavior="${key}"]`,
+    )
+    if (current) current.value = String(getReviewers(key))
+  })
 }
 
 // Memory cell — a pill button that opens the per-behavior scratchpad
@@ -521,6 +557,7 @@ function renderShell(): string {
             <th class="col-title">Behavior</th>
             <th class="col-owner-wide">Owner</th>
             <th class="col-setting">Setting</th>
+            <th class="col-reviewers">Reviewers</th>
             <th class="col-memory">Memory</th>
             <th class="col-last">Last triggered</th>
             <th class="col-active">Active</th>
@@ -540,6 +577,7 @@ function renderRow(meta: typeof BEHAVIORS[number]): HTMLTableRowElement {
     <td class="title-cell"><span class="behavior-name">${escapeHtml(meta.label)}</span></td>
     <td>${ownerCell(owner)}</td>
     <td class="behavior-setting-cell">${settingCell(meta)}</td>
+    <td class="behavior-reviewers-cell">${reviewersCell(meta)}</td>
     <td class="behavior-memory-cell">${memoryCell(meta)}</td>
     <td class="behavior-last-cell">${lastTriggeredCell(meta.key)}</td>
     <td class="behavior-active-cell">${toggleCell(meta.key)}</td>
@@ -661,6 +699,15 @@ function attachHandlers() {
       queueSettingWrite(key, sel.value as BehaviorSetting)
       return
     }
+    // Reviewers dropdown — three values, written as chosen; an intermediate
+    // value only changes how many reviewers the next new pull request gets.
+    if (target.matches('select.behavior-reviewers[data-behavior]')) {
+      const sel = target as HTMLSelectElement
+      const key = sel.dataset.behavior as BehaviorKey
+      const value = Number(sel.value)
+      if (isReviewerCount(value)) writeReviewers(key, value)
+      return
+    }
   })
   tbody.addEventListener('click', (e) => {
     // Memory button → toggle the per-behavior scratchpad panel.
@@ -708,6 +755,8 @@ async function tickRefresh() {
     // ceiling and it being stored there is a window in which the mirror still
     // holds the old value — repainting from it here threw the choice away.
     if (setting && !settingWrites.has(meta.key)) setting.value = getSetting(meta.key)
+    const reviewers = tr.querySelector<HTMLSelectElement>('select.behavior-reviewers[data-behavior]')
+    if (reviewers && !reviewersInFlight.has(meta.key)) reviewers.value = String(getReviewers(meta.key))
   }
 }
 

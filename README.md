@@ -89,6 +89,21 @@ switches to once after a Claude output limit. For chat places the fallback
 launches when the default's provider is not signed in. A choice the catalog no
 longer contains resolves to the Caller default and says so in the pane.
 
+The PR review place also names a secondary and a tertiary reviewer (seeded
+from different families than the default). The Reviewers column of the
+Behaviors view decides how many of the three review each new pull request —
+primary only by default, primary + secondary, or all three — and they run at
+the same time, each as its own Swarm row with its own model and Stop button.
+Every review posts as the configured reviewer, so the pull request ends up with
+the union of their findings; a bug two reviewers find in the same minutes can
+appear twice, since github-interface deduplicates only against threads already
+posted. Each run reports the review it submitted (Caller records the GitHub
+review id as its receipt), so a reviewer that dies is relaunched exactly like a
+single review is: once every review posted since its launch is accounted for by
+a sibling. Approvals stay with the default model. A wider panel applies to
+pull requests opened after the change; the manual Review button in Swarm keeps
+launching the default alone.
+
 The catalog holds the latest model of each family with its top two efforts
 (three for Claude, so reviews can run at high; Claude keeps Opus and Fable,
 Codex Astra and Sol).
