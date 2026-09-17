@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { CATALOG, CATALOG_STDOUT } from './model-catalog-fixture'
+import { CATALOG, CATALOG_STDOUT, NARROW_CATALOG } from './model-catalog-fixture'
 
 const mocks = vi.hoisted(() => ({ runFile: vi.fn() }))
 vi.mock('../server/process', () => ({ runFile: mocks.runFile }))
 
 const models = await import('../server/models')
 const catalog = CATALOG as any
+const narrow = NARROW_CATALOG as any
 
 beforeEach(() => {
   models.invalidateCatalog()
@@ -65,8 +66,14 @@ describe('resolving a place against the live catalog', () => {
     })
   })
 
+  it('lets a review place use any provider Caller lists as reviewing', () => {
+    const stored = { default: 'grok-4.6-xhigh', fallback: 'muse-spark-1.3-contributor-max' }
+    expect(models.resolveChoice(catalog, 'pr_review', stored)).toEqual({ ...stored, notes: [] })
+    expect(models.resolveChoice(catalog, 'pr_approve', { default: 'gemini-3.8-flash-high', fallback: 'gpt-5.6-sol-ultra' }).notes).toEqual([])
+  })
+
   it('never resolves a review place to a model its providers cannot review with', () => {
-    const resolved = models.resolveChoice(catalog, 'pr_review', { default: 'grok-4.6-xhigh', fallback: 'opus-5-max' })
+    const resolved = models.resolveChoice(narrow, 'pr_review', { default: 'grok-4.6-xhigh', fallback: 'opus-5-max' })
     expect(resolved.default).toBe('opus-5-xhigh')
     expect(resolved.fallback).toBe('opus-5-max')
     expect(resolved.notes[0]).toContain('grok-4.6-xhigh is no longer in the catalog')
@@ -77,13 +84,21 @@ describe('validating what the settings pane saves', () => {
   it('accepts catalog identities per known place and returns only those', () => {
     const next = models.validateModelSettings(catalog, {
       chat: { default: 'gemini-3.8-flash-high', fallback: 'opus-5-max', extra: 'ignored' },
+      pr_review: { default: 'muse-spark-1.3-contributor-max', fallback: 'grok-4.6-high' },
     })
-    expect(next).toEqual({ chat: { default: 'gemini-3.8-flash-high', fallback: 'opus-5-max' } })
+    expect(next).toEqual({
+      chat: { default: 'gemini-3.8-flash-high', fallback: 'opus-5-max' },
+      pr_review: { default: 'muse-spark-1.3-contributor-max', fallback: 'grok-4.6-high' },
+    })
+  })
+
+  it('holds a review place to the providers an older Caller lists', () => {
+    expect(() => models.validateModelSettings(narrow, { pr_review: { default: 'muse-spark-1.3-contributor-max', fallback: 'opus-5-xhigh' } }))
+      .toThrow(/PR review default must be a claude or codex model/)
   })
 
   it.each([
     [{ chat: { default: 'opus', fallback: 'opus-5-max' } }, /Chat default must be a model from the catalog/],
-    [{ pr_review: { default: 'muse-spark-1.3-contributor-max', fallback: 'opus-5-xhigh' } }, /PR review default must be a claude or codex model/],
     [{ pr_approve: { default: 'opus-5-xhigh', fallback: 'opus-5-xhigh' } }, /PR approval fallback must differ/],
     [{ canary: { default: 'opus-5-max', fallback: 'opus-5-xhigh' } }, /unknown model place canary/],
     ['opus-5-max', /object of places/],
