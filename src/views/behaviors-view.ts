@@ -231,22 +231,18 @@ function settingCell(meta: typeof BEHAVIORS[number]): string {
 
 // Reviewers cell — how many of the PR review place's models (Settings →
 // Models: default, secondary, tertiary) review each new pull request, all
-// at the same time. One is the default; the others show a dash.
-const REVIEWER_OPTIONS: Array<{ value: ReviewerCount, label: string }> = [
-  { value: 1, label: 'Primary only' },
-  { value: 2, label: 'Primary + secondary' },
-  { value: 3, label: 'All three' },
-]
+// at the same time. One is the default; the other behaviors show a dash.
+const REVIEWER_OPTIONS: ReviewerCount[] = [1, 2, 3]
 const reviewersInFlight = new Set<BehaviorKey>()
 
 function reviewersCell(meta: typeof BEHAVIORS[number]): string {
   if (!meta.hasReviewers) return '<span class="last-dash">—</span>'
   const current = getReviewers(meta.key)
-  const opts = REVIEWER_OPTIONS.map((o) =>
-    `<option value="${o.value}"${o.value === current ? ' selected' : ''}>${escapeHtml(o.label)}</option>`
+  const opts = REVIEWER_OPTIONS.map((count) =>
+    `<option value="${count}"${count === current ? ' selected' : ''}>${count}</option>`
   ).join('')
   return `
-    <select class="behavior-reviewers" data-behavior="${escapeHtml(meta.key)}" aria-label="Reviewers for ${escapeHtml(meta.key)}">
+    <select class="behavior-reviewers" data-behavior="${escapeHtml(meta.key)}" aria-label="Reviewers for ${escapeHtml(meta.key)}" title="How many of the PR review models (Settings → Models) review each new pull request, at the same time">
       ${opts}
     </select>
   `
