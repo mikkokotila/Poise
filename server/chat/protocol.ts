@@ -75,6 +75,7 @@ export interface SessionRecord {
   repo: string
   /** Absolute canonical path of the checkout the session runs in. */
   checkout: string
+  workspaceKind?: 'poise-local'
   branch: BranchBinding
   title: string
   createdAt: string
@@ -271,8 +272,8 @@ export interface NewSessionRequest {
   model: string
   /** Optional effort override, one of the agent's advertised efforts. */
   effort?: string
-  repo: string
-  branch: BranchRequest
+  repo?: string
+  branch?: BranchRequest
   title?: string
   context?: SessionContext
   /** Explicit fallback choice when the default provider is not signed in. */

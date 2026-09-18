@@ -172,3 +172,31 @@ it('bounds server shutdown when a WebSocket peer does not read the close handsha
     socket.terminate()
   }
 })
+
+it('does not let WebSocket session creation choose a repository or branch', async () => {
+  const create = vi.fn(async (_request: unknown) => ({ id: 'created-local' }))
+  const connect = await serve(create)
+  const socket = await connect()
+  const response = ack(socket, 'local-only')
+  socket.send(command('local-only'))
+  expect((await response).ok).toBe(true)
+  const request = create.mock.calls[0][0]
+  expect(request).toMatchObject({ agent: 'grok', model: 'fixture', title: 'one' })
+  expect(request).not.toHaveProperty('repo')
+  expect(request).not.toHaveProperty('branch')
+})
+
+it('does not let REST session creation choose a repository, branch or filesystem path', async () => {
+  const { Readable } = await import('node:stream')
+  const { handleChatApi } = await import('../server/chat/transport')
+  const create = vi.fn(async (_request: unknown) => ({ id: 'created-local-rest' }))
+  const req = Object.assign(Readable.from([JSON.stringify({ agent: 'grok', model: 'fixture', repo: 'other/repo', branch: { existing: 'main' }, checkout: '/outside' })]),
+    { method: 'POST', headers: { 'content-type': 'application/json' } })
+  const res = { statusCode: 0, setHeader: vi.fn(), end: vi.fn() }
+  await handleChatApi(req as unknown as import('node:http').IncomingMessage, res as unknown as import('node:http').ServerResponse, '/api/chat/sessions', { create } as unknown as ChatRuntime)
+  expect(res.statusCode).toBe(201)
+  const request = create.mock.calls[0][0]
+  expect(request).not.toHaveProperty('repo')
+  expect(request).not.toHaveProperty('branch')
+  expect(request).not.toHaveProperty('checkout')
+})

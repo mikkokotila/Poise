@@ -15,12 +15,11 @@ import type {
   SessionRecord,
   SessionStatus,
   AgentId,
-  BranchRequest,
 } from '../../server/chat/protocol'
 import { AGENT_LABELS } from '../../server/chat/protocol'
 import { chatClient, ChatCommandError, ChatHttpError, type AgentsResponse, type AgentInfo } from '../chat-client'
 import { escapeHtml } from '../markdown'
-import { getSettings } from '../config'
+import { renderNewSessionDialog } from './chat-new-session'
 import {
   createModel, applyEvent, addOptimisticTurn, dropOptimisticTurns, focusedPending, createTranscriptView, pickQuestionOption,
   type TranscriptModel, type TranscriptView,
@@ -103,15 +102,7 @@ function dateLabel(iso: string): string {
   return sameDay ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
 
-function slugify(text: string): string {
-  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40)
-}
-
-function branchPrefix(): string {
-  return agentsInfo?.settings.branchPrefix || getSettings().chat?.branchPrefix || 'chat/'
-}
-
-function agentFor(id: AgentId): AgentInfo | undefined {
+function agentFor(id: string): AgentInfo | undefined {
   return agentsInfo?.agents.find((a) => a.id === id)
 }
 
@@ -700,7 +691,7 @@ function headerHtml(): string {
         <select class="chat-h-select chat-model-select" aria-label="Model"${between ? '' : ' disabled'}>${models.map((m) => `<option value="${escapeHtml(m)}"${m === s.model ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('')}</select>
         ${efforts.length ? `<select class="chat-h-select chat-effort-select" aria-label="Effort"${between ? '' : ' disabled'}>${(efforts.includes(s.effort) ? efforts : [s.effort, ...efforts]).map((x) => `<option value="${escapeHtml(x)}"${x === s.effort ? ' selected' : ''}>${escapeHtml(x)}</option>`).join('')}</select>` : `<span class="chat-h-effort">${escapeHtml(s.effort)}</span>`}
       </span>
-      <span class="chat-h-repo" title="${escapeHtml(s.checkout || '')}"><code>${escapeHtml(s.repo || 'local')}</code> · <code>${escapeHtml(s.branch?.name || '')}</code>${ws.text ? ` <span class="chat-h-ws ${ws.cls}">${escapeHtml(ws.text)}</span>` : ''}</span>
+      <span class="chat-h-repo" title="${escapeHtml(s.checkout || '')}">${s.workspaceKind === 'poise-local' ? '<span>Poise · local</span>' : `<code>${escapeHtml(s.repo || 'local')}</code> · <code>${escapeHtml(s.branch?.name || '')}</code>`}${ws.text ? ` <span class="chat-h-ws ${ws.cls}">${escapeHtml(ws.text)}</span>` : ''}</span>
       ${modeSel}
       <span class="chat-h-status" data-status="${s.status}">${escapeHtml(statusText(s))}</span>
       <span class="chat-controls-spacer"></span>
@@ -840,7 +831,7 @@ function render(): void {
   welcomeEl.hidden = !empty
   welcomeEl.textContent = !e
     ? 'Pick a session on the left, or start a new one.'
-    : `Start a conversation with ${AGENT_LABELS[e.record.agent] || e.record.agent} on ${e.record.repo || 'a local checkout'} · ${e.record.branch?.name || ''}`
+    : e.record.workspaceKind === 'poise-local' ? `Start a conversation with ${AGENT_LABELS[e.record.agent] || e.record.agent}. Files stay local to Poise.` : `Start a conversation with ${AGENT_LABELS[e.record.agent] || e.record.agent} on ${e.record.repo || 'a local checkout'} · ${e.record.branch?.name || ''}`
   viewEl.querySelector<HTMLElement>('.chat-transcript-loading')!.hidden = !(e && e.loading && !e.model.blocks.length)
   // Scrolling sticks to the bottom only for someone already reading there.
   const distance = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
@@ -860,165 +851,20 @@ function render(): void {
 
 // ── New session dialog ─────────────────────────────────────────────────────
 
-export interface NewSessionPrefill {
-  context?: SessionContext
-  repo?: string
-  branch?: BranchRequest
-  /** Open with the repository picker focused (document handoff). */
-  pickRepo?: boolean
-}
-
-let dialogRepoSeq = 0
+export interface NewSessionPrefill { context?: SessionContext }
 
 async function openNewSessionDialog(prefill: NewSessionPrefill = {}): Promise<void> {
   closeDialog()
   dialogEl.hidden = false
-  dialogEl.innerHTML = '<div class="chat-dialog-body"><div class="chat-empty">Loading agents…</div></div>'
-  const [agents, reposRes] = await Promise.all([
-    loadAgents(true),
-    chatClient.repos().catch(() => ({ repos: [] as string[] })),
-  ])
+  dialogEl.innerHTML = '<div class="chat-dialog-body"><div class="chat-empty">Loading models…</div></div>'
+  const agents = await loadAgents(true)
   if (dialogEl.hidden) return
   if (!agents) {
-    dialogEl.innerHTML = '<div class="chat-dialog-body"><div class="st-help st-help-error">Could not load the agent list.</div><button type="button" class="st-clear chat-dialog-cancel">Close</button></div>'
+    dialogEl.innerHTML = '<div class="chat-dialog-body"><div class="st-help st-help-error">Could not load the model catalogue.</div><button type="button" class="st-clear chat-dialog-cancel">Close</button></div>'
+    dialogEl.querySelector('.chat-dialog-cancel')!.addEventListener('click', closeDialog)
     return
   }
-  const repos = reposRes.repos || []
-  const defaultAgent = agents.agents.find((a) => a.models.some((m) => m.identity === agents.defaults.model))
-    || agents.agents.find((a) => a.available) || agents.agents[0]
-  const repo = prefill.repo && repos.includes(prefill.repo) ? prefill.repo : (prefill.repo || repos[0] || '')
-  const slugBase = prefill.context?.title ? slugify(prefill.context.title) : ''
-  const branchNew = prefill.branch && 'new' in prefill.branch ? prefill.branch.new
-    : `${branchPrefix()}${slugBase || `session-${Date.now().toString(36).slice(-5)}`}`
-  const branchKind: 'new' | 'existing' | 'pr' = prefill.branch ? ('pr' in prefill.branch ? 'pr' : 'existing' in prefill.branch ? 'existing' : 'new') : 'new'
-  const fallbackAgent = agents.agents.find((a) => a.models.some((m) => m.identity === agents.defaults.fallback))
-  const fallback = agents.defaults.fallbackReason ? `
-    <fieldset class="chat-dialog-field chat-dialog-fallback">
-      <legend>Model provider</legend>
-      <div class="st-help st-help-error">${escapeHtml(agents.defaults.fallbackReason)}</div>
-      <label class="chat-radio"><input type="radio" name="fallback" value="default" checked> Use the default, <code>${escapeHtml(agents.defaults.model)}</code></label>
-      <label class="chat-radio"><input type="radio" name="fallback" value="fallback"> Use the fallback, <code>${escapeHtml(agents.defaults.fallback)}</code>${fallbackAgent ? ` (${escapeHtml(fallbackAgent.label)})` : ''}</label>
-    </fieldset>` : ''
-  const ctx = prefill.context
-  dialogEl.innerHTML = `
-    <form class="chat-dialog-body">
-      <div class="chat-dialog-title">New session</div>
-      ${ctx ? `<div class="chat-dialog-context"><span class="chat-pill">${escapeHtml(ctx.kind)}</span> ${escapeHtml(ctx.title)}</div>` : ''}
-      <label class="chat-dialog-field">Agent
-        <select class="st-select chat-d-agent" aria-label="Agent">${agents.agents.map((a) => `<option value="${a.id}"${a.id === defaultAgent?.id ? ' selected' : ''}${a.available ? '' : ' disabled'}>${escapeHtml(a.label)}${a.available ? '' : ` — ${escapeHtml(a.reason || 'unavailable')}`}</option>`).join('')}</select>
-      </label>
-      <div class="chat-dialog-row">
-        <label class="chat-dialog-field">Model
-          <select class="st-select chat-d-model" aria-label="Model"></select>
-        </label>
-        <label class="chat-dialog-field">Effort
-          <select class="st-select chat-d-effort" aria-label="Effort"></select>
-        </label>
-      </div>
-      ${fallback}
-      <label class="chat-dialog-field">Repository
-        <select class="st-select chat-d-repo" aria-label="Repository">${repos.map((r) => `<option value="${escapeHtml(r)}"${r === repo ? ' selected' : ''}>${escapeHtml(r)}</option>`).join('')}${repos.length ? '' : '<option value="">No repositories configured</option>'}</select>
-      </label>
-      <fieldset class="chat-dialog-field chat-dialog-branch">
-        <legend>Branch</legend>
-        <label class="chat-radio"><input type="radio" name="branch" value="new"${branchKind === 'new' ? ' checked' : ''}> New branch
-          <input type="text" class="st-input chat-d-branch-new" aria-label="New branch name" value="${escapeHtml(branchNew)}" spellcheck="false">
-        </label>
-        <label class="chat-radio"><input type="radio" name="branch" value="existing"${branchKind === 'existing' ? ' checked' : ''}> Existing branch
-          <select class="st-select chat-d-branch-existing" aria-label="Existing branch"><option value="">Loading…</option></select>
-        </label>
-        <label class="chat-radio"><input type="radio" name="branch" value="pr"${branchKind === 'pr' ? ' checked' : ''}> Pull request
-          <select class="st-select chat-d-branch-pr" aria-label="Pull request"><option value="">Loading…</option></select>
-        </label>
-        <div class="st-help st-help-info chat-d-repo-state"></div>
-      </fieldset>
-      <div class="st-help st-help-error chat-dialog-error" role="alert" hidden></div>
-      <div class="st-row">
-        <button type="submit" class="st-save chat-dialog-create">Create</button>
-        <button type="button" class="st-clear chat-dialog-cancel">Cancel</button>
-      </div>
-    </form>
-  `
-  const form = dialogEl.querySelector<HTMLFormElement>('form')!
-  const agentSel = form.querySelector<HTMLSelectElement>('.chat-d-agent')!
-  const modelSel = form.querySelector<HTMLSelectElement>('.chat-d-model')!
-  const effortSel = form.querySelector<HTMLSelectElement>('.chat-d-effort')!
-  const repoSel = form.querySelector<HTMLSelectElement>('.chat-d-repo')!
-  const errorEl = form.querySelector<HTMLElement>('.chat-dialog-error')!
-
-  const fillModels = (agent: AgentInfo | undefined, wanted?: string) => {
-    const models = agent?.models || []
-    modelSel.innerHTML = models.map((m) => `<option value="${escapeHtml(m.identity)}"${m.identity === wanted ? ' selected' : ''}>${escapeHtml(m.identity)}</option>`).join('')
-    const efforts = agent?.efforts || []
-    const current = models.find((m) => m.identity === modelSel.value)
-    effortSel.innerHTML = efforts.map((x) => `<option value="${escapeHtml(x)}"${x === current?.effort ? ' selected' : ''}>${escapeHtml(x)}</option>`).join('')
-    effortSel.disabled = !efforts.length
-  }
-  fillModels(defaultAgent, agents.defaults.model)
-  agentSel.addEventListener('change', () => fillModels(agentFor(agentSel.value as AgentId)))
-  modelSel.addEventListener('change', () => {
-    const m = agentFor(agentSel.value as AgentId)?.models.find((x) => x.identity === modelSel.value)
-    if (m && [...effortSel.options].some((o) => o.value === m.effort)) effortSel.value = m.effort
-  })
-  form.querySelectorAll<HTMLInputElement>('input[name="fallback"]').forEach((r) => r.addEventListener('change', () => {
-    const useFallback = r.value === 'fallback' && r.checked
-    const target = useFallback ? fallbackAgent : defaultAgent
-    if (!target) return
-    agentSel.value = target.id
-    fillModels(target, useFallback ? agents.defaults.fallback : agents.defaults.model)
-  }))
-
-  const loadRepo = async () => {
-    const name = repoSel.value
-    const seq = ++dialogRepoSeq
-    const existing = form.querySelector<HTMLSelectElement>('.chat-d-branch-existing')!
-    const prs = form.querySelector<HTMLSelectElement>('.chat-d-branch-pr')!
-    const stateEl = form.querySelector<HTMLElement>('.chat-d-repo-state')!
-    if (!name) { existing.innerHTML = '<option value="">—</option>'; prs.innerHTML = '<option value="">—</option>'; return }
-    try {
-      const info = await chatClient.repo(name)
-      if (seq !== dialogRepoSeq) return
-      const wantExisting = prefill.branch && 'existing' in prefill.branch ? prefill.branch.existing : info.currentBranch
-      existing.innerHTML = info.branches.map((b) => `<option value="${escapeHtml(b)}"${b === wantExisting ? ' selected' : ''}>${escapeHtml(b)}</option>`).join('') || '<option value="">No branches</option>'
-      const wantPr = prefill.branch && 'pr' in prefill.branch ? prefill.branch.pr : undefined
-      prs.innerHTML = info.prs.map((p) => `<option value="${p.number}"${p.number === wantPr ? ' selected' : ''}>#${p.number} ${escapeHtml(p.title)} (${escapeHtml(p.branch)})</option>`).join('') || '<option value="">No open pull requests</option>'
-      if (wantPr !== undefined && !info.prs.some((p) => p.number === wantPr)) prs.insertAdjacentHTML('afterbegin', `<option value="${wantPr}" selected>#${wantPr}</option>`)
-      stateEl.textContent = `Checkout ${info.checkout} on ${info.currentBranch}${info.dirty ? ` · ${info.dirtyFiles} uncommitted file${info.dirtyFiles === 1 ? '' : 's'}` : ' · clean'}; new branches cut from ${info.defaultBranch}.`
-    } catch (err) {
-      if (seq !== dialogRepoSeq) return
-      stateEl.textContent = `Could not read the repository — ${(err as Error).message}`
-    }
-  }
-  repoSel.addEventListener('change', () => { void loadRepo() })
-  void loadRepo()
-  form.querySelector<HTMLElement>('.chat-dialog-cancel')!.addEventListener('click', () => closeDialog())
-  form.addEventListener('submit', (e) => {
-    e.preventDefault()
-    const kind = (form.querySelector<HTMLInputElement>('input[name="branch"]:checked')?.value || 'new') as 'new' | 'existing' | 'pr'
-    let branch: BranchRequest
-    if (kind === 'new') branch = { new: form.querySelector<HTMLInputElement>('.chat-d-branch-new')!.value.trim() }
-    else if (kind === 'existing') branch = { existing: form.querySelector<HTMLSelectElement>('.chat-d-branch-existing')!.value }
-    else branch = { pr: Number(form.querySelector<HTMLSelectElement>('.chat-d-branch-pr')!.value) }
-    if (('new' in branch && !branch.new) || ('existing' in branch && !branch.existing) || ('pr' in branch && !branch.pr)) {
-      errorEl.textContent = 'Pick a branch for the session.'
-      errorEl.hidden = false
-      return
-    }
-    const useFallback = form.querySelector<HTMLInputElement>('input[name="fallback"][value="fallback"]')?.checked
-    const req: NewSessionRequest = {
-      agent: agentSel.value as AgentId,
-      model: modelSel.value,
-      effort: effortSel.value || undefined,
-      repo: repoSel.value,
-      branch,
-      context: prefill.context,
-      ...(useFallback ? { fallbackModel: agents.defaults.fallback } : {}),
-    }
-    if (!req.model) { errorEl.textContent = 'Pick a model.'; errorEl.hidden = false; return }
-    void createSession(req, errorEl)
-  })
-  if (prefill.pickRepo) repoSel.focus()
-  else agentSel.focus()
+  renderNewSessionDialog(dialogEl, agents, prefill.context, (request, error) => { void createSession(request, error) }, closeDialog)
 }
 
 function closeDialog(): void {
@@ -1030,8 +876,8 @@ function closeDialog(): void {
 async function createSession(req: NewSessionRequest, errorEl: HTMLElement): Promise<void> {
   const tempId = `pending-${Date.now().toString(36)}`
   const placeholder: SessionRecord = {
-    id: tempId, agent: req.agent, model: req.model, modelId: req.model, effort: req.effort || '', repo: req.repo, checkout: '',
-    branch: { name: 'new' in req.branch ? req.branch.new : 'existing' in req.branch ? req.branch.existing : `pr-${req.branch.pr}`, origin: 'new' in req.branch ? 'new' : 'existing' in req.branch ? 'existing' : 'pr', pr: 'pr' in req.branch ? req.branch.pr : undefined, provisional: 'new' in req.branch },
+    id: tempId, agent: req.agent, model: req.model, modelId: req.model, effort: req.effort || '', repo: '', checkout: '', workspaceKind: 'poise-local',
+    branch: { name: '', origin: 'new', provisional: true },
     title: req.context?.title || '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'starting',
     capabilities: { steer: true, fork: false, thought: false, plan: false, commands: false, modes: false, permissions: true, questions: true, resume: true, images: false },
     lastSeq: 0, pendingRequests: [], instance: '', context: req.context,
@@ -1061,7 +907,7 @@ async function createSession(req: NewSessionRequest, errorEl: HTMLElement): Prom
       : code === 'compat' ? `Caller needs updating (no --record-turn). ${message}`
       : message
     // Reopen the dialog with the reason, so the choice can be adjusted.
-    await openNewSessionDialog({ context: req.context, repo: req.repo, branch: req.branch })
+    await openNewSessionDialog({ context: req.context })
     const el = dialogEl.querySelector<HTMLElement>('.chat-dialog-error') || errorEl
     el.textContent = text
     el.hidden = false

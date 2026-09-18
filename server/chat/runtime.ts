@@ -30,6 +30,8 @@ import { loadCatalog, catalogModel, type Catalog, type CatalogModel } from '../m
 import { claudeAuth } from '../claude-auth'
 import { HttpError } from '../http'
 import { localCheckoutPath } from '../gh'
+import { ensureLocalWorkspace, LOCAL_CHAT_ROOT } from './local-workspace'
+import { catalogueAgents } from './catalog-agents'
 import { runFile } from '../process'
 import { CheckoutLease, canonicalCheckout, describeHolder, type AcquireResult, type CheckoutLeaseOptions } from './checkout-lock'
 import { ATTACHMENT_DIR, attachmentPath, ensureExcluded, inlineText, safeAttachmentName, sha256Of } from './attachments'
@@ -132,6 +134,7 @@ export interface RuntimeOptions {
   callerTurns?: CallerTurns | null
   catalog?: () => Promise<Catalog>
   resolveCheckout?: (repo: string) => Promise<string>
+  localWorkspaceRoot?: string
   idleTimeoutMinutes?: () => number
   branchPrefix?: () => string
   requireClaudeReady?: () => Promise<void>
@@ -142,7 +145,7 @@ export interface RuntimeOptions {
 }
 
 export interface AgentAvailability {
-  id: AgentId
+  id: string
   label: string
   available: boolean
   reason?: string
@@ -313,20 +316,7 @@ export class ChatRuntime extends EventEmitter {
 
   async agents(): Promise<{ agents: AgentAvailability[], catalog: Catalog }> {
     const catalog = await this.catalog()
-    const claudeReady = claudeAuth.snapshot().status === 'authenticated'
-    const agents: AgentAvailability[] = []
-    for (const id of AGENT_IDS) {
-      const models = catalog.models.filter((m) => PROVIDER_AGENT[m.provider] === id)
-      const efforts = [...new Set(models.map((m) => m.effort))]
-      let available = models.length > 0
-      let reason = available ? undefined : 'no models for this agent in the catalog'
-      if (available && id === 'claude' && !claudeReady) { available = false; reason = 'Claude.ai sign-in is not ready' }
-      if (available) {
-        const probe = await this.availabilityOf(id)
-        if (!probe.ok) { available = false; reason = probe.reason }
-      }
-      agents.push({ id, label: AGENT_LABEL[id], available, reason, models, efforts })
-    }
+    const agents = await catalogueAgents(catalog, claudeAuth.snapshot().status === 'authenticated', (id) => this.availabilityOf(id))
     return { agents, catalog }
   }
 
@@ -350,11 +340,12 @@ export class ChatRuntime extends EventEmitter {
     const agent = PROVIDER_AGENT[model.provider]
     if (!agent) throw new ChatError(400, `${identity} runs on ${model.provider}, which is not in Chat v1`, 'unsupported')
     const effort = effortOverride || model.effort
-    const known = efforts?.length ? efforts : [...new Set(catalog.models.filter((m) => m.provider === model.provider).map((m) => m.effort))]
-    if (effortOverride && !known.includes(effortOverride)) {
-      throw new ChatError(400, `${AGENT_LABEL[agent]} offers efforts ${known.join(', ')}`, 'invalid')
+    const variants = catalog.models.filter(m => m.provider === model.provider && m.selector === model.selector)
+    const selected = variants.find(m => m.effort === effort)
+    if (!selected || (efforts?.length && !efforts.includes(effort))) {
+      throw new ChatError(400, `${model.selector} offers catalogue efforts ${variants.map(m => m.effort).join(', ')}`, 'invalid')
     }
-    return { agent, model, effort }
+    return { agent, model: selected, effort: selected.effort }
   }
 
   // ── Sessions ───────────────────────────────────────────────────────────
@@ -410,20 +401,25 @@ export class ChatRuntime extends EventEmitter {
     if (!AGENT_IDS.includes(request.agent)) throw new ChatError(400, `unknown agent ${String(request.agent)}`, 'invalid')
     const { agent, model, effort } = await this.resolveModel(request.model, request.effort)
     if (agent !== request.agent) throw new ChatError(400, `${request.model} is a ${agent} model, not ${request.agent}`, 'invalid')
-    if (!/^[^/\s]+\/[^/\s]+$/.test(request.repo)) throw new ChatError(400, 'repo must be owner/name', 'invalid')
-    const branch = normalizeBranchRequest(request.branch, this.branchPrefix())
+    const local = !request.repo
+    const id = randomUUID()
+    if (!local && !/^[^/\s]+\/[^/\s]+$/.test(request.repo!)) throw new ChatError(400, 'repo must be owner/name', 'invalid')
+    const branch = normalizeBranchRequest(request.branch ?? { new: `chat/${id}` }, this.branchPrefix())
     if (agent === 'claude') await this.requireClaudeReady()
-    const checkout = canonicalCheckout(await this.resolveCheckout(request.repo))
+    const checkout = local
+      ? await ensureLocalWorkspace(this.options.localWorkspaceRoot ?? LOCAL_CHAT_ROOT, this.instance)
+      : canonicalCheckout(await this.resolveCheckout(request.repo!))
     const now = new Date().toISOString()
     const title = (request.title || request.context?.title || 'New session').slice(0, CHAT_LIMITS.titleChars)
     const record: SessionRecord = {
-      id: randomUUID(),
+      id,
       agent,
       model: model.identity,
       modelId: model.selector,
       effort,
-      repo: request.repo,
+      repo: request.repo || '',
       checkout,
+      ...(local ? { workspaceKind: 'poise-local' as const } : {}),
       branch: { name: branch.name, origin: branch.origin, pr: branch.pr, provisional: branch.origin === 'new' },
       title,
       createdAt: now,

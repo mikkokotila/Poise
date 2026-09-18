@@ -3,7 +3,8 @@
 Chat is a Poise-native window onto the installed coding agents, not a new
 agent harness and not an embedded terminal UI. Poise owns sessions, streaming
 and interaction; Claude Code, Codex, Grok Build and Muse do the agent work
-through their native session interfaces. The implementation follows issue #68.
+through their native session interfaces. The implementation follows issue #68,
+with the new-session policy below superseding its repository-picker design.
 
 ## Scope and migration
 
@@ -18,18 +19,34 @@ Current cards, Swarm rows and Editor documents can hand off into Chat. Changing
 the agent creates a new native session with a labelled context handoff, not a
 pretence that one vendor's session migrated to another. The existing chat pane
 remains for `/content`, `/consensus` and Editor annotations in v1. Its retirement
-belongs to v1.1. Antigravity, pi, image input, worktrees and parallel turns on the
-same checkout are outside v1.
+belongs to v1.1. Antigravity models remain visible in the catalogue, but native
+Chat launches need a permission/question channel its current CLI does not offer.
+pi, image input, worktrees and parallel turns on the same checkout are outside v1.
 
 ## Sessions and working context
 
-A session is bound to one repository checkout and one branch. The branch may
-be new, existing or a pull request head. The runtime selects and verifies that
-branch before starting the native agent. Switching away from a session-owned
-dirty branch checkpoints tracked and untracked, non-ignored work with
-`wip(poise): checkpoint`. Dirty branches without a session owner are refused,
-not automatically committed or stashed. Branch removal is conservative: a
-session must not delete committed or uncommitted work on its way out.
+New session offers **Model** and **Effort**, with model families grouped across
+all five catalogue providers: Claude, Codex, Grok, Antigravity and Muse. Efforts
+come from the selected model's catalogue rows, not a provider-wide union. The
+submitted identity always matches that effort. An unavailable provider stays
+visible with its reason; Poise does not invent interactive capabilities or
+silently choose a different model.
+
+New sessions use `.poise-chat/workspace/` inside the running Poise installation.
+The root `/.poise-chat/` ignore rule keeps workspace files out of Poise commits.
+An independently initialized, remote-free Git repository inside that directory
+provides checkpoints and safe Revert without switching or committing the outer
+Poise checkout. The session branch is an internal implementation detail. The
+dialog contains no repository, branch, PR, or location picker, and both REST and
+WebSocket creation routes discard such fields. Card/document handoffs supply
+context, not permission to check out another repository.
+
+Existing repository-bound sessions and their transcripts remain intact. They
+still use their original checkout and branch; this change does not move files
+or rewrite their history. Transcript metadata continues in Poise's existing
+SQLite store. Legacy session switching checkpoints owned dirty branches as
+`wip(poise): checkpoint` and refuses unowned dirty work. A new local session
+never stashes, commits, or switches the enclosing Poise source checkout.
 
 The checkout lease is shared by Poise development, Poise production and the
 compatible Caller writing behavior. Turns in different checkouts can run
@@ -173,7 +190,7 @@ Final validation on the implementation checkout:
 
 | Check | Result |
 | --- | --- |
-| `npm run verify` | Passed: 607 unit/integration tests in 57 files, lint, all three typechecks, production client/server builds and 27 Playwright tests |
+| `npm run verify` | Passed: 617 unit/integration tests in 59 files, lint, all three typechecks, production client/server builds and 28 Playwright tests |
 | Companion Caller Python suite | 299 installed-package tests passed across all three packages, with isolated data |
 | Actual Poise TypeScript to companion Caller CLI | Recorded completed/cancelled turns; repeated start/finish deduplicated; no provider calls |
 | `npm audit --omit=dev --audit-level=high` | Zero vulnerabilities reported |
@@ -228,3 +245,13 @@ an installed-package versus source-test gate-path mismatch and bounded `ps`
 output on Linux. The fix tests the gate shipped with the imported package
 and requests an untruncated process command; the installed-package local
 suite passed 299 tests, including the independent identity checks.
+
+## Local-session catalogue follow-up
+
+The simplified new-session dialog and fixed Poise-local workspace passed
+`npm run verify`: 617 unit/integration tests, all static/build gates and 28
+Playwright tests. Coverage includes every catalogue provider and model-specific
+effort, preserving the outer checkout and dirty work, queueing local sessions,
+rejecting symlinked storage, retaining an unsettled bootstrap lease, and stripping
+repository/branch/path inputs at both public creation endpoints.
+The local log is `/tmp/poise-local-catalogue-final-verify.log`.

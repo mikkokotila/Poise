@@ -226,11 +226,17 @@ updates existing rows and text in place, preserving expansion and scroll positio
 ## Native-agent Chat
 
 The full Chat view owns persistent sessions for Claude Code, Codex, Grok Build
-and Muse. It includes branch-bound working context, inline permissions and
+and Muse. New sessions use Git-ignored storage inside Poise, with no repository
+or branch picker. It includes inline permissions and
 questions, steering, Stop, durable transcripts, and Current/Swarm/Editor
 handoffs. It requires the companion Caller turn-recording and checkout-lock
 changes; the existing pane stays available for `/content`, `/consensus` and
 Editor annotations in v1.
+
+The New session model picker lists all five catalogue providers and each
+model’s exact effort variants. Unavailable integrations, including the current
+Antigravity CLI’s missing interactive permission channel, remain visible with
+an explanation. Existing sessions are preserved.
 
 See [Chat v1](docs/Chat-v1.md) for architecture, recovery, release integration
 and the distinction between automated coverage and live-agent verification.

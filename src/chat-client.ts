@@ -26,7 +26,7 @@ export type ConnectionState = 'connecting' | 'open' | 'closed'
 
 export interface AgentModel { identity: string, selector: string, effort: string }
 export interface AgentInfo {
-  id: AgentId
+  id: string
   label: string
   available: boolean
   reason?: string

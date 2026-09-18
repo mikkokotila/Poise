@@ -213,9 +213,7 @@ export class ChatSocketServer {
       case 'session.list':
         return { sessions: runtime.list() }
       case 'session.new': {
-        const { type: _type, ...request } = command
-        void _type
-        return { session: await runtime.create(request) }
+        return { session: await runtime.create(localSessionRequest(command)) }
       }
       case 'session.resume':
         return { session: await runtime.resume(String(command.id || '')) }
@@ -375,16 +373,7 @@ export async function handleChatApi(req: IncomingMessage, res: ServerResponse, u
     }
     if (path === '/api/chat/sessions' && req.method === 'POST') {
       const body = await readJson<any>(req)
-      const session = await runtime.create({
-        agent: body.agent,
-        model: String(body.model || ''),
-        effort: body.effort ? String(body.effort) : undefined,
-        repo: String(body.repo || ''),
-        branch: body.branch,
-        title: typeof body.title === 'string' ? body.title : undefined,
-        context: body.context && typeof body.context === 'object' ? sanitizeContext(body.context) : undefined,
-        fallbackModel: typeof body.fallbackModel === 'string' ? body.fallbackModel : undefined,
-      })
+      const session = await runtime.create(localSessionRequest(body))
       return json(res, 201, { session }), true
     }
     const match = path.match(/^\/api\/chat\/sessions\/([0-9a-f-]{36})(?:\/([a-z]+))?$/)
@@ -433,5 +422,17 @@ function sanitizeContext(value: any): import('./protocol').SessionContext | unde
     headSha: typeof value.headSha === 'string' && /^[0-9a-f]{40}$/.test(value.headSha) ? value.headSha : undefined,
     slug: typeof value.slug === 'string' && /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,119}$/.test(value.slug) ? value.slug : undefined,
     fromSession: typeof value.fromSession === 'string' && /^[0-9a-f-]{36}$/.test(value.fromSession) ? value.fromSession : undefined,
+  }
+}
+
+/** Browser requests never choose a repository, branch or filesystem path. */
+function localSessionRequest(body: any): import('./protocol').NewSessionRequest {
+  return {
+    agent: body.agent,
+    model: String(body.model || ''),
+    effort: body.effort ? String(body.effort) : undefined,
+    title: typeof body.title === 'string' ? body.title : undefined,
+    context: body.context && typeof body.context === 'object' ? sanitizeContext(body.context) : undefined,
+    fallbackModel: typeof body.fallbackModel === 'string' ? body.fallbackModel : undefined,
   }
 }
