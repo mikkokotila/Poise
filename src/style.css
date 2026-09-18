@@ -2856,12 +2856,28 @@ tr:hover .stop-btn { opacity: 1; }
    This block only declares the column widths and the toggle switch.
    ───────────────────────────────────────────────────────────────────────── */
 
-.col-owner-wide { width: 180px; }
-.col-setting    { width: 130px; }
-.col-reviewers  { width: 170px; }
-.col-memory     { width: 110px; }
-.col-last       { width: 130px; }
-.col-active     { width: 120px; }
+/* The controls take what they need and the name gets the rest — at the
+   default 960px content width that is ~290px, enough for the longest name
+   on one line; every cell stays on one line and ellipsizes rather than
+   wraps (the shared .title-cell rule allows wrapping for Archive's
+   titles, which is exactly what stacked the names three lines high). */
+.col-owner-wide { width: 150px; }
+.col-setting    { width: 100px; }
+.col-reviewers  { width: 80px; }
+.col-memory     { width: 90px; }
+.col-last       { width: 125px; }
+.col-active     { width: 80px; }
+
+#behaviors-table .title-cell {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Below the narrowest content width the table can hold, it keeps its
+   layout and the view scrolls sideways; the name column never collapses. */
+#view-behaviors main { overflow-x: auto; }
+#behaviors-table { min-width: 860px; }
 
 .behavior-diagnostics {
   margin: var(--sp-4) var(--sp-6);
