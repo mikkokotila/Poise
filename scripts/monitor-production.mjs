@@ -2,9 +2,11 @@ import { spawn } from 'node:child_process'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { assessUpdater, productionUpdatePath, readProductionUpdate, updaterAlert } from './production-update.mjs'
 
 const healthUrl = process.env.POISE_HEALTH_URL || 'http://127.0.0.1:5555/api/health'
 const statePath = join(homedir(), '.poise', 'health-monitor.json')
+const updatePath = productionUpdatePath(homedir())
 
 async function previousState() {
   try {
@@ -55,7 +57,7 @@ async function check() {
   }
 }
 
-const [before, current] = await Promise.all([previousState(), check()])
+const [before, current, update] = await Promise.all([previousState(), check(), readProductionUpdate(updatePath)])
 if (current.status !== before?.status) {
   if (current.status === 'healthy') notify('Production runtime recovered and is healthy.')
   else if (current.status === 'unavailable') notify('Production runtime is unavailable.')
@@ -65,6 +67,18 @@ if (current.authStatus === 'reauth_required' && before?.authStatus !== 'reauth_r
   notify('Claude subscription sign-in is required.')
   runDetached('/usr/bin/open', [healthUrl.replace(/\/api\/health$/, '/')])
 }
+// A healthy service on a stale commit is the failure the health check cannot
+// see: the updater (update-caller.mjs) records each run, and this is where
+// its silence or its failures become a notification.
+const updater = assessUpdater(update)
+const alert = updaterAlert(
+  { previous: before?.updater ?? null, alerted: before?.updaterAlerted ?? null },
+  updater,
+  update,
+)
+if (alert.message) notify(alert.message)
+current.updater = updater.status
+current.updaterAlerted = alert.alerted
 await saveState(current)
 console.log(JSON.stringify(current))
 if (current.status !== 'healthy') process.exitCode = 1

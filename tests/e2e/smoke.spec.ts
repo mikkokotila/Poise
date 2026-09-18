@@ -234,6 +234,46 @@ test('saves a review model choice and restores it after reload', async ({ page }
   await expect(page.getByLabel('PR review secondary reviewer')).toHaveValue('muse-spark-1.3-contributor-max')
 })
 
+test('shows in Settings whether production is on main', async ({ page }) => {
+  const deployed = 'b'.repeat(40)
+  let production: Record<string, unknown> = {
+    status: 'failed',
+    checkedAt: new Date().toISOString(),
+    deployedCommit: deployed,
+    remoteCommit: 'c'.repeat(40),
+    behind: 2,
+    failingSince: new Date(Date.now() - 6 * 60_000).toISOString(),
+    error: 'Remote Poise main is not a fast-forward of the deployed commit',
+  }
+  await page.route('**/api/health', async (route) => {
+    await route.fulfill({ json: { status: 'ok', production } })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Menu', exact: true }).click()
+  await page.locator('[data-action="settings"]').click()
+  const line = page.locator('.st-production')
+  await expect(line).toBeVisible()
+  await expect(line).toContainText('Deployed bbbbbbb · main ccccccc — 2 commits behind; updater failing since')
+  await expect(line).toContainText('not a fast-forward')
+  await expect(line).toHaveClass(/st-help-error/)
+
+  // Back on main: the same line, quiet.
+  production = { ...production, status: 'current', remoteCommit: deployed, behind: 0, failingSince: null, error: null }
+  await page.reload()
+  await page.getByRole('button', { name: 'Menu', exact: true }).click()
+  await page.locator('[data-action="settings"]').click()
+  await expect(line).toHaveText('Deployed bbbbbbb · main bbbbbbb — up to date, checked just now.')
+  await expect(line).toHaveClass(/st-help-info/)
+
+  // A dev server has no record, and no Production group.
+  production = { status: 'unknown', checkedAt: null, deployedCommit: null, remoteCommit: null, behind: null, failingSince: null, error: null }
+  await page.reload()
+  await page.getByRole('button', { name: 'Menu', exact: true }).click()
+  await page.locator('[data-action="settings"]').click()
+  await expect(page.getByRole('tab', { name: 'General' })).toBeVisible()
+  await expect(page.locator('.st-production-group')).toBeHidden()
+})
+
 test('chooses how many reviewers each new pull request gets from Behaviors', async ({ page }) => {
   let reviewers = 1
   const writes: Array<Record<string, unknown>> = []
