@@ -5,6 +5,7 @@ import { MODEL_PLACES, invalidateCatalog, loadCatalog, readCatalogReport, resolv
 import { refreshModelCatalog } from './models-refresh'
 import { claudeAuth, type ClaudeAuthSnapshot } from './claude-auth'
 import { getCallerReleaseHealth } from './caller-release'
+import { getProductionUpdateHealth } from './production-update'
 import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, type Lane } from './current'
 import { handleGhBody, listOrgRepos, setReviewAgentUsername } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, fetchAgentReasoning, triggerPrReview, replayAgentJob, stopAgentJob } from './agent'
@@ -76,17 +77,24 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
         if (url === '/api/health' && req.method === 'GET') {
           const scheduler = getBehaviorsRuntimeHealth()
           const claudeAuthState = auth.snapshot()
-          const callerRelease = await getCallerReleaseHealth()
+          const [callerRelease, production] = await Promise.all([
+            getCallerReleaseHealth(),
+            getProductionUpdateHealth(),
+          ])
           const enabled = getEnabledMap()
           const claudeBackedEnabled = enabled['review-new-prs'] || enabled['approve-prs']
           const healthy = scheduler.status === 'ok'
             && (!claudeBackedEnabled || claudeAuthState.status === 'authenticated')
             && callerRelease.status !== 'invalid'
+          // `production` is informational: a stalled updater leaves the
+          // running service healthy, so it does not turn this degraded — the
+          // health monitor raises that on its own and Settings shows it.
           return json(res, healthy ? 200 : 503, {
             status: healthy ? 'ok' : 'degraded',
             scheduler,
             claudeAuth: claudeAuthState,
             callerRelease,
+            production,
           })
         }
 

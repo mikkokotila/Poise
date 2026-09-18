@@ -12,6 +12,7 @@
 // panel never invents a label for one.
 
 import { getSettings as getCachedSettings, setLocalSettings, loadSettings, settingsLoadOk, getRefreshRate, setRefreshRate, getTheme, setTheme } from './config'
+import { productionSummary, type ProductionUpdate } from './production-status'
 
 interface CatalogModel { identity: string, provider: string, selector: string, effort: string }
 interface ModelPlace {
@@ -48,6 +49,7 @@ let helpEl: HTMLElement | null = null
 let modelsEl: HTMLElement | null = null
 let fixedEl: HTMLElement | null = null
 let catalogStatusEl: HTMLElement | null = null
+let productionEl: HTMLElement | null = null
 let refreshBtn: HTMLButtonElement | null = null
 // A model select someone has changed keeps its value across background
 // reloads until Save, exactly like the text fields keep typed text.
@@ -100,6 +102,34 @@ function setHelp(text: string, cls: 'info' | 'error' | 'ok' = 'info') {
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string))
+}
+
+// ── Production ──────────────────────────────────────────────────────────
+
+function renderProduction(update: ProductionUpdate) {
+  if (!productionEl) return
+  const summary = productionSummary(update)
+  const group = productionEl.closest<HTMLElement>('.st-production-group')
+  if (!summary) {
+    if (group) group.hidden = true
+    productionEl.textContent = ''
+    return
+  }
+  productionEl.textContent = summary.text
+  productionEl.className = `st-help st-help-${summary.level} st-production`
+  if (group) group.hidden = false
+}
+
+async function loadProduction(): Promise<void> {
+  if (!productionEl) return
+  try {
+    // 503 still carries the body; a degraded runtime must not blank this line.
+    const res = await fetch('/api/health')
+    const data = await res.json() as { production?: ProductionUpdate }
+    if (data.production) renderProduction(data.production)
+  } catch {
+    // Leave whatever was shown; the next open tries again.
+  }
 }
 
 // ── Models tab ──────────────────────────────────────────────────────────
@@ -387,6 +417,14 @@ function buildPanel(): HTMLElement {
           </div>
           <div class="st-help st-help-info">Applies instantly. Stored locally; no reload needed.</div>
         </div>
+
+        <div class="st-production-group" hidden>
+          <div class="tp-group-label">Production</div>
+          <div class="tp-section">
+            <div class="st-help st-help-info st-production" role="status" aria-live="polite"></div>
+            <div class="st-help st-help-info">Production follows <code>main</code>: a launchd job fast-forwards its checkout and rebuilds every minute. A failing or silent updater also raises a desktop notification.</div>
+          </div>
+        </div>
       </section>
 
       <section class="st-tab" data-tab="models" hidden>
@@ -426,6 +464,7 @@ function buildPanel(): HTMLElement {
   modelsEl = panel.querySelector('.st-models')
   fixedEl = panel.querySelector('.st-models-fixed')
   catalogStatusEl = panel.querySelector('.st-catalog-status')
+  productionEl = panel.querySelector('.st-production')
   refreshBtn = panel.querySelector('.st-refresh-models') as HTMLButtonElement
   refreshBtn.addEventListener('click', () => { void refreshModels() })
   // This used to be `panel.querySelector('.st-help')`, which is the Username
@@ -491,6 +530,7 @@ export function openSettingsPanel() {
   document.addEventListener('keydown', onSettingsKeydown)
   void refreshStatus()
   void loadModels()
+  void loadProduction()
   setTimeout(() => {
     // Focus the first empty required field
     if (!orgInput || !meInput) return

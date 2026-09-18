@@ -3,6 +3,7 @@ import { readFile, realpath } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { productionUpdatePath, readProductionUpdate, writeProductionUpdate } from './production-update.mjs'
 import { configureStopGate, stopGateIsCurrent } from './stop-gate-runtime.mjs'
 
 const scriptPath = fileURLToPath(import.meta.url)
@@ -96,12 +97,69 @@ function requireCommit(value, label) {
   return commit
 }
 
+// Every run leaves a record (production-update.json) whether it succeeds or
+// throws: the health monitor reads it to notice an updater that keeps failing
+// or has stopped running, and /api/health shows it in Settings. The record
+// also carries the last commit whose install completed, so a fast-forward
+// whose install failed is retried on the next tick instead of leaving the
+// checkout on a commit the service was never rebuilt from.
 export async function reconcileRuntime(options = {}) {
-  const root = options.projectRoot || projectRoot
   const home = options.home || homedir()
+  const statePath = options.statePath || productionUpdatePath(home)
+  const readState = options.readState || readProductionUpdate
+  const writeState = options.writeState || writeProductionUpdate
+  const run = options.run || output
+
+  const previous = await readState(statePath)
+  const state = {
+    at: null,
+    status: 'failed',
+    action: null,
+    error: null,
+    failingSince: null,
+    poise: {
+      deployed: null,
+      installed: validCommit(previous?.poise?.installed) ? previous.poise.installed : null,
+      remote: null,
+      behind: null,
+    },
+    caller: validCommit(previous?.caller) ? previous.caller : null,
+  }
+  try {
+    const result = await reconcile({ ...options, home, run, previous, state })
+    state.status = result.action === 'current' ? 'current' : 'updated'
+    state.action = result.action
+    return result
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error)
+    state.failingSince = previous?.status === 'failed' && typeof previous.failingSince === 'string'
+      ? previous.failingSince
+      : new Date().toISOString()
+    throw error
+  } finally {
+    const { deployed, remote } = state.poise
+    if (deployed && remote && deployed !== remote) {
+      try {
+        const count = (await run('git', ['rev-list', '--count', `${deployed}..${remote}`], {
+          cwd: options.projectRoot || projectRoot,
+        })).stdout
+        state.poise.behind = /^\d+$/.test(count) ? Number(count) : null
+      } catch {
+        // The count is a courtesy for the operator; the record stands without it.
+      }
+    } else if (deployed && remote) {
+      state.poise.behind = 0
+    }
+    state.at = new Date().toISOString()
+    await writeState(statePath, state)
+  }
+}
+
+async function reconcile(options) {
+  const root = options.projectRoot || projectRoot
+  const { home, run, previous, state } = options
   const release = options.callerRelease || callerRelease
   const repository = options.poiseRepository || poiseRepository
-  const run = options.run || output
   const readHealth = options.readHealth || callerHealth
   const hookCurrent = options.hookCurrent || stopGateIsCurrent
   const datastoreCurrent = options.datastoreCurrent || datastoreServicesCurrent
@@ -124,11 +182,13 @@ export async function reconcileRuntime(options = {}) {
     (await run('git', ['rev-parse', 'HEAD'], { cwd: root })).stdout,
     'Local Poise HEAD',
   )
+  state.poise.deployed = localPoise
   await run('git', ['fetch', '--quiet', repository, 'refs/heads/main'], { cwd: root })
   const remotePoise = requireCommit(
     (await run('git', ['rev-parse', 'FETCH_HEAD'], { cwd: root })).stdout,
     'Remote Poise main',
   )
+  state.poise.remote = remotePoise
 
   if (localPoise !== remotePoise) {
     try {
@@ -143,8 +203,24 @@ export async function reconcileRuntime(options = {}) {
       'Deployed Poise HEAD',
     )
     if (deployed !== remotePoise) throw new Error('Poise fast-forward did not deploy the selected commit')
+    state.poise.deployed = deployed
     await install()
+    state.poise.installed = deployed
     return { action: 'updated-poise', poiseCommit: remotePoise }
+  }
+
+  // The checkout is on main's commit. If the last completed install was for
+  // an older one — the fast-forward went through and the install then failed
+  // — the service is still running that older build, and nothing above would
+  // ever run the install again. A record with no install at all predates
+  // this bookkeeping; its install happened, so it is adopted, not repeated.
+  if (!previous || !state.poise.installed) {
+    state.poise.installed = localPoise
+  } else if (state.poise.installed !== localPoise) {
+    log(`Installing Poise ${localPoise}: the previous install did not complete`)
+    await install()
+    state.poise.installed = localPoise
+    return { action: 'installed-poise', poiseCommit: localPoise }
   }
 
   const remoteCaller = requireCommit((await run('gh', [
@@ -153,6 +229,7 @@ export async function reconcileRuntime(options = {}) {
     '--jq',
     '.sha',
   ])).stdout, `Caller ${release.ref}`)
+  state.caller = remoteCaller
   const [localCaller, currentHook, currentDatastore] = await Promise.all([
     readHealth(),
     hookCurrent({ home, manifest: { ...release, commit: remoteCaller } }),

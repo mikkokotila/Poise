@@ -133,11 +133,20 @@ The macOS installer builds Poise, resolves the tracked Caller ref in
 Codex stop gates, and registers three per-user launchd services. They keep
 Poise alive, check `/api/health`, and reconcile Poise `main`, Caller, and both
 agent hooks from their remote sources every minute. Updates use fast-forward
-only and refuse to overwrite a dirty production worktree. Output is in
+only and refuse to overwrite a dirty production checkout; a fast-forward whose
+install did not complete is installed again on the next run. Output is in
 `~/.poise/logs/caller-update.out.log` and failures are in
-`~/.poise/logs/caller-update.err.log`. A transition to degraded health produces
-a desktop notification; expired Claude authentication also opens Poise's
-subscription sign-in prompt.
+`~/.poise/logs/caller-update.err.log`. Each run also records its outcome in
+`~/.poise/production-update.json`: Settings → General shows the deployed
+commit against `main` from it, and the health monitor sends a desktop
+notification when the updater has been failing for five minutes or has not
+run for ten, and again when it recovers. A transition to degraded health
+produces a desktop notification; expired Claude authentication also opens
+Poise's subscription sign-in prompt.
+
+Keep the production checkout outside `~/dev` (for example
+`~/.poise/production`): the updater needs it permanently on `main` and clean,
+which a working checkout is not.
 
 The production build emits the browser client under `dist/client` and the Node
 entrypoint at `dist/server.js`. The server binds `127.0.0.1:5555` by default.

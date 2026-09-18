@@ -27,6 +27,7 @@ beforeAll(async () => {
   process.env.POISE_CHAT_ATTACHMENTS_DIR = join(root, 'chat')
   process.env.POISE_ESPANSO_MATCH_DIR = join(root, 'espanso')
   process.env.AGENT_INTERFACE_ROOT = join(root, 'agent')
+  process.env.POISE_PRODUCTION_UPDATE_REPORT = join(root, 'production-update.json')
   vi.resetModules()
   production = await import('../server/production')
   server = production.createProductionServer({
@@ -52,6 +53,7 @@ afterAll(async () => {
     'POISE_CHAT_ATTACHMENTS_DIR',
     'POISE_ESPANSO_MATCH_DIR',
     'AGENT_INTERFACE_ROOT',
+    'POISE_PRODUCTION_UPDATE_REPORT',
   ]) delete process.env[key]
   vi.resetModules()
   await rm(root, { recursive: true, force: true })
@@ -124,8 +126,67 @@ describe('production server', () => {
         required: false,
         expectedCommit: '',
       },
+      // No updater record yet: nothing is claimed about production.
+      production: { status: 'unknown', checkedAt: null, deployedCommit: null },
     })
     expect((await fetch(`${baseUrl}/api/unknown`)).status).toBe(404)
+  })
+
+  it('passes the production updater record through health, validated', async () => {
+    const deployed = 'b'.repeat(40)
+    const remote = 'c'.repeat(40)
+    const path = process.env.POISE_PRODUCTION_UPDATE_REPORT!
+    await writeFile(path, JSON.stringify({
+      at: '2026-09-18T12:00:00.000Z',
+      status: 'failed',
+      action: null,
+      error: '  Remote Poise main is not a fast-forward of the deployed commit\n',
+      failingSince: '2026-09-18T11:55:00.000Z',
+      poise: { deployed, installed: deployed, remote, behind: 2 },
+      caller: 'd'.repeat(40),
+    }))
+    try {
+      await expect((await fetch(`${baseUrl}/api/health`)).json()).resolves.toMatchObject({
+        status: 'ok',
+        production: {
+          status: 'failed',
+          checkedAt: '2026-09-18T12:00:00.000Z',
+          deployedCommit: deployed,
+          remoteCommit: remote,
+          behind: 2,
+          failingSince: '2026-09-18T11:55:00.000Z',
+          error: 'Remote Poise main is not a fast-forward of the deployed commit',
+        },
+      })
+
+      // A successful run carries no failure fields, and junk in the record
+      // is dropped rather than shown.
+      await writeFile(path, JSON.stringify({
+        at: '2026-09-18T12:01:00.000Z',
+        status: 'current',
+        error: 'stale text from an old run',
+        failingSince: '2026-09-18T11:55:00.000Z',
+        poise: { deployed, remote: 'not-a-sha', behind: -1 },
+      }))
+      await expect((await fetch(`${baseUrl}/api/health`)).json()).resolves.toMatchObject({
+        production: {
+          status: 'current',
+          checkedAt: '2026-09-18T12:01:00.000Z',
+          deployedCommit: deployed,
+          remoteCommit: null,
+          behind: null,
+          failingSince: null,
+          error: null,
+        },
+      })
+
+      await writeFile(path, '{"at": "never"}')
+      await expect((await fetch(`${baseUrl}/api/health`)).json()).resolves.toMatchObject({
+        production: { status: 'unknown' },
+      })
+    } finally {
+      await rm(path, { force: true })
+    }
   })
 
   it('returns 503 when Claude-backed behavior work is enabled without authentication', async () => {
