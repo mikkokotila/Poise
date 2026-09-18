@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { catalogueAgents } from '../../server/chat/catalog-agents'
-import { catalogueFamilies, familyForIdentity } from '../../src/chat-catalog'
+import { catalogueFamilies, familyForIdentity, quickSessionRequest } from '../../src/chat-catalog'
 import { CATALOG } from '../model-catalog-fixture'
 
 describe('Chat uses the whole catalogue', () => {
@@ -30,5 +30,23 @@ describe('Chat uses the whole catalogue', () => {
     }
     expect(familyForIdentity(families, 'gemini-3.8-flash-medium')?.models.map(m => m.effort)).toEqual(['high', 'medium'])
     expect(familyForIdentity(families, 'gpt-6-astra-ultra')?.models.map(m => m.effort)).toEqual(['ultra', 'max'])
+  })
+})
+
+
+describe('Fresh console model policy', () => {
+  const model = { identity: 'opus-5-high', provider: 'claude', selector: 'claude-opus-5', effort: 'high' }
+  const catalog = { ...CATALOG, models: [...CATALOG.models, model] }
+  it('uses exactly the catalogue Opus 5 High variant, independent of the configured default', async () => {
+    const agents = await catalogueAgents(catalog, true, async () => ({ ok: true }))
+    expect(quickSessionRequest(agents)).toEqual({ agent: 'claude', model: 'opus-5-high', effort: 'high' })
+  })
+  it('does not substitute another effort when the requested default has retired', async () => {
+    const agents = await catalogueAgents(CATALOG, true, async () => ({ ok: true }))
+    expect(() => quickSessionRequest(agents)).toThrow(/not in the current catalogue/)
+  })
+  it('does not silently fall back when Claude is signed out', async () => {
+    const agents = await catalogueAgents(catalog, false, async () => ({ ok: true }))
+    expect(() => quickSessionRequest(agents)).toThrow(/unavailable/)
   })
 })

@@ -23,6 +23,30 @@ belongs to v1.1. Antigravity models remain visible in the catalogue, but native
 Chat launches need a permission/question channel its current CLI does not offer.
 pi, image input, worktrees and parallel turns on the same checkout are outside v1.
 
+## Fresh console and split pane
+
+The empty console is writable without selecting or creating a session first.
+Its first send creates one Poise-local session using the current catalogue's
+`opus-5-high` identity and sends the message to it. Clicking, focusing or typing
+alone does not launch an agent. Attaching a file can lazily create the same
+kind of session; the text and uploaded file stay together. The New session
+dialog remains the explicit way to choose another model and effort.
+
+If Opus 5 High is absent or unavailable, the draft is retained and the reason
+is shown. There is no silent fallback. Session-creation and first-send errors
+preserve the message, and repeated submission while creating cannot launch
+another session. The console also returns to this writable state after the
+last session is deleted. A selected session still starting its native agent
+accepts a prompt through the runtime's existing serialized turn queue.
+
+The sessions pane resizes from its right edge, remembers its width, and eases
+open/closed without detaching its contents. Arrow keys resize the focused
+separator, Home/End choose the bounds, and double-click resets the width.
+Collapsed contents are inert; reduced-motion preferences suppress movement.
+The fresh console has a 640 px maximum width, a taller writing area and a
+slightly elevated position. Its border uses a low-opacity neutral hairline,
+with no resting or focus shadow, in both light and dark themes.
+
 ## Sessions and working context
 
 New session offers **Model** and **Effort**, with model families grouped across

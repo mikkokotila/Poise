@@ -24,7 +24,9 @@ import {
   createModel, applyEvent, addOptimisticTurn, dropOptimisticTurns, focusedPending, createTranscriptView, pickQuestionOption,
   type TranscriptModel, type TranscriptView,
 } from './chat-transcript'
-import { createComposer, type Composer, type ComposerDraft } from './chat-composer'
+import { createComposer, emptyDraft, type Composer, type ComposerDraft } from './chat-composer'
+import { quickSessionRequest } from '../chat-catalog'
+import { attachChatSidebar } from './chat-sidebar'
 
 interface SessionEntry {
   record: SessionRecord
@@ -46,7 +48,6 @@ let mainEl: HTMLElement
 let scrollEl: HTMLElement
 let transcriptEl: HTMLElement
 let dockEl: HTMLElement
-let welcomeEl: HTMLElement
 let dialogEl: HTMLElement
 let noticeEl: HTMLElement
 let transcript: TranscriptView
@@ -60,7 +61,10 @@ let agentsPromise: Promise<AgentsResponse | null> | null = null
 let renderQueued = false
 let tickTimer: ReturnType<typeof setInterval> | null = null
 
-const SIDEBAR_KEY = 'poise-chat-sidebar'
+let splitPane: ReturnType<typeof attachChatSidebar>
+let freshDraft: ComposerDraft | null = null
+let quickSessionPromise: Promise<SessionEntry> | null = null
+let firstPromptPending = false
 /** A single click waits this long so a double-click renames without opening. */
 const CLICK_DELAY_MS = 220
 const STICK_TO_BOTTOM_PX = 40
@@ -132,15 +136,16 @@ function renderShell(): void {
   viewEl.innerHTML = `
     <header class="view-header">
       <div class="filter-cluster chat-view-controls">
-        <button type="button" class="chat-icon-btn chat-sidebar-toggle" title="Toggle sessions" aria-label="Toggle sessions" aria-pressed="true">${ICON_SIDEBAR}</button>
+        <button type="button" class="chat-icon-btn chat-sidebar-toggle" title="Toggle sessions" aria-label="Toggle sessions" aria-controls="chat-sessions-pane" aria-expanded="true" aria-pressed="true">${ICON_SIDEBAR}</button>
         <button type="button" class="chat-new-btn" title="New session">${ICON_PLUS}<span>New session</span></button>
         <span class="chat-conn" role="status" hidden></span>
       </div>
     </header>
     <main class="chat-shell">
       <div class="chat-layout">
-        <aside class="chat-sidebar" aria-label="Sessions">
+        <aside id="chat-sessions-pane" class="chat-sidebar" aria-label="Sessions">
           <div class="chat-session-list" role="list"></div>
+          <div class="chat-sidebar-resize" role="separator" aria-label="Resize sessions pane" aria-orientation="vertical" aria-controls="chat-sessions-pane" tabindex="0" title="Drag to resize; double-click to reset"></div>
         </aside>
         <section class="chat-main">
           <div class="chat-session-header" hidden></div>
@@ -149,9 +154,7 @@ function renderShell(): void {
             <div class="chat-empty chat-transcript-loading" hidden>Loading…</div>
             <div class="chat-transcript"></div>
           </div>
-          <div class="chat-dock">
-            <div class="chat-welcome"></div>
-          </div>
+          <div class="chat-dock"></div>
           <div class="chat-new-dialog" role="dialog" aria-label="New session" hidden></div>
         </section>
       </div>
@@ -163,19 +166,9 @@ function renderShell(): void {
   scrollEl = viewEl.querySelector<HTMLElement>('.chat-transcript-scroll')!
   transcriptEl = viewEl.querySelector<HTMLElement>('.chat-transcript')!
   dockEl = viewEl.querySelector<HTMLElement>('.chat-dock')!
-  welcomeEl = viewEl.querySelector<HTMLElement>('.chat-welcome')!
   dialogEl = viewEl.querySelector<HTMLElement>('.chat-new-dialog')!
   noticeEl = viewEl.querySelector<HTMLElement>('.chat-notice')!
 
-  const collapsed = localStorage.getItem(SIDEBAR_KEY) === 'collapsed'
-  viewEl.classList.toggle('chat-sidebar-collapsed', collapsed)
-  const toggle = viewEl.querySelector<HTMLButtonElement>('.chat-sidebar-toggle')!
-  toggle.setAttribute('aria-pressed', collapsed ? 'false' : 'true')
-  toggle.addEventListener('click', () => {
-    const now = viewEl.classList.toggle('chat-sidebar-collapsed')
-    toggle.setAttribute('aria-pressed', now ? 'false' : 'true')
-    localStorage.setItem(SIDEBAR_KEY, now ? 'collapsed' : 'open')
-  })
   viewEl.querySelector<HTMLButtonElement>('.chat-new-btn')!.addEventListener('click', () => { void openNewSessionDialog() })
 
   transcript = createTranscriptView(transcriptEl, {
@@ -192,9 +185,18 @@ function renderShell(): void {
     onStop: () => { void cancelTurn() },
     onResume: () => { void resumeActive() },
     onCommand: (name, arg) => { void runOwnCommand(name, arg) },
-    upload: (file) => {
-      if (!activeId) return Promise.reject(new Error('No session'))
-      return chatClient.uploadAttachment(activeId, file)
+    prepareUpload: async () => (await ensureQuickSession()).record.id,
+    upload: async (file, sessionId) => {
+      const attachment = await chatClient.uploadAttachment(sessionId, file)
+      // A slow upload belongs to its original draft, even if the user switched.
+      if (activeId !== sessionId) {
+        const target = sessions.get(sessionId)
+        if (target) {
+          const draft = target.draft || emptyDraft()
+          target.draft = { ...draft, attachments: [...draft.attachments, attachment] }
+        }
+      }
+      return attachment
     },
     searchFiles: async (q) => {
       if (!activeId) return []
@@ -203,6 +205,10 @@ function renderShell(): void {
     },
   })
   dockEl.appendChild(composer.el)
+  splitPane = attachChatSidebar(viewEl, () => { composer.layout(); queueRender() })
+  const layoutObserver = new ResizeObserver(() => queueRender())
+  layoutObserver.observe(mainEl)
+  layoutObserver.observe(dockEl)
 
   attachSidebar()
   attachHeader()
@@ -272,7 +278,7 @@ function renderSidebar(): void {
 
 function sidebarHtml(): string {
   if (!order.length) {
-    return '<div class="chat-empty chat-sidebar-empty">No sessions yet.<br>Start one with New session.</div>'
+    return '<div class="chat-empty chat-sidebar-empty">No sessions yet.</div>'
   }
   return order.map((id) => {
     const e = sessions.get(id)!
@@ -390,6 +396,7 @@ async function deleteSession(id: string): Promise<void> {
       activeId = null
       transcript.clear()
       if (order[0]) void selectSession(order[0])
+      else { composer.setDraft(freshDraft); setNotice(null) }
     }
     queueRender()
   } catch (err) {
@@ -403,6 +410,7 @@ async function deleteSession(id: string): Promise<void> {
 async function selectSession(id: string): Promise<void> {
   const e = sessions.get(id)
   if (!e) return
+  if (!activeId) freshDraft = composer.getDraft()
   if (activeId && activeId !== id) {
     const prev = sessions.get(activeId)
     if (prev) prev.draft = composer.getDraft()
@@ -481,25 +489,55 @@ function commandFailed(err: unknown, what: string): void {
   setNotice(`${what} failed${code ? ` (${code})` : ''} — ${message}`)
 }
 
+/** One user action creates one session; neither focus nor typing launches an agent. */
+function ensureQuickSession(firstPrompt?: ComposerDraft): Promise<SessionEntry> {
+  if (quickSessionPromise) return quickSessionPromise
+  const current = entry()
+  if (current && !current.pending) return Promise.resolve(current)
+  if (current) return Promise.reject(new Error('The session is still being created.'))
+  const draft = firstPrompt ? null : composer.getDraft()
+  quickSessionPromise = (async () => {
+    const catalogue = await loadAgents(true)
+    if (!catalogue) throw new Error('Could not load the model catalogue. Your message has not been sent.')
+    const request = quickSessionRequest(catalogue.agents)
+    if (firstPrompt?.text) request.title = firstPrompt.text.slice(0, 200)
+    return createSessionEntry(request, draft, firstPrompt, null)
+  })().finally(() => { quickSessionPromise = null; queueRender() })
+  queueRender()
+  return quickSessionPromise
+}
+
 async function sendPrompt(draft: ComposerDraft): Promise<void> {
-  const e = entry()
-  if (!e) return
+  let e = entry()
+  if (!e || e.pending) {
+    if (firstPromptPending) return
+    firstPromptPending = true
+    try {
+      e = await ensureQuickSession(draft)
+      freshDraft = null
+    } catch (err) {
+      freshDraft = draft
+      if (!activeId) composer.setDraft(draft)
+      commandFailed(err, 'Start session')
+      queueRender()
+      return
+    } finally { firstPromptPending = false }
+  }
   const prompt = { text: draft.text, attachments: draft.attachments, mentions: draft.mentions }
-  // On screen the instant it is sent: the turn in the transcript, the title
-  // in the sidebar, the status in the header — all before the ack.
+  // Reuse the immediate first-message preview made during session creation.
+  dropOptimisticTurns(e.model)
   addOptimisticTurn(e.model, prompt)
   if (!e.record.title) e.record = { ...e.record, title: draft.text.slice(0, 200) }
   e.record = { ...e.record, status: 'running' }
-  setNotice(null)
+  if (activeId === e.record.id) { setNotice(null); scrollToBottom(true) }
   queueRender()
-  scrollToBottom(true)
   try {
-    await chatClient.send({ type: 'prompt', sessionId: e.record.id, text: draft.text, attachments: draft.attachments, mentions: draft.mentions })
+    await chatClient.send({ type: 'prompt', sessionId: e.record.id, ...prompt })
   } catch (err) {
     dropOptimisticTurns(e.model)
     if (e.record.status === 'running' && !e.model.running) e.record = { ...e.record, status: 'idle' }
-    commandFailed(err, 'Send')
-    composer.setDraft(draft)
+    if (activeId === e.record.id) { commandFailed(err, 'Send'); composer.setDraft(draft) }
+    else { e.draft = draft; e.error = `Send failed — ${(err as Error).message}` }
     queueRender()
   }
 }
@@ -781,14 +819,15 @@ function attachKeys(): void {
 
 function composerStateFor(e: SessionEntry | null): void {
   if (!e) {
-    composer.setState({ running: false, disabled: true, placeholder: 'Start a session to chat', sessionId: null })
+    composer.setCommands([], { model: false, modes: false, fork: false })
+    composer.setState({ running: false, disabled: !!quickSessionPromise, placeholder: quickSessionPromise ? 'Starting the session…' : undefined, modelLabel: 'Opus 5 · High', sessionId: null })
     return
   }
   const s = e.record
   const running = isRunning(s.status) || !!e.model.running
   let disabled = false
   let placeholder: string | undefined
-  if (e.pending || s.status === 'starting') { disabled = true; placeholder = 'Starting the session…' }
+  if (e.pending) { disabled = true; placeholder = 'Starting the session…' }
   else if (s.status === 'closed') { disabled = true; placeholder = 'This session is closed' }
   else if (s.status === 'interrupted') { disabled = true; placeholder = 'Interrupted by a restart — resume to continue' }
   else if (s.status === 'error') { disabled = true; placeholder = 'The session failed — resume to try again' }
@@ -823,15 +862,11 @@ function render(): void {
   const e = entry()
   composerStateFor(e)
   const empty = !e || (!e.model.blocks.length && !e.loading)
-  // Before the first turn the composer sits mid-screen with the welcome
-  // line; the first send lets it settle to the bottom. The lift is half the
-  // transcript's height, published for the CSS transition to animate.
-  mainEl.style.setProperty('--chat-dock-lift', `${Math.round(scrollEl.clientHeight / 2)}px`)
   mainEl.classList.toggle('chat-empty-session', empty)
-  welcomeEl.hidden = !empty
-  welcomeEl.textContent = !e
-    ? 'Pick a session on the left, or start a new one.'
-    : e.record.workspaceKind === 'poise-local' ? `Start a conversation with ${AGENT_LABELS[e.record.agent] || e.record.agent}. Files stay local to Poise.` : `Start a conversation with ${AGENT_LABELS[e.record.agent] || e.record.agent} on ${e.record.repo || 'a local checkout'} · ${e.record.branch?.name || ''}`
+  // The fresh console sits slightly above centre. Its own height participates
+  // in the calculation, so a taller draft never pushes it off-screen.
+  if (lastEmpty !== empty) { lastEmpty = empty; composer.layout() }
+  mainEl.style.setProperty('--chat-dock-lift', `${Math.max(0, Math.round(mainEl.clientHeight * 0.58 - dockEl.offsetHeight / 2))}px`)
   viewEl.querySelector<HTMLElement>('.chat-transcript-loading')!.hidden = !(e && e.loading && !e.model.blocks.length)
   // Scrolling sticks to the bottom only for someone already reading there.
   const distance = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
@@ -843,10 +878,6 @@ function render(): void {
   }
   if (wasAtBottom || forceBottom) scrollEl.scrollTop = scrollEl.scrollHeight
   forceBottom = false
-  if (lastEmpty !== empty) {
-    lastEmpty = empty
-    composer.layout()
-  }
 }
 
 // ── New session dialog ─────────────────────────────────────────────────────
@@ -873,40 +904,57 @@ function closeDialog(): void {
   dialogEl.innerHTML = ''
 }
 
-async function createSession(req: NewSessionRequest, errorEl: HTMLElement): Promise<void> {
-  const tempId = `pending-${Date.now().toString(36)}`
+async function createSessionEntry(req: NewSessionRequest, draft: ComposerDraft | null = null,
+  firstPrompt?: ComposerDraft, expectedActiveId = activeId): Promise<SessionEntry> {
+  const tempId = `pending-${crypto.randomUUID()}`
   const placeholder: SessionRecord = {
     id: tempId, agent: req.agent, model: req.model, modelId: req.model, effort: req.effort || '', repo: '', checkout: '', workspaceKind: 'poise-local',
     branch: { name: '', origin: 'new', provisional: true },
-    title: req.context?.title || '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'starting',
+    title: req.title || req.context?.title || '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'starting',
     capabilities: { steer: true, fork: false, thought: false, plan: false, commands: false, modes: false, permissions: true, questions: true, resume: true, images: false },
     lastSeq: 0, pendingRequests: [], instance: '', context: req.context,
   }
-  // The entry is in the sidebar and selected before the server has answered.
-  upsertRecord(placeholder, { pending: true })
-  closeDialog()
-  await selectSession(tempId)
+  const temporary = upsertRecord(placeholder, { pending: true })
+  temporary.draft = draft
+  if (firstPrompt) addOptimisticTurn(temporary.model, firstPrompt)
+  if (activeId === expectedActiveId) await selectSession(tempId)
+  queueRender()
   try {
     const r = await chatClient.createSession(req)
     sessions.delete(tempId)
-    order = order.filter((x) => x !== tempId)
+    order = order.filter(x => x !== tempId)
     const e = upsertRecord(r.session, { pending: false })
+    e.model = temporary.model
+    e.draft = temporary.draft
     if (activeId === tempId) activeId = r.session.id
     chatClient.subscribe(r.session.id, 0)
     e.loaded = true
     queueRender()
-    composer.focus()
+    if (activeId === r.session.id) composer.focus()
+    return e
   } catch (err) {
     sessions.delete(tempId)
-    order = order.filter((x) => x !== tempId)
-    if (activeId === tempId) activeId = null
+    order = order.filter(x => x !== tempId)
+    if (activeId === tempId) {
+      activeId = null
+      transcript.clear()
+      composer.setDraft(draft || freshDraft)
+    }
+    queueRender()
+    throw err
+  }
+}
+
+async function createSession(req: NewSessionRequest, errorEl: HTMLElement): Promise<void> {
+  try {
+    await createSessionEntry(req, activeId ? null : composer.getDraft())
+  } catch (err) {
     const code = err instanceof ChatHttpError ? err.code : undefined
     const message = (err as Error).message
     const text = code === 'checkout_dirty' ? `The checkout has uncommitted changes on a branch no session owns — commit or stash them first. ${message}`
       : code === 'checkout_busy' ? `The checkout is busy with another session. ${message}`
       : code === 'compat' ? `Caller needs updating (no --record-turn). ${message}`
       : message
-    // Reopen the dialog with the reason, so the choice can be adjusted.
     await openNewSessionDialog({ context: req.context })
     const el = dialogEl.querySelector<HTMLElement>('.chat-dialog-error') || errorEl
     el.textContent = text
@@ -966,7 +1014,7 @@ export async function initChatView(): Promise<void> {
   await loadSessions()
   // A handoff may have opened the New session dialog while the list loaded;
   // auto-selecting would close it.
-  if (!activeId && order.length && dialogEl.hidden) await selectSession(order[0])
+  if (!activeId && !quickSessionPromise && !composer.getDraft().text && order.length && dialogEl.hidden) await selectSession(order[0])
   queueRender()
 }
 
@@ -974,6 +1022,7 @@ export async function initChatView(): Promise<void> {
 // and its subscriptions stay so a running turn keeps being mirrored and the
 // sidebar is current when the view comes back.
 export function stopChatRefresh(): void {
+  splitPane?.cancelResize()
   if (tickTimer) { clearInterval(tickTimer); tickTimer = null }
   if (composer && activeId) {
     const e = sessions.get(activeId)
