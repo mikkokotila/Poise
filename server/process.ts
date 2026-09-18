@@ -214,6 +214,17 @@ function isClaudeSubscriptionLogin(command: string, args: readonly string[]): bo
     && args[2] === '--claudeai'
 }
 
+// The chat runtime launches long-lived agents through a worker gate rather
+// than runFile, but their environment must be scrubbed by exactly the same
+// allowlists as every other child: the gate inherits this and passes it on.
+export function scrubbedChildEnvironment(
+  command: string,
+  overrides: NodeJS.ProcessEnv = {},
+  args: readonly string[] = [],
+): NodeJS.ProcessEnv {
+  return childEnvironment(command, overrides, args)
+}
+
 function childEnvironment(
   command: string,
   overrides: NodeJS.ProcessEnv = {},

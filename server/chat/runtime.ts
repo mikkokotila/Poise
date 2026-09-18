@@ -1,0 +1,1530 @@
+// The Chat v1 session runtime: the session table, one native agent process
+// per session, the checkout it runs in, and the transcript mirror.
+//
+// The runtime owns everything the adapters do not: which branch a session is
+// bound to and how the shared checkout follows the active session, the
+// per-checkout lease that serializes turns with the other Poise server and
+// with Caller's fix-failing-ci, the worker gates every writer runs under,
+// the session-scoped permission memory, the Caller row that makes a turn
+// visible in Swarm, the staged Editor document, and crash reconciliation on
+// startup. Every event a browser sees goes through `emit_()`, which appends
+// to SQLite first and broadcasts second — a reload renders from the mirror
+// alone, and a transcript that cannot be recorded stops the turn.
+//
+// Lifecycle rules that matter:
+// - a turn is reserved synchronously in `prompt()` before anything is
+//   awaited, so two prompts in one tick cannot both be accepted;
+// - the checkout lease is held from before the first git mutation until the
+//   agent reported the turn finished, every Poise-served file operation
+//   returned, and — when the agent misbehaved — its process group is
+//   verifiably gone; an orphan keeps the lease and is reported;
+// - close/delete cancel and stop outside the per-session operation chain,
+//   so they are never queued behind a whole coding turn.
+
+import { randomUUID } from 'node:crypto'
+import { EventEmitter } from 'node:events'
+import type { ChildProcess } from 'node:child_process'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { basename, dirname } from 'node:path'
+import { loadCatalog, catalogModel, type Catalog, type CatalogModel } from '../models'
+import { claudeAuth } from '../claude-auth'
+import { HttpError } from '../http'
+import { localCheckoutPath } from '../gh'
+import { runFile } from '../process'
+import { CheckoutLease, canonicalCheckout, describeHolder, type AcquireResult, type CheckoutLeaseOptions } from './checkout-lock'
+import { ATTACHMENT_DIR, attachmentPath, ensureExcluded, inlineText, safeAttachmentName, sha256Of } from './attachments'
+import { readCheckoutBytes, readCheckoutTextFile, writeCheckoutTextFile } from './client-fs'
+import { captureCheckoutSnapshot, emitCheckoutChanges, type CheckoutSnapshot } from './change-mirror'
+import { CallerCompatError, callerTurns as defaultCallerTurns, type CallerTurns } from './caller-turns'
+import { forkStagedDocument, isBridgeProblem, refreshDocument, stageDocument, stagedDocumentPrompt, unstageDocument, writeBackDocument, type StagedDocument } from './editor-bridge'
+import {
+  GitError, PathError, assertBranchName, branchExists, branchTip, checkoutPrHead, checkpoint, createBranch, deleteBranch,
+  inspectCheckout, resolveInsideCheckout, revertDiff, switchBranch, type RecordedDiff,
+} from './git'
+import {
+  AGENT_IDS, CHAT_LIMITS, type AgentId, type Attachment, type BranchRequest, type ChatEnvelope, type ChatEvent, type NewSessionRequest,
+  type PermissionOption, type PromptInput, type Question, type SessionContext, type SessionRecord, type SessionStatus, type StopReason, type WorkspaceState,
+} from './protocol'
+import * as storage from './storage'
+import { pgidAlive, pidAlive, signalGroup, spawnWorker, workerIdentityMatches, type WorkerHandle } from './worker'
+import { createClaudeAdapter } from './adapters/claude'
+import { createCodexAdapter } from './adapters/codex'
+import { createGrokAdapter } from './adapters/grok'
+import { createMuseAdapter } from './adapters/muse'
+import type { Adapter, AdapterHost, PermissionRequest, QuestionAnswers, QuestionRequest } from './adapters/types'
+
+export type AdapterFactory = (host: AdapterHost) => Adapter
+
+export const DEFAULT_ADAPTERS: Record<AgentId, AdapterFactory> = {
+  claude: createClaudeAdapter,
+  codex: createCodexAdapter,
+  grok: createGrokAdapter,
+  muse: createMuseAdapter,
+}
+
+/** Which agent a catalog provider maps to. Antigravity is not in Chat v1. */
+const PROVIDER_AGENT: Record<string, AgentId> = { claude: 'claude', codex: 'codex', grok: 'grok', muse: 'muse' }
+const AGENT_COMMAND: Record<AgentId, string> = { claude: 'claude', codex: 'codex', grok: 'grok', muse: 'muse' }
+const AGENT_LABEL: Record<AgentId, string> = { claude: 'Claude Code', codex: 'Codex', grok: 'Grok Build', muse: 'Muse' }
+
+export const DEFAULT_IDLE_TIMEOUT_MINUTES = 120
+export const DEFAULT_BRANCH_PREFIX = 'chat/'
+const STOP_SETTLE_MS = 2_000
+const CLOSE_GRACE_MS = 5_000
+const SERVICE_SETTLE_MS = 5_000
+/** How long an upload waits for a busy checkout before it is refused. */
+const ATTACHMENT_LEASE_WAIT_MS = 15_000
+const TITLE_CHARS = 60
+const AVAILABILITY_TTL_MS = 60_000
+
+export class ChatError extends HttpError {
+  constructor(statusCode: number, message: string, readonly code: string) {
+    super(statusCode, message)
+    this.name = 'ChatError'
+  }
+}
+
+interface PendingRequest {
+  kind: 'permission' | 'question'
+  turnId: string
+  options?: PermissionOption[]
+  questions?: Question[]
+  grantKey?: string
+  resolve: (value: any) => void
+  reject: (error: Error) => void
+}
+
+interface RunningTurn {
+  id: string
+  callId: string | null
+  startedAt: number
+  abort: AbortController
+  stopping: boolean
+  /** Set when the turn must end as an error (mirror failure, lost lease, forced stop). */
+  failure?: string
+}
+
+interface LiveSession {
+  record: SessionRecord
+  adapter: Adapter | null
+  worker: WorkerHandle | null
+  lease: CheckoutLease | null
+  turn: RunningTurn | null
+  pending: Map<string, PendingRequest>
+  grants: Map<string, string>
+  idleTimer: ReturnType<typeof setTimeout> | null
+  /** Aborted by close/delete/stop: wakes lease waits and startup. */
+  lifecycle: AbortController
+  /** Poise-served file operations still running for the agent. */
+  services: number
+  /** Set while a turn waits for its services to return; no new one may join. */
+  draining: boolean
+  staged: StagedDocument | null
+  /** Serializes lifecycle operations on one session. */
+  chain: Promise<unknown>
+}
+
+export interface RuntimeOptions {
+  /** `poise-dev:<db>` or `poise-prod:<db>`; sessions of another instance are never adopted. */
+  instance: string
+  instanceLabel: string
+  adapters?: Partial<Record<AgentId, AdapterFactory>>
+  callerTurns?: CallerTurns | null
+  catalog?: () => Promise<Catalog>
+  resolveCheckout?: (repo: string) => Promise<string>
+  idleTimeoutMinutes?: () => number
+  branchPrefix?: () => string
+  requireClaudeReady?: () => Promise<void>
+  /** Whether an agent's CLI is launchable; replaced in tests. */
+  probeAgent?: (agent: AgentId) => Promise<{ ok: boolean, reason?: string }>
+  /** Lease liveness probes; tests use them to make this host look dead. */
+  leaseProbes?: CheckoutLeaseOptions
+}
+
+export interface AgentAvailability {
+  id: AgentId
+  label: string
+  available: boolean
+  reason?: string
+  models: CatalogModel[]
+  efforts: string[]
+}
+
+export class ChatRuntime extends EventEmitter {
+  readonly instance: string
+  private readonly live = new Map<string, LiveSession>()
+  private readonly adapters: Record<AgentId, AdapterFactory>
+  private readonly caller: CallerTurns | null
+  private readonly catalog: () => Promise<Catalog>
+  private readonly resolveCheckout: (repo: string) => Promise<string>
+  private readonly idleTimeoutMinutes: () => number
+  private readonly branchPrefix: () => string
+  private readonly requireClaudeReady: () => Promise<void>
+  private readonly probeAgent: (agent: AgentId) => Promise<{ ok: boolean, reason?: string }>
+  private readonly leaseProbes: CheckoutLeaseOptions
+  private readonly hostPid: number
+  private readonly availability = new Map<AgentId, { at: number, result: { ok: boolean, reason?: string } }>()
+  private stopped = false
+
+  constructor(private readonly options: RuntimeOptions) {
+    super()
+    this.instance = options.instance
+    this.adapters = { ...DEFAULT_ADAPTERS, ...(options.adapters ?? {}) } as Record<AgentId, AdapterFactory>
+    this.caller = options.callerTurns === undefined ? defaultCallerTurns : options.callerTurns
+    this.catalog = options.catalog ?? (() => loadCatalog())
+    this.resolveCheckout = options.resolveCheckout ?? (async (repo) => {
+      const [owner, name] = repo.split('/', 2)
+      return localCheckoutPath(owner, name)
+    })
+    this.idleTimeoutMinutes = options.idleTimeoutMinutes ?? (() => DEFAULT_IDLE_TIMEOUT_MINUTES)
+    this.branchPrefix = options.branchPrefix ?? (() => DEFAULT_BRANCH_PREFIX)
+    this.requireClaudeReady = options.requireClaudeReady ?? (() => claudeAuth.requireReady())
+    this.probeAgent = options.probeAgent ?? defaultProbeAgent
+    this.leaseProbes = options.leaseProbes ?? {}
+    this.hostPid = this.leaseProbes.hostPid ?? process.pid
+  }
+
+  // ── Startup and shutdown ───────────────────────────────────────────────
+
+  /** Crash reconciliation. Leftover workers this instance recorded are
+   *  terminated only after their identity is verified and never while the
+   *  lease they hold belongs to a live process (another server with the
+   *  same instance name). Turns that were open are marked interrupted and
+   *  their prompts cancelled; nothing is replayed. */
+  async recover(): Promise<void> {
+    // Sessions whose lease another live server of this instance holds are
+    // that server's: their workers, turns and Caller rows are left alone.
+    const protectedSessions = new Set<string>()
+    for (const worker of storage.listWorkers()) {
+      if (storage.sessionInstance(worker.sessionId) !== this.instance) continue
+      const record = storage.getSession(worker.sessionId)
+      let holderAlive = false
+      if (worker.leaseToken) {
+        try {
+          const row = new CheckoutLease(worker.checkout, { ownerKind: 'poise:chat', ownerId: worker.sessionId, ownerLabel: '', instance: this.instance }, this.leaseProbes).read()
+          holderAlive = !!row && row.token === worker.leaseToken && row.host_pid !== this.hostPid && (this.leaseProbes.pidAlive ?? pidAlive)(row.host_pid)
+        } catch { holderAlive = true } // the lock file is unreadable: do not touch anything
+      }
+      if (holderAlive) { protectedSessions.add(worker.sessionId); continue }
+      const verified = await workerIdentityMatches(worker.gatePid, worker.ident)
+      const groupAlive = pgidAlive(worker.gatePgid)
+      if (!verified && groupAlive) {
+        if (record) {
+          record.orphanNotice = `a worker recorded for this session (pid ${worker.gatePid}) is still running but could not be verified; stop it by hand`
+          storage.saveSession(record)
+        }
+        continue
+      }
+      if (verified) {
+        signalGroup(worker.gatePgid, 'SIGTERM')
+        if (!(await waitDead(worker.gatePgid, CLOSE_GRACE_MS))) {
+          signalGroup(worker.gatePgid, 'SIGKILL')
+          if (!(await waitDead(worker.gatePgid, CLOSE_GRACE_MS))) {
+            if (record) {
+              record.orphanNotice = `the worker group ${worker.gatePgid} of this session survived termination; stop it by hand`
+              storage.saveSession(record)
+            }
+            continue
+          }
+        }
+      }
+      if (worker.leaseToken) { try { CheckoutLease.releaseByToken(worker.checkout, worker.leaseToken) } catch { /* the lock file may be gone */ } }
+      storage.forgetWorker(worker.sessionId)
+    }
+    for (const open of storage.listOpenTurns(this.instance)) {
+      if (protectedSessions.has(open.sessionId)) continue
+      const record = storage.getSession(open.sessionId)
+      if (!record) continue
+      for (const pending of storage.listPendingRequests(open.sessionId)) {
+        this.emit_(open.sessionId, pending.kind === 'permission'
+          ? { type: 'permission.resolved', id: pending.requestId, optionId: '', by: 'cancelled' }
+          : { type: 'question.answered', id: pending.requestId, answers: {}, by: 'cancelled' })
+      }
+      const envelope = storage.finalizeTurn(open.sessionId,
+        { type: 'turn.finished', turnId: open.turnId, stopReason: 'interrupted', error: 'Poise restarted while this turn was running' },
+        open.callId ? { callId: open.callId, instance: this.instance } : undefined)
+      const terminal = envelope.event as Extract<ChatEvent, { type: 'turn.finished' }>
+      // Older builds could leave open flags after recording a terminal event.
+      // Honor that event instead of overwriting it with an interruption.
+      const interrupted = terminal.stopReason === 'interrupted'
+      if (interrupted) record.interruptedTurnId = open.turnId
+      record.status = interrupted || terminal.stopReason === 'error' ? 'interrupted' : 'idle'
+      record.lastSeq = envelope.seq
+      storage.saveSession(record)
+      this.emit('event', envelope)
+      this.emit_(open.sessionId, { type: 'status.changed', status: record.status,
+        detail: interrupted ? 'Poise restarted while this turn was running' : 'previous turn outcome recovered' })
+    }
+    if (this.caller) {
+      for (const row of storage.listFinishOutbox(this.instance)) {
+        if (protectedSessions.has(row.sessionId)) continue
+        try {
+          await this.caller.finish(row.callId, row.status, row.error ?? undefined)
+          storage.finishDelivered(row.callId)
+        } catch (error) {
+          this.emit('log', `[chat] Caller finish for ${row.callId.slice(0, 8)} still undelivered: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+    }
+    for (const record of storage.listSessions(this.instance)) {
+      if (protectedSessions.has(record.id)) continue
+      if (['running', 'waiting', 'stopping', 'queued', 'starting'].includes(record.status)) {
+        record.status = record.nativeSessionId ? 'interrupted' : 'idle'
+        storage.saveSession(record)
+      }
+    }
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true
+    await Promise.all([...this.live.values()].map(async (session) => {
+      session.lifecycle.abort()
+      await this.forceStop(session, 'server stopping')
+      await this.serialized(session, () => this.shutdownSession(session)).catch(() => undefined)
+    }))
+  }
+
+  /** Outside the operation chain: cancel a turn and, if the agent does not
+   *  settle, terminate its process. Resolves once the turn's own cleanup
+   *  can run (or the process is gone). */
+  private async forceStop(session: LiveSession, reason: string): Promise<void> {
+    const turn = session.turn
+    if (!turn) return
+    turn.stopping = true
+    turn.failure ??= reason
+    this.settlePending(session, 'cancelled')
+    turn.abort.abort()
+    try { await session.adapter?.cancel() } catch { /* terminating below */ }
+    if (await this.waitForTurnEnd(session, STOP_SETTLE_MS)) return
+    // The agent did not acknowledge: the process goes, verifiably, and the
+    // turn's finally block then runs with the adapter's rejection.
+    await this.stopProcess(session).catch(() => undefined)
+    await this.waitForTurnEnd(session, CLOSE_GRACE_MS * 2)
+  }
+
+  private async shutdownSession(session: LiveSession): Promise<void> {
+    if (session.idleTimer) clearTimeout(session.idleTimer)
+    if (session.turn) return // still running after forceStop: leave it, the lease stays
+    await this.stopProcess(session)
+    if (session.record.status !== 'closed' && session.record.status !== 'error') this.setStatus(session, 'idle')
+  }
+
+  // ── Catalog and agents ─────────────────────────────────────────────────
+
+  async agents(): Promise<{ agents: AgentAvailability[], catalog: Catalog }> {
+    const catalog = await this.catalog()
+    const claudeReady = claudeAuth.snapshot().status === 'authenticated'
+    const agents: AgentAvailability[] = []
+    for (const id of AGENT_IDS) {
+      const models = catalog.models.filter((m) => PROVIDER_AGENT[m.provider] === id)
+      const efforts = [...new Set(models.map((m) => m.effort))]
+      let available = models.length > 0
+      let reason = available ? undefined : 'no models for this agent in the catalog'
+      if (available && id === 'claude' && !claudeReady) { available = false; reason = 'Claude.ai sign-in is not ready' }
+      if (available) {
+        const probe = await this.availabilityOf(id)
+        if (!probe.ok) { available = false; reason = probe.reason }
+      }
+      agents.push({ id, label: AGENT_LABEL[id], available, reason, models, efforts })
+    }
+    return { agents, catalog }
+  }
+
+  private async availabilityOf(agent: AgentId): Promise<{ ok: boolean, reason?: string }> {
+    const cached = this.availability.get(agent)
+    if (cached && Date.now() - cached.at < AVAILABILITY_TTL_MS) return cached.result
+    const result = await this.probeAgent(agent).catch((error) => ({ ok: false, reason: error instanceof Error ? error.message : String(error) }))
+    this.availability.set(agent, { at: Date.now(), result })
+    return result
+  }
+
+  /** The local checkout a repository's sessions run in. */
+  checkoutFor(repo: string): Promise<string> {
+    return this.resolveCheckout(repo)
+  }
+
+  private async resolveModel(identity: string, effortOverride?: string, efforts?: string[]): Promise<{ agent: AgentId, model: CatalogModel, effort: string }> {
+    const catalog = await this.catalog()
+    const model = catalogModel(catalog, identity)
+    if (!model) throw new ChatError(400, `unknown model ${identity}`, 'invalid')
+    const agent = PROVIDER_AGENT[model.provider]
+    if (!agent) throw new ChatError(400, `${identity} runs on ${model.provider}, which is not in Chat v1`, 'unsupported')
+    const effort = effortOverride || model.effort
+    const known = efforts?.length ? efforts : [...new Set(catalog.models.filter((m) => m.provider === model.provider).map((m) => m.effort))]
+    if (effortOverride && !known.includes(effortOverride)) {
+      throw new ChatError(400, `${AGENT_LABEL[agent]} offers efforts ${known.join(', ')}`, 'invalid')
+    }
+    return { agent, model, effort }
+  }
+
+  // ── Sessions ───────────────────────────────────────────────────────────
+
+  list(): SessionRecord[] {
+    return storage.listSessions(this.instance).map((record) => this.withLive(record))
+  }
+
+  get(id: string): SessionRecord | null {
+    const record = storage.getSession(id)
+    if (!record) return null
+    if (record.instance !== this.instance) throw new ChatError(409, `this session belongs to another Poise server (${record.instance})`, 'foreign_session')
+    return this.withLive(record)
+  }
+
+  events(id: string, afterSeq: number): { events: ChatEnvelope[], truncated: boolean } {
+    this.get(id)
+    return storage.listEvents(id, afterSeq)
+  }
+
+  ownsSession(id: string): boolean {
+    return storage.sessionInstance(id) === this.instance
+  }
+
+  private withLive(record: SessionRecord): SessionRecord {
+    const live = this.live.get(record.id)
+    if (!live) return record
+    live.record.pendingRequests = [...live.pending.keys()]
+    return live.record
+  }
+
+  private requireLive(id: string): LiveSession {
+    const record = this.get(id)
+    if (!record) throw new ChatError(404, 'unknown session', 'unknown_session')
+    let live = this.live.get(id)
+    if (!live) {
+      // The staged document rides on the record: the live object and the
+      // persisted one are the same reference, so saving the record saves it.
+      live = { record, adapter: null, worker: null, lease: null, turn: null, pending: new Map(), grants: new Map(), idleTimer: null, lifecycle: new AbortController(), services: 0, draining: false, staged: record.staged ?? null, chain: Promise.resolve() }
+      this.live.set(id, live)
+    }
+    return live
+  }
+
+  private serialized<T>(session: LiveSession, operation: () => Promise<T>): Promise<T> {
+    const run = session.chain.then(operation, operation)
+    session.chain = run.catch(() => undefined)
+    return run
+  }
+
+  async create(request: NewSessionRequest): Promise<SessionRecord> {
+    if (this.stopped) throw new ChatError(503, 'the chat runtime is stopping', 'agent_error')
+    if (!AGENT_IDS.includes(request.agent)) throw new ChatError(400, `unknown agent ${String(request.agent)}`, 'invalid')
+    const { agent, model, effort } = await this.resolveModel(request.model, request.effort)
+    if (agent !== request.agent) throw new ChatError(400, `${request.model} is a ${agent} model, not ${request.agent}`, 'invalid')
+    if (!/^[^/\s]+\/[^/\s]+$/.test(request.repo)) throw new ChatError(400, 'repo must be owner/name', 'invalid')
+    const branch = normalizeBranchRequest(request.branch, this.branchPrefix())
+    if (agent === 'claude') await this.requireClaudeReady()
+    const checkout = canonicalCheckout(await this.resolveCheckout(request.repo))
+    const now = new Date().toISOString()
+    const title = (request.title || request.context?.title || 'New session').slice(0, CHAT_LIMITS.titleChars)
+    const record: SessionRecord = {
+      id: randomUUID(),
+      agent,
+      model: model.identity,
+      modelId: model.selector,
+      effort,
+      repo: request.repo,
+      checkout,
+      branch: { name: branch.name, origin: branch.origin, pr: branch.pr, provisional: branch.origin === 'new' },
+      title,
+      createdAt: now,
+      updatedAt: now,
+      status: 'starting',
+      capabilities: emptyCapabilities(),
+      lastSeq: 0,
+      pendingRequests: [],
+      instance: this.instance,
+      context: request.context,
+    }
+    storage.insertSession(record)
+    const live = this.requireLive(record.id)
+    this.emit_(record.id, { type: 'session.created', session: record })
+    void this.serialized(live, () => this.startSession(live, { fresh: true })).catch(() => undefined)
+    return live.record
+  }
+
+  /** Bring the native process up under the checkout lease: prepare the
+   *  branch (fresh sessions), switch the checkout to it, register the gate,
+   *  then create/resume/fork the native session. Failures become a readable
+   *  error event and the `error` status; nothing is retried on its own. */
+  private async startSession(session: LiveSession, options: { fresh?: boolean, forkFrom?: SessionRecord } = {}): Promise<void> {
+    if (session.adapter?.alive) return
+    const record = session.record
+    this.setStatus(session, 'starting')
+    const lease = this.leaseFor(session)
+    let freed = true
+    try {
+      await lease.acquire({ signal: session.lifecycle.signal, onBusy: (busy) => this.reportBusy(session, busy) })
+      session.lease = lease
+      if (options.fresh) await this.prepareBranch(session, lease)
+      await this.prepareCheckout(session, lease)
+      if ((options.fresh || options.forkFrom) && record.context?.kind === 'document' && record.context.slug) {
+        session.staged = options.forkFrom
+          ? await forkStagedDocument(record.checkout, record.id, record.context.slug, { sessionId: options.forkFrom.id, staged: options.forkFrom.staged })
+          : await stageDocument(record.checkout, record.id, record.context.slug)
+        record.staged = session.staged
+        this.saveRecord(session)
+      }
+      const host = this.hostFor(session)
+      const adapter = this.adapters[record.agent](host)
+      session.adapter = adapter
+      adapter.onExit((code, signal) => this.onAdapterExit(session, adapter, code, signal))
+      const startOptions = {
+        modelId: record.modelId,
+        effort: record.effort,
+        ...(options.forkFrom
+          ? (record.agent === 'claude' ? { forkFrom: options.forkFrom.nativeSessionId } : { resume: record.nativeSessionId })
+          : record.nativeSessionId ? { resume: record.nativeSessionId } : {}),
+      }
+      const started = await adapter.start(startOptions)
+      record.nativeSessionId = started.nativeSessionId
+      record.capabilities = started.capabilities
+      record.modelId = started.modelId || record.modelId
+      record.effort = started.effort || record.effort
+      record.efforts = started.efforts
+      record.mode = started.mode
+      record.modes = started.modes
+      record.commands = started.commands
+      record.interruptedTurnId = undefined
+      await this.refreshWorkspace(session)
+      this.setStatus(session, 'idle')
+      this.emit_(record.id, { type: 'session.resumed', session: record })
+      this.armIdleTimer(session)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      try { this.emit_(record.id, { type: 'error', message, recoverable: true }) } catch { /* mirror */ }
+      this.setStatus(session, 'error', message)
+      try { await this.stopProcess(session) } catch { freed = false }
+      throw error
+    } finally {
+      // The idle agent holds no lease; the next turn takes one. Release only
+      // when nothing of this start can still write (a stopped orphan keeps it).
+      if (lease.held) {
+        if (freed) { lease.clearWorker(); lease.release() }
+        else this.emit('log', `[chat ${record.id.slice(0, 8)}] checkout lease kept: worker not settled`)
+      }
+      if (session.lease === lease && !lease.held) session.lease = null
+    }
+  }
+
+  async resume(id: string): Promise<SessionRecord> {
+    const session = this.requireLive(id)
+    await this.serialized(session, async () => {
+      if (session.record.status === 'closed' || session.lifecycle.signal.aborted) { session.lifecycle = new AbortController(); session.record.status = 'idle' }
+      if (!session.adapter?.alive) await this.startSession(session)
+    })
+    return session.record
+  }
+
+  async rename(id: string, title: string): Promise<SessionRecord> {
+    const session = this.requireLive(id)
+    const next = String(title || '').trim().slice(0, CHAT_LIMITS.titleChars)
+    if (!next) throw new ChatError(400, 'title is required', 'invalid')
+    session.record.title = next
+    this.saveRecord(session)
+    this.emit_(id, { type: 'session.updated', session: session.record })
+    return session.record
+  }
+
+  async close(id: string): Promise<SessionRecord> {
+    const session = this.requireLive(id)
+    session.lifecycle.abort()
+    await this.forceStop(session, 'session closed')
+    await this.serialized(session, async () => {
+      await this.shutdownSession(session)
+      if (session.turn) throw new ChatError(409, 'the agent could not be stopped; the session stays open', 'agent_error')
+      this.setStatus(session, 'closed')
+      this.emit_(id, { type: 'session.closed', reason: 'closed by user' })
+    })
+    return session.record
+  }
+
+  async delete(id: string): Promise<void> {
+    const session = this.requireLive(id)
+    session.lifecycle.abort()
+    await this.forceStop(session, 'session deleted')
+    await this.serialized(session, async () => {
+      await this.shutdownSession(session)
+      if (session.turn || session.worker?.alive) throw new ChatError(409, 'the agent could not be stopped; the session was not deleted', 'agent_error')
+      const record = session.record
+      if (session.staged) { await unstageDocument(record.checkout, record.id); session.staged = null; record.staged = undefined }
+      await this.removeAttachments(session)
+      if (record.branch.origin === 'new' && record.branch.provisional && record.branch.baseSha) {
+        // A branch Poise created whose tip never moved goes with the session.
+        const lease = this.leaseFor(session)
+        try {
+          await lease.acquire({ onBusy: (busy) => this.reportBusy(session, busy) })
+          if (await branchExists(record.checkout, record.branch.name) && (await branchTip(record.checkout, record.branch.name)) === record.branch.baseSha) {
+            await deleteBranch(lease, record.checkout, record.branch.name)
+          }
+        } catch (error) {
+          this.emit_(id, { type: 'error', message: `branch ${record.branch.name} was kept: ${error instanceof Error ? error.message : String(error)}`, recoverable: true })
+        } finally {
+          if (lease.held) lease.release()
+        }
+      }
+      this.emit_(id, { type: 'session.closed', reason: 'deleted' })
+      storage.deleteSession(id)
+      this.live.delete(id)
+      this.emit('deleted', id)
+    })
+  }
+
+  async fork(id: string): Promise<SessionRecord> {
+    const source = this.requireLive(id)
+    return this.serialized(source, async () => {
+      if (!source.record.capabilities.fork) throw new ChatError(409, `${AGENT_LABEL[source.record.agent]} sessions cannot be forked`, 'unsupported')
+      if (source.turn) throw new ChatError(409, 'a turn is running; fork after it finishes', 'turn_in_progress')
+      if (!source.adapter?.alive) await this.startSession(source)
+      const now = new Date().toISOString()
+      const nativeId = source.record.agent === 'claude' ? source.record.nativeSessionId : await source.adapter!.fork()
+      const record: SessionRecord = {
+        ...structuredClone(source.record),
+        id: randomUUID(),
+        title: `${source.record.title} (fork)`.slice(0, CHAT_LIMITS.titleChars),
+        createdAt: now,
+        updatedAt: now,
+        status: 'starting',
+        nativeSessionId: nativeId,
+        lastSeq: 0,
+        pendingRequests: [],
+        forkedFrom: source.record.id,
+        interruptedTurnId: undefined,
+        orphanNotice: undefined,
+        workspace: undefined,
+        staged: undefined, // the fork stages its own copy on start
+        branch: { ...source.record.branch, provisional: false },
+      }
+      storage.insertSession(record)
+      const live = this.requireLive(record.id)
+      this.emit_(record.id, { type: 'session.created', session: record })
+      // The visible transcript starts here; the native context was inherited
+      // by the agent, which the header states through `forkedFrom`.
+      this.emit_(record.id, { type: 'status.changed', status: 'starting', detail: `forked from "${source.record.title}"; the agent keeps that conversation's context` })
+      void this.serialized(live, () => this.startSession(live, { forkFrom: source.record })).catch(() => undefined)
+      return live.record
+    })
+  }
+
+  /** Explicit cross-agent handoff: a new session for another agent whose
+   *  first turn is a labelled summary — never a pretence that the native
+   *  session moved. The new session binds to the same branch as it is. */
+  async handoff(id: string, target: { agent: AgentId, model: string, effort?: string }): Promise<SessionRecord> {
+    const source = this.requireLive(id)
+    if (source.turn) throw new ChatError(409, 'a turn is running; hand off after it finishes', 'turn_in_progress')
+    const summary = this.handoffSummary(source.record)
+    const created = await this.create({
+      agent: target.agent,
+      model: target.model,
+      effort: target.effort,
+      repo: source.record.repo,
+      branch: { existing: source.record.branch.name },
+      title: `${source.record.title} → ${AGENT_LABEL[target.agent]}`.slice(0, CHAT_LIMITS.titleChars),
+      context: { kind: 'handoff', title: source.record.title, body: summary, fromSession: source.record.id },
+    })
+    const live = this.requireLive(created.id)
+    void this.serialized(live, async () => {
+      if (live.record.status === 'error' || live.lifecycle.signal.aborted) return
+      const turn = this.reserveTurn(live)
+      await this.runTurn(live, turn, { text: summary, attachments: [], mentions: [] })
+    }).catch(() => undefined)
+    return created
+  }
+
+  private handoffSummary(record: SessionRecord): string {
+    const turns: Array<{ prompt: string, text: string, files: Set<string> }> = []
+    let cursor = 0
+    while (true) {
+      const page = storage.listEvents(record.id, cursor)
+      for (const { event } of page.events) {
+        if (event.type === 'turn.started') {
+          turns.push({ prompt: clip(event.prompt.text, 600), text: '', files: new Set() })
+          if (turns.length > 6) turns.shift()
+        } else if (event.type === 'text.delta' && turns.length) {
+          const turn = turns[turns.length - 1]
+          // Keep a bounded tail so the outcome survives a long streamed turn.
+          turn.text = (turn.text + event.delta).slice(-1800)
+        } else if (event.type === 'diff' && turns.length) {
+          const paths = turns[turns.length - 1].files
+          if (paths.size < 40) paths.add(event.path)
+        }
+      }
+      if (!page.truncated || !page.events.length) break
+      cursor = page.events[page.events.length - 1].seq
+    }
+    const recent = turns
+    const files = new Set(recent.flatMap(turn => [...turn.files]))
+    const lines = [
+      `[Handoff from a ${AGENT_LABEL[record.agent]} session "${record.title}" in ${record.repo} on branch ${record.branch.name}]`,
+      'This conversation continues here with a different agent. Nothing from the previous native session carried over except this summary.',
+      '',
+      'Recent turns:',
+      ...recent.map((t, i) => `${i + 1}. User: ${clip(t.prompt, 600)}\n   Agent: ${clip(t.text.trim(), 900)}`),
+    ]
+    if (files.size) lines.push('', `Files the previous agent changed: ${[...files].slice(0, 40).join(', ')}`)
+    lines.push('', 'Continue from here.')
+    return lines.join('\n')
+  }
+
+  // ── Turns ──────────────────────────────────────────────────────────────
+
+  /** Reserve the turn synchronously — before any await — so a second prompt
+   *  in the same tick is refused, and persist it before acknowledging. */
+  private reserveTurn(session: LiveSession): RunningTurn {
+    if (session.turn) throw new ChatError(409, 'a turn is already running; Enter steers it', 'turn_in_progress')
+    if (session.record.status === 'closed') throw new ChatError(409, 'the session is closed; resume it first', 'no_turn')
+    if (session.lifecycle.signal.aborted) throw new ChatError(409, 'the session is closing', 'no_turn')
+    const turn: RunningTurn = { id: randomUUID(), callId: null, startedAt: Date.now(), abort: new AbortController(), stopping: false }
+    session.turn = turn
+    storage.setOpenTurn(session.record.id, turn.id, null)
+    if (session.idleTimer) { clearTimeout(session.idleTimer); session.idleTimer = null }
+    return turn
+  }
+
+  prompt(id: string, input: PromptInput): { turnId: string } {
+    const session = this.requireLive(id)
+    const text = String(input.text || '').trim()
+    if (!text && !input.attachments?.length) throw new ChatError(400, 'prompt is required', 'invalid')
+    if (Buffer.byteLength(text, 'utf8') > CHAT_LIMITS.promptBytes) throw new ChatError(413, `prompt exceeds ${CHAT_LIMITS.promptBytes} bytes`, 'invalid')
+    // What the browser says about an attachment is checked against the
+    // record this server issued; only the id, name, path and size it
+    // recorded go on, never client-supplied text.
+    const attachments: Attachment[] = []
+    for (const claimed of (input.attachments ?? []).slice(0, 20)) {
+      const record = claimed && typeof claimed.id === 'string' ? storage.getAttachment(claimed.id) : null
+      if (!record || record.sessionId !== id) throw new ChatError(400, `attachment ${claimed?.name ?? ''} does not belong to this session`, 'invalid')
+      if (claimed.path !== record.path || claimed.size !== record.size) throw new ChatError(400, `attachment ${record.name} does not match its record`, 'invalid')
+      attachments.push({ id: record.id, name: record.name, path: record.path, size: record.size })
+    }
+    const mentions = (input.mentions ?? []).filter((m) => m && typeof m.path === 'string').slice(0, 50).map((m) => ({ path: m.path }))
+    const turn = this.reserveTurn(session)
+    const prompt = { text, attachments, mentions }
+    void this.serialized(session, () => this.runTurn(session, turn, prompt)).catch(() => undefined)
+    return { turnId: turn.id }
+  }
+
+  /** Stage an uploaded file inside the session's checkout, under the lease.
+   *  While this session's own turn holds the checkout the write is one of
+   *  the turn's services (the turn does not release before it returns);
+   *  otherwise it runs in the session's operation chain under a lease of its
+   *  own, so it cannot interleave with close, delete or the next turn. The
+   *  record is issued inside the protected operation. */
+  async saveAttachment(id: string, filename: string, body: Buffer): Promise<Attachment> {
+    const session = this.requireLive(id)
+    const record = session.record
+    if (record.status === 'closed' || session.lifecycle.signal.aborted) throw new ChatError(409, 'the session is closed', 'no_turn')
+    if (body.byteLength > CHAT_LIMITS.attachmentBytes) throw new ChatError(413, `attachment exceeds ${CHAT_LIMITS.attachmentBytes} bytes`, 'invalid')
+    const name = safeAttachmentName(filename)
+    const attachmentId = randomUUID()
+    const relative = attachmentPath(record.id, attachmentId, name)
+    const write = async () => {
+      if (record.status === 'closed' || session.lifecycle.signal.aborted) throw new ChatError(409, 'the session is closing', 'no_turn')
+      const { absolute } = await resolveInsideCheckout(record.checkout, relative)
+      await mkdir(dirname(absolute), { recursive: true, mode: 0o700 })
+      await ensureExcluded(record.checkout)
+      await writeFile(absolute, body, { flag: 'wx', mode: 0o600 })
+      storage.insertAttachment({ id: attachmentId, sessionId: record.id, name, path: relative, size: body.byteLength, sha256: sha256Of(body), createdAt: new Date().toISOString() })
+    }
+    if (!(await this.asTurnService(session, write))) {
+      await this.serialized(session, async () => {
+        const lease = this.leaseFor(session)
+        const deadline = AbortSignal.timeout(ATTACHMENT_LEASE_WAIT_MS)
+        const signal = AbortSignal.any([session.lifecycle.signal, deadline])
+        let holder = ''
+        try {
+          await lease.acquire({ signal, onBusy: (busy) => { holder = describeHolder(busy.holder) } })
+        } catch {
+          throw new ChatError(409, deadline.aborted ? `the checkout is busy (${holder}); try again when that turn is over` : 'the session is closing', 'checkout_busy')
+        }
+        try {
+          await write()
+        } finally {
+          lease.release()
+        }
+      })
+    }
+    return { id: attachmentId, name, path: relative, size: body.byteLength }
+  }
+
+  /** Run `operation` as a service of the session's running turn, counted so
+   *  the turn drains it before releasing the checkout. False when there is
+   *  no such turn (or it is already draining), in which case the caller
+   *  takes its own lease. */
+  private async asTurnService(session: LiveSession, operation: () => Promise<void>): Promise<boolean> {
+    const turn = session.turn
+    if (!turn || turn.stopping || session.draining || !session.lease?.held) return false
+    session.services += 1
+    try {
+      if (session.draining || !session.lease?.held) return false
+      await operation()
+      return true
+    } finally {
+      session.services -= 1
+    }
+  }
+
+  private async removeAttachments(session: LiveSession): Promise<void> {
+    try {
+      const { absolute } = await resolveInsideCheckout(session.record.checkout, `${ATTACHMENT_DIR}/${session.record.id}`)
+      await rm(absolute, { recursive: true, force: true })
+    } catch { /* nothing staged */ }
+  }
+
+  /** Under the held lease, on the session's branch: read every attachment
+   *  from its record (bounded, regular files only, content verified against
+   *  the recorded hash) and check every @mention names a real file inside
+   *  the checkout. A claim that does not hold fails the turn readably. */
+  private async resolveInput(session: LiveSession, input: PromptInput): Promise<PromptInput> {
+    const checkout = session.record.checkout
+    const attachments: Attachment[] = []
+    for (const attachment of input.attachments) {
+      const record = storage.getAttachment(attachment.id)
+      if (!record || record.sessionId !== session.record.id) throw new Error(`attachment ${attachment.name} is not one of this session's`)
+      let text: string | undefined
+      try {
+        const { bytes } = await readCheckoutBytes(checkout, record.path, CHAT_LIMITS.attachmentBytes)
+        if (bytes.byteLength !== record.size || sha256Of(bytes) !== record.sha256) throw new Error(`attachment ${record.name} changed on disk since it was uploaded`)
+        text = inlineText(bytes)
+      } catch (error) {
+        if (error instanceof PathError) throw new Error(`attachment ${record.name} is no longer readable in the checkout (${error.message})`)
+        throw error
+      }
+      attachments.push({ id: record.id, name: record.name, path: record.path, size: record.size, ...(text !== undefined ? { text } : {}) })
+    }
+    const mentions: PromptInput['mentions'] = []
+    for (const mention of input.mentions) {
+      try {
+        const { relative } = await readCheckoutBytes(checkout, mention.path)
+        mentions.push({ path: relative })
+      } catch (error) {
+        throw new Error(`@${mention.path} is not a file in the checkout (${error instanceof Error ? error.message : String(error)})`)
+      }
+    }
+    return { ...input, attachments, mentions }
+  }
+
+  private async runTurn(session: LiveSession, turn: RunningTurn, input: PromptInput): Promise<void> {
+    const record = session.record
+    let lease: CheckoutLease | null = null
+    let stopReason: StopReason = 'error'
+    let error: string | undefined
+    let usage
+    let terminate = false
+    let agentSettled = false
+    let agentInvoked = false
+    let checkoutBefore: CheckoutSnapshot | null = null
+    let started = false
+    session.draining = false
+    try {
+      if (turn.abort.signal.aborted) throw new Error(turn.failure || 'cancelled before it started')
+      if (!session.adapter?.alive) await this.startSession(session)
+      const adapter = session.adapter!
+      const isFirst = !storage.findEvent(record.id, (e) => e.type === 'turn.started')
+      if (record.title === 'New session' || isFirst) {
+        record.title = (input.text.split('\n')[0] || record.title).slice(0, TITLE_CHARS) || record.title
+        this.saveRecord(session)
+        this.emit_(record.id, { type: 'session.updated', session: record })
+      }
+      // The Caller row first, so its id is part of the durable turn record.
+      if (this.caller) {
+        turn.callId = await this.caller.start({ model: record.model, sessionId: record.id, repo: record.repo, pr: record.branch.pr, correlationId: turn.id })
+        storage.setOpenTurn(record.id, turn.id, turn.callId)
+      }
+      const nativeInput = await this.composePrompt(session, input, isFirst)
+      this.emit_(record.id, { type: 'turn.started', turnId: turn.id, prompt: nativeInput, callId: turn.callId ?? undefined })
+      started = true
+      this.setStatus(session, 'queued')
+      // Created after the title settled: the label names what is queued behind.
+      lease = this.leaseFor(session)
+      await lease.acquire({ signal: turn.abort.signal, onBusy: (busy) => this.reportBusy(session, busy) })
+      session.lease = lease
+      lease.onLost(() => {
+        try { this.emit_(record.id, { type: 'error', message: 'the checkout lease was lost; stopping the turn', recoverable: true }) } catch { /* mirror */ }
+        turn.failure = 'the checkout lease was lost'
+        turn.abort.abort()
+        void adapter.cancel()
+      })
+      await this.prepareCheckout(session, lease)
+      if (session.worker) {
+        if (!lease.registerWorker({ pid: session.worker.pid, pgid: session.worker.pgid, ident: session.worker.ident })) throw new Error('the checkout lease was lost before the turn started')
+        storage.setWorkerLeaseToken(record.id, lease.currentToken)
+      }
+      const adapterInput = await this.resolveInput(session, nativeInput)
+      if (session.staged) {
+        const report = await refreshDocument(record.checkout, session.staged)
+        if (report.kind === 'refreshed' || report.kind === 'staged') this.saveRecord(session)
+        if (isBridgeProblem(report)) this.emit_(record.id, { type: 'error', message: report.message, recoverable: true })
+      }
+      // Capture before the native prompt can write, not in an asynchronous
+      // item/started notification that races the tool's filesystem effects.
+      checkoutBefore = await captureCheckoutSnapshot(record.checkout, session.staged ? [session.staged.path] : [])
+      if (turn.abort.signal.aborted) throw new Error(turn.failure || 'cancelled before the agent prompt')
+      this.setStatus(session, 'running')
+      agentInvoked = true
+      const result = await adapter.prompt(turn.id, adapterInput, turn.abort.signal)
+      agentSettled = true
+      stopReason = result.stopReason
+      error = result.error
+      usage = result.usage
+      terminate = result.terminate === true
+      if (turn.failure && stopReason !== 'cancelled') { stopReason = 'error'; error = turn.failure }
+    } catch (err) {
+      const cancelled = turn.abort.signal.aborted
+      stopReason = cancelled ? 'cancelled' : 'error'
+      error = cancelled
+        ? (turn.failure && turn.failure !== 'cancelled before it started' ? turn.failure : undefined)
+        : err instanceof CallerCompatError ? err.message : `${err instanceof Error ? err.message : String(err)}`
+      try {
+        if (!started) this.emit_(record.id, { type: 'turn.started', turnId: turn.id, prompt: input, callId: turn.callId ?? undefined })
+        if (!cancelled) this.emit_(record.id, { type: 'error', message: error || 'turn failed', recoverable: true })
+      } catch { /* mirror */ }
+    } finally {
+      this.settlePending(session, 'cancelled')
+      // The lease is released only once nothing of this turn can still write:
+      // the agent reported the turn finished (or its process is verifiably
+      // gone) and every Poise-served file operation returned.
+      let freed = true
+      // An agent that was asked and did not report back is not trusted with
+      // the checkout; a failure before it was asked leaves it alone.
+      // An agent that ended its own process (Claude does after a stop) has
+      // its worker group verified gone, or is terminated when it asked for
+      // that, before the lease can go.
+      if (agentInvoked && session.adapter && (!agentSettled || terminate || !session.adapter.alive)) {
+        try { await this.stopProcess(session) } catch { freed = false }
+      }
+      session.draining = true
+      if (!(await this.waitForServices(session, SERVICE_SETTLE_MS))) {
+        // The agent is not letting go; end it. A Poise-side file operation
+        // that is already executing cannot be cancelled by that, so the
+        // checkout stays held until every service has actually returned
+        // (each is bounded: capped reads, atomic writes, single uploads).
+        try { await this.stopProcess(session) } catch { freed = false }
+        await this.waitForServices(session, Number.POSITIVE_INFINITY)
+      }
+      if (checkoutBefore && agentInvoked && lease?.held && freed) {
+        try { await emitCheckoutChanges(record.checkout, turn.id, checkoutBefore, event => this.emit_(record.id, event)) }
+        catch (failure) {
+          try { this.emit_(record.id, { type: 'error', recoverable: true,
+            message: `Checkout change capture failed: ${failure instanceof Error ? failure.message : String(failure)}. Native tool records remain available.` }) } catch { /* mirror */ }
+        }
+      }
+      if (session.staged && lease?.held) {
+        const report = await writeBackDocument(record.checkout, session.staged, record.id).catch((e) => ({ kind: 'conflict' as const, message: `document write-back failed: ${e instanceof Error ? e.message : String(e)}` }))
+        if (report.kind !== 'unchanged' && report.kind !== 'missing') this.saveRecord(session) // revision/version moved
+        if (isBridgeProblem(report)) { try { this.emit_(record.id, { type: 'error', message: report.message, recoverable: true }) } catch { /* mirror */ } }
+      }
+      let terminalRecorded = false
+      try {
+        const envelope = storage.finalizeTurn(record.id,
+          { type: 'turn.finished', turnId: turn.id, stopReason, error, usage, durationMs: Date.now() - turn.startedAt },
+          turn.callId ? { callId: turn.callId, instance: this.instance } : undefined)
+        terminalRecorded = true
+        record.lastSeq = envelope.seq
+        this.emit('event', envelope)
+      } catch (failure) {
+        // Preserve the open turn on storage failure; do not acknowledge a
+        // ledger result whose recovery record was never made durable.
+        this.emit('log', `[chat] terminal outcome could not be published: ${failure instanceof Error ? failure.message : String(failure)}`)
+      }
+      session.turn = null
+      if (terminalRecorded && turn.callId && this.caller) {
+        const outcome = storage.listFinishOutbox(this.instance).find(row => row.callId === turn.callId)
+        try {
+          if (outcome) await this.caller.finish(turn.callId, outcome.status, outcome.error ?? undefined)
+          storage.finishDelivered(turn.callId)
+        } catch (e) {
+          try { this.emit_(record.id, { type: 'error', message: `Caller did not record the turn end (it will be retried when Poise restarts): ${e instanceof Error ? e.message : String(e)}`, recoverable: true }) } catch { /* mirror */ }
+        }
+      }
+      if (lease?.held) {
+        if (freed) { lease.clearWorker(); lease.release() }
+        else { try { this.emit_(record.id, { type: 'error', message: 'the checkout stays locked: the agent process could not be stopped', recoverable: false }) } catch { /* mirror */ } }
+      }
+      if (lease && session.lease === lease && !lease.held) session.lease = null
+      // A fork learns its native id from the agent's first frames.
+      if (session.adapter?.nativeSessionId && session.adapter.nativeSessionId !== record.nativeSessionId) {
+        record.nativeSessionId = session.adapter.nativeSessionId
+        this.saveRecord(session)
+      }
+      await this.refreshWorkspace(session).catch(() => undefined)
+      if (record.status !== 'closed') {
+        if (!freed) this.setStatus(session, 'error', record.orphanNotice || 'the agent process could not be stopped')
+        else if (session.adapter?.alive) this.setStatus(session, 'idle')
+        // An agent that closed itself after a turn (Claude does after a stop,
+        // so a queued interjection can never run) resumes on the next prompt.
+        else if (stopReason === 'cancelled' || stopReason === 'end_turn') this.setStatus(session, 'idle', 'agent process closed after the turn; it resumes on the next prompt')
+        else this.setStatus(session, 'interrupted')
+      }
+      this.armIdleTimer(session)
+    }
+  }
+
+  /** The first prompt of a session carries its context (card, document,
+   *  handoff) to the agent; the transcript records what the agent got. */
+  private async composePrompt(session: LiveSession, input: PromptInput, isFirst: boolean): Promise<PromptInput> {
+    const context = session.record.context
+    if (!isFirst || !context) return input
+    const parts: string[] = []
+    if (context.kind === 'card') {
+      parts.push(`[Context: ${context.title}]`)
+      if (context.url) parts.push(context.url)
+      if (context.headSha) parts.push(`Head: ${context.headSha}`)
+      if (context.body) parts.push('', context.body)
+    } else if (context.kind === 'document' && session.staged) {
+      parts.push(stagedDocumentPrompt(session.staged, context.title))
+    } else {
+      return input // a handoff summary is the prompt itself
+    }
+    return { ...input, text: `${parts.join('\n')}\n\n${input.text}` }
+  }
+
+  async steer(id: string, text: string): Promise<void> {
+    const session = this.requireLive(id)
+    if (!session.turn || session.turn.stopping) throw new ChatError(409, 'no turn is running', 'no_turn')
+    if (!session.record.capabilities.steer) throw new ChatError(409, `${AGENT_LABEL[session.record.agent]} does not support steering`, 'unsupported')
+    const trimmed = String(text || '').trim()
+    if (!trimmed) throw new ChatError(400, 'text is required', 'invalid')
+    await session.adapter!.steer(trimmed)
+    this.emit_(id, { type: 'steer.sent', turnId: session.turn.id, text: trimmed })
+  }
+
+  /** Cancel the running turn. Resolves when the agent acknowledged or after
+   *  the stop target elapsed with the session in `stopping` — never by
+   *  pretending the turn ended. */
+  async cancel(id: string): Promise<{ settled: boolean }> {
+    const session = this.requireLive(id)
+    const turn = session.turn
+    if (!turn) return { settled: true }
+    turn.stopping = true
+    this.settlePending(session, 'cancelled')
+    turn.abort.abort()
+    try { await session.adapter?.cancel() } catch { /* the abort signal also reaches prompt() */ }
+    const settled = await this.waitForTurnEnd(session, STOP_SETTLE_MS)
+    if (!settled) this.setStatus(session, 'stopping', 'the agent has not acknowledged the stop yet')
+    return { settled }
+  }
+
+  private waitForTurnEnd(session: LiveSession, ms: number): Promise<boolean> {
+    const deadline = Date.now() + ms
+    return new Promise((resolve) => {
+      const check = () => {
+        if (!session.turn) resolve(true)
+        else if (Date.now() >= deadline) resolve(false)
+        else setTimeout(check, 25)
+      }
+      check()
+    })
+  }
+
+  private async waitForServices(session: LiveSession, ms: number): Promise<boolean> {
+    const deadline = Date.now() + ms
+    while (session.services > 0) {
+      if (Date.now() >= deadline) return false
+      await delay(25)
+    }
+    return true
+  }
+
+  // ── Requests from the agent ────────────────────────────────────────────
+
+  respondPermission(id: string, requestId: string, optionId: string): void {
+    const session = this.requireLive(id)
+    const pending = session.pending.get(requestId)
+    if (!pending || pending.kind !== 'permission') {
+      // A request that outlived its process (crash, restart) is closed out
+      // rather than left hanging in the transcript.
+      if (storage.listPendingRequests(id).some((p) => p.requestId === requestId)) {
+        this.emit_(id, { type: 'permission.resolved', id: requestId, optionId: '', by: 'cancelled' })
+      }
+      throw new ChatError(409, 'this permission request is no longer pending', 'no_turn')
+    }
+    const option = pending.options!.find((o) => o.id === optionId)
+    if (!option) throw new ChatError(400, 'unknown option', 'invalid')
+    session.pending.delete(requestId)
+    this.emit_(id, { type: 'permission.resolved', id: requestId, optionId, by: 'user' })
+    // "Always" means this session, in Poise's memory — never the agent's own
+    // persistence, which outlives the session. The agent is told "once".
+    let onWire = optionId
+    if (option.kind === 'allow_always' || option.kind === 'reject_always') {
+      if (pending.grantKey) session.grants.set(pending.grantKey, optionId)
+      const once = pending.options!.find((o) => o.kind === (option.kind === 'allow_always' ? 'allow_once' : 'reject_once'))
+      if (once) onWire = once.id
+    }
+    pending.resolve(onWire)
+    this.afterRequestAnswered(session)
+  }
+
+  answerQuestion(id: string, requestId: string, answers: QuestionAnswers): void {
+    const session = this.requireLive(id)
+    const pending = session.pending.get(requestId)
+    if (!pending || pending.kind !== 'question') {
+      if (storage.listPendingRequests(id).some((p) => p.requestId === requestId)) {
+        this.emit_(id, { type: 'question.answered', id: requestId, answers: {}, by: 'cancelled' })
+      }
+      throw new ChatError(409, 'this question is no longer pending', 'no_turn')
+    }
+    const validated = validateAnswers(pending.questions ?? [], answers)
+    session.pending.delete(requestId)
+    this.emit_(id, { type: 'question.answered', id: requestId, answers: validated, by: 'user' })
+    pending.resolve(validated)
+    this.afterRequestAnswered(session)
+  }
+
+  private afterRequestAnswered(session: LiveSession): void {
+    if (session.turn && !session.turn.stopping && session.pending.size === 0 && session.record.status === 'waiting') this.setStatus(session, 'running')
+  }
+
+  private settlePending(session: LiveSession, by: 'cancelled'): void {
+    for (const [requestId, pending] of session.pending) {
+      session.pending.delete(requestId)
+      try {
+        this.emit_(session.record.id, pending.kind === 'permission'
+          ? { type: 'permission.resolved', id: requestId, optionId: '', by }
+          : { type: 'question.answered', id: requestId, answers: {}, by })
+      } catch { /* mirror failure is handled by the turn */ }
+      pending.reject(new Error('cancelled'))
+    }
+  }
+
+  // ── Model, mode, revert ────────────────────────────────────────────────
+
+  async setModel(id: string, identity: string, effortOverride?: string): Promise<SessionRecord> {
+    const session = this.requireLive(id)
+    return this.serialized(session, async () => {
+      if (session.turn) throw new ChatError(409, 'change the model between turns', 'turn_in_progress')
+      const { agent, model, effort } = await this.resolveModel(identity, effortOverride, session.record.efforts)
+      if (agent !== session.record.agent) throw new ChatError(400, `${identity} is a ${AGENT_LABEL[agent]} model; hand the conversation off instead`, 'invalid')
+      if (session.adapter?.alive) {
+        const applied = await session.adapter.setModel(model.selector, effort)
+        session.record.modelId = applied.modelId || model.selector
+        session.record.effort = applied.effort || effort
+        if (applied.efforts) session.record.efforts = applied.efforts
+      } else {
+        session.record.modelId = model.selector
+        session.record.effort = effort
+      }
+      session.record.model = model.identity
+      this.saveRecord(session)
+      this.emit_(id, { type: 'model.updated', model: model.identity, modelId: session.record.modelId, effort: session.record.effort, efforts: session.record.efforts })
+      this.emit_(id, { type: 'session.updated', session: session.record })
+      return session.record
+    })
+  }
+
+  async setMode(id: string, mode: string): Promise<void> {
+    const session = this.requireLive(id)
+    await this.serialized(session, async () => {
+      if (session.turn) throw new ChatError(409, 'change the mode between turns', 'turn_in_progress')
+      if (!session.record.capabilities.modes) throw new ChatError(409, `${AGENT_LABEL[session.record.agent]} sessions have no modes`, 'unsupported')
+      if (!session.adapter?.alive) await this.startSession(session)
+      await session.adapter!.setMode(mode)
+      session.record.mode = mode
+      this.saveRecord(session)
+    })
+  }
+
+  async revert(id: string, diffId: string): Promise<void> {
+    const session = this.requireLive(id)
+    const found = storage.findEvent(id, (e) => e.type === 'diff' && e.diffId === diffId)
+    if (!found || found.event.type !== 'diff') throw new ChatError(404, 'unknown change', 'invalid')
+    const diff: RecordedDiff = found.event
+    await this.serialized(session, async () => {
+      if (session.turn) throw new ChatError(409, 'revert after the turn finishes', 'turn_in_progress')
+      const lease = this.leaseFor(session)
+      try {
+        await lease.acquire({ signal: session.lifecycle.signal, onBusy: (busy) => this.reportBusy(session, busy) })
+        const state = await inspectCheckout(session.record.checkout)
+        if (state.currentBranch !== session.record.branch.name) {
+          throw new GitError(`the checkout is on ${state.currentBranch}, not ${session.record.branch.name}; switch back before reverting`, 'branch_drift')
+        }
+        await revertDiff(lease, session.record.checkout, diff)
+        this.emit_(id, { type: 'diff.reverted', diffId, path: diff.path, ok: true })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        this.emit_(id, { type: 'diff.reverted', diffId, path: diff.path, ok: false, error: message })
+        throw new ChatError(409, message, 'checkout_dirty')
+      } finally {
+        if (lease.held) lease.release()
+        await this.refreshWorkspace(session).catch(() => undefined)
+      }
+    })
+  }
+
+  // ── Checkout and branch ────────────────────────────────────────────────
+
+  private leaseFor(session: LiveSession): CheckoutLease {
+    const record = session.record
+    return new CheckoutLease(record.checkout, {
+      ownerKind: 'poise:chat',
+      ownerId: record.id,
+      ownerLabel: `chat "${record.title}" on ${record.branch.name} (Poise ${this.options.instanceLabel})`,
+      instance: this.instance,
+      branch: record.branch.name,
+    }, this.leaseProbes)
+  }
+
+  private reportBusy(session: LiveSession, busy: Extract<AcquireResult, { acquired: false }>): void {
+    const label = describeHolder(busy.holder) + (busy.orphan ? ' — its worker is still running' : '')
+    if (session.record.queuedBehind !== label || session.record.status !== 'queued') {
+      session.record.queuedBehind = label
+      this.setStatus(session, 'queued', label)
+    }
+  }
+
+  /** Fresh session: cut/verify/check out its branch under the lease. */
+  private async prepareBranch(session: LiveSession, lease: CheckoutLease): Promise<void> {
+    const record = session.record
+    const checkout = record.checkout
+    if (record.branch.origin === 'pr') {
+      await this.makeCheckoutSwitchable(session, lease)
+      record.branch.name = await checkoutPrHead(lease, checkout, record.branch.pr!)
+      this.saveRecord(session)
+      return
+    }
+    if (record.branch.origin === 'existing') {
+      if (!(await branchExists(checkout, record.branch.name))) throw new GitError(`branch ${record.branch.name} does not exist in ${checkout}`, 'invalid')
+      return
+    }
+    const state = await inspectCheckout(checkout)
+    record.branch.baseSha = await createBranch(lease, checkout, record.branch.name, state.defaultBranch)
+    this.saveRecord(session)
+  }
+
+  /** The checkout must be on the session's branch before the agent runs.
+   *  The outgoing session's uncommitted work is committed on its own
+   *  branch; a dirty checkout on a branch no session owns is refused by name. */
+  private async prepareCheckout(session: LiveSession, lease: CheckoutLease): Promise<void> {
+    const record = session.record
+    const state = await inspectCheckout(record.checkout)
+    if (state.currentBranch === record.branch.name) { lease.setBranch(record.branch.name); return }
+    await this.makeCheckoutSwitchable(session, lease)
+    await switchBranch(lease, record.checkout, record.branch.name)
+    lease.setBranch(record.branch.name)
+  }
+
+  private async makeCheckoutSwitchable(session: LiveSession, lease: CheckoutLease): Promise<void> {
+    const record = session.record
+    const state = await inspectCheckout(record.checkout)
+    if (!state.dirty) return
+    const owner = storage.listSessions(this.instance).find((s) => s.checkout === record.checkout && s.branch.name === state.currentBranch && s.status !== 'closed')
+    if (!owner) {
+      throw new GitError(`the checkout at ${record.checkout} has ${state.dirtyFiles} uncommitted change(s) on ${state.currentBranch || 'a detached HEAD'}, which no chat session owns; commit or stash them yourself`, 'dirty_unowned')
+    }
+    const result = await checkpoint(lease, record.checkout, state.currentBranch)
+    if (result.committed) {
+      const ownerLive = this.live.get(owner.id)
+      if (ownerLive) {
+        ownerLive.record.branch.provisional = false
+        this.saveRecord(ownerLive)
+      } else {
+        owner.branch.provisional = false
+        storage.saveSession(owner)
+      }
+      this.emit_(record.id, { type: 'status.changed', status: session.record.status, detail: `checkpointed ${owner.title}'s changes on ${state.currentBranch}` })
+    }
+  }
+
+  private async refreshWorkspace(session: LiveSession): Promise<void> {
+    try {
+      const state = await inspectCheckout(session.record.checkout)
+      const workspace: WorkspaceState = {
+        currentBranch: state.currentBranch,
+        onBranch: state.currentBranch === session.record.branch.name,
+        dirty: state.dirty,
+        dirtyFiles: state.dirtyFiles,
+        checkedAt: new Date().toISOString(),
+      }
+      session.record.workspace = workspace
+      this.saveRecord(session)
+    } catch { /* not a git checkout yet; the header shows nothing */ }
+  }
+
+  // ── Process and host ───────────────────────────────────────────────────
+
+  private hostFor(session: LiveSession): AdapterHost {
+    const record = session.record
+    return {
+      sessionId: record.id,
+      checkout: record.checkout,
+      spawn: async (command, args, options) => this.spawnAgent(session, command, args, options?.env),
+      emit: (event) => {
+        if (session.record.status === 'closed') return
+        try {
+          this.emit_(record.id, event)
+        } catch (error) {
+          // An unrecorded transcript is not a transcript: the turn stops.
+          const turn = session.turn
+          if (turn && !turn.failure) {
+            turn.failure = `the transcript could not be recorded: ${error instanceof Error ? error.message : String(error)}`
+            turn.abort.abort()
+            void session.adapter?.cancel()
+          }
+        }
+      },
+      requestPermission: (request) => this.askPermission(session, request),
+      askQuestion: (request) => this.askUser(session, request),
+      readTextFile: (path, options) => this.serve(session, () => readCheckoutTextFile(record.checkout, path, options)),
+      writeTextFile: (path, content) => this.serve(session, () => writeCheckoutTextFile(record.checkout, path, content)),
+      log: (message) => this.emit('log', `[chat ${record.id.slice(0, 8)}] ${message}`),
+    }
+  }
+
+  /** Poise-served file operations run only for a turn that holds the
+   *  checkout lease on the session's branch; anything else is refused. */
+  private async serve<T>(session: LiveSession, operation: () => Promise<T>): Promise<T> {
+    const turn = session.turn
+    if (!turn || turn.stopping || turn.abort.signal.aborted) throw new Error('no turn is running; file services are closed')
+    if (!session.lease?.held) throw new Error('the checkout lease is not held; file services are closed')
+    const head = await runFile('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: session.record.checkout, timeoutMs: 10_000 }).then((r) => r.stdout.trim()).catch(() => '')
+    if (head !== session.record.branch.name) throw new Error(`the checkout is on ${head || 'a detached HEAD'}, not ${session.record.branch.name}; file services are closed`)
+    session.services += 1
+    try {
+      return await operation()
+    } finally {
+      session.services -= 1
+    }
+  }
+
+  private async spawnAgent(session: LiveSession, command: string, args: readonly string[], env?: NodeJS.ProcessEnv): Promise<ChildProcess> {
+    if (session.worker?.alive) throw new Error('the session already has a worker')
+    const record = session.record
+    const lease = session.lease
+    if (!lease?.held) throw new Error('the checkout lease is not held; the agent cannot start')
+    const worker = spawnWorker(command, args, {
+      cwd: record.checkout,
+      env,
+      // The Claude SDK asks for `node <wrapper>`: scrub by the wrapper's name.
+      envCommand: command === process.execPath && args[0] ? basename(args[0]) : undefined,
+    })
+    session.worker = worker
+    storage.recordWorker({
+      sessionId: record.id,
+      gatePid: worker.pid,
+      gatePgid: worker.pgid,
+      ident: worker.ident,
+      checkout: record.checkout,
+      leaseToken: lease.currentToken,
+      command,
+      startedAt: new Date().toISOString(),
+    })
+    // Registered before GO: nothing runs unregistered.
+    if (!lease.registerWorker({ pid: worker.pid, pgid: worker.pgid, ident: worker.ident })) {
+      await worker.terminate(1_000).catch(() => undefined)
+      storage.forgetWorker(record.id)
+      throw new Error('the checkout lease was lost before the agent could start')
+    }
+    worker.go()
+    void worker.exited.then(() => {
+      // Only a settled group is forgotten; a dead leader with live children
+      // stays recorded so startup cleanup and the lease keep seeing it.
+      if (session.worker === worker && !worker.alive) {
+        session.worker = null
+        storage.forgetWorker(record.id)
+      }
+    })
+    return worker.child
+  }
+
+  private onAdapterExit(session: LiveSession, adapter: Adapter, code: number | null, signal: NodeJS.Signals | null): void {
+    if (session.adapter !== adapter) return
+    if (session.record.status === 'closed') return
+    const turn = session.turn
+    try {
+      if (turn && !turn.stopping) {
+        this.emit_(session.record.id, { type: 'error', message: `${AGENT_LABEL[session.record.agent]} exited (${code ?? signal ?? 'unknown'}) during the turn`, recoverable: true })
+      }
+      if (!turn) this.setStatus(session, 'interrupted', `${AGENT_LABEL[session.record.agent]} exited (${code ?? signal ?? 'unknown'})`)
+    } catch { /* mirror */ }
+  }
+
+  /** Close the adapter and terminate its process group, verified. On
+   *  failure the worker stays recorded, the session says so, and the error
+   *  propagates so no caller releases the checkout. */
+  private async stopProcess(session: LiveSession): Promise<void> {
+    const adapter = session.adapter
+    session.adapter = null
+    if (adapter) { try { await adapter.close() } catch { /* terminating below */ } }
+    const worker = session.worker
+    if (!worker) return
+    try {
+      await worker.terminate(CLOSE_GRACE_MS)
+    } catch (error) {
+      session.record.orphanNotice = error instanceof Error ? error.message : String(error)
+      this.saveRecord(session)
+      try { this.emit_(session.record.id, { type: 'error', message: session.record.orphanNotice, recoverable: false }) } catch { /* mirror */ }
+      throw error
+    }
+    if (session.worker === worker) session.worker = null
+    storage.forgetWorker(session.record.id)
+  }
+
+  private async askPermission(session: LiveSession, request: PermissionRequest): Promise<string> {
+    const turn = session.turn
+    if (!turn || turn.stopping) throw new Error('no turn is running')
+    const grantKey = `${request.title}\0${canonicalJson(request.input)}`
+    const granted = session.grants.get(grantKey)
+    const requestId = randomUUID()
+    if (granted) {
+      const remembered = request.options.find((o) => o.id === granted)
+      const onWire = request.options.find((o) => o.kind === (remembered?.kind === 'reject_always' ? 'reject_once' : 'allow_once'))
+      this.emit_(session.record.id, { type: 'permission.requested', id: requestId, turnId: turn.id, toolId: request.toolId, title: request.title, description: request.description, input: request.input, options: request.options })
+      this.emit_(session.record.id, { type: 'permission.resolved', id: requestId, optionId: granted, by: 'session' })
+      return onWire?.id ?? granted
+    }
+    return new Promise<string>((resolve, reject) => {
+      session.pending.set(requestId, { kind: 'permission', turnId: turn.id, options: request.options, grantKey, resolve, reject })
+      this.emit_(session.record.id, { type: 'permission.requested', id: requestId, turnId: turn.id, toolId: request.toolId, title: request.title, description: request.description, input: request.input, options: request.options })
+      this.setStatus(session, 'waiting')
+    })
+  }
+
+  private async askUser(session: LiveSession, request: QuestionRequest): Promise<QuestionAnswers> {
+    const turn = session.turn
+    if (!turn || turn.stopping) throw new Error('no turn is running')
+    const requestId = randomUUID()
+    return new Promise<QuestionAnswers>((resolve, reject) => {
+      session.pending.set(requestId, { kind: 'question', turnId: turn.id, questions: request.questions, resolve, reject })
+      this.emit_(session.record.id, { type: 'question.asked', id: requestId, turnId: turn.id, toolId: request.toolId, questions: request.questions })
+      this.setStatus(session, 'waiting')
+    })
+  }
+
+  private armIdleTimer(session: LiveSession): void {
+    if (session.idleTimer) clearTimeout(session.idleTimer)
+    const minutes = this.idleTimeoutMinutes()
+    if (!Number.isFinite(minutes) || minutes <= 0) return
+    session.idleTimer = setTimeout(() => {
+      session.idleTimer = null
+      if (session.turn || !session.adapter) return
+      void this.serialized(session, async () => {
+        if (session.turn) return
+        await this.stopProcess(session)
+        this.emit_(session.record.id, { type: 'status.changed', status: 'idle', detail: 'agent process closed after idle timeout; it resumes on the next prompt' })
+      }).catch(() => undefined)
+    }, minutes * 60_000)
+    session.idleTimer.unref()
+  }
+
+  // ── Events ─────────────────────────────────────────────────────────────
+
+  private setStatus(session: LiveSession, status: SessionStatus, detail?: string): void {
+    session.record.status = status
+    if (status !== 'queued') session.record.queuedBehind = undefined
+    this.saveRecord(session)
+    this.emit_(session.record.id, { type: 'status.changed', status, queuedBehind: session.record.queuedBehind, detail })
+  }
+
+  private saveRecord(session: LiveSession): void {
+    session.record.updatedAt = new Date().toISOString()
+    storage.saveSession(session.record)
+  }
+
+  /** Append to the mirror, then broadcast. Throws when the mirror cannot be
+   *  written; callers that run on the agent's behalf turn that into a stop. */
+  private emit_(sessionId: string, event: ChatEvent): ChatEnvelope {
+    const envelope = storage.appendEvent(sessionId, event)
+    const live = this.live.get(sessionId)
+    if (live) live.record.lastSeq = envelope.seq
+    this.emit('event', envelope)
+    return envelope
+  }
+
+  /** For Swarm and Stop: the session and turn behind a Caller call id. */
+  describeTurn(callId: string): { sessionId: string, turnId: string, events: Array<{ at: string, message: string }> } | null {
+    for (const record of storage.listSessions(this.instance)) {
+      const started = storage.findEvent(record.id, (e) => e.type === 'turn.started' && e.callId === callId)
+      const open = storage.getOpenTurn(record.id)
+      const turnId = started?.event.type === 'turn.started' ? started.event.turnId : open?.callId === callId ? open.turnId : null
+      if (!turnId) continue
+      const { events } = storage.listEvents(record.id, 0)
+      const summary = events
+        .filter((e) => 'turnId' in e.event && (e.event as any).turnId === turnId && (e.event.type === 'tool.started' || e.event.type === 'turn.finished' || e.event.type === 'permission.requested'))
+        .slice(-40)
+        .map((e) => ({ at: e.at, message: e.event.type === 'tool.started' ? `${e.event.kind}: ${e.event.title}` : e.event.type === 'permission.requested' ? `waiting for permission: ${e.event.title}` : `turn ${(e.event as any).stopReason}` }))
+      return { sessionId: record.id, turnId, events: summary }
+    }
+    return null
+  }
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────
+
+async function defaultProbeAgent(agent: AgentId): Promise<{ ok: boolean, reason?: string }> {
+  const command = AGENT_COMMAND[agent]
+  try {
+    await runFile(command, ['--version'], { timeoutMs: 15_000, maxOutputBytes: 64 * 1024 })
+    return { ok: true }
+  } catch (error: any) {
+    if (error?.code === 'ENOENT') return { ok: false, reason: `${command} is not installed on the PATH the server runs with` }
+    return { ok: false, reason: `${command} --version failed: ${String(error?.stderr || error?.message || error).trim().slice(0, 200)}` }
+  }
+}
+
+function normalizeBranchRequest(branch: BranchRequest, prefix: string): { name: string, origin: 'new' | 'existing' | 'pr', pr?: number } {
+  if (!branch || typeof branch !== 'object') throw new ChatError(400, 'branch is required', 'invalid')
+  if ('pr' in branch) {
+    const pr = Number(branch.pr)
+    if (!Number.isSafeInteger(pr) || pr <= 0) throw new ChatError(400, 'pr must be a positive integer', 'invalid')
+    return { name: `github-interface-pr-${pr}`, origin: 'pr', pr }
+  }
+  if ('existing' in branch) {
+    try { return { name: assertBranchName(branch.existing), origin: 'existing' } } catch (error) { throw new ChatError(400, (error as Error).message, 'invalid') }
+  }
+  if ('new' in branch) {
+    const raw = String(branch.new || '').trim()
+    const name = raw.includes('/') || raw.startsWith(prefix) ? raw : `${prefix}${raw}`
+    try { return { name: assertBranchName(name), origin: 'new' } } catch (error) { throw new ChatError(400, (error as Error).message, 'invalid') }
+  }
+  throw new ChatError(400, 'branch must be { new }, { existing } or { pr }', 'invalid')
+}
+
+function validateAnswers(questions: Question[], answers: unknown): QuestionAnswers {
+  if (!answers || typeof answers !== 'object' || Array.isArray(answers)) throw new ChatError(400, 'answers must be an object', 'invalid')
+  const input = answers as Record<string, unknown>
+  const out: QuestionAnswers = {}
+  for (const question of questions) {
+    const value = input[question.id]
+    if (value === undefined) throw new ChatError(400, `question "${question.question}" was not answered`, 'invalid')
+    const labels = new Set(question.options.map((o) => o.label))
+    if (question.multiSelect) {
+      if (!Array.isArray(value) || !value.every((v) => typeof v === 'string' && v.length <= 2_000)) throw new ChatError(400, 'multi-select answers must be an array of strings', 'invalid')
+      if (!question.freeText && !value.every((v) => labels.has(v))) throw new ChatError(400, 'an answer is not one of the offered options', 'invalid')
+      out[question.id] = value
+    } else {
+      if (typeof value !== 'string' || value.length > 2_000) throw new ChatError(400, 'an answer must be a string', 'invalid')
+      if (!question.freeText && !labels.has(value)) throw new ChatError(400, 'an answer is not one of the offered options', 'invalid')
+      out[question.id] = value
+    }
+  }
+  return out
+}
+
+function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text
+}
+
+/** Recursive canonical form: nested input keys count, so two commands that
+ *  differ below the top level never share a permission grant. */
+export function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'undefined'
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  return `{${Object.keys(value as object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson((value as any)[key])}`).join(',')}}`
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function waitDead(pgid: number, ms: number): Promise<boolean> {
+  const deadline = Date.now() + ms
+  while (pgidAlive(pgid)) {
+    if (Date.now() >= deadline) return false
+    await delay(50)
+  }
+  return true
+}
+
+export function emptyCapabilities() {
+  return { steer: false, fork: false, thought: false, plan: false, commands: false, modes: false, permissions: false, questions: false, resume: false, images: false }
+}
+
+export type { SessionContext }

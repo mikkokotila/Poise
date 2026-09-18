@@ -2,7 +2,7 @@
 // Archive) with the burger toggle as a sibling. The burger only opens
 // Settings + Typography now; view switching happens via the inline nav.
 
-type ViewName = 'current' | 'swarm' | 'main' | 'behaviors' | 'snippets' | 'editor'
+type ViewName = 'current' | 'swarm' | 'chat' | 'main' | 'behaviors' | 'snippets' | 'editor'
 
 const VIEW_KEY = 'poise-view'
 
@@ -14,6 +14,7 @@ const ICON_CLOSE = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none">
 const VIEW_ITEMS: { key: ViewName; label: string }[] = [
   { key: 'current',   label: 'Current'   },
   { key: 'swarm',     label: 'Swarm'     },
+  { key: 'chat',      label: 'Chat'      },
   { key: 'main',      label: 'Archive'   },
   { key: 'behaviors', label: 'Behaviors' },
   { key: 'snippets',  label: 'Snippets'  },
@@ -34,7 +35,7 @@ function loadView(): ViewName {
       localStorage.setItem(VIEW_KEY, 'current')
       return 'current'
     }
-    if (v === 'current' || v === 'swarm' || v === 'main' || v === 'behaviors' || v === 'snippets' || v === 'editor') return v
+    if (v === 'current' || v === 'swarm' || v === 'chat' || v === 'main' || v === 'behaviors' || v === 'snippets' || v === 'editor') return v
   } catch { /* ignore */ }
   return 'current'
 }

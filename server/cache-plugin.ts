@@ -16,6 +16,10 @@ import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, set
 import { ContentLaunchPendingError, getContentJobResponse, launchAndEnqueueContentJob, startContentFinalizer, stopContentFinalizer } from './content-jobs'
 import { ProcessLockError } from './process-lock'
 import { ATTACHMENT_MAX_BYTES, enforceApiRequest, httpStatus, readBuffer, readJson, setApiHeaders } from './http'
+import { ChatRuntime } from './chat/runtime'
+import { ChatSocketServer, handleChatApi } from './chat/transport'
+import { getChatSettings } from './settings'
+import type { Server } from 'node:http'
 
 function json(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status
@@ -32,6 +36,26 @@ export interface CachePluginOptions {
   allowedHosts?: string[]
   /** Auth runtime override for isolated integration tests. */
   claudeAuth?: ClaudeAuthRuntime
+  /** Which Poise server this is; chat sessions are owned per instance and
+   *  the dev and production servers never adopt each other's. */
+  instanceLabel?: 'dev' | 'production'
+}
+
+// Chat v1: one runtime per server process. Sessions are keyed by instance
+// (`poise-<label>:<db path>`), so the same database file never hosts two
+// servers' sessions and two different databases never mix.
+let chatRuntime: ChatRuntime | null = null
+let chatSockets: ChatSocketServer | null = null
+
+export function getChatRuntime(): ChatRuntime {
+  if (!chatRuntime) throw new Error('the chat runtime is not started')
+  return chatRuntime
+}
+
+/** Serve /ws/chat on an HTTP server (production server or Vite's). */
+export function attachChatSockets(server: Server): void {
+  if (!chatSockets) throw new Error('the chat runtime is not started')
+  chatSockets.attach(server)
 }
 
 export interface ClaudeAuthRuntime {
@@ -50,12 +74,30 @@ export function startPoiseRuntime(opts: CachePluginOptions = {}): void {
   setReviewAgentUsername(opts.reviewAgentUsername || '')
   startBehaviorsRuntime({ reviewAgentUsername: opts.reviewAgentUsername })
   startContentFinalizer()
+  if (!chatRuntime) {
+    const label = opts.instanceLabel ?? 'dev'
+    chatRuntime = new ChatRuntime({
+      instance: `poise-${label}:${process.env.POISE_DB || 'default'}`,
+      instanceLabel: label,
+      idleTimeoutMinutes: () => getChatSettings().idleTimeoutMinutes,
+      branchPrefix: () => getChatSettings().branchPrefix,
+    })
+    chatRuntime.on('log', (line: string) => console.log(line))
+    chatSockets = new ChatSocketServer(chatRuntime, { allowedHosts: opts.allowedHosts })
+    void chatRuntime.recover().catch((error: unknown) => {
+      console.error('[chat] startup reconciliation failed:', error)
+    })
+  }
 }
 
 export async function stopPoiseRuntime(): Promise<void> {
   const authStops = [...activeClaudeAuthRuntimes].map((auth) => auth.stop())
   activeClaudeAuthRuntimes.clear()
-  await Promise.all([stopBehaviorsRuntime(), stopContentFinalizer(), ...authStops])
+  const chatStop = chatRuntime?.stop() ?? Promise.resolve()
+  const socketStop = chatSockets?.close() ?? Promise.resolve()
+  chatRuntime = null
+  chatSockets = null
+  await Promise.all([stopBehaviorsRuntime(), stopContentFinalizer(), chatStop, socketStop, ...authStops])
 }
 
 export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.NextHandleFunction {
@@ -359,6 +401,13 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
           }
         }
 
+        // ── /api/chat/* — Chat v1 sessions (server/chat) ──
+        // Handled before the legacy per-card chat below, whose matchers use
+        // the exact `/api/chat` path or the `/api/chat-…` prefixes.
+        if (url.startsWith('/api/chat/') && chatRuntime) {
+          if (await handleChatApi(req, res, url, chatRuntime)) return
+        }
+
         // ── /api/chat — per-card long-lived chats via agent-interface ──
         // GET /api/chat?session=<id> returns the chat transcript for
         // that session (oldest-first; each entry has the user prompt
@@ -507,7 +556,22 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
         if (url === '/api/agent-stop' && req.method === 'POST') {
           try {
             const body = await readJson<any>(req)
-            const result = await stopAgentJob(String(body.id || ''))
+            const id = String(body.id || '').toLowerCase()
+            // A Chat turn has no Caller process to signal: Stop goes to the
+            // runtime that owns the session, and only that one. A turn of the
+            // other Poise server is reported, never touched.
+            const chatTurn = chatRuntime && /^[0-9a-f]{32}$/.test(id) ? chatRuntime.describeTurn(id) : null
+            if (chatTurn) {
+              const { settled } = await chatRuntime!.cancel(chatTurn.sessionId)
+              return json(res, 200, { id, stopped: settled, status: settled ? 'cancelled' : 'stopping', error_code: 'stopped' })
+            }
+            if (/^[0-9a-f]{32}$/.test(id)) {
+              const row = (await fetchAgentLogs().catch(() => [])).find((entry) => entry.id === id)
+              if (row && row.runner === 'external') {
+                return json(res, 409, { error: 'this turn belongs to another Poise server; stop it from that server\'s Chat view' })
+              }
+            }
+            const result = await stopAgentJob(id)
             return json(res, 200, result)
           } catch (err: any) {
             const stderr = err?.stderr?.toString?.() || ''

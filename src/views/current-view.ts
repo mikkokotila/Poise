@@ -6,7 +6,7 @@
 // unaffected. The Issue lane has a richer composer (title / body / repo)
 // that opens a real GitHub issue via the proxy.
 
-import { midnightInZone, startOfWeekInZone } from '../config'
+import { midnightInZone, startOfWeekInZone, getSettings } from '../config'
 
 type Lane = 'idea' | 'concept' | 'plan' | 'issue' | 'pr'
 type LaneType = 'manual' | 'live'
@@ -299,6 +299,15 @@ const COPY_ICON_SVG = '<svg width="11" height="11" viewBox="0 0 14 14" fill="non
 // Checkmark shown for ~1.2s after a successful copy as visual feedback.
 const CHECK_ICON_SVG = '<svg width="11" height="11" viewBox="0 0 14 14" fill="none"><path d="M3 7.5l3 3 5-6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
 
+// Opens the Chat view's New session dialog with the card as context: a PR
+// binds to its head branch, an issue gets a new `<prefix>issue-<n>` branch.
+// The person confirms agent, model and branch before anything runs.
+const CHAT_SESSION_ICON_SVG = '<svg width="11" height="11" viewBox="0 0 14 14" fill="none"><path d="M2.5 3h9a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H7l-2.5 2v-2H2.5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linejoin="round"/><path d="M5 5.5l2 1.5-2 1.5M7.5 8.5h2" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+
+function chatSessionButton(item: LiveItem): string {
+  return `<button class="card-action-btn card-chat-session-btn" data-repo="${escapeHtml(item.repo)}" data-number="${item.number}" data-pr="${item.is_pr}" title="Open in Chat" aria-label="Open in Chat">${CHAT_SESSION_ICON_SVG}</button>`
+}
+
 function chatButton(sessionId: string, label: string, draft: string): string {
   return `<button class="card-action-btn card-chat-btn" data-session="${escapeHtml(sessionId)}" data-label="${escapeHtml(label)}" data-draft="${escapeHtml(draft)}" title="Chat about this card" aria-label="Chat">${CHAT_ICON_SVG}</button>`
 }
@@ -335,8 +344,10 @@ function cardActions(opts: {
   label: string,
   copyText: string,
   primary?: string,
+  /** Extra tool buttons between chat and the primary slot. */
+  tools?: string,
 }): string {
-  return `<div class="card-actions">${copyButton(opts.copyText)}${chatButton(opts.sessionId, opts.label, opts.copyText)}${opts.primary || ''}</div>`
+  return `<div class="card-actions">${copyButton(opts.copyText)}${chatButton(opts.sessionId, opts.label, opts.copyText)}${opts.tools || ''}${opts.primary || ''}</div>`
 }
 
 // Copy `text` to the clipboard and briefly swap the button's icon
@@ -462,6 +473,7 @@ function paintLiveItem(el: HTMLElement, item: LiveItem): void {
       sessionId: liveSessionId(item),
       label: `${shortRepo(item.repo)}#${item.number}`,
       copyText: `${item.title}\n${item.url}`,
+      tools: chatSessionButton(item),
       primary,
     })}
   `
@@ -1538,6 +1550,27 @@ function attachCardClickHandlers() {
       const draft = chatBtn.dataset.draft || ''
       if (!session) return
       window.dispatchEvent(new CustomEvent('poise:open-chat', { detail: { session, label, draft } }))
+      return
+    }
+
+    // Chat session icon — hands the card to the Chat view's New session
+    // dialog. The event carries what the dialog prefills; the person still
+    // confirms before a session starts.
+    const chatSessionBtn = target.closest<HTMLButtonElement>('.card-chat-session-btn')
+    if (chatSessionBtn) {
+      e.preventDefault()
+      e.stopPropagation()
+      const cardEl = chatSessionBtn.closest<HTMLElement>('.card')!
+      const item = liveItems.find((i) => prKey(i) === (cardEl.dataset.id || ''))
+      if (!item) return
+      const prefix = getSettings().chat?.branchPrefix || 'chat/'
+      window.dispatchEvent(new CustomEvent('poise:open-chat-session', {
+        detail: {
+          context: { kind: 'card', title: item.title, body: '', url: item.url },
+          repo: item.repo,
+          branch: item.is_pr === 1 ? { pr: item.number } : { new: `${prefix}issue-${item.number}` },
+        },
+      }))
       return
     }
 

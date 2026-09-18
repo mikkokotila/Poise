@@ -8,6 +8,7 @@ with a framework-free browser client, a Node server, and a small SQLite store.
 
 - **Current** — manual idea/concept/plan cards beside live issues and PRs.
 - **Swarm** — agent run status, live review activity, responses, and safe replay controls.
+- **Chat** — native coding-agent sessions with streaming, tools, permissions and checkout-bound work.
 - **Archive** — searchable GitHub issue and PR history.
 - **Behaviors** — scheduled review, approval, and unblocking automations.
 - **Snippets** — simple Espanso trigger management.
@@ -221,6 +222,18 @@ Each minute records whether new reasoning activity arrived. Expand **Provider
 reasoning** to read the latest 65,536 characters exposed by the provider, when
 available. These details load on demand, outside the main log payload. Polling
 updates existing rows and text in place, preserving expansion and scroll position.
+
+## Native-agent Chat
+
+The full Chat view owns persistent sessions for Claude Code, Codex, Grok Build
+and Muse. It includes branch-bound working context, inline permissions and
+questions, steering, Stop, durable transcripts, and Current/Swarm/Editor
+handoffs. It requires the companion Caller turn-recording and checkout-lock
+changes; the existing pane stays available for `/content`, `/consensus` and
+Editor annotations in v1.
+
+See [Chat v1](docs/Chat-v1.md) for architecture, recovery, release integration
+and the distinction between automated coverage and live-agent verification.
 
 ## License
 

@@ -59,6 +59,10 @@ export interface LogEntry {
   // The GitHub review this run submitted (Caller's receipt); tells a
   // reviewer's review apart from a sibling's on the same pull request.
   review_id?: number | null
+  // `external` for a Chat turn Poise recorded through `--record-turn`: no
+  // Caller process ran, so `--stop` refuses it and Poise routes it to its
+  // own runtime.
+  runner?: 'external' | null
 }
 
 export async function fetchAgentLogs(
@@ -148,7 +152,25 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
     || (correlationId !== null && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(correlationId))) {
     throw new Error(`agent-interface log row ${index} violates the schema`)
   }
-  if (source?.startsWith('poise:')) {
+  const runner = optionalString('runner')
+  if (runner !== null && runner !== 'external') {
+    throw new Error(`agent-interface log row ${index} has invalid runner`)
+  }
+  // A Chat turn is a Caller row without a Caller process: it is exempt from
+  // the review provenance rules only when it is exactly the well-formed
+  // externally recorded shape (runner, behavior and source all agree).
+  const externalChatTurn = runner === 'external' && behavior === 'chat' && source === 'poise:chat'
+  if (externalChatTurn) {
+    if (!sessionId || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(sessionId)) {
+      throw new Error(`agent-interface log row ${index} is a chat turn without a session`)
+    }
+    if (status === 'failed' && !error) {
+      throw new Error(`agent-interface log row ${index} has no terminal error`)
+    }
+  } else if (runner === 'external') {
+    throw new Error(`agent-interface log row ${index} is externally recorded but not a chat turn`)
+  }
+  if (source?.startsWith('poise:') && !externalChatTurn) {
     if (!actor || !expectedHead || !correlationId || !behavior
       || !repo || !/^[^/\s]+\/[^/\s]+$/.test(repo) || !prId) {
       throw new Error(`agent-interface log row ${index} has incomplete Poise provenance`)
@@ -191,6 +213,7 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
     review_policy: optionalString('review_policy'),
     recovery_model: optionalString('recovery_model'),
     review_id: Number.isSafeInteger(row.review_id) && Number(row.review_id) > 0 ? Number(row.review_id) : null,
+    runner: runner as LogEntry['runner'],
   }
 }
 

@@ -1,0 +1,3040 @@
+[
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 1,
+   "method": "initialize",
+   "params": {
+    "clientInfo": {
+     "name": "poise",
+     "version": "0.1.0"
+    },
+    "capabilities": {}
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 1,
+   "result": {
+    "serverInfo": {
+     "name": "muse",
+     "version": "1.3.0"
+    },
+    "userAgent": "muse-build/1.3.0 (non-interactive; macos-aarch64; build 3c572bc7348890f3f5cb4f24b7efb04bc3d31c09)",
+    "museHome": "/home/user/.local/share/muse",
+    "platformFamily": "unix",
+    "platformOs": "macos",
+    "schema": {
+     "version": 1,
+     "fingerprint": "sha256:7469c9e352e67def4a59df7e439984d7194fa351e1c8b7abb34060fd977ced81"
+    },
+    "grantedCapabilities": [],
+    "experimentalApi": false,
+    "sessionDurability": "durable"
+   }
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "initialized"
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 2,
+   "method": "model/list",
+   "params": {}
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 2,
+   "result": {
+    "providerId": "meta",
+    "profileId": "tbh",
+    "source": "providerCatalog",
+    "models": [
+     {
+      "modelId": "muse-spark-1.3",
+      "displayLabel": "muse-spark-1.3",
+      "providerId": "meta",
+      "profileId": "tbh",
+      "releaseDate": "2026-09-02",
+      "description": null,
+      "contextLimit": 1007997,
+      "outputLimit": 128000,
+      "cost": {
+       "input": "1.25",
+       "output": "4.25",
+       "cached": "0.15",
+       "currency": "USD"
+      },
+      "isActive": false,
+      "isDefault": false
+     },
+     {
+      "modelId": "muse-spark-1.3-contributor",
+      "displayLabel": "muse-spark-1.3-contributor",
+      "providerId": "meta",
+      "profileId": "tbh",
+      "releaseDate": "2026-09-02",
+      "description": "Discounted tokens: your content, including inter-session messages, may be used for product improvement.",
+      "contextLimit": 1007997,
+      "outputLimit": 128000,
+      "cost": {
+       "input": "0.10",
+       "output": "0.20",
+       "cached": "0.002",
+       "currency": "USD"
+      },
+      "isActive": false,
+      "isDefault": true
+     },
+     {
+      "modelId": "muse-spark-1.2",
+      "displayLabel": "muse-spark-1.2",
+      "providerId": "meta",
+      "profileId": "tbh",
+      "releaseDate": "2026-08-05",
+      "description": null,
+      "contextLimit": 1007997,
+      "outputLimit": 128000,
+      "cost": {
+       "input": "1.25",
+       "output": "4.25",
+       "cached": "0.15",
+       "currency": "USD"
+      },
+      "isActive": false,
+      "isDefault": false
+     },
+     {
+      "modelId": "muse-spark-1.2-contributor",
+      "displayLabel": "muse-spark-1.2-contributor",
+      "providerId": "meta",
+      "profileId": "tbh",
+      "releaseDate": "2026-08-05",
+      "description": "Discounted tokens: your content, including inter-session messages, may be used for product improvement.",
+      "contextLimit": 1007997,
+      "outputLimit": 128000,
+      "cost": {
+       "input": "0.10",
+       "output": "0.20",
+       "cached": "0.002",
+       "currency": "USD"
+      },
+      "isActive": false,
+      "isDefault": false
+     }
+    ]
+   }
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 3,
+   "method": "session/start",
+   "params": {
+    "commandId": "01a0b4a9-ceff-785b-abd2-e6de4bbda40e",
+    "workspaceRoot": "/tmp/poise-chat-v1/probe/fixture",
+    "approvalMode": "onRequest"
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/started",
+   "params": {
+    "session": {
+     "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+     "path": "/home/user/.local/share/muse/sessions/2026/09/18/01a0b4a9-cf48-7a92-84ef-d9af8b6bca85/session.jsonl",
+     "status": "idle",
+     "activeTurnId": null,
+     "createdAt": "2026-09-18T13:17:02.687053Z",
+     "updatedAt": "2026-09-18T13:17:02.687057Z",
+     "workspaceRoot": "/tmp/poise-chat-v1/probe/fixture",
+     "providerId": "meta",
+     "modelId": "muse-spark-1.3-contributor",
+     "turnCount": 0,
+     "forkedFrom": null,
+     "approvalMode": {
+      "mode": "onRequest",
+      "source": "startup",
+      "lastCommandId": null
+     }
+    }
+   },
+   "emittedAtMs": 1789737422796
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 3,
+   "result": {
+    "session": {
+     "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+     "path": "/home/user/.local/share/muse/sessions/2026/09/18/01a0b4a9-cf48-7a92-84ef-d9af8b6bca85/session.jsonl",
+     "status": "idle",
+     "activeTurnId": null,
+     "createdAt": "2026-09-18T13:17:02.687053Z",
+     "updatedAt": "2026-09-18T13:17:02.687057Z",
+     "workspaceRoot": "/tmp/poise-chat-v1/probe/fixture",
+     "providerId": "meta",
+     "modelId": "muse-spark-1.3-contributor",
+     "turnCount": 0,
+     "forkedFrom": null,
+     "approvalMode": {
+      "mode": "onRequest",
+      "source": "startup",
+      "lastCommandId": null
+     }
+    },
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:1"
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/approvalModeChanged",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:1",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "d8079f4b-9468-4b6f-9610-feb814fc6416",
+      "sequence": 4
+     },
+     "last": {
+      "id": "d8079f4b-9468-4b6f-9610-feb814fc6416",
+      "sequence": 4
+     }
+    },
+    "mode": "onRequest",
+    "source": "approvalReconfigure",
+    "commandId": "01a0b4a9-ceff-785b-abd2-e6de4bbda40e",
+    "clientName": "poise"
+   },
+   "emittedAtMs": 1789737422800
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 4,
+   "method": "session/setReasoningEffort",
+   "params": {
+    "commandId": "01a0b4a9-cfd2-7d54-ba39-d4784caa844e",
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "reasoningEffort": "low"
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/reasoningEffortChanged",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:2",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "7667aa71-e51f-412c-bace-61c86489c11b",
+      "sequence": 9
+     },
+     "last": {
+      "id": "7667aa71-e51f-412c-bace-61c86489c11b",
+      "sequence": 9
+     }
+    },
+    "reasoningEffort": "low",
+    "source": "user"
+   },
+   "emittedAtMs": 1789737422807
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 4,
+   "result": {
+    "commandId": "01a0b4a9-cfd2-7d54-ba39-d4784caa844e",
+    "status": "accepted"
+   }
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 5,
+   "method": "turn/start",
+   "params": {
+    "commandId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6",
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "input": [
+     {
+      "type": "text",
+      "text": "Run the shell command `rm -f probe-dir/marker.txt`. If it is refused, say \"refused\" and stop. Otherwise say \"done\"."
+     }
+    ]
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/branchChanged",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:3",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "12f8040c-3d1d-41f5-80fd-774e93005ca3",
+      "sequence": 14
+     },
+     "last": {
+      "id": "12f8040c-3d1d-41f5-80fd-774e93005ca3",
+      "sequence": 14
+     }
+    },
+    "workspaceRoot": "/tmp/poise-chat-v1/probe/fixture",
+    "branch": "main",
+    "vcs": "git"
+   },
+   "emittedAtMs": 1789737422861
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 5,
+   "result": {
+    "commandId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6",
+    "status": "accepted",
+    "turnId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6",
+    "startedNewTurn": true,
+    "disposition": "started"
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/statusChanged",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "status": "running",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:4"
+   },
+   "emittedAtMs": 1789737422876
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "turn/started",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:4",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "82b3b76e-e910-4a10-aa20-36d90047686b",
+      "sequence": 16
+     },
+     "last": {
+      "id": "82b3b76e-e910-4a10-aa20-36d90047686b",
+      "sequence": 16
+     }
+    },
+    "turnId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6",
+    "commandId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6"
+   },
+   "emittedAtMs": 1789737422876
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/completed",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:5",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "82b3b76e-e910-4a10-aa20-36d90047686b",
+      "sequence": 16
+     },
+     "last": {
+      "id": "82b3b76e-e910-4a10-aa20-36d90047686b",
+      "sequence": 16
+     }
+    },
+    "item": {
+     "itemId": "b56b1dc8-0a9c-42c4-99de-627f88b9d2ea",
+     "kind": "userMessage",
+     "turnId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6",
+     "revision": 1,
+     "status": "completed",
+     "recordedAt": "2026-09-18T13:17:02.862346Z",
+     "text": "Run the shell command `rm -f probe-dir/marker.txt`. If it is refused, say \"refused\" and stop. Otherwise say \"done\".",
+     "commandId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6"
+    }
+   },
+   "emittedAtMs": 1789737422876
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/started",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:6",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "5443950b-d403-4c05-836e-c7b592e2ae86",
+      "sequence": 33
+     },
+     "last": {
+      "id": "5443950b-d403-4c05-836e-c7b592e2ae86",
+      "sequence": 33
+     }
+    },
+    "item": {
+     "itemId": "5443950b-d403-4c05-836e-c7b592e2ae86",
+     "kind": "reminderChild",
+     "turnId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6",
+     "revision": 1,
+     "status": "inProgress",
+     "recordedAt": "2026-09-18T13:17:02.997187Z",
+     "fallbackText": "Reminder child session",
+     "childSessionId": "1ec1ebf6-1938-420d-8b55-8919f0611928",
+     "reminderAgentId": "skill-reminder",
+     "generationId": 1,
+     "taskId": "01a0b4a9-d075-7072-b797-179c5adaa57e"
+    }
+   },
+   "emittedAtMs": 1789737423005
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/tokenUsage",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:7",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "e9a0bb16-39b0-43e2-871b-35f3240c0a11",
+      "sequence": 49
+     },
+     "last": {
+      "id": "e9a0bb16-39b0-43e2-871b-35f3240c0a11",
+      "sequence": 49
+     }
+    },
+    "turnId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6",
+    "modelId": "muse-spark-1.3-contributor",
+    "usage": {
+     "inputTokens": 20321,
+     "outputTokens": 232,
+     "cachedTokens": 11249,
+     "cacheWriteTokens": 0,
+     "cacheReadTokens": 11249,
+     "reasoningTokens": 140
+    },
+    "promptTokens": 20321,
+    "totalTokens": 20553,
+    "finishReason": "tool_calls",
+    "durationMs": 4532,
+    "cumulative": {
+     "promptTokens": 20321,
+     "outputTokens": 232,
+     "totalTokens": 20553
+    }
+   },
+   "emittedAtMs": 1789737427618
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/contextUsage",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:8",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "e9a0bb16-39b0-43e2-871b-35f3240c0a11",
+      "sequence": 49
+     },
+     "last": {
+      "id": "e9a0bb16-39b0-43e2-871b-35f3240c0a11",
+      "sequence": 49
+     }
+    },
+    "windowTokens": 1007997,
+    "usedTokens": 20553,
+    "pressure": "normal"
+   },
+   "emittedAtMs": 1789737427618
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/statusChanged",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "status": "running",
+    "attention": [
+     "approvalPending"
+    ],
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:9"
+   },
+   "emittedAtMs": 1789737427653
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "approval/requested",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "approvalId": "01a0b4a9-e2ad-7ab2-91ae-65ea5b562afc",
+    "turnId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6",
+    "taskId": "01a0b4a9-e2ad-7ab2-91ae-65ea5b562afc",
+    "itemId": "01a0b4a9-e2ad-7ab2-91ae-65ea5b562afc",
+    "toolCallId": "call_01a0b4a9e13e725f8ca2b8703dda4475",
+    "toolName": "bash",
+    "rawArgs": "{\"command\":\"rm -f probe-dir/marker.txt\",\"description\":\"Remove probe marker file\"}",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:9",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "cb7cea8d-081f-485d-aef2-f21f6402f910",
+      "sequence": 54
+     },
+     "last": {
+      "id": "cb7cea8d-081f-485d-aef2-f21f6402f910",
+      "sequence": 54
+     }
+    },
+    "subject": {
+     "kind": "shell",
+     "command": "rm -f probe-dir/marker.txt",
+     "workspaceRoot": "/private/tmp/poise-chat-v1/probe/fixture",
+     "stages": [
+      {
+       "requirementId": {
+        "approvalId": "01a0b4a9-e2ad-7ab2-91ae-65ea5b562afc",
+        "sourceIndex": 0
+       },
+       "position": 1,
+       "totalStages": 1,
+       "argv": [
+        "rm",
+        "-f",
+        "probe-dir/marker.txt"
+       ],
+       "argvComplete": true,
+       "resolution": {
+        "kind": "unresolved"
+       },
+       "suggestedPrefix": {
+        "argvPrefix": [
+         "rm"
+        ],
+        "label": "Always allow in this workspace: rm ..."
+       }
+      }
+     ]
+    },
+    "currentRequirementId": {
+     "approvalId": "01a0b4a9-e2ad-7ab2-91ae-65ea5b562afc",
+     "sourceIndex": 0
+    },
+    "availableChoices": [
+     {
+      "choiceId": "allow_once",
+      "label": "Allow once",
+      "decision": "approved",
+      "scope": "once"
+     },
+     {
+      "choiceId": "allow_local_prefix",
+      "label": "Always allow in this workspace: rm ...",
+      "decision": "approvedPolicyAmendment",
+      "scope": "localPersistent",
+      "rulePreview": "Always allow in this workspace: rm ..."
+     },
+     {
+      "choiceId": "abort",
+      "label": "Reject",
+      "decision": "abort",
+      "scope": "once",
+      "acceptsFeedback": true
+     }
+    ],
+    "protectedWrite": false,
+    "judgeEscalated": false
+   },
+   "emittedAtMs": 1789737427655
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 6,
+   "method": "approval/decide",
+   "params": {
+    "commandId": "01a0b4a9-e2cc-7588-ada1-686843b8955b",
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "approvalId": "01a0b4a9-e2ad-7ab2-91ae-65ea5b562afc",
+    "choiceId": "allow_once",
+    "requirementId": {
+     "approvalId": "01a0b4a9-e2ad-7ab2-91ae-65ea5b562afc",
+     "sourceIndex": 0
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 6,
+   "result": {
+    "commandId": "01a0b4a9-e2cc-7588-ada1-686843b8955b",
+    "status": "accepted",
+    "approvalId": "01a0b4a9-e2ad-7ab2-91ae-65ea5b562afc",
+    "terminal": true
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/statusChanged",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "status": "running",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:11"
+   },
+   "emittedAtMs": 1789737427705
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "approval/updated",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:10",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "56a0865c-4347-4b0d-b574-5d927fb8b082",
+      "sequence": 57
+     },
+     "last": {
+      "id": "56a0865c-4347-4b0d-b574-5d927fb8b082",
+      "sequence": 57
+     }
+    },
+    "approvalId": "01a0b4a9-e2ad-7ab2-91ae-65ea5b562afc",
+    "currentRequirementId": {
+     "approvalId": "01a0b4a9-e2ad-7ab2-91ae-65ea5b562afc",
+     "sourceIndex": 0
+    },
+    "subject": {
+     "kind": "shell",
+     "command": "rm -f probe-dir/marker.txt",
+     "workspaceRoot": "/private/tmp/poise-chat-v1/probe/fixture",
+     "stages": [
+      {
+       "requirementId": {
+        "approvalId": "01a0b4a9-e2ad-7ab2-91ae-65ea5b562afc",
+        "sourceIndex": 0
+       },
+       "position": 1,
+       "totalStages": 1,
+       "argv": [
+        "rm",
+        "-f",
+        "probe-dir/marker.txt"
+       ],
+       "argvComplete": true,
+       "resolution": {
+        "kind": "allowOnce"
+       },
+       "suggestedPrefix": {
+        "argvPrefix": [
+         "rm"
+        ],
+        "label": "Always allow in this workspace: rm ..."
+       }
+      }
+     ]
+    },
+    "availableChoices": [
+     {
+      "choiceId": "allow_once",
+      "label": "Allow once",
+      "decision": "approved",
+      "scope": "once"
+     },
+     {
+      "choiceId": "allow_local_prefix",
+      "label": "Always allow in this workspace: rm ...",
+      "decision": "approvedPolicyAmendment",
+      "scope": "localPersistent",
+      "rulePreview": "Always allow in this workspace: rm ..."
+     },
+     {
+      "choiceId": "abort",
+      "label": "Reject",
+      "decision": "abort",
+      "scope": "once",
+      "acceptsFeedback": true
+     }
+    ],
+    "change": {
+     "kind": "stageResolved",
+     "requirementId": {
+      "approvalId": "01a0b4a9-e2ad-7ab2-91ae-65ea5b562afc",
+      "sourceIndex": 0
+     },
+     "choiceId": "allow_once",
+     "decision": "approved"
+    }
+   },
+   "emittedAtMs": 1789737427705
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "approval/resolved",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:11",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "991ec00d-78ee-4dc4-bd86-787a9a50f505",
+      "sequence": 58
+     },
+     "last": {
+      "id": "991ec00d-78ee-4dc4-bd86-787a9a50f505",
+      "sequence": 58
+     }
+    },
+    "approvalId": "01a0b4a9-e2ad-7ab2-91ae-65ea5b562afc",
+    "itemId": "01a0b4a9-e2ad-7ab2-91ae-65ea5b562afc",
+    "turnId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6",
+    "decision": "approved",
+    "policyResult": "allow",
+    "resolvedBy": "user",
+    "decidedByCommandId": "01a0b4a9-e2cc-7588-ada1-686843b8955b",
+    "stageEvidence": [
+     {
+      "requirementId": {
+       "approvalId": "01a0b4a9-e2ad-7ab2-91ae-65ea5b562afc",
+       "sourceIndex": 0
+      },
+      "position": 1,
+      "totalStages": 1,
+      "argv": [
+       "rm",
+       "-f",
+       "probe-dir/marker.txt"
+      ],
+      "resolution": {
+       "kind": "allowOnce"
+      }
+     }
+    ]
+   },
+   "emittedAtMs": 1789737427705
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/started",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:12",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "6402f451-a16b-47bd-b250-b2086c9ee2ca",
+      "sequence": 51
+     },
+     "last": {
+      "id": "f5e69270-afc4-4059-9e09-12b8e895c403",
+      "sequence": 64
+     }
+    },
+    "item": {
+     "itemId": "01a0b4a9-e2ad-7ab2-91ae-65ea5b562afc",
+     "kind": "toolCall",
+     "turnId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6",
+     "revision": 1,
+     "status": "inProgress",
+     "recordedAt": "2026-09-18T13:17:07.715373Z",
+     "tool": "bash",
+     "callId": "call_01a0b4a9e13e725f8ca2b8703dda4475",
+     "args": "{\"command\":\"rm -f probe-dir/marker.txt\",\"description\":\"Remove probe marker file\"}"
+    }
+   },
+   "emittedAtMs": 1789737427720
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/completed",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:13",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "6402f451-a16b-47bd-b250-b2086c9ee2ca",
+      "sequence": 51
+     },
+     "last": {
+      "id": "99dee170-371d-4208-9b1a-fce71b3ee9aa",
+      "sequence": 69
+     }
+    },
+    "item": {
+     "itemId": "01a0b4a9-e2ad-7ab2-91ae-65ea5b562afc",
+     "kind": "toolCall",
+     "turnId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6",
+     "revision": 2,
+     "status": "completed",
+     "recordedAt": "2026-09-18T13:17:07.803458Z",
+     "tool": "bash",
+     "callId": "call_01a0b4a9e13e725f8ca2b8703dda4475",
+     "args": "{\"command\":\"rm -f probe-dir/marker.txt\",\"description\":\"Remove probe marker file\"}",
+     "visibleOutput": "{\n  \"chunk_id\": \"exec-1-1\",\n  \"command\": \"rm -f probe-dir/marker.txt\",\n  \"description\": \"Remove probe marker file\",\n  \"exit_code\": 0,\n  \"terminal_status\": \"completed\",\n  \"output\": \"\",\n  \"original_output_bytes\": 0,\n  \"original_output_tokens\": 0,\n  \"truncated\": false\n}"
+    }
+   },
+   "emittedAtMs": 1789737427809
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/started",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:13.1",
+    "item": {
+     "itemId": "8dcafdc6-38a2-47bb-943b-b4f8ee066289",
+     "kind": "agentMessage",
+     "turnId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6",
+     "revision": 1,
+     "status": "inProgress",
+     "text": ""
+    }
+   },
+   "emittedAtMs": 1789737430466
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/delta",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:13.2",
+    "itemId": "8dcafdc6-38a2-47bb-943b-b4f8ee066289",
+    "field": "text",
+    "delta": "done"
+   },
+   "emittedAtMs": 1789737430466
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/completed",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:14",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "d0fa4e7a-cd6a-4d5a-820a-da04d1f9f918",
+      "sequence": 86
+     },
+     "last": {
+      "id": "d0fa4e7a-cd6a-4d5a-820a-da04d1f9f918",
+      "sequence": 86
+     }
+    },
+    "item": {
+     "itemId": "8dcafdc6-38a2-47bb-943b-b4f8ee066289",
+     "kind": "agentMessage",
+     "turnId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6",
+     "revision": 2,
+     "status": "completed",
+     "recordedAt": "2026-09-18T13:17:10.466931Z",
+     "text": "done"
+    }
+   },
+   "emittedAtMs": 1789737430476
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/tokenUsage",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:15",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "4b95f554-8686-47f7-a8e8-c5d867700f9c",
+      "sequence": 89
+     },
+     "last": {
+      "id": "4b95f554-8686-47f7-a8e8-c5d867700f9c",
+      "sequence": 89
+     }
+    },
+    "turnId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6",
+    "modelId": "muse-spark-1.3-contributor",
+    "usage": {
+     "inputTokens": 20650,
+     "outputTokens": 49,
+     "cachedTokens": 20209,
+     "cacheWriteTokens": 0,
+     "cacheReadTokens": 20209,
+     "reasoningTokens": 38
+    },
+    "promptTokens": 20650,
+    "totalTokens": 20699,
+    "durationMs": 2611,
+    "cumulative": {
+     "promptTokens": 40971,
+     "outputTokens": 281,
+     "totalTokens": 41252
+    }
+   },
+   "emittedAtMs": 1789737430541
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/contextUsage",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:16",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "4b95f554-8686-47f7-a8e8-c5d867700f9c",
+      "sequence": 89
+     },
+     "last": {
+      "id": "4b95f554-8686-47f7-a8e8-c5d867700f9c",
+      "sequence": 89
+     }
+    },
+    "windowTokens": 1007997,
+    "usedTokens": 20699,
+    "pressure": "normal"
+   },
+   "emittedAtMs": 1789737430541
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/started",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:17",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "692ea23c-23d3-4540-987f-1c9947d86425",
+      "sequence": 96
+     },
+     "last": {
+      "id": "692ea23c-23d3-4540-987f-1c9947d86425",
+      "sequence": 96
+     }
+    },
+    "item": {
+     "itemId": "692ea23c-23d3-4540-987f-1c9947d86425",
+     "kind": "reminderChild",
+     "turnId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6",
+     "revision": 1,
+     "status": "inProgress",
+     "recordedAt": "2026-09-18T13:17:10.580643Z",
+     "fallbackText": "Reminder child session",
+     "childSessionId": "a52f8d8f-31c6-48c4-84cd-c7b2881c297d",
+     "reminderAgentId": "verify-reminder",
+     "generationId": 1,
+     "taskId": "01a0b4a9-ee15-7921-8b79-2c3debe101bc"
+    }
+   },
+   "emittedAtMs": 1789737430585
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/completed",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:18",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "5443950b-d403-4c05-836e-c7b592e2ae86",
+      "sequence": 33
+     },
+     "last": {
+      "id": "419d231e-bad5-430b-a39d-f6861a47e191",
+      "sequence": 98
+     }
+    },
+    "item": {
+     "itemId": "5443950b-d403-4c05-836e-c7b592e2ae86",
+     "kind": "reminderChild",
+     "turnId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6",
+     "revision": 2,
+     "status": "completed",
+     "recordedAt": "2026-09-18T13:17:21.266037Z",
+     "fallbackText": "Reminder child session",
+     "childSessionId": "1ec1ebf6-1938-420d-8b55-8919f0611928",
+     "reminderAgentId": "skill-reminder",
+     "generationId": 1,
+     "taskId": "01a0b4a9-d075-7072-b797-179c5adaa57e"
+    }
+   },
+   "emittedAtMs": 1789737441275
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/completed",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:19",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "692ea23c-23d3-4540-987f-1c9947d86425",
+      "sequence": 96
+     },
+     "last": {
+      "id": "e17171bb-d8a5-4468-98a1-e09e370d421b",
+      "sequence": 99
+     }
+    },
+    "item": {
+     "itemId": "692ea23c-23d3-4540-987f-1c9947d86425",
+     "kind": "reminderChild",
+     "turnId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6",
+     "revision": 2,
+     "status": "completed",
+     "recordedAt": "2026-09-18T13:17:21.274987Z",
+     "fallbackText": "Reminder child session",
+     "childSessionId": "a52f8d8f-31c6-48c4-84cd-c7b2881c297d",
+     "reminderAgentId": "verify-reminder",
+     "generationId": 1,
+     "taskId": "01a0b4a9-ee15-7921-8b79-2c3debe101bc"
+    }
+   },
+   "emittedAtMs": 1789737441281
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/statusChanged",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "status": "idle",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:20"
+   },
+   "emittedAtMs": 1789737441325
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "turn/completed",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:20",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "8b32d2f5-c6af-49f5-8a16-b96a28242bbb",
+      "sequence": 105
+     },
+     "last": {
+      "id": "8b32d2f5-c6af-49f5-8a16-b96a28242bbb",
+      "sequence": 105
+     }
+    },
+    "turnId": "01a0b4a9-cff2-7f86-afe3-a3984196bdd6",
+    "terminal": "completed",
+    "durationMs": 18454,
+    "timeToFirstTokenMs": 7603
+   },
+   "emittedAtMs": 1789737441341
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 7,
+   "method": "turn/start",
+   "params": {
+    "commandId": "01a0b4aa-6c56-722a-bb03-fbe14aeb8ce9",
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "input": [
+     {
+      "type": "text",
+      "text": "Count from 1 to 100, one number per line."
+     }
+    ]
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 7,
+   "result": {
+    "commandId": "01a0b4aa-6c56-722a-bb03-fbe14aeb8ce9",
+    "status": "accepted",
+    "turnId": "01a0b4aa-6c56-722a-bb03-fbe14aeb8ce9",
+    "startedNewTurn": true,
+    "disposition": "started"
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/statusChanged",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "status": "running",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:21"
+   },
+   "emittedAtMs": 1789737462915
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "turn/started",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:21",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "b98dc0ef-1079-4295-a3c0-ae216721ba13",
+      "sequence": 111
+     },
+     "last": {
+      "id": "b98dc0ef-1079-4295-a3c0-ae216721ba13",
+      "sequence": 111
+     }
+    },
+    "turnId": "01a0b4aa-6c56-722a-bb03-fbe14aeb8ce9",
+    "commandId": "01a0b4aa-6c56-722a-bb03-fbe14aeb8ce9"
+   },
+   "emittedAtMs": 1789737462916
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/completed",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:22",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "b98dc0ef-1079-4295-a3c0-ae216721ba13",
+      "sequence": 111
+     },
+     "last": {
+      "id": "b98dc0ef-1079-4295-a3c0-ae216721ba13",
+      "sequence": 111
+     }
+    },
+    "item": {
+     "itemId": "b8c16bc4-3684-4cd8-b33f-c764763f925c",
+     "kind": "userMessage",
+     "turnId": "01a0b4aa-6c56-722a-bb03-fbe14aeb8ce9",
+     "revision": 1,
+     "status": "completed",
+     "recordedAt": "2026-09-18T13:17:42.909088Z",
+     "text": "Count from 1 to 100, one number per line.",
+     "commandId": "01a0b4aa-6c56-722a-bb03-fbe14aeb8ce9"
+    }
+   },
+   "emittedAtMs": 1789737462916
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/started",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:23",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "67ce6848-9e30-432f-8669-789b13226392",
+      "sequence": 128
+     },
+     "last": {
+      "id": "67ce6848-9e30-432f-8669-789b13226392",
+      "sequence": 128
+     }
+    },
+    "item": {
+     "itemId": "67ce6848-9e30-432f-8669-789b13226392",
+     "kind": "reminderChild",
+     "turnId": "01a0b4aa-6c56-722a-bb03-fbe14aeb8ce9",
+     "revision": 1,
+     "status": "inProgress",
+     "recordedAt": "2026-09-18T13:17:43.063368Z",
+     "fallbackText": "Reminder child session",
+     "childSessionId": "b5b31e5e-788e-4f2f-ac8f-bf6352ca596f",
+     "reminderAgentId": "skill-reminder",
+     "generationId": 1,
+     "taskId": "01a0b4aa-6cf2-7240-abc4-bbafad34cbfc"
+    }
+   },
+   "emittedAtMs": 1789737463068
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 8,
+   "method": "turn/interrupt",
+   "params": {
+    "commandId": "01a0b4aa-7c24-7a05-85b2-275949c082bb",
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "turnId": "01a0b4aa-6c56-722a-bb03-fbe14aeb8ce9"
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 8,
+   "result": {
+    "commandId": "01a0b4aa-7c24-7a05-85b2-275949c082bb",
+    "status": "accepted",
+    "turnId": "01a0b4aa-6c56-722a-bb03-fbe14aeb8ce9"
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/completed",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:24",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "67ce6848-9e30-432f-8669-789b13226392",
+      "sequence": 128
+     },
+     "last": {
+      "id": "ec856f3d-05fb-4439-8118-644b3c21ae9d",
+      "sequence": 141
+     }
+    },
+    "item": {
+     "itemId": "67ce6848-9e30-432f-8669-789b13226392",
+     "kind": "reminderChild",
+     "turnId": "01a0b4aa-6c56-722a-bb03-fbe14aeb8ce9",
+     "revision": 2,
+     "status": "completed",
+     "recordedAt": "2026-09-18T13:17:46.933227Z",
+     "fallbackText": "Reminder child session",
+     "childSessionId": "b5b31e5e-788e-4f2f-ac8f-bf6352ca596f",
+     "reminderAgentId": "skill-reminder",
+     "generationId": 1,
+     "taskId": "01a0b4aa-6cf2-7240-abc4-bbafad34cbfc"
+    }
+   },
+   "emittedAtMs": 1789737466942
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/statusChanged",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "status": "idle",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:25"
+   },
+   "emittedAtMs": 1789737466985
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "turn/completed",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:25",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "cbf30972-3956-4fdc-9354-f279802de2bc",
+      "sequence": 146
+     },
+     "last": {
+      "id": "cbf30972-3956-4fdc-9354-f279802de2bc",
+      "sequence": 146
+     }
+    },
+    "turnId": "01a0b4aa-6c56-722a-bb03-fbe14aeb8ce9",
+    "terminal": "cancelled",
+    "reason": "cancelled during model step",
+    "durationMs": 4068
+   },
+   "emittedAtMs": 1789737466987
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 9,
+   "method": "turn/start",
+   "params": {
+    "commandId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "input": [
+     {
+      "type": "text",
+      "text": "Ask me one question using your user-input tool: \"Which letter?\" with options A and B. Then reply with only the letter I chose."
+     }
+    ]
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 9,
+   "result": {
+    "commandId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+    "status": "accepted",
+    "turnId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+    "startedNewTurn": true,
+    "disposition": "started"
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/statusChanged",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "status": "running",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:26"
+   },
+   "emittedAtMs": 1789737470973
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "turn/started",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:26",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "5a2f96e2-7d33-4e50-9ff8-d899e2d90ede",
+      "sequence": 152
+     },
+     "last": {
+      "id": "5a2f96e2-7d33-4e50-9ff8-d899e2d90ede",
+      "sequence": 152
+     }
+    },
+    "turnId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+    "commandId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107"
+   },
+   "emittedAtMs": 1789737470974
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/completed",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:27",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "5a2f96e2-7d33-4e50-9ff8-d899e2d90ede",
+      "sequence": 152
+     },
+     "last": {
+      "id": "5a2f96e2-7d33-4e50-9ff8-d899e2d90ede",
+      "sequence": 152
+     }
+    },
+    "item": {
+     "itemId": "1ce73c54-c63d-4a49-ba60-0c2384e07719",
+     "kind": "userMessage",
+     "turnId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+     "revision": 1,
+     "status": "completed",
+     "recordedAt": "2026-09-18T13:17:50.962532Z",
+     "text": "Ask me one question using your user-input tool: \"Which letter?\" with options A and B. Then reply with only the letter I chose.",
+     "commandId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107"
+    }
+   },
+   "emittedAtMs": 1789737470974
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/started",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:28",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "87c90d25-e4bc-415f-937f-99d339423cb4",
+      "sequence": 169
+     },
+     "last": {
+      "id": "87c90d25-e4bc-415f-937f-99d339423cb4",
+      "sequence": 169
+     }
+    },
+    "item": {
+     "itemId": "87c90d25-e4bc-415f-937f-99d339423cb4",
+     "kind": "reminderChild",
+     "turnId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+     "revision": 1,
+     "status": "inProgress",
+     "recordedAt": "2026-09-18T13:17:51.179369Z",
+     "fallbackText": "Reminder child session",
+     "childSessionId": "df6c6d92-1fa2-41ba-ab27-f4b6f01fb492",
+     "reminderAgentId": "skill-reminder",
+     "generationId": 1,
+     "taskId": "01a0b4aa-8c87-77e2-a3ce-461e74eac9e1"
+    }
+   },
+   "emittedAtMs": 1789737471189
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/tokenUsage",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:29",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "108cbe68-4c1b-4787-a06b-12b0cbfe7155",
+      "sequence": 185
+     },
+     "last": {
+      "id": "108cbe68-4c1b-4787-a06b-12b0cbfe7155",
+      "sequence": 185
+     }
+    },
+    "turnId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+    "modelId": "muse-spark-1.3-contributor",
+    "usage": {
+     "inputTokens": 20766,
+     "outputTokens": 168,
+     "cachedTokens": 20593,
+     "cacheWriteTokens": 0,
+     "cacheReadTokens": 20593,
+     "reasoningTokens": 60
+    },
+    "promptTokens": 20766,
+    "totalTokens": 20934,
+    "finishReason": "tool_calls",
+    "durationMs": 11719,
+    "cumulative": {
+     "promptTokens": 61737,
+     "outputTokens": 449,
+     "totalTokens": 62186
+    }
+   },
+   "emittedAtMs": 1789737482996
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/contextUsage",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:30",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "108cbe68-4c1b-4787-a06b-12b0cbfe7155",
+      "sequence": 185
+     },
+     "last": {
+      "id": "108cbe68-4c1b-4787-a06b-12b0cbfe7155",
+      "sequence": 185
+     }
+    },
+    "windowTokens": 1007997,
+    "usedTokens": 20934,
+    "pressure": "normal"
+   },
+   "emittedAtMs": 1789737482996
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/started",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:31",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "12db891f-579a-4246-9dc0-c839fe0ffca3",
+      "sequence": 187
+     },
+     "last": {
+      "id": "842db1f7-8308-4217-81b4-c4b55ababa15",
+      "sequence": 192
+     }
+    },
+    "item": {
+     "itemId": "01a0b4aa-baff-7a82-9c2a-4bba9828750d",
+     "kind": "toolCall",
+     "turnId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+     "revision": 1,
+     "status": "inProgress",
+     "recordedAt": "2026-09-18T13:18:03.030484Z",
+     "tool": "request_user_input",
+     "callId": "call_01a0b4aab90c73b7b6bb51ef06c1285a",
+     "args": "{\"questions\":[{\"header\":\"Letter\",\"id\":\"letter\",\"options\":[{\"label\":\"A\"},{\"label\":\"B\"}],\"question\":\"Which letter?\"}]}"
+    }
+   },
+   "emittedAtMs": 1789737483034
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/statusChanged",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "status": "running",
+    "attention": [
+     "inputPending"
+    ],
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:32"
+   },
+   "emittedAtMs": 1789737483042
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 1,
+   "method": "userInput/request",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "userInputId": "01a0b4aa-baff-7a82-9c2a-4bba9828750d",
+    "turnId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+    "itemId": "01a0b4aa-baff-7a82-9c2a-4bba9828750d",
+    "toolCallId": "call_01a0b4aab90c73b7b6bb51ef06c1285a",
+    "toolName": "request_user_input",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:32",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "3c9e904d-aa58-4283-b481-954b4cbd17a5",
+      "sequence": 193
+     },
+     "last": {
+      "id": "3c9e904d-aa58-4283-b481-954b4cbd17a5",
+      "sequence": 193
+     }
+    },
+    "questions": [
+     {
+      "id": "letter",
+      "header": "Letter",
+      "question": "Which letter?",
+      "selection": {
+       "mode": "single"
+      },
+      "options": [
+       {
+        "label": "A"
+       },
+       {
+        "label": "B"
+       }
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 1,
+   "result": {}
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 10,
+   "method": "userInput/answer",
+   "params": {
+    "commandId": "01a0b4aa-bb26-73c6-b993-f01440ee98fc",
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "userInputId": "01a0b4aa-baff-7a82-9c2a-4bba9828750d",
+    "answers": [
+     {
+      "questionId": "letter",
+      "selectedLabel": "A"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "userInput/requested",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "userInputId": "01a0b4aa-baff-7a82-9c2a-4bba9828750d",
+    "turnId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+    "itemId": "01a0b4aa-baff-7a82-9c2a-4bba9828750d",
+    "toolCallId": "call_01a0b4aab90c73b7b6bb51ef06c1285a",
+    "toolName": "request_user_input",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:32",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "3c9e904d-aa58-4283-b481-954b4cbd17a5",
+      "sequence": 193
+     },
+     "last": {
+      "id": "3c9e904d-aa58-4283-b481-954b4cbd17a5",
+      "sequence": 193
+     }
+    },
+    "questions": [
+     {
+      "id": "letter",
+      "header": "Letter",
+      "question": "Which letter?",
+      "selection": {
+       "mode": "single"
+      },
+      "options": [
+       {
+        "label": "A"
+       },
+       {
+        "label": "B"
+       }
+      ]
+     }
+    ]
+   },
+   "emittedAtMs": 1789737483046
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 11,
+   "method": "userInput/answer",
+   "params": {
+    "commandId": "01a0b4aa-bb27-7a06-bf21-0c0f43c89d14",
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "userInputId": "01a0b4aa-baff-7a82-9c2a-4bba9828750d",
+    "answers": [
+     {
+      "questionId": "letter",
+      "selectedLabel": "A"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 10,
+   "result": {
+    "commandId": "01a0b4aa-bb26-73c6-b993-f01440ee98fc",
+    "status": "accepted",
+    "userInputId": "01a0b4aa-baff-7a82-9c2a-4bba9828750d"
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/statusChanged",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "status": "running",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:33"
+   },
+   "emittedAtMs": 1789737483072
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "userInput/settled",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:33",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "a2e796e2-de0e-4529-a4ac-8024f7ae32e6",
+      "sequence": 197
+     },
+     "last": {
+      "id": "a2e796e2-de0e-4529-a4ac-8024f7ae32e6",
+      "sequence": 197
+     }
+    },
+    "userInputId": "01a0b4aa-baff-7a82-9c2a-4bba9828750d",
+    "outcome": "answered",
+    "answers": [
+     {
+      "questionId": "letter",
+      "selectedLabel": "A"
+     }
+    ],
+    "clarification": null,
+    "reason": null,
+    "decidedByCommandId": "01a0b4aa-bb26-73c6-b993-f01440ee98fc"
+   },
+   "emittedAtMs": 1789737483074
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/completed",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:34",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "12db891f-579a-4246-9dc0-c839fe0ffca3",
+      "sequence": 187
+     },
+     "last": {
+      "id": "a9ff43e7-4747-4358-9621-698ecd36607b",
+      "sequence": 199
+     }
+    },
+    "item": {
+     "itemId": "01a0b4aa-baff-7a82-9c2a-4bba9828750d",
+     "kind": "toolCall",
+     "turnId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+     "revision": 2,
+     "status": "completed",
+     "recordedAt": "2026-09-18T13:18:03.077596Z",
+     "tool": "request_user_input",
+     "callId": "call_01a0b4aab90c73b7b6bb51ef06c1285a",
+     "args": "{\"questions\":[{\"header\":\"Letter\",\"id\":\"letter\",\"options\":[{\"label\":\"A\"},{\"label\":\"B\"}],\"question\":\"Which letter?\"}]}",
+     "visibleOutput": "{\"status\":\"answered\",\"answers\":[{\"id\":\"letter\",\"selected_label\":\"A\"}]}"
+    }
+   },
+   "emittedAtMs": 1789737483081
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/completed",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:35",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "87c90d25-e4bc-415f-937f-99d339423cb4",
+      "sequence": 169
+     },
+     "last": {
+      "id": "564e5ea5-8e9b-4d43-bd00-6087ae1deb99",
+      "sequence": 202
+     }
+    },
+    "item": {
+     "itemId": "87c90d25-e4bc-415f-937f-99d339423cb4",
+     "kind": "reminderChild",
+     "turnId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+     "revision": 2,
+     "status": "completed",
+     "recordedAt": "2026-09-18T13:18:03.096563Z",
+     "fallbackText": "Reminder child session",
+     "childSessionId": "df6c6d92-1fa2-41ba-ab27-f4b6f01fb492",
+     "reminderAgentId": "skill-reminder",
+     "generationId": 1,
+     "taskId": "01a0b4aa-8c87-77e2-a3ce-461e74eac9e1"
+    }
+   },
+   "emittedAtMs": 1789737483102
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/started",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:36",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "ebd26bf8-ebb5-4cf1-9250-f0b5f83ecb96",
+      "sequence": 211
+     },
+     "last": {
+      "id": "ebd26bf8-ebb5-4cf1-9250-f0b5f83ecb96",
+      "sequence": 211
+     }
+    },
+    "item": {
+     "itemId": "ebd26bf8-ebb5-4cf1-9250-f0b5f83ecb96",
+     "kind": "reminderChild",
+     "turnId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+     "revision": 1,
+     "status": "inProgress",
+     "recordedAt": "2026-09-18T13:18:03.180432Z",
+     "fallbackText": "Reminder child session",
+     "childSessionId": "ee46e242-4f58-48f3-9d4b-449d318f0791",
+     "reminderAgentId": "skill-reminder",
+     "generationId": 2,
+     "taskId": "01a0b4aa-bb75-77d1-8851-e9bb5bf9e11c"
+    }
+   },
+   "emittedAtMs": 1789737483193
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 11,
+   "error": {
+    "code": -32056,
+    "message": "user input 01a0b4aa-baff-7a82-9c2a-4bba9828750d is already settled",
+    "data": {
+     "kind": "userInputAlreadySettled",
+     "retryable": false,
+     "userInputId": "01a0b4aa-baff-7a82-9c2a-4bba9828750d",
+     "settlement": {
+      "outcome": "answered",
+      "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:33"
+     }
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/started",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:36.1",
+    "item": {
+     "itemId": "de7f87e8-41fb-49f8-a875-8bc2de8cfbaf",
+     "kind": "agentMessage",
+     "turnId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+     "revision": 1,
+     "status": "inProgress",
+     "text": ""
+    }
+   },
+   "emittedAtMs": 1789737491068
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/delta",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:36.2",
+    "itemId": "de7f87e8-41fb-49f8-a875-8bc2de8cfbaf",
+    "field": "text",
+    "delta": "A"
+   },
+   "emittedAtMs": 1789737491068
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/completed",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:37",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "ff350b3d-6715-43c7-a92a-0adeefa66a24",
+      "sequence": 225
+     },
+     "last": {
+      "id": "ff350b3d-6715-43c7-a92a-0adeefa66a24",
+      "sequence": 225
+     }
+    },
+    "item": {
+     "itemId": "de7f87e8-41fb-49f8-a875-8bc2de8cfbaf",
+     "kind": "agentMessage",
+     "turnId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+     "revision": 2,
+     "status": "completed",
+     "recordedAt": "2026-09-18T13:18:11.068968Z",
+     "text": "A"
+    }
+   },
+   "emittedAtMs": 1789737491074
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/tokenUsage",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:38",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "c60de128-e5e7-4f0b-8c8e-49c3e35acbf1",
+      "sequence": 228
+     },
+     "last": {
+      "id": "c60de128-e5e7-4f0b-8c8e-49c3e35acbf1",
+      "sequence": 228
+     }
+    },
+    "turnId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+    "modelId": "muse-spark-1.3-contributor",
+    "usage": {
+     "inputTokens": 20976,
+     "outputTokens": 29,
+     "cachedTokens": 20721,
+     "cacheWriteTokens": 0,
+     "cacheReadTokens": 20721,
+     "reasoningTokens": 18
+    },
+    "promptTokens": 20976,
+    "totalTokens": 21005,
+    "durationMs": 7825,
+    "cumulative": {
+     "promptTokens": 82713,
+     "outputTokens": 478,
+     "totalTokens": 83191
+    }
+   },
+   "emittedAtMs": 1789737491117
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/contextUsage",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:39",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "c60de128-e5e7-4f0b-8c8e-49c3e35acbf1",
+      "sequence": 228
+     },
+     "last": {
+      "id": "c60de128-e5e7-4f0b-8c8e-49c3e35acbf1",
+      "sequence": 228
+     }
+    },
+    "windowTokens": 1007997,
+    "usedTokens": 21005,
+    "pressure": "normal"
+   },
+   "emittedAtMs": 1789737491117
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/completed",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:40",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "ebd26bf8-ebb5-4cf1-9250-f0b5f83ecb96",
+      "sequence": 211
+     },
+     "last": {
+      "id": "2d9d3c9d-e23d-41b6-9d08-ca5ffdbc0d06",
+      "sequence": 230
+     }
+    },
+    "item": {
+     "itemId": "ebd26bf8-ebb5-4cf1-9250-f0b5f83ecb96",
+     "kind": "reminderChild",
+     "turnId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+     "revision": 2,
+     "status": "completed",
+     "recordedAt": "2026-09-18T13:18:11.122757Z",
+     "fallbackText": "Reminder child session",
+     "childSessionId": "ee46e242-4f58-48f3-9d4b-449d318f0791",
+     "reminderAgentId": "skill-reminder",
+     "generationId": 2,
+     "taskId": "01a0b4aa-bb75-77d1-8851-e9bb5bf9e11c"
+    }
+   },
+   "emittedAtMs": 1789737491126
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/started",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:41",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "d11dae1c-6953-488e-9fa5-c0e8323e93bb",
+      "sequence": 239
+     },
+     "last": {
+      "id": "d11dae1c-6953-488e-9fa5-c0e8323e93bb",
+      "sequence": 239
+     }
+    },
+    "item": {
+     "itemId": "d11dae1c-6953-488e-9fa5-c0e8323e93bb",
+     "kind": "reminderChild",
+     "turnId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+     "revision": 1,
+     "status": "inProgress",
+     "recordedAt": "2026-09-18T13:18:11.195488Z",
+     "fallbackText": "Reminder child session",
+     "childSessionId": "dc7d1dc0-6f4e-41b0-b3f0-9bc47a6da96a",
+     "reminderAgentId": "verify-reminder",
+     "generationId": 1,
+     "taskId": "01a0b4aa-dace-7ab2-8ea0-072fa883c1f5"
+    }
+   },
+   "emittedAtMs": 1789737491200
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "item/completed",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:42",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "d11dae1c-6953-488e-9fa5-c0e8323e93bb",
+      "sequence": 239
+     },
+     "last": {
+      "id": "72357494-3646-4759-a25c-dc5d5596151b",
+      "sequence": 241
+     }
+    },
+    "item": {
+     "itemId": "d11dae1c-6953-488e-9fa5-c0e8323e93bb",
+     "kind": "reminderChild",
+     "turnId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+     "revision": 2,
+     "status": "completed",
+     "recordedAt": "2026-09-18T13:18:20.541633Z",
+     "fallbackText": "Reminder child session",
+     "childSessionId": "dc7d1dc0-6f4e-41b0-b3f0-9bc47a6da96a",
+     "reminderAgentId": "verify-reminder",
+     "generationId": 1,
+     "taskId": "01a0b4aa-dace-7ab2-8ea0-072fa883c1f5"
+    }
+   },
+   "emittedAtMs": 1789737500553
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/statusChanged",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "status": "idle",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:43"
+   },
+   "emittedAtMs": 1789737500583
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "turn/completed",
+   "params": {
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "viewCursor": "v:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:43",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85"
+     },
+     "first": {
+      "id": "f249f0c5-980a-478f-9306-f6950b078979",
+      "sequence": 244
+     },
+     "last": {
+      "id": "f249f0c5-980a-478f-9306-f6950b078979",
+      "sequence": 244
+     }
+    },
+    "turnId": "01a0b4aa-8bd0-71bc-8d06-a383478a9107",
+    "terminal": "completed",
+    "durationMs": 29607,
+    "timeToFirstTokenMs": 20106
+   },
+   "emittedAtMs": 1789737500584
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 12,
+   "method": "session/fork",
+   "params": {
+    "commandId": "01a0b4ab-3bbf-76d6-bc71-248b4cadbc25",
+    "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+    "excludeItems": true
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/started",
+   "params": {
+    "session": {
+     "sessionId": "01a0b4ab-3bdb-7572-9867-d0d6236b65ef",
+     "path": "/home/user/.local/share/muse/sessions/2026/09/18/01a0b4ab-3bdb-7572-9867-d0d6236b65ef/session.jsonl",
+     "status": "idle",
+     "activeTurnId": null,
+     "createdAt": "2026-09-18T13:18:35.995Z",
+     "updatedAt": "2026-09-18T13:18:36.160609Z",
+     "workspaceRoot": "/tmp/poise-chat-v1/probe/fixture",
+     "providerId": "meta",
+     "modelId": "muse-spark-1.3-contributor",
+     "turnCount": 3,
+     "forkedFrom": {
+      "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+      "cutCursor": "session:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:turn:3",
+      "cutExplicit": false,
+      "commandId": "01a0b4ab-3bbf-76d6-bc71-248b4cadbc25"
+     },
+     "title": "Run the shell command `rm -f probe-dir/marker.txt`. If it is refused, say \"refused\" and stop. Otherwise say \"done\".",
+     "firstUserPrompt": "Run the shell command `rm -f probe-dir/marker.txt`. If it is refused, say \"refused\" and stop. Otherwise say \"done\".",
+     "branch": "main",
+     "approvalMode": {
+      "mode": "allowAll",
+      "source": "startup",
+      "lastCommandId": null
+     }
+    }
+   },
+   "emittedAtMs": 1789737516259
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 12,
+   "result": {
+    "session": {
+     "sessionId": "01a0b4ab-3bdb-7572-9867-d0d6236b65ef",
+     "path": "/home/user/.local/share/muse/sessions/2026/09/18/01a0b4ab-3bdb-7572-9867-d0d6236b65ef/session.jsonl",
+     "status": "idle",
+     "activeTurnId": null,
+     "createdAt": "2026-09-18T13:18:35.995Z",
+     "updatedAt": "2026-09-18T13:18:36.160609Z",
+     "workspaceRoot": "/tmp/poise-chat-v1/probe/fixture",
+     "providerId": "meta",
+     "modelId": "muse-spark-1.3-contributor",
+     "turnCount": 3,
+     "forkedFrom": {
+      "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+      "cutCursor": "session:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:turn:3",
+      "cutExplicit": false,
+      "commandId": "01a0b4ab-3bbf-76d6-bc71-248b4cadbc25"
+     },
+     "title": "Run the shell command `rm -f probe-dir/marker.txt`. If it is refused, say \"refused\" and stop. Otherwise say \"done\".",
+     "firstUserPrompt": "Run the shell command `rm -f probe-dir/marker.txt`. If it is refused, say \"refused\" and stop. Otherwise say \"done\".",
+     "branch": "main",
+     "approvalMode": {
+      "mode": "allowAll",
+      "source": "startup",
+      "lastCommandId": null
+     }
+    },
+    "viewCursor": "v:01a0b4ab-3bdb-7572-9867-d0d6236b65ef:17",
+    "history": {
+     "mode": "none",
+     "items": null,
+     "snapshot": null,
+     "noneReason": "excluded"
+    },
+    "pendingRequests": []
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/branchChanged",
+   "params": {
+    "sessionId": "01a0b4ab-3bdb-7572-9867-d0d6236b65ef",
+    "viewCursor": "v:01a0b4ab-3bdb-7572-9867-d0d6236b65ef:17",
+    "sourceRange": {
+     "stream": {
+      "kind": "session",
+      "id": "01a0b4ab-3bdb-7572-9867-d0d6236b65ef"
+     },
+     "first": {
+      "id": "70bfae13-f843-4257-819d-a651b605100e",
+      "sequence": 37
+     },
+     "last": {
+      "id": "70bfae13-f843-4257-819d-a651b605100e",
+      "sequence": 37
+     }
+    },
+    "workspaceRoot": "/tmp/poise-chat-v1/probe/fixture",
+    "branch": "main",
+    "vcs": "git"
+   },
+   "emittedAtMs": 1789737516263
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 13,
+   "method": "session/list",
+   "params": {}
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 13,
+   "result": {
+    "sessions": [
+     {
+      "sessionId": "01a0b4ab-3bdb-7572-9867-d0d6236b65ef",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/18/01a0b4ab-3bdb-7572-9867-d0d6236b65ef/session.jsonl",
+      "status": "idle",
+      "activeTurnId": null,
+      "createdAt": "2026-09-18T13:18:35.995Z",
+      "updatedAt": "2026-09-18T13:18:36.160609Z",
+      "workspaceRoot": "/tmp/poise-chat-v1/probe/fixture",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 3,
+      "forkedFrom": {
+       "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+       "cutCursor": "session:01a0b4a9-cf48-7a92-84ef-d9af8b6bca85:turn:3",
+       "cutExplicit": false,
+       "commandId": "01a0b4ab-3bbf-76d6-bc71-248b4cadbc25"
+      },
+      "title": "Run the shell command `rm -f probe-dir/marker.txt`. If it is refused, say \"refused\" and stop. Otherwise say \"done\".",
+      "firstUserPrompt": "Run the shell command `rm -f probe-dir/marker.txt`. If it is refused, say \"refused\" and stop. Otherwise say \"done\".",
+      "branch": "main"
+     },
+     {
+      "sessionId": "01a0b4a9-cf48-7a92-84ef-d9af8b6bca85",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/18/01a0b4a9-cf48-7a92-84ef-d9af8b6bca85/session.jsonl",
+      "status": "idle",
+      "activeTurnId": null,
+      "createdAt": "2026-09-18T13:17:02.664855Z",
+      "updatedAt": "2026-09-18T13:18:20.569571Z",
+      "workspaceRoot": "/tmp/poise-chat-v1/probe/fixture",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 3,
+      "forkedFrom": null,
+      "title": "Run the shell command `rm -f probe-dir/marker.txt`. If it is refused, say \"refused\" and stop. Otherwise say \"done\".",
+      "firstUserPrompt": "Run the shell command `rm -f probe-dir/marker.txt`. If it is refused, say \"refused\" and stop. Otherwise say \"done\".",
+      "branch": "main"
+     },
+     {
+      "sessionId": "01a0b4a6-e0fa-73f3-bff0-0b196cc9a78c",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/18/01a0b4a6-e0fa-73f3-bff0-0b196cc9a78c/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-18T13:13:50.587191Z",
+      "updatedAt": "2026-09-18T13:14:38.388169Z",
+      "workspaceRoot": "/tmp/poise-chat-v1/probe/fixture",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "title": "Run the shell command `rm -f probe-dir/marker.txt`. If it is refused, say \"refused\" and stop. Otherwise say \"done\".",
+      "firstUserPrompt": "Run the shell command `rm -f probe-dir/marker.txt`. If it is refused, say \"refused\" and stop. Otherwise say \"done\".",
+      "branch": "main"
+     },
+     {
+      "sessionId": "01a0b4a7-986f-7013-9206-443767e798fc",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/18/01a0b4a7-986f-7013-9206-443767e798fc/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-18T13:14:37.551Z",
+      "updatedAt": "2026-09-18T13:14:38.105181Z",
+      "workspaceRoot": "/tmp/poise-chat-v1/probe/fixture",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 0,
+      "forkedFrom": {
+       "sessionId": "01a0b4a6-e0fa-73f3-bff0-0b196cc9a78c",
+       "cutCursor": "session:01a0b4a6-e0fa-73f3-bff0-0b196cc9a78c:turn:0",
+       "cutExplicit": false,
+       "commandId": "01a0b4a7-9861-77f9-8cba-7cc2478a942a"
+      },
+      "branch": "main"
+     },
+     {
+      "sessionId": "01a0b448-06e5-7e83-87f0-417ceefa908e",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/18/01a0b448-06e5-7e83-87f0-417ceefa908e/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-18T11:30:14.413209Z",
+      "updatedAt": "2026-09-18T11:31:11.024354Z",
+      "workspaceRoot": "/home/user/dev/Poise",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 2,
+      "forkedFrom": null,
+      "name": "wool-acrux",
+      "title": "how good are you with frontend?",
+      "firstUserPrompt": "how good are you with frontend?",
+      "branch": "fix/service-path-provider-clis"
+     },
+     {
+      "sessionId": "01a0b445-9655-7892-8fc3-6e17e914000a",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/18/01a0b445-9655-7892-8fc3-6e17e914000a/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-18T11:27:34.551092Z",
+      "updatedAt": "2026-09-18T11:30:11.104101Z",
+      "workspaceRoot": "/home/user/dev/Poise",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 3,
+      "forkedFrom": null,
+      "name": "cherry-oberon",
+      "title": "yolo",
+      "firstUserPrompt": "yolo",
+      "branch": "fix/service-path-provider-clis"
+     },
+     {
+      "sessionId": "01a0aef0-8f84-7393-9f84-30ff75ca3104",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/17/01a0aef0-8f84-7393-9f84-30ff75ca3104/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-17T10:36:36.180231Z",
+      "updatedAt": "2026-09-17T16:05:01.159223Z",
+      "workspaceRoot": "/home/user",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 2,
+      "forkedFrom": null,
+      "name": "drift-albiorix",
+      "title": "profile ~/dev/origo pr_test_checks CI for me. Tell me everything that runs and their % of the whole runtime and the purpose it serves. I want test/file level detail, not just headings. Run the thing, profile the thing, report back exactly what each test/file does, why it matters, how long it takes, and how to make it shorter.",
+      "firstUserPrompt": "profile ~/dev/origo pr_test_checks CI for me. Tell me everything that runs and their % of the whole runtime and the purpose it serves. I want test/file level detail, not just headings. Run the thing, profile the thing, report back exactly what each test/file does, why it matters, how long it takes, and how to make it shorter."
+     },
+     {
+      "sessionId": "01a0afb9-59a7-7ae2-a8c4-d221d03c9d0b",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/17/01a0afb9-59a7-7ae2-a8c4-d221d03c9d0b/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-17T14:15:55.084917Z",
+      "updatedAt": "2026-09-17T14:16:10.889916Z",
+      "workspaceRoot": "/home/user",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "evergreen-inclination",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     },
+     {
+      "sessionId": "01a0afb9-05c1-7b92-b6bb-3001e224b4aa",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/17/01a0afb9-05c1-7b92-b6bb-3001e224b4aa/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-17T14:15:33.620962Z",
+      "updatedAt": "2026-09-17T14:15:54.711061Z",
+      "workspaceRoot": "/home/user",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "straw-aphelion",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     },
+     {
+      "sessionId": "01a0afb8-cfda-75a0-8831-738f3a869591",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/17/01a0afb8-cfda-75a0-8831-738f3a869591/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-17T14:15:19.835902Z",
+      "updatedAt": "2026-09-17T14:15:33.229571Z",
+      "workspaceRoot": "/home/user",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "steady-mensa",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     },
+     {
+      "sessionId": "01a0a37a-9e5c-76c3-841c-b56762bb1f50",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/15/01a0a37a-9e5c-76c3-841c-b56762bb1f50/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-15T05:11:57.299208Z",
+      "updatedAt": "2026-09-17T10:36:33.51067Z",
+      "workspaceRoot": "/home/user",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 11,
+      "forkedFrom": null,
+      "name": "linen-vela",
+      "title": "Have a look at ~/dev/sequencer and tell me what you find. The quality of the package, the standards it follows, any current dangling issues you can identify, and how you would next use available resources to work on this package?",
+      "firstUserPrompt": "Have a look at ~/dev/sequencer and tell me what you find. The quality of the package, the standards it follows, any current dangling issues you can identify, and how you would next use available resources to work on this package?"
+     },
+     {
+      "sessionId": "01a0aedd-46c1-73c2-ac08-4a73d70849c2",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/17/01a0aedd-46c1-73c2-ac08-4a73d70849c2/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-17T10:15:32.336487Z",
+      "updatedAt": "2026-09-17T10:15:38.832691Z",
+      "workspaceRoot": "/home/user",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "noble-spectrum",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     },
+     {
+      "sessionId": "01a0aedd-0cae-7383-a1f9-6c9bab484a2c",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/17/01a0aedd-0cae-7383-a1f9-6c9bab484a2c/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-17T10:15:17.482002Z",
+      "updatedAt": "2026-09-17T10:15:32.009169Z",
+      "workspaceRoot": "/home/user",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "hazel-equuleus",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     },
+     {
+      "sessionId": "01a0aedc-4f7d-7ea3-9f6d-5458532b09cb",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/17/01a0aedc-4f7d-7ea3-9f6d-5458532b09cb/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-17T10:14:29.045714Z",
+      "updatedAt": "2026-09-17T10:15:13.901757Z",
+      "workspaceRoot": "/home/user",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "alder-astrograph",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     },
+     {
+      "sessionId": "01a0aa4f-3dc5-7572-aa4b-8b13d0a2aef4",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/16/01a0aa4f-3dc5-7572-aa4b-8b13d0a2aef4/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-16T13:01:55.058923Z",
+      "updatedAt": "2026-09-16T13:02:43.296334Z",
+      "workspaceRoot": "/home/user",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "copper-planetoid",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     },
+     {
+      "sessionId": "01a0aa4e-27d3-7872-8e0f-4a421314f3f2",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/16/01a0aa4e-27d3-7872-8e0f-4a421314f3f2/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-16T13:00:43.913627Z",
+      "updatedAt": "2026-09-16T13:01:54.762197Z",
+      "workspaceRoot": "/home/user",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "gold-nadir",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     },
+     {
+      "sessionId": "01a0aa4d-e678-7430-be71-3afa607e702d",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/16/01a0aa4d-e678-7430-be71-3afa607e702d/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-16T13:00:27.175527Z",
+      "updatedAt": "2026-09-16T13:00:43.648592Z",
+      "workspaceRoot": "/home/user",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "dune-zenith",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     },
+     {
+      "sessionId": "01a0aa4b-f12e-7e13-b006-a2383d5ba1ac",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/16/01a0aa4b-f12e-7e13-b006-a2383d5ba1ac/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-16T12:58:18.837275Z",
+      "updatedAt": "2026-09-16T12:58:31.284876Z",
+      "workspaceRoot": "/home/user",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "anise-aquarius",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     },
+     {
+      "sessionId": "01a0aa4b-592e-7dd2-b60d-c03fdfc57e21",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/16/01a0aa4b-592e-7dd2-b60d-c03fdfc57e21/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-16T12:57:39.92241Z",
+      "updatedAt": "2026-09-16T12:58:18.562614Z",
+      "workspaceRoot": "/home/user",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "feather-elongation",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     },
+     {
+      "sessionId": "01a0aa4b-1a55-7931-9944-5b34e828fb3e",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/16/01a0aa4b-1a55-7931-9944-5b34e828fb3e/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-16T12:57:23.848633Z",
+      "updatedAt": "2026-09-16T12:57:39.635247Z",
+      "workspaceRoot": "/home/user",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "flax-dubhe",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     },
+     {
+      "sessionId": "fd781b36-9df5-5e6d-88ce-a9e0d0d8404e",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/16/fd781b36-9df5-5e6d-88ce-a9e0d0d8404e/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-16T12:36:30.183821Z",
+      "updatedAt": "2026-09-16T12:37:11.035052Z",
+      "workspaceRoot": "/private/tmp/claude-501/-Users-user-dev-Poise/b77a4c8b-5ab3-47f5-bc4f-28c9103272eb/scratchpad/work4",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 2,
+      "forkedFrom": null,
+      "name": "celadon-antares",
+      "title": "Reply with exactly the word MANGO and nothing else.",
+      "firstUserPrompt": "Reply with exactly the word MANGO and nothing else."
+     },
+     {
+      "sessionId": "01a0aa37-15b2-72b3-9492-9ad20044378d",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/16/01a0aa37-15b2-72b3-9492-9ad20044378d/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-16T12:35:31.925482Z",
+      "updatedAt": "2026-09-16T12:35:39.295946Z",
+      "workspaceRoot": "/home/user",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "yellow-magnetar",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     },
+     {
+      "sessionId": "01a0aa36-dacd-70b0-a9c8-85dfd8c20d80",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/16/01a0aa36-dacd-70b0-a9c8-85dfd8c20d80/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-16T12:35:16.860461Z",
+      "updatedAt": "2026-09-16T12:35:31.578447Z",
+      "workspaceRoot": "/home/user",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "indigo-sagitta",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     },
+     {
+      "sessionId": "01a0aa36-7988-7813-9cf0-727a34834785",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/16/01a0aa36-7988-7813-9cf0-727a34834785/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-16T12:34:51.967463Z",
+      "updatedAt": "2026-09-16T12:35:16.554589Z",
+      "workspaceRoot": "/home/user",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "pearl-draco",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     },
+     {
+      "sessionId": "89864bed-d2b3-4d3d-be17-bebe46d16885",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/16/89864bed-d2b3-4d3d-be17-bebe46d16885/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-16T12:25:17.518794Z",
+      "updatedAt": "2026-09-16T12:26:15.174685Z",
+      "workspaceRoot": "/private/tmp",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 2,
+      "forkedFrom": null,
+      "name": "rapid-capricornus",
+      "title": "Reply with exactly the word PINEAPPLE.",
+      "firstUserPrompt": "Reply with exactly the word PINEAPPLE."
+     },
+     {
+      "sessionId": "da36ef8c-57c1-4b38-a336-27b730a2e5d0",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/16/da36ef8c-57c1-4b38-a336-27b730a2e5d0/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-16T12:24:14.027142Z",
+      "updatedAt": "2026-09-16T12:25:08.290677Z",
+      "workspaceRoot": "/private/tmp",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 2,
+      "forkedFrom": null,
+      "name": "field-photon",
+      "title": "Reply with exactly the word OK.",
+      "firstUserPrompt": "Reply with exactly the word OK."
+     },
+     {
+      "sessionId": "01a0aa24-0744-7492-a46f-6818b65b2691",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/16/01a0aa24-0744-7492-a46f-6818b65b2691/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-16T12:14:43.053088Z",
+      "updatedAt": "2026-09-16T12:15:16.489182Z",
+      "workspaceRoot": "/private/tmp",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "black-charon",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     },
+     {
+      "sessionId": "01a0aa23-ca67-7393-84c9-7814f5440f24",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/16/01a0aa23-ca67-7393-84c9-7814f5440f24/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-16T12:14:27.471559Z",
+      "updatedAt": "2026-09-16T12:14:42.745391Z",
+      "workspaceRoot": "/private/tmp",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "crescent-sagitta",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     },
+     {
+      "sessionId": "01a0aa23-8e66-7e73-827b-0438fd54e4bf",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/16/01a0aa23-8e66-7e73-827b-0438fd54e4bf/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-16T12:14:12.117898Z",
+      "updatedAt": "2026-09-16T12:14:20.302036Z",
+      "workspaceRoot": "/private/tmp",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "shore-callisto",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     },
+     {
+      "sessionId": "01a0aa23-01fa-7452-a822-40b718703258",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/16/01a0aa23-01fa-7452-a822-40b718703258/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-16T12:13:36.170041Z",
+      "updatedAt": "2026-09-16T12:14:02.502348Z",
+      "workspaceRoot": "/private/tmp",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "honey-hamal",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     },
+     {
+      "sessionId": "01a0aa22-df22-7fc3-b12f-d37d084c5142",
+      "path": "/home/user/.local/share/muse/sessions/2026/09/16/01a0aa22-df22-7fc3-b12f-d37d084c5142/session.jsonl",
+      "status": "notLoaded",
+      "activeTurnId": null,
+      "createdAt": "2026-09-16T12:13:27.249077Z",
+      "updatedAt": "2026-09-16T12:13:35.706512Z",
+      "workspaceRoot": "/private/tmp",
+      "providerId": "meta",
+      "modelId": "muse-spark-1.3-contributor",
+      "turnCount": 1,
+      "forkedFrom": null,
+      "name": "pearl-aegaeon",
+      "title": "Reply with exactly OK.",
+      "firstUserPrompt": "Reply with exactly OK."
+     }
+    ],
+    "nextCursor": null
+   }
+  }
+ }
+]

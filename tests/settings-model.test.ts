@@ -24,7 +24,7 @@ beforeEach(() => {
 describe('what the settings model accepts', () => {
   it('stores a well-formed org, username and timezone', () => {
     const s = setSettings({ org: ' Vaquum ', me: ' mikkokotila ', timezone: 'Europe/Helsinki' })
-    expect(s).toEqual({ org: 'Vaquum', me: 'mikkokotila', timezone: 'Europe/Helsinki', models: {} })
+    expect(s).toEqual({ org: 'Vaquum', me: 'mikkokotila', timezone: 'Europe/Helsinki', models: {}, chat: { branchPrefix: 'chat/', idleTimeoutMinutes: 120 } })
   })
 
   it('refuses a pasted URL rather than storing something no query can use', () => {
@@ -56,7 +56,7 @@ describe('a rejected save changes nothing at all', () => {
     setSettings({ org: 'Vaquum', me: 'mikkokotila', timezone: 'UTC' })
     expect(() => setSettings({ timezone: 'Europe/Berlin', org: 'not a valid org' })).toThrow()
     // The timezone in the same call must not have landed.
-    expect(getSettings()).toEqual({ org: 'Vaquum', me: 'mikkokotila', timezone: 'UTC', models: {} })
+    expect(getSettings()).toEqual({ org: 'Vaquum', me: 'mikkokotila', timezone: 'UTC', models: {}, chat: { branchPrefix: 'chat/', idleTimeoutMinutes: 120 } })
   })
 })
 

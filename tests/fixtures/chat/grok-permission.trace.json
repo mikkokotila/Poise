@@ -1,0 +1,2045 @@
+[
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 1,
+   "method": "initialize",
+   "params": {
+    "protocolVersion": 1,
+    "clientInfo": {
+     "name": "poise",
+     "title": "Poise",
+     "version": "0.1.0"
+    },
+    "clientCapabilities": {
+     "fs": {
+      "readTextFile": true,
+      "writeTextFile": true
+     },
+     "terminal": true
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 1,
+   "result": {
+    "protocolVersion": 1,
+    "agentCapabilities": {
+     "loadSession": true,
+     "promptCapabilities": {
+      "image": false,
+      "audio": false,
+      "embeddedContext": true
+     },
+     "mcpCapabilities": {
+      "http": true,
+      "sse": true
+     },
+     "sessionCapabilities": {
+      "list": {},
+      "resume": {},
+      "close": {}
+     },
+     "auth": {},
+     "_meta": {
+      "x.ai/fs_notify": true,
+      "x.ai/hooks": {
+       "blockingEvents": [
+        "pre_tool_use",
+        "stop",
+        "subagent_stop"
+       ],
+       "decisions": [
+        "deny",
+        "block"
+       ],
+       "stopSignals": [
+        "continue",
+        "stopReason",
+        "additionalContext"
+       ]
+      },
+      "x.ai/capabilities": {
+       "toolOverrides": {
+        "x_keyword_search": true,
+        "x_semantic_search": true,
+        "x_user_search": false,
+        "x_thread_fetch": false
+       }
+      }
+     }
+    },
+    "authMethods": [
+     {
+      "id": "cached_token",
+      "name": "cached_token",
+      "description": "Cached token from ~/.grok/auth.json"
+     },
+     {
+      "id": "grok.com",
+      "name": "Grok",
+      "description": "Sign in with Grok"
+     }
+    ],
+    "_meta": {
+     "grokShell": true,
+     "defaultAuthMethodId": "cached_token",
+     "x.ai/mcp/sdk": true,
+     "x.ai/pluginDirs": true,
+     "currentWorkingDirectory": "/private/tmp/poise-chat-v1/probe/fixture",
+     "agentVersion": "1.0.34",
+     "agentId": "29090748-bfaf-591f-a1ef-527f163b17ed",
+     "agentInstanceId": "b815dee5-384f-43f5-a0a9-753067524019",
+     "hostname": "MacBookPro",
+     "modelState": {
+      "currentModelId": "grok-4.6",
+      "availableModels": [
+       {
+        "modelId": "grok-4.6",
+        "name": "Grok 4.6",
+        "description": "SpaceXAI's latest frontier model",
+        "_meta": {
+         "totalContextTokens": 500000,
+         "agentType": "grok-build-plan",
+         "supportsReasoningEffort": true,
+         "reasoningEffort": "high",
+         "reasoningEfforts": [
+          {
+           "id": "xhigh",
+           "value": "xhigh",
+           "label": "Extra High Effort",
+           "description": "Highest effort and reasoning level",
+           "default": false
+          },
+          {
+           "id": "high",
+           "value": "high",
+           "label": "High Effort",
+           "description": "Higher implementation quality with extensive reasoning",
+           "default": true
+          },
+          {
+           "id": "medium",
+           "value": "medium",
+           "label": "Medium Effort",
+           "description": "Balanced effort with standard implementation and testing",
+           "default": false
+          },
+          {
+           "id": "low",
+           "value": "low",
+           "label": "Low Effort",
+           "description": "Quick, fast implementations",
+           "default": false
+          }
+         ]
+        }
+       },
+       {
+        "modelId": "grok-4.5",
+        "name": "Grok 4.5",
+        "_meta": {
+         "totalContextTokens": 500000,
+         "agentType": "grok-build-plan",
+         "supportsReasoningEffort": true,
+         "reasoningEffort": "high",
+         "reasoningEfforts": [
+          {
+           "id": "high",
+           "value": "high",
+           "label": "High Effort",
+           "description": "Highest implementation quality with extensive reasoning",
+           "default": true
+          },
+          {
+           "id": "medium",
+           "value": "medium",
+           "label": "Medium Effort",
+           "description": "Balanced effort with standard implementation and testing",
+           "default": false
+          },
+          {
+           "id": "low",
+           "value": "low",
+           "label": "Low Effort",
+           "description": "Quick, fast implementations",
+           "default": false
+          }
+         ]
+        }
+       }
+      ]
+     },
+     "mcpServers": [],
+     "mcpApps": false,
+     "metadata": null,
+     "availableCommands": [
+      {
+       "name": "compact",
+       "description": "Compress conversation history to save context window",
+       "input": {
+        "hint": "optional context about what to preserve"
+       }
+      },
+      {
+       "name": "always-approve",
+       "description": "Toggle always-approve mode (skip all permission prompts)",
+       "input": {
+        "hint": "on|off"
+       }
+      },
+      {
+       "name": "context",
+       "description": "Show context window usage and session stats",
+       "input": null
+      },
+      {
+       "name": "deep-research",
+       "description": "Research with bounded parallel agents, cross-check evidence, and write a cited report",
+       "input": {
+        "hint": "<query>"
+       }
+      }
+     ],
+     "cancelRewind": true,
+     "sessionRecap": true,
+     "feedbackTraceOffer": false,
+     "voiceMode": true
+    }
+   }
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 2,
+   "method": "session/new",
+   "params": {
+    "cwd": "/tmp/poise-chat-v1/probe/fixture",
+    "mcpServers": []
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "available_commands_update",
+     "availableCommands": [
+      {
+       "name": "compact",
+       "description": "Compress conversation history to save context window",
+       "input": {
+        "hint": "optional context about what to preserve"
+       }
+      },
+      {
+       "name": "always-approve",
+       "description": "Toggle always-approve mode (skip all permission prompts)",
+       "input": {
+        "hint": "on|off"
+       }
+      },
+      {
+       "name": "context",
+       "description": "Show context window usage and session stats",
+       "input": null
+      },
+      {
+       "name": "deep-research",
+       "description": "Research with bounded parallel agents, cross-check evidence, and write a cited report",
+       "input": {
+        "hint": "<query>"
+       },
+       "_meta": {
+        "workflowSource": "builtin",
+        "workflowPath": "/tmp/poise-chat-v1/probe/fakehome/.grok/bundled/workflows/deep-research.rhai"
+       }
+      }
+     ],
+     "_meta": {
+      "tools": [
+       "run_terminal_command",
+       "read_file",
+       "search_replace",
+       "list_dir",
+       "grep",
+       "kill_command_or_subagent",
+       "todo_write",
+       "get_command_or_subagent_output",
+       "spawn_subagent",
+       "scheduler_create",
+       "scheduler_delete",
+       "scheduler_list",
+       "monitor",
+       "search_tool",
+       "use_tool",
+       "workflow",
+       "enter_plan_mode",
+       "exit_plan_mode",
+       "ask_user_question",
+       "send_feedback",
+       "web_search",
+       "web_fetch",
+       "image_gen",
+       "image_edit",
+       "image_to_video",
+       "reference_to_video",
+       "write"
+      ]
+     }
+    },
+    "_meta": {
+     "totalTokens": 1475,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-0",
+     "agentTimestampMs": 1789736871970,
+     "updateType": "AvailableCommandsUpdate",
+     "updateParams": {
+      "commandsCount": 27
+     }
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "available_commands_update",
+     "availableCommands": [
+      {
+       "name": "compact",
+       "description": "Compress conversation history to save context window",
+       "input": {
+        "hint": "optional context about what to preserve"
+       }
+      },
+      {
+       "name": "always-approve",
+       "description": "Toggle always-approve mode (skip all permission prompts)",
+       "input": {
+        "hint": "on|off"
+       }
+      },
+      {
+       "name": "context",
+       "description": "Show context window usage and session stats",
+       "input": null
+      },
+      {
+       "name": "deep-research",
+       "description": "Research with bounded parallel agents, cross-check evidence, and write a cited report",
+       "input": {
+        "hint": "<query>"
+       },
+       "_meta": {
+        "workflowSource": "builtin",
+        "workflowPath": "/tmp/poise-chat-v1/probe/fakehome/.grok/bundled/workflows/deep-research.rhai"
+       }
+      }
+     ],
+     "_meta": {
+      "tools": [
+       "run_terminal_command",
+       "read_file",
+       "search_replace",
+       "list_dir",
+       "grep",
+       "kill_command_or_subagent",
+       "todo_write",
+       "get_command_or_subagent_output",
+       "spawn_subagent",
+       "scheduler_create",
+       "scheduler_delete",
+       "scheduler_list",
+       "monitor",
+       "search_tool",
+       "use_tool",
+       "workflow",
+       "enter_plan_mode",
+       "exit_plan_mode",
+       "ask_user_question",
+       "send_feedback",
+       "web_search",
+       "web_fetch",
+       "image_gen",
+       "image_edit",
+       "image_to_video",
+       "reference_to_video",
+       "write"
+      ]
+     }
+    },
+    "_meta": {
+     "totalTokens": 1475,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-1",
+     "agentTimestampMs": 1789736871992,
+     "updateType": "AvailableCommandsUpdate",
+     "updateParams": {
+      "commandsCount": 27
+     }
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "_x.ai/session_notification",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "model_changed",
+     "model_id": "grok-4.6",
+     "reasoning_effort": "high"
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 2,
+   "result": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "models": {
+     "currentModelId": "grok-4.6",
+     "availableModels": [
+      {
+       "modelId": "grok-4.6",
+       "name": "Grok 4.6",
+       "description": "SpaceXAI's latest frontier model",
+       "_meta": {
+        "totalContextTokens": 500000,
+        "agentType": "grok-build-plan",
+        "supportsReasoningEffort": true,
+        "reasoningEffort": "high",
+        "reasoningEfforts": [
+         {
+          "id": "xhigh",
+          "value": "xhigh",
+          "label": "Extra High Effort",
+          "description": "Highest effort and reasoning level",
+          "default": false
+         },
+         {
+          "id": "high",
+          "value": "high",
+          "label": "High Effort",
+          "description": "Higher implementation quality with extensive reasoning",
+          "default": true
+         },
+         {
+          "id": "medium",
+          "value": "medium",
+          "label": "Medium Effort",
+          "description": "Balanced effort with standard implementation and testing",
+          "default": false
+         },
+         {
+          "id": "low",
+          "value": "low",
+          "label": "Low Effort",
+          "description": "Quick, fast implementations",
+          "default": false
+         }
+        ]
+       }
+      },
+      {
+       "modelId": "grok-4.5",
+       "name": "Grok 4.5",
+       "_meta": {
+        "totalContextTokens": 500000,
+        "agentType": "grok-build-plan",
+        "supportsReasoningEffort": true,
+        "reasoningEffort": "high",
+        "reasoningEfforts": [
+         {
+          "id": "high",
+          "value": "high",
+          "label": "High Effort",
+          "description": "Highest implementation quality with extensive reasoning",
+          "default": true
+         },
+         {
+          "id": "medium",
+          "value": "medium",
+          "label": "Medium Effort",
+          "description": "Balanced effort with standard implementation and testing",
+          "default": false
+         },
+         {
+          "id": "low",
+          "value": "low",
+          "label": "Low Effort",
+          "description": "Quick, fast implementations",
+          "default": false
+         }
+        ]
+       }
+      }
+     ]
+    },
+    "configOptions": [
+     {
+      "id": "model",
+      "name": "Model",
+      "category": "model",
+      "type": "select",
+      "currentValue": "grok-4.6",
+      "options": [
+       {
+        "value": "grok-4.6",
+        "name": "Grok 4.6"
+       },
+       {
+        "value": "grok-4.5",
+        "name": "Grok 4.5"
+       }
+      ]
+     },
+     {
+      "id": "reasoning_effort",
+      "name": "Reasoning Effort",
+      "category": "thought_level",
+      "type": "select",
+      "currentValue": "high",
+      "options": [
+       {
+        "value": "xhigh",
+        "name": "Extra High Effort",
+        "description": "Highest effort and reasoning level"
+       },
+       {
+        "value": "high",
+        "name": "High Effort",
+        "description": "Higher implementation quality with extensive reasoning"
+       },
+       {
+        "value": "medium",
+        "name": "Medium Effort",
+        "description": "Balanced effort with standard implementation and testing"
+       },
+       {
+        "value": "low",
+        "name": "Low Effort",
+        "description": "Quick, fast implementations"
+       }
+      ]
+     }
+    ],
+    "_meta": {
+     "currentWorkingDirectory": "/tmp/poise-chat-v1/probe/fixture",
+     "codebaseIndexed": [],
+     "isGitRepo": true,
+     "gitRoot": "/private/tmp/poise-chat-v1/probe/fixture",
+     "showNonGitWarning": false,
+     "feedbackEnabled": true,
+     "x.ai/sessionConfig": {
+      "options": [
+       {
+        "id": "grok-4.6",
+        "category": "model",
+        "label": "Grok 4.6",
+        "selected": true
+       },
+       {
+        "id": "grok-4.5",
+        "category": "model",
+        "label": "Grok 4.5",
+        "selected": false
+       },
+       {
+        "id": "xhigh",
+        "category": "mode",
+        "label": "Extra High Effort",
+        "description": "Highest effort and reasoning level",
+        "selected": false
+       },
+       {
+        "id": "high",
+        "category": "mode",
+        "label": "High Effort",
+        "description": "Higher implementation quality with extensive reasoning",
+        "selected": true
+       },
+       {
+        "id": "medium",
+        "category": "mode",
+        "label": "Medium Effort",
+        "description": "Balanced effort with standard implementation and testing",
+        "selected": false
+       },
+       {
+        "id": "low",
+        "category": "mode",
+        "label": "Low Effort",
+        "description": "Quick, fast implementations",
+        "selected": false
+       }
+      ]
+     },
+     "x.ai/sessionDetail": {
+      "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+      "kind": "build",
+      "cwd": "/tmp/poise-chat-v1/probe/fixture",
+      "currentModelId": "grok-4.6"
+     },
+     "x.ai/memoryMode": "v2"
+    }
+   }
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 3,
+   "method": "session/set_config_option",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "configId": "reasoning_effort",
+    "value": "low"
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 3,
+   "result": {
+    "configOptions": [
+     {
+      "id": "model",
+      "name": "Model",
+      "category": "model",
+      "type": "select",
+      "currentValue": "grok-4.6",
+      "options": [
+       {
+        "value": "grok-4.6",
+        "name": "Grok 4.6"
+       },
+       {
+        "value": "grok-4.5",
+        "name": "Grok 4.5"
+       }
+      ]
+     },
+     {
+      "id": "reasoning_effort",
+      "name": "Reasoning Effort",
+      "category": "thought_level",
+      "type": "select",
+      "currentValue": "low",
+      "options": [
+       {
+        "value": "xhigh",
+        "name": "Extra High Effort",
+        "description": "Highest effort and reasoning level"
+       },
+       {
+        "value": "high",
+        "name": "High Effort",
+        "description": "Higher implementation quality with extensive reasoning"
+       },
+       {
+        "value": "medium",
+        "name": "Medium Effort",
+        "description": "Balanced effort with standard implementation and testing"
+       },
+       {
+        "value": "low",
+        "name": "Low Effort",
+        "description": "Quick, fast implementations"
+       }
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 4,
+   "method": "session/prompt",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "prompt": [
+     {
+      "type": "text",
+      "text": "Run the shell command `rm -f probe-dir/marker.txt` and report whether it succeeded. If the command is refused, say \"refused\" and stop."
+     }
+    ]
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "_x.ai/session_notification",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "model_changed",
+     "model_id": "grok-4.6",
+     "reasoning_effort": "low"
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "config_option_update",
+     "configOptions": [
+      {
+       "id": "model",
+       "name": "Model",
+       "category": "model",
+       "type": "select",
+       "currentValue": "grok-4.6",
+       "options": [
+        {
+         "value": "grok-4.6",
+         "name": "Grok 4.6"
+        },
+        {
+         "value": "grok-4.5",
+         "name": "Grok 4.5"
+        }
+       ]
+      },
+      {
+       "id": "reasoning_effort",
+       "name": "Reasoning Effort",
+       "category": "thought_level",
+       "type": "select",
+       "currentValue": "low",
+       "options": [
+        {
+         "value": "xhigh",
+         "name": "Extra High Effort",
+         "description": "Highest effort and reasoning level"
+        },
+        {
+         "value": "high",
+         "name": "High Effort",
+         "description": "Higher implementation quality with extensive reasoning"
+        },
+        {
+         "value": "medium",
+         "name": "Medium Effort",
+         "description": "Balanced effort with standard implementation and testing"
+        },
+        {
+         "value": "low",
+         "name": "Low Effort",
+         "description": "Quick, fast implementations"
+        }
+       ]
+      }
+     ]
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "_x.ai/sessions/changed",
+   "params": {
+    "upserted": [
+     {
+      "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+      "title": null,
+      "cwd": "/tmp/poise-chat-v1/probe/fixture",
+      "isWorktree": false,
+      "modelId": "grok-4.6",
+      "reasoningEffort": "low",
+      "yolo": false,
+      "activity": "working",
+      "resident": true,
+      "lastChangeUnixMs": 1789736872018,
+      "origin": {
+       "kind": "local"
+      }
+     }
+    ],
+    "removed": []
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "_x.ai/queue/changed",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "entries": [
+     {
+      "id": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+      "version": 0,
+      "kind": "prompt",
+      "text": "Run the shell command `rm -f probe-dir/marker.txt` and report whether it succeeded. If the command is refused, say \"refused\" and stop.",
+      "position": 0
+     }
+    ]
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "_x.ai/queue/changed",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "entries": [],
+    "runningPromptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+    "runningText": "Run the shell command `rm -f probe-dir/marker.txt` and report whether it succeeded. If the command is refused, say \"refused\" and stop.",
+    "runningKind": "prompt"
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": "The"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-4",
+     "agentTimestampMs": 1789736874257,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 1
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " user"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-5",
+     "agentTimestampMs": 1789736874257,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 2
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " wants"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-6",
+     "agentTimestampMs": 1789736874257,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 3
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " me"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-7",
+     "agentTimestampMs": 1789736874257,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 4
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " to"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-8",
+     "agentTimestampMs": 1789736874257,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 5
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " run"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-9",
+     "agentTimestampMs": 1789736874257,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 6
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " a"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-10",
+     "agentTimestampMs": 1789736874257,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 7
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " shell"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-11",
+     "agentTimestampMs": 1789736874257,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 8
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " command"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-12",
+     "agentTimestampMs": 1789736874258,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 9
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " to"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-13",
+     "agentTimestampMs": 1789736874258,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 10
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " remove"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-14",
+     "agentTimestampMs": 1789736874258,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 11
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " a"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-15",
+     "agentTimestampMs": 1789736874258,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 12
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " file"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-16",
+     "agentTimestampMs": 1789736874258,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 13
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": "."
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-17",
+     "agentTimestampMs": 1789736874258,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 14
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " This"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-18",
+     "agentTimestampMs": 1789736874258,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 15
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " is"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-19",
+     "agentTimestampMs": 1789736874258,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 16
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " a"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-20",
+     "agentTimestampMs": 1789736874258,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 17
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " straightforward"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-21",
+     "agentTimestampMs": 1789736874258,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 18
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " request"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-22",
+     "agentTimestampMs": 1789736874258,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 19
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": "."
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-23",
+     "agentTimestampMs": 1789736874356,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 20
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " Let"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-24",
+     "agentTimestampMs": 1789736874356,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 21
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " me"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-25",
+     "agentTimestampMs": 1789736874356,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 22
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " execute"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-26",
+     "agentTimestampMs": 1789736874356,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 23
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": " it"
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-27",
+     "agentTimestampMs": 1789736874356,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 24
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "agent_thought_chunk",
+     "content": {
+      "type": "text",
+      "text": "."
+     }
+    },
+    "_meta": {
+     "totalTokens": 1515,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-28",
+     "agentTimestampMs": 1789736874356,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AgentThoughtChunk",
+     "chunkId": 25
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "_x.ai/session_notification",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "tool_call_delta_chunk",
+     "tool_call_id": "call-4f65cc4e-5db3-4ea9-a5dd-c98c97f105e7-0",
+     "tool_index": 0,
+     "name": "run_terminal_command"
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "_x.ai/session_notification",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "tool_call_delta_chunk",
+     "tool_index": 0,
+     "arguments_delta": "{\"command\":\"rm -f probe-dir/marker.txt\",\"description\":\"Remove probe-dir/marker.txt if it exists\"}"
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "available_commands_update",
+     "availableCommands": [
+      {
+       "name": "compact",
+       "description": "Compress conversation history to save context window",
+       "input": {
+        "hint": "optional context about what to preserve"
+       }
+      },
+      {
+       "name": "always-approve",
+       "description": "Toggle always-approve mode (skip all permission prompts)",
+       "input": {
+        "hint": "on|off"
+       }
+      },
+      {
+       "name": "context",
+       "description": "Show context window usage and session stats",
+       "input": null
+      },
+      {
+       "name": "deep-research",
+       "description": "Research with bounded parallel agents, cross-check evidence, and write a cited report",
+       "input": {
+        "hint": "<query>"
+       },
+       "_meta": {
+        "workflowSource": "builtin",
+        "workflowPath": "/tmp/poise-chat-v1/probe/fakehome/.grok/bundled/workflows/deep-research.rhai"
+       }
+      }
+     ],
+     "_meta": {
+      "tools": [
+       "run_terminal_command",
+       "read_file",
+       "search_replace",
+       "list_dir",
+       "grep",
+       "kill_command_or_subagent",
+       "todo_write",
+       "get_command_or_subagent_output",
+       "spawn_subagent",
+       "scheduler_create",
+       "scheduler_delete",
+       "scheduler_list",
+       "monitor",
+       "search_tool",
+       "use_tool",
+       "workflow",
+       "enter_plan_mode",
+       "exit_plan_mode",
+       "ask_user_question",
+       "send_feedback",
+       "web_search",
+       "web_fetch",
+       "image_gen",
+       "image_edit",
+       "image_to_video",
+       "reference_to_video",
+       "write"
+      ]
+     }
+    },
+    "_meta": {
+     "totalTokens": 17346,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-29",
+     "agentTimestampMs": 1789736874889,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "AvailableCommandsUpdate",
+     "updateParams": {
+      "commandsCount": 27
+     }
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "_x.ai/session_notification",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "response_completed",
+     "usage": {
+      "input_tokens": 17156,
+      "output_tokens": 59,
+      "cache_read_input_tokens": 128,
+      "cache_creation_input_tokens": 0,
+      "reasoning_tokens": 25
+     },
+     "signature": "KsFCN+unYdS+ReDc0CQ3CLXx63AgR/toaQTPHE29KAmlmOi1CgPvXIX7rZ6tnLsXMOMTJZqQSkWGJWzLkE6p6Pa6LTL41HYnm2GbWtE3aR/zqEvjH2oY5i/E5WgUKqqKrzNhei/5XJhkocxk7YPMPfu+V9gWaU7WkoeOAz5Ue/lWFRgyZWTq4Ndj4QM"
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "tool_call",
+     "toolCallId": "call-4f65cc4e-5db3-4ea9-a5dd-c98c97f105e7-0",
+     "title": "run_terminal_command",
+     "rawInput": {
+      "command": "rm -f probe-dir/marker.txt",
+      "description": "Remove probe-dir/marker.txt if it exists"
+     },
+     "_meta": {
+      "x.ai/tool": {
+       "version": 1,
+       "name": "run_terminal_command",
+       "kind": "execute",
+       "namespace": "grok_build",
+       "label": "Run Command",
+       "read_only": false
+      }
+     }
+    },
+    "_meta": {
+     "totalTokens": 17346,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-30",
+     "agentTimestampMs": 1789736874890,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "ToolCall",
+     "updateParams": {
+      "toolCallId": "call-4f65cc4e-5db3-4ea9-a5dd-c98c97f105e7-0",
+      "title": "run_terminal_command",
+      "kind": "Other",
+      "status": "Pending"
+     }
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "_x.ai/session_notification",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "pending_interaction",
+     "tool_call_id": "call-4f65cc4e-5db3-4ea9-a5dd-c98c97f105e7-0",
+     "kind": "permission"
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "tool_call_update",
+     "toolCallId": "call-4f65cc4e-5db3-4ea9-a5dd-c98c97f105e7-0",
+     "kind": "execute",
+     "title": "Execute `rm -f probe-dir/marker.txt`",
+     "content": [
+      {
+       "type": "content",
+       "content": {
+        "type": "text",
+        "text": "Remove probe-dir/marker.txt if it exists"
+       }
+      }
+     ],
+     "locations": [],
+     "rawInput": {
+      "variant": "Bash",
+      "command": "rm -f probe-dir/marker.txt",
+      "description": "Remove probe-dir/marker.txt if it exists",
+      "is_background": false
+     },
+     "_meta": {
+      "x.ai/tool": {
+       "version": 1,
+       "name": "run_terminal_command",
+       "kind": "execute",
+       "namespace": "grok_build",
+       "label": "Run Command",
+       "read_only": false,
+       "input": {
+        "command": "rm -f probe-dir/marker.txt",
+        "description": "Remove probe-dir/marker.txt if it exists"
+       }
+      }
+     }
+    },
+    "_meta": {
+     "totalTokens": 17346,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-31",
+     "agentTimestampMs": 1789736874890,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "ToolCallUpdate",
+     "updateParams": {
+      "toolCallId": "call-4f65cc4e-5db3-4ea9-a5dd-c98c97f105e7-0",
+      "status": null
+     }
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 0,
+   "method": "session/request_permission",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "toolCall": {
+     "toolCallId": "call-4f65cc4e-5db3-4ea9-a5dd-c98c97f105e7-0",
+     "kind": "execute",
+     "title": "Execute `rm -f probe-dir/marker.txt`",
+     "rawInput": {
+      "variant": "Bash",
+      "command": "rm -f probe-dir/marker.txt",
+      "description": "Remove probe-dir/marker.txt if it exists",
+      "is_background": false
+     },
+     "_meta": {
+      "x.ai/tool": {
+       "version": 1,
+       "name": "run_terminal_command",
+       "kind": "execute",
+       "namespace": "grok_build",
+       "label": "Run Command",
+       "read_only": false,
+       "input": {
+        "command": "rm -f probe-dir/marker.txt",
+        "description": "Remove probe-dir/marker.txt if it exists"
+       }
+      }
+     }
+    },
+    "options": [
+     {
+      "optionId": "always-allow",
+      "name": "Yes, and don't ask again for bash commands",
+      "kind": "allow_always"
+     },
+     {
+      "optionId": "allow-once",
+      "name": "Yes, proceed",
+      "kind": "allow_once"
+     },
+     {
+      "optionId": "reject-once",
+      "name": "No, and tell Grok what to do differently",
+      "kind": "reject_once"
+     },
+     {
+      "optionId": "reject-always",
+      "name": "No, and don't ask again for this command",
+      "kind": "reject_always"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 0,
+   "result": {
+    "outcome": {
+     "outcome": "selected",
+     "optionId": "reject-once"
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "_x.ai/session_notification",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "interaction_resolved",
+     "tool_call_id": "call-4f65cc4e-5db3-4ea9-a5dd-c98c97f105e7-0"
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "session/update",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "tool_call_update",
+     "toolCallId": "call-4f65cc4e-5db3-4ea9-a5dd-c98c97f105e7-0",
+     "status": "failed",
+     "content": [
+      {
+       "type": "content",
+       "content": {
+        "type": "text",
+        "text": "User rejected the execution for tool `run_terminal_command`"
+       }
+      }
+     ]
+    },
+    "_meta": {
+     "totalTokens": 17346,
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-32",
+     "agentTimestampMs": 1789736874897,
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "streamStartMs": 1789736873217,
+     "turnStartMs": 1789736872256,
+     "updateType": "ToolCallUpdate",
+     "updateParams": {
+      "toolCallId": "call-4f65cc4e-5db3-4ea9-a5dd-c98c97f105e7-0",
+      "status": "Failed"
+     }
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "_x.ai/queue/changed",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "entries": []
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "_x.ai/session_notification",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "update": {
+     "sessionUpdate": "turn_completed",
+     "prompt_id": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "stop_reason": "cancelled",
+     "usage": {
+      "inputTokens": 17284,
+      "outputTokens": 59,
+      "totalTokens": 17343,
+      "cachedReadTokens": 128,
+      "cacheCreationTokens": 0,
+      "reasoningTokens": 25,
+      "modelCalls": 1,
+      "apiDurationMs": 2605,
+      "costUsdTicks": 118082000,
+      "modelUsage": {
+       "grok-4.6-build": {
+        "inputTokens": 17284,
+        "outputTokens": 59,
+        "totalTokens": 17343,
+        "cachedReadTokens": 128,
+        "cacheCreationTokens": 0,
+        "reasoningTokens": 25,
+        "modelCalls": 1,
+        "apiDurationMs": 2605,
+        "costUsdTicks": 118082000
+       }
+      },
+      "numTurns": 1
+     },
+     "elapsed_ms": 3069
+    },
+    "_meta": {
+     "eventId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599-34",
+     "agentTimestampMs": 1789736875110,
+     "cancellationCategory": "PermissionRejected",
+     "cancellationContext": {
+      "tool_name": "run_terminal_command",
+      "reason": "User rejected the execution"
+     }
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "_x.ai/session/prompt_complete",
+   "params": {
+    "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+    "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+    "stopReason": "cancelled",
+    "agentResult": null,
+    "cancellationCategory": "PermissionRejected",
+    "cancellationContext": {
+     "tool_name": "run_terminal_command",
+     "reason": "User rejected the execution"
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "_x.ai/sessions/changed",
+   "params": {
+    "upserted": [
+     {
+      "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+      "title": null,
+      "cwd": "/tmp/poise-chat-v1/probe/fixture",
+      "isWorktree": false,
+      "modelId": "grok-4.6",
+      "reasoningEffort": "low",
+      "yolo": false,
+      "activity": "idle",
+      "resident": true,
+      "lastChangeUnixMs": 1789736875111,
+      "origin": {
+       "kind": "local"
+      }
+     }
+    ],
+    "removed": []
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 4,
+   "result": {
+    "stopReason": "cancelled",
+    "_meta": {
+     "sessionId": "01a0b4a1-679d-7ed2-ac8d-ffbc9be27599",
+     "requestId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "promptId": "cdaa26a0-749f-4604-9cf1-d07296c08158",
+     "totalTokens": 17346,
+     "modelId": "grok-4.6",
+     "inputTokens": 17284,
+     "outputTokens": 59,
+     "cachedReadTokens": 128,
+     "reasoningTokens": 25,
+     "usage": {
+      "inputTokens": 17284,
+      "outputTokens": 59,
+      "totalTokens": 17343,
+      "cachedReadTokens": 128,
+      "cacheCreationTokens": 0,
+      "reasoningTokens": 25,
+      "modelCalls": 1,
+      "apiDurationMs": 2605,
+      "costUsdTicks": 118082000,
+      "modelUsage": {
+       "grok-4.6-build": {
+        "inputTokens": 17284,
+        "outputTokens": 59,
+        "totalTokens": 17343,
+        "cachedReadTokens": 128,
+        "cacheCreationTokens": 0,
+        "reasoningTokens": 25,
+        "modelCalls": 1,
+        "apiDurationMs": 2605,
+        "costUsdTicks": 118082000
+       }
+      },
+      "numTurns": 1
+     },
+     "cancellationCategory": "PermissionRejected",
+     "cancellationContext": {
+      "tool_name": "run_terminal_command",
+      "reason": "User rejected the execution"
+     }
+    }
+   }
+  }
+ }
+]

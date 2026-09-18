@@ -809,6 +809,75 @@ if (args.includes('auth') && args.includes('status')) {
     }
   })
 
+  // The Claude Agent SDK (Chat sessions) never passes --print: it drives the
+  // CLI with --input-format/--output-format stream-json over stdin/stdout.
+  // The wrapper used to treat that as a non-model invocation and skip the
+  // first-party preflight — the one gate that keeps Poise-owned Claude
+  // processes on the Claude.ai subscription.
+  it('preflights the SDK stream-json invocation and streams stdin through it', async () => {
+    if (process.platform === 'win32') return
+    const root = await mkdtemp(join(tmpdir(), 'poise-claude-sdk-stdin-'))
+    const rawClaude = join(root, 'claude')
+    const statusFile = join(root, 'status.json')
+    const source = `#!/usr/bin/env node
+const { readFileSync } = require('node:fs')
+const args = process.argv.slice(2)
+if (args.includes('auth') && args.includes('status')) {
+  process.stdout.write(readFileSync(${JSON.stringify(statusFile)}, 'utf8'))
+} else {
+  let input = ''
+  process.stdin.setEncoding('utf8')
+  process.stdin.on('data', (chunk) => { input += chunk })
+  process.stdin.on('end', () => process.stdout.write(JSON.stringify({
+    args,
+    input,
+    apiKey: process.env.ANTHROPIC_API_KEY ?? null,
+    entrypoint: process.env.CLAUDE_CODE_ENTRYPOINT ?? null,
+    settings: JSON.parse(args[args.indexOf('--settings') + 1]).env,
+  })))
+}
+`
+    const sdkArgs = [
+      '--output-format', 'stream-json', '--verbose', '--input-format', 'stream-json',
+      '--model', 'claude-opus-5', '--permission-prompt-tool', 'stdio', '--include-partial-messages',
+    ]
+    const env = {
+      ...process.env,
+      PATH: `${root}${delimiter}${process.env.PATH || ''}`,
+      ANTHROPIC_API_KEY: 'leaked-key-must-not-reach-claude',
+      CLAUDE_CODE_ENTRYPOINT: 'sdk-ts',
+    }
+    try {
+      await writeFile(rawClaude, source, { mode: 0o700 })
+      // Not first-party: the model process must not start.
+      await writeFile(statusFile, JSON.stringify({ loggedIn: true, authMethod: 'console', apiProvider: 'apiKey' }))
+      const blocked = await runWithInput(CLAUDE_SUBSCRIPTION_CLI, sdkArgs, '{"type":"user"}\n', env)
+      expect(blocked).toMatchObject({ code: 77, stdout: '' })
+      expect(blocked.stderr).toContain('subscription preflight failed')
+      // The blocked preflight armed the per-parent retry breaker, as it does
+      // for every model launch; clear it so the next launch is judged on its own.
+      await rm(join(tmpdir(), `poise-claude-failure-${process.pid}`), { force: true })
+
+      // First-party: the stream-json frames reach the CLI's stdin through the
+      // wrapper, with the scrubbed environment and the overlay that blanks
+      // provider credentials.
+      await writeFile(statusFile, JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }))
+      const frames = '{"type":"user","message":{"role":"user","content":"hello"}}\n'.repeat(3)
+      const result = await runWithInput(CLAUDE_SUBSCRIPTION_CLI, sdkArgs, frames, env)
+      expect(result).toMatchObject({ code: 0, stderr: '' })
+      const observed = JSON.parse(result.stdout)
+      expect(observed.input).toBe(frames)
+      expect(observed.args).toEqual(['--settings', expect.any(String), ...sdkArgs])
+      expect(observed.apiKey).toBeNull()
+      expect(observed.entrypoint).toBeNull()
+      expect(observed.settings.ANTHROPIC_API_KEY).toBe('')
+      expect(observed.settings.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST).toBe('1')
+    } finally {
+      await rm(join(tmpdir(), `poise-claude-failure-${process.pid}`), { force: true })
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('caps a single process argument by UTF-8 bytes', () => {
     expect(MAX_PROCESS_ARG_BYTES).toBe(64 * 1024)
     expect(() => assertProcessArgSize('x'.repeat(MAX_PROCESS_ARG_BYTES), 'prompt')).not.toThrow()
