@@ -1,0 +1,1283 @@
+[
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 1,
+   "method": "initialize",
+   "params": {
+    "clientInfo": {
+     "name": "poise",
+     "title": "Poise",
+     "version": "0.1.0"
+    },
+    "capabilities": {
+     "experimentalApi": true,
+     "requestAttestation": false
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "id": 1,
+   "result": {
+    "userAgent": "poise/0.154.0 (Mac OS 26.6.2; arm64) xterm-256color (poise; 0.1.0)",
+    "codexHome": "/home/user/.codex",
+    "platformFamily": "unix",
+    "platformOs": "macos"
+   }
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "method": "initialized"
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 2,
+   "method": "model/list",
+   "params": {}
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "remoteControl/status/changed",
+   "params": {
+    "status": "disabled",
+    "serverName": "MacBookPro",
+    "installationId": "ac717984-14ae-4ce4-b623-0735afc1c771",
+    "environmentId": null
+   },
+   "emittedAtMs": 1789737149958
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "id": 2,
+   "result": {
+    "data": [
+     {
+      "id": "gpt-6-astra",
+      "model": "gpt-6-astra",
+      "upgrade": null,
+      "upgradeInfo": null,
+      "availabilityNux": {
+       "message": "This is GPT-6, a new generation of intelligence. Astra is state-of-the-art in coding, computer use, science, and professional work. Give it a hard problem, a half-formed idea, or anything you've been meaning to build. See where it takes you."
+      },
+      "displayName": "GPT-6-Astra",
+      "description": "Our most capable model for complex, demanding work.",
+      "modelSpecialty": null,
+      "hidden": false,
+      "supportedReasoningEfforts": [
+       {
+        "reasoningEffort": "low",
+        "description": "Fast responses with lighter reasoning"
+       },
+       {
+        "reasoningEffort": "medium",
+        "description": "Balances speed and reasoning depth for everyday tasks"
+       },
+       {
+        "reasoningEffort": "high",
+        "description": "Greater reasoning depth for complex problems"
+       },
+       {
+        "reasoningEffort": "xhigh",
+        "description": "Extra high reasoning depth for complex problems"
+       },
+       {
+        "reasoningEffort": "max",
+        "description": "Maximum reasoning depth for the hardest problems"
+       },
+       {
+        "reasoningEffort": "ultra",
+        "description": "Maximum reasoning with automatic task delegation"
+       }
+      ],
+      "defaultReasoningEffort": "medium",
+      "inputModalities": [
+       "text",
+       "image"
+      ],
+      "supportsPersonality": false,
+      "multiAgentVersion": "v2",
+      "additionalSpeedTiers": [
+       "fast"
+      ],
+      "serviceTiers": [
+       {
+        "id": "priority",
+        "name": "Fast",
+        "description": "2x speed, increased usage"
+       }
+      ],
+      "defaultServiceTier": null,
+      "isDefault": true
+     },
+     {
+      "id": "gpt-5.6-sol",
+      "model": "gpt-5.6-sol",
+      "upgrade": null,
+      "upgradeInfo": null,
+      "availabilityNux": null,
+      "displayName": "GPT-5.6-Sol",
+      "description": "Reliable agentic workhorse for everyday tasks.",
+      "modelSpecialty": null,
+      "hidden": false,
+      "supportedReasoningEfforts": [
+       {
+        "reasoningEffort": "low",
+        "description": "Fast responses with lighter reasoning"
+       },
+       {
+        "reasoningEffort": "medium",
+        "description": "Balances speed and reasoning depth for everyday tasks"
+       },
+       {
+        "reasoningEffort": "high",
+        "description": "Greater reasoning depth for complex problems"
+       },
+       {
+        "reasoningEffort": "xhigh",
+        "description": "Extra high reasoning depth for complex problems"
+       },
+       {
+        "reasoningEffort": "max",
+        "description": "Maximum reasoning depth for the hardest problems"
+       },
+       {
+        "reasoningEffort": "ultra",
+        "description": "Maximum reasoning with automatic task delegation"
+       }
+      ],
+      "defaultReasoningEffort": "low",
+      "inputModalities": [
+       "text",
+       "image"
+      ],
+      "supportsPersonality": false,
+      "multiAgentVersion": "v2",
+      "additionalSpeedTiers": [
+       "fast"
+      ],
+      "serviceTiers": [
+       {
+        "id": "priority",
+        "name": "Fast",
+        "description": "1.5x speed, increased usage"
+       }
+      ],
+      "defaultServiceTier": null,
+      "isDefault": false
+     },
+     {
+      "id": "gpt-5.6-terra",
+      "model": "gpt-5.6-terra",
+      "upgrade": null,
+      "upgradeInfo": null,
+      "availabilityNux": null,
+      "displayName": "GPT-5.6-Terra",
+      "description": "Balanced agentic coding model for everyday work.",
+      "modelSpecialty": null,
+      "hidden": false,
+      "supportedReasoningEfforts": [
+       {
+        "reasoningEffort": "low",
+        "description": "Fast responses with lighter reasoning"
+       },
+       {
+        "reasoningEffort": "medium",
+        "description": "Balances speed and reasoning depth for everyday tasks"
+       },
+       {
+        "reasoningEffort": "high",
+        "description": "Greater reasoning depth for complex problems"
+       },
+       {
+        "reasoningEffort": "xhigh",
+        "description": "Extra high reasoning depth for complex problems"
+       },
+       {
+        "reasoningEffort": "max",
+        "description": "Maximum reasoning depth for the hardest problems"
+       },
+       {
+        "reasoningEffort": "ultra",
+        "description": "Maximum reasoning with automatic task delegation"
+       }
+      ],
+      "defaultReasoningEffort": "medium",
+      "inputModalities": [
+       "text",
+       "image"
+      ],
+      "supportsPersonality": false,
+      "multiAgentVersion": "v2",
+      "additionalSpeedTiers": [
+       "fast"
+      ],
+      "serviceTiers": [
+       {
+        "id": "priority",
+        "name": "Fast",
+        "description": "1.5x speed, increased usage"
+       }
+      ],
+      "defaultServiceTier": null,
+      "isDefault": false
+     },
+     {
+      "id": "gpt-5.6-luna",
+      "model": "gpt-5.6-luna",
+      "upgrade": null,
+      "upgradeInfo": null,
+      "availabilityNux": null,
+      "displayName": "GPT-5.6-Luna",
+      "description": "Fast and affordable agentic coding model.",
+      "modelSpecialty": null,
+      "hidden": false,
+      "supportedReasoningEfforts": [
+       {
+        "reasoningEffort": "low",
+        "description": "Fast responses with lighter reasoning"
+       },
+       {
+        "reasoningEffort": "medium",
+        "description": "Balances speed and reasoning depth for everyday tasks"
+       },
+       {
+        "reasoningEffort": "high",
+        "description": "Greater reasoning depth for complex problems"
+       },
+       {
+        "reasoningEffort": "xhigh",
+        "description": "Extra high reasoning depth for complex problems"
+       },
+       {
+        "reasoningEffort": "max",
+        "description": "Maximum reasoning depth for the hardest problems"
+       }
+      ],
+      "defaultReasoningEffort": "medium",
+      "inputModalities": [
+       "text",
+       "image"
+      ],
+      "supportsPersonality": false,
+      "multiAgentVersion": "v1",
+      "additionalSpeedTiers": [
+       "fast"
+      ],
+      "serviceTiers": [
+       {
+        "id": "priority",
+        "name": "Fast",
+        "description": "1.5x speed, increased usage"
+       }
+      ],
+      "defaultServiceTier": null,
+      "isDefault": false
+     },
+     {
+      "id": "gpt-5.5",
+      "model": "gpt-5.5",
+      "upgrade": "gpt-5.6-sol",
+      "upgradeInfo": {
+       "model": "gpt-5.6-sol",
+       "upgradeCopy": null,
+       "modelLink": null,
+       "migrationMarkdown": "GPT-5.5 retires on October 14, 2026. Switch to GPT-5.6 Sol to continue working in Codex.",
+       "retirementAt": 1792004400
+      },
+      "availabilityNux": null,
+      "displayName": "GPT-5.5",
+      "description": "Proven previous-generation model for coding and general work.",
+      "modelSpecialty": null,
+      "hidden": false,
+      "supportedReasoningEfforts": [
+       {
+        "reasoningEffort": "low",
+        "description": "Fast responses with lighter reasoning"
+       },
+       {
+        "reasoningEffort": "medium",
+        "description": "Balances speed and reasoning depth for everyday tasks"
+       },
+       {
+        "reasoningEffort": "high",
+        "description": "Greater reasoning depth for complex problems"
+       },
+       {
+        "reasoningEffort": "xhigh",
+        "description": "Extra high reasoning depth for complex problems"
+       }
+      ],
+      "defaultReasoningEffort": "medium",
+      "inputModalities": [
+       "text",
+       "image"
+      ],
+      "supportsPersonality": false,
+      "multiAgentVersion": null,
+      "additionalSpeedTiers": [
+       "fast"
+      ],
+      "serviceTiers": [
+       {
+        "id": "priority",
+        "name": "Fast",
+        "description": "1.5x speed, increased usage"
+       }
+      ],
+      "defaultServiceTier": null,
+      "isDefault": false
+     }
+    ],
+    "nextCursor": null
+   }
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 3,
+   "method": "thread/start",
+   "params": {
+    "cwd": "/tmp/poise-chat-v1/probe/fixture",
+    "approvalPolicy": "on-request",
+    "sandbox": "workspace-write",
+    "ephemeral": false
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "id": 3,
+   "result": {
+    "thread": {
+     "id": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+     "environments": [
+      {
+       "environmentId": "local",
+       "cwd": "/tmp/poise-chat-v1/probe/fixture",
+       "runtimeWorkspaceRoots": [
+        "/tmp/poise-chat-v1/probe/fixture"
+       ]
+      }
+     ],
+     "extra": null,
+     "sessionId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+     "forkedFromId": null,
+     "parentThreadId": null,
+     "preview": "",
+     "ephemeral": false,
+     "section": null,
+     "sectionEnteredAt": null,
+     "projectId": null,
+     "historyMode": "paginated",
+     "modelProvider": "openai",
+     "model": "gpt-6-astra",
+     "reasoningEffort": "xhigh",
+     "createdAt": 1789737150,
+     "updatedAt": 1789737150,
+     "recencyAt": 1789737150,
+     "status": {
+      "type": "idle"
+     },
+     "path": "/home/user/.codex/sessions/2026/09/18/rollout-2026-09-18T16-12-30-01a0b4a5-a8ee-7a10-bb70-04b994562487.jsonl",
+     "cwd": "/tmp/poise-chat-v1/probe/fixture",
+     "cliVersion": "0.154.0",
+     "originator": "poise",
+     "source": "vscode",
+     "canAcceptDirectInput": true,
+     "threadSource": null,
+     "agentNickname": null,
+     "agentRole": null,
+     "gitInfo": null,
+     "name": null,
+     "daybreakEnabled": null,
+     "turns": []
+    },
+    "model": "gpt-6-astra",
+    "modelProvider": "openai",
+    "serviceTier": "default",
+    "cwd": "/tmp/poise-chat-v1/probe/fixture",
+    "runtimeWorkspaceRoots": [
+     "/tmp/poise-chat-v1/probe/fixture"
+    ],
+    "instructionSources": [
+     "/home/user/.codex/AGENTS.md"
+    ],
+    "approvalPolicy": "on-request",
+    "approvalsReviewer": "user",
+    "sandbox": {
+     "type": "workspaceWrite",
+     "writableRoots": [],
+     "networkAccess": false,
+     "excludeTmpdirEnvVar": false,
+     "excludeSlashTmp": false
+    },
+    "activePermissionProfile": null,
+    "reasoningEffort": "xhigh",
+    "multiAgentMode": "explicitRequestOnly"
+   }
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 4,
+   "method": "turn/start",
+   "params": {
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+    "input": [
+     {
+      "type": "text",
+      "text": "Reply with the single word OK.",
+      "text_elements": []
+     }
+    ],
+    "effort": "low"
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "thread/started",
+   "params": {
+    "thread": {
+     "id": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+     "environments": [
+      {
+       "environmentId": "local",
+       "cwd": "/tmp/poise-chat-v1/probe/fixture",
+       "runtimeWorkspaceRoots": [
+        "/tmp/poise-chat-v1/probe/fixture"
+       ]
+      }
+     ],
+     "extra": null,
+     "sessionId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+     "forkedFromId": null,
+     "parentThreadId": null,
+     "preview": "",
+     "ephemeral": false,
+     "section": null,
+     "sectionEnteredAt": null,
+     "projectId": null,
+     "historyMode": "paginated",
+     "modelProvider": "openai",
+     "model": "gpt-6-astra",
+     "reasoningEffort": "xhigh",
+     "createdAt": 1789737150,
+     "updatedAt": 1789737150,
+     "recencyAt": 1789737150,
+     "status": {
+      "type": "idle"
+     },
+     "path": "/home/user/.codex/sessions/2026/09/18/rollout-2026-09-18T16-12-30-01a0b4a5-a8ee-7a10-bb70-04b994562487.jsonl",
+     "cwd": "/tmp/poise-chat-v1/probe/fixture",
+     "cliVersion": "0.154.0",
+     "originator": "poise",
+     "source": "vscode",
+     "canAcceptDirectInput": true,
+     "threadSource": null,
+     "agentNickname": null,
+     "agentRole": null,
+     "gitInfo": null,
+     "name": null,
+     "daybreakEnabled": null,
+     "turns": []
+    }
+   },
+   "emittedAtMs": 1789737150975
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "deprecationNotice",
+   "params": {
+    "summary": "`[features].codex_hooks` is deprecated. Use `[features].hooks` instead.",
+    "details": "Enable it with `--enable hooks` or `[features].hooks` in config.toml. See https://developers.openai.com/codex/config-basic#feature-flags for details."
+   },
+   "emittedAtMs": 1789737150976
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "mcpServer/startupStatus/updated",
+   "params": {
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+    "name": "codex_apps",
+    "status": "starting",
+    "error": null,
+    "failureReason": null
+   },
+   "emittedAtMs": 1789737150976
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "mcpServer/startupStatus/updated",
+   "params": {
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+    "name": "acp",
+    "status": "starting",
+    "error": null,
+    "failureReason": null
+   },
+   "emittedAtMs": 1789737150976
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "mcpServer/startupStatus/updated",
+   "params": {
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+    "name": "node_repl",
+    "status": "starting",
+    "error": null,
+    "failureReason": null
+   },
+   "emittedAtMs": 1789737150976
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "mcpServer/startupStatus/updated",
+   "params": {
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+    "name": "cua_repl",
+    "status": "starting",
+    "error": null,
+    "failureReason": null
+   },
+   "emittedAtMs": 1789737150976
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "thread/settings/updated",
+   "params": {
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+    "threadSettings": {
+     "cwd": "/tmp/poise-chat-v1/probe/fixture",
+     "approvalPolicy": "on-request",
+     "approvalsReviewer": "user",
+     "sandboxPolicy": {
+      "type": "workspaceWrite",
+      "writableRoots": [],
+      "networkAccess": false,
+      "excludeTmpdirEnvVar": false,
+      "excludeSlashTmp": false
+     },
+     "activePermissionProfile": null,
+     "model": "gpt-6-astra",
+     "modelProvider": "openai",
+     "serviceTier": "default",
+     "effort": "low",
+     "summary": null,
+     "collaborationMode": {
+      "mode": "default",
+      "settings": {
+       "model": "gpt-6-astra",
+       "reasoning_effort": "low",
+       "developer_instructions": null
+      }
+     },
+     "multiAgentMode": "explicitRequestOnly",
+     "personality": "pragmatic"
+    }
+   },
+   "emittedAtMs": 1789737150990
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "id": 4,
+   "result": {
+    "turn": {
+     "id": "01a0b4a5-aa03-76c0-8f90-9b0306d2dd64",
+     "items": [],
+     "itemsView": "notLoaded",
+     "status": "inProgress",
+     "error": null,
+     "startedAt": null,
+     "completedAt": null,
+     "durationMs": null
+    }
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "thread/status/changed",
+   "params": {
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+    "status": {
+     "type": "active",
+     "activeFlags": []
+    }
+   },
+   "emittedAtMs": 1789737151098
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "turn/started",
+   "params": {
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+    "turn": {
+     "id": "01a0b4a5-aa03-76c0-8f90-9b0306d2dd64",
+     "items": [],
+     "itemsView": "notLoaded",
+     "status": "inProgress",
+     "error": null,
+     "startedAt": 1789737150,
+     "completedAt": null,
+     "durationMs": null
+    }
+   },
+   "emittedAtMs": 1789737151098
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "mcpServer/startupStatus/updated",
+   "params": {
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+    "name": "node_repl",
+    "status": "ready",
+    "error": null,
+    "failureReason": null
+   },
+   "emittedAtMs": 1789737151260
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "mcpServer/startupStatus/updated",
+   "params": {
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+    "name": "cua_repl",
+    "status": "ready",
+    "error": null,
+    "failureReason": null
+   },
+   "emittedAtMs": 1789737151288
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "mcpServer/startupStatus/updated",
+   "params": {
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+    "name": "codex_apps",
+    "status": "ready",
+    "error": null,
+    "failureReason": null
+   },
+   "emittedAtMs": 1789737152884
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "item/started",
+   "params": {
+    "item": {
+     "type": "userMessage",
+     "id": "01a0b4a5-b503-7f30-97f3-26505c843d62",
+     "clientId": null,
+     "content": [
+      {
+       "type": "text",
+       "text": "Reply with the single word OK.",
+       "text_elements": []
+      }
+     ]
+    },
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+    "turnId": "01a0b4a5-aa03-76c0-8f90-9b0306d2dd64",
+    "startedAtMs": 1789737153795
+   },
+   "emittedAtMs": 1789737153796
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "item/completed",
+   "params": {
+    "item": {
+     "type": "userMessage",
+     "id": "01a0b4a5-b503-7f30-97f3-26505c843d62",
+     "clientId": null,
+     "content": [
+      {
+       "type": "text",
+       "text": "Reply with the single word OK.",
+       "text_elements": []
+      }
+     ]
+    },
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+    "turnId": "01a0b4a5-aa03-76c0-8f90-9b0306d2dd64",
+    "completedAtMs": 1789737153795
+   },
+   "emittedAtMs": 1789737153800
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "mcpServer/startupStatus/updated",
+   "params": {
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+    "name": "acp",
+    "status": "ready",
+    "error": null,
+    "failureReason": null
+   },
+   "emittedAtMs": 1789737154372
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "account/rateLimits/updated",
+   "params": {
+    "rateLimits": {
+     "limitId": "premium",
+     "limitName": null,
+     "normalModelSlug": null,
+     "primary": null,
+     "secondary": null,
+     "credits": {
+      "hasCredits": false,
+      "unlimited": false,
+      "balance": "0"
+     },
+     "individualLimit": null,
+     "spendControlReached": null,
+     "planType": null,
+     "rateLimitReachedType": null
+    }
+   },
+   "emittedAtMs": 1789737155104
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "thread/status/changed",
+   "params": {
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+    "status": {
+     "type": "systemError"
+    }
+   },
+   "emittedAtMs": 1789737155105
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "error",
+   "params": {
+    "error": {
+     "message": "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 22nd, 2026 8:33 AM.",
+     "codexErrorInfo": "usageLimitExceeded",
+     "additionalDetails": null,
+     "misalignment": null
+    },
+    "willRetry": false,
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+    "turnId": "01a0b4a5-aa03-76c0-8f90-9b0306d2dd64"
+   },
+   "emittedAtMs": 1789737155105
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "turn/completed",
+   "params": {
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+    "turn": {
+     "id": "01a0b4a5-aa03-76c0-8f90-9b0306d2dd64",
+     "items": [],
+     "itemsView": "notLoaded",
+     "status": "failed",
+     "error": {
+      "message": "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 22nd, 2026 8:33 AM.",
+      "codexErrorInfo": "usageLimitExceeded",
+      "additionalDetails": null,
+      "misalignment": null
+     },
+     "startedAt": 1789737150,
+     "completedAt": 1789737155,
+     "durationMs": 4118
+    }
+   },
+   "emittedAtMs": 1789737155114
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 5,
+   "method": "thread/resume",
+   "params": {
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+    "excludeTurns": true
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "id": 5,
+   "result": {
+    "thread": {
+     "id": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+     "environments": [
+      {
+       "environmentId": "local",
+       "cwd": "/tmp/poise-chat-v1/probe/fixture",
+       "runtimeWorkspaceRoots": [
+        "/tmp/poise-chat-v1/probe/fixture"
+       ]
+      }
+     ],
+     "extra": null,
+     "sessionId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+     "forkedFromId": null,
+     "parentThreadId": null,
+     "preview": "Reply with the single word OK.",
+     "ephemeral": false,
+     "section": null,
+     "sectionEnteredAt": null,
+     "projectId": null,
+     "historyMode": "paginated",
+     "modelProvider": "openai",
+     "model": "gpt-6-astra",
+     "reasoningEffort": "low",
+     "createdAt": 1789737150,
+     "updatedAt": 1789737155,
+     "recencyAt": 1789737151,
+     "status": {
+      "type": "systemError"
+     },
+     "path": "/home/user/.codex/sessions/2026/09/18/rollout-2026-09-18T16-12-30-01a0b4a5-a8ee-7a10-bb70-04b994562487.jsonl",
+     "cwd": "/private/tmp/poise-chat-v1/probe/fixture",
+     "cliVersion": "0.154.0",
+     "originator": "poise",
+     "source": "vscode",
+     "canAcceptDirectInput": true,
+     "threadSource": null,
+     "agentNickname": null,
+     "agentRole": null,
+     "gitInfo": null,
+     "name": null,
+     "daybreakEnabled": null,
+     "turns": []
+    },
+    "model": "gpt-6-astra",
+    "modelProvider": "openai",
+    "serviceTier": "default",
+    "cwd": "/tmp/poise-chat-v1/probe/fixture",
+    "runtimeWorkspaceRoots": [
+     "/tmp/poise-chat-v1/probe/fixture"
+    ],
+    "instructionSources": [
+     "/home/user/.codex/AGENTS.md"
+    ],
+    "approvalPolicy": "on-request",
+    "approvalsReviewer": "user",
+    "sandbox": {
+     "type": "workspaceWrite",
+     "writableRoots": [],
+     "networkAccess": false,
+     "excludeTmpdirEnvVar": false,
+     "excludeSlashTmp": false
+    },
+    "activePermissionProfile": null,
+    "reasoningEffort": "low",
+    "multiAgentMode": "explicitRequestOnly",
+    "initialTurnsPage": null,
+    "turnsBackwardsCursor": "{\"requestedThreadId\":\"01a0b4a5-a8ee-7a10-bb70-04b994562487\",\"rolloutOrdinal\":1,\"includeAnchor\":true,\"scope\":{\"kind\":\"turns\"}}",
+    "itemsBackwardsCursor": "{\"requestedThreadId\":\"01a0b4a5-a8ee-7a10-bb70-04b994562487\",\"rolloutOrdinal\":9,\"includeAnchor\":true,\"scope\":{\"kind\":\"itemsByCreatedAtOrdinal\"}}"
+   }
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 6,
+   "method": "thread/fork",
+   "params": {
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+    "excludeTurns": true
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "thread/goal/cleared",
+   "params": {
+    "threadId": "01a0b4a5-a8ee-7a10-bb70-04b994562487"
+   },
+   "emittedAtMs": 1789737157035
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "deprecationNotice",
+   "params": {
+    "summary": "`[features].codex_hooks` is deprecated. Use `[features].hooks` instead.",
+    "details": "Enable it with `--enable hooks` or `[features].hooks` in config.toml. See https://developers.openai.com/codex/config-basic#feature-flags for details."
+   },
+   "emittedAtMs": 1789737157342
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "mcpServer/startupStatus/updated",
+   "params": {
+    "threadId": "01a0b4a5-c1b2-73d3-9743-a92f735a005a",
+    "name": "codex_apps",
+    "status": "starting",
+    "error": null,
+    "failureReason": null
+   },
+   "emittedAtMs": 1789737157342
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "mcpServer/startupStatus/updated",
+   "params": {
+    "threadId": "01a0b4a5-c1b2-73d3-9743-a92f735a005a",
+    "name": "node_repl",
+    "status": "starting",
+    "error": null,
+    "failureReason": null
+   },
+   "emittedAtMs": 1789737157342
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "mcpServer/startupStatus/updated",
+   "params": {
+    "threadId": "01a0b4a5-c1b2-73d3-9743-a92f735a005a",
+    "name": "acp",
+    "status": "starting",
+    "error": null,
+    "failureReason": null
+   },
+   "emittedAtMs": 1789737157342
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "mcpServer/startupStatus/updated",
+   "params": {
+    "threadId": "01a0b4a5-c1b2-73d3-9743-a92f735a005a",
+    "name": "cua_repl",
+    "status": "starting",
+    "error": null,
+    "failureReason": null
+   },
+   "emittedAtMs": 1789737157342
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "id": 6,
+   "result": {
+    "thread": {
+     "id": "01a0b4a5-c1b2-73d3-9743-a92f735a005a",
+     "environments": [
+      {
+       "environmentId": "local",
+       "cwd": "/private/tmp/poise-chat-v1/probe/fixture",
+       "runtimeWorkspaceRoots": [
+        "/private/tmp/poise-chat-v1/probe/fixture"
+       ]
+      }
+     ],
+     "extra": null,
+     "sessionId": "01a0b4a5-c1b2-73d3-9743-a92f735a005a",
+     "forkedFromId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+     "parentThreadId": null,
+     "preview": "",
+     "ephemeral": false,
+     "section": null,
+     "sectionEnteredAt": null,
+     "projectId": null,
+     "historyMode": "paginated",
+     "modelProvider": "openai",
+     "model": "gpt-6-astra",
+     "reasoningEffort": "xhigh",
+     "createdAt": 1789737157,
+     "updatedAt": 1789737157,
+     "recencyAt": 1789737157,
+     "status": {
+      "type": "idle"
+     },
+     "path": "/home/user/.codex/sessions/2026/09/18/rollout-2026-09-18T16-12-37-01a0b4a5-c1b2-73d3-9743-a92f735a005a.jsonl",
+     "cwd": "/private/tmp/poise-chat-v1/probe/fixture",
+     "cliVersion": "0.154.0",
+     "originator": "poise",
+     "source": "vscode",
+     "canAcceptDirectInput": true,
+     "threadSource": null,
+     "agentNickname": null,
+     "agentRole": null,
+     "gitInfo": null,
+     "name": null,
+     "daybreakEnabled": null,
+     "turns": []
+    },
+    "model": "gpt-6-astra",
+    "modelProvider": "openai",
+    "serviceTier": "default",
+    "cwd": "/private/tmp/poise-chat-v1/probe/fixture",
+    "runtimeWorkspaceRoots": [
+     "/private/tmp/poise-chat-v1/probe/fixture"
+    ],
+    "instructionSources": [
+     "/home/user/.codex/AGENTS.md"
+    ],
+    "approvalPolicy": "on-request",
+    "approvalsReviewer": "user",
+    "sandbox": {
+     "type": "workspaceWrite",
+     "writableRoots": [],
+     "networkAccess": false,
+     "excludeTmpdirEnvVar": false,
+     "excludeSlashTmp": false
+    },
+    "activePermissionProfile": {
+     "id": ":workspace",
+     "extends": null
+    },
+    "reasoningEffort": "xhigh",
+    "multiAgentMode": "explicitRequestOnly"
+   }
+  }
+ },
+ {
+  "dir": "out",
+  "msg": {
+   "jsonrpc": "2.0",
+   "id": 7,
+   "method": "thread/list",
+   "params": {
+    "cwd": "/tmp/poise-chat-v1/probe/fixture",
+    "limit": 5
+   }
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "thread/started",
+   "params": {
+    "thread": {
+     "id": "01a0b4a5-c1b2-73d3-9743-a92f735a005a",
+     "environments": [
+      {
+       "environmentId": "local",
+       "cwd": "/private/tmp/poise-chat-v1/probe/fixture",
+       "runtimeWorkspaceRoots": [
+        "/private/tmp/poise-chat-v1/probe/fixture"
+       ]
+      }
+     ],
+     "extra": null,
+     "sessionId": "01a0b4a5-c1b2-73d3-9743-a92f735a005a",
+     "forkedFromId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+     "parentThreadId": null,
+     "preview": "",
+     "ephemeral": false,
+     "section": null,
+     "sectionEnteredAt": null,
+     "projectId": null,
+     "historyMode": "paginated",
+     "modelProvider": "openai",
+     "model": "gpt-6-astra",
+     "reasoningEffort": "xhigh",
+     "createdAt": 1789737157,
+     "updatedAt": 1789737157,
+     "recencyAt": 1789737157,
+     "status": {
+      "type": "idle"
+     },
+     "path": "/home/user/.codex/sessions/2026/09/18/rollout-2026-09-18T16-12-37-01a0b4a5-c1b2-73d3-9743-a92f735a005a.jsonl",
+     "cwd": "/private/tmp/poise-chat-v1/probe/fixture",
+     "cliVersion": "0.154.0",
+     "originator": "poise",
+     "source": "vscode",
+     "canAcceptDirectInput": true,
+     "threadSource": null,
+     "agentNickname": null,
+     "agentRole": null,
+     "gitInfo": null,
+     "name": null,
+     "daybreakEnabled": null,
+     "turns": []
+    }
+   },
+   "emittedAtMs": 1789737157343
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "mcpServer/startupStatus/updated",
+   "params": {
+    "threadId": "01a0b4a5-c1b2-73d3-9743-a92f735a005a",
+    "name": "node_repl",
+    "status": "ready",
+    "error": null,
+    "failureReason": null
+   },
+   "emittedAtMs": 1789737157484
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "mcpServer/startupStatus/updated",
+   "params": {
+    "threadId": "01a0b4a5-c1b2-73d3-9743-a92f735a005a",
+    "name": "cua_repl",
+    "status": "ready",
+    "error": null,
+    "failureReason": null
+   },
+   "emittedAtMs": 1789737157508
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "mcpServer/startupStatus/updated",
+   "params": {
+    "threadId": "01a0b4a5-c1b2-73d3-9743-a92f735a005a",
+    "name": "codex_apps",
+    "status": "ready",
+    "error": null,
+    "failureReason": null
+   },
+   "emittedAtMs": 1789737158271
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "method": "mcpServer/startupStatus/updated",
+   "params": {
+    "threadId": "01a0b4a5-c1b2-73d3-9743-a92f735a005a",
+    "name": "acp",
+    "status": "ready",
+    "error": null,
+    "failureReason": null
+   },
+   "emittedAtMs": 1789737160309
+  }
+ },
+ {
+  "dir": "in",
+  "msg": {
+   "id": 7,
+   "result": {
+    "data": [
+     {
+      "id": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+      "environments": [
+       {
+        "environmentId": "local",
+        "cwd": "/tmp/poise-chat-v1/probe/fixture",
+        "runtimeWorkspaceRoots": [
+         "/tmp/poise-chat-v1/probe/fixture"
+        ]
+       }
+      ],
+      "extra": null,
+      "sessionId": "01a0b4a5-a8ee-7a10-bb70-04b994562487",
+      "forkedFromId": null,
+      "parentThreadId": null,
+      "preview": "Reply with the single word OK.",
+      "ephemeral": false,
+      "section": null,
+      "sectionEnteredAt": null,
+      "projectId": null,
+      "historyMode": "paginated",
+      "modelProvider": "openai",
+      "model": "gpt-6-astra",
+      "reasoningEffort": "low",
+      "createdAt": 1789737150,
+      "updatedAt": 1789737155,
+      "recencyAt": 1789737151,
+      "status": {
+       "type": "systemError"
+      },
+      "path": "/home/user/.codex/sessions/2026/09/18/rollout-2026-09-18T16-12-30-01a0b4a5-a8ee-7a10-bb70-04b994562487.jsonl",
+      "cwd": "/tmp/poise-chat-v1/probe/fixture",
+      "cliVersion": "0.154.0",
+      "originator": "poise",
+      "source": "vscode",
+      "canAcceptDirectInput": null,
+      "threadSource": null,
+      "agentNickname": null,
+      "agentRole": null,
+      "gitInfo": null,
+      "name": null,
+      "daybreakEnabled": null,
+      "turns": []
+     }
+    ],
+    "nextCursor": null,
+    "backwardsCursor": "2026-09-18T13:12:30.787Z"
+   }
+  }
+ }
+]

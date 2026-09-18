@@ -24,6 +24,9 @@ interface LogEntry {
   // Chat runs are not tied to a repo or PR; this is what identifies them, and
   // it is the same id the chat pane opens a conversation by.
   session_id: string | null
+  // Who started the run. `poise:chat` rows are Chat view turns; their session
+  // id is a Chat session, not a chat-pane conversation.
+  source?: string | null
   prompt: string
   started_at: string        // ISO-ish "YYYY-MM-DDTHH:MM:SS" — naive LOCAL time
                             // (agent-interface uses datetime.fromtimestamp().isoformat()
@@ -279,6 +282,12 @@ function sessionLabel(sessionId: string): string {
   return `${label.slice(0, SESSION_LABEL_MAX - 1)}…`
 }
 
+// A turn the Chat view ran. Caller records it with `behavior: chat` and
+// `source: poise:chat`; Stop on the row is routed back to the runtime.
+function isChatTurn(e: LogEntry): boolean {
+  return e.behavior === 'chat' && e.source === 'poise:chat' && !!e.session_id
+}
+
 // What the Target column reads as, so the filter can match the same text the
 // person is looking at. Empty when the row has no target at all.
 function targetText(e: LogEntry): string {
@@ -308,10 +317,12 @@ function targetCell(e: LogEntry): string {
   }
   // A session always resolves: listChatHistory reads the same agent log this
   // row came from, filtered by session_id, so the conversation contains at
-  // least this run. Clicking opens it in the chat pane.
+  // least this run. Clicking opens it in the chat pane — or, for a Chat view
+  // turn, the Chat view on that session.
   if (e.session_id) {
-    return `<button type="button" class="agent-target agent-session-link" data-session="${escapeHtml(e.session_id)}"`
-      + ` title="Open this conversation — ${escapeHtml(e.session_id)}">${escapeHtml(label)}</button>`
+    const chat = isChatTurn(e)
+    return `<button type="button" class="agent-target agent-session-link${chat ? ' agent-chat-session' : ''}" data-session="${escapeHtml(e.session_id)}"`
+      + ` title="${chat ? 'Open this session in Chat' : 'Open this conversation'} — ${escapeHtml(e.session_id)}">${escapeHtml(label)}</button>`
   }
   return '<span class="agent-dash">—</span>'
 }
@@ -741,6 +752,10 @@ function attachClicks() {
     if (sessionBtn) {
       const session = sessionBtn.dataset.session || ''
       if (!session) return
+      if (sessionBtn.classList.contains('agent-chat-session')) {
+        window.dispatchEvent(new CustomEvent('poise:open-chat-session', { detail: { id: session } }))
+        return
+      }
       window.dispatchEvent(new CustomEvent('poise:open-chat', {
         detail: { session, label: sessionLabel(session) },
       }))

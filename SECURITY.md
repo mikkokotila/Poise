@@ -47,3 +47,28 @@ falling back to a shell-based wrapper.
 This isolation prevents provider-credential fallback, but it cannot disable
 Anthropic account-level Usage Credits. Users requiring a hard spending cap must
 disable Usage Credits under Claude account Settings > Usage.
+
+## Chat sessions
+
+The Chat WebSocket applies the same loopback host and browser-origin boundary
+as the HTTP API. Requests and output buffering are bounded. Mutating commands
+use durable receipts, so reconnecting or retrying an uncertain request cannot
+silently start the same work twice. Transcript events, attachment records and
+Caller delivery state remain local data.
+
+Checkout locks coordinate Poise instances and compatible Caller writers; they
+are not a system-wide filesystem lock. Registered worker groups and in-flight
+Poise file operations must settle before releasing a checkout. Uncertainty
+keeps it blocked rather than allowing another writer to proceed. Native
+agents retain their own permissions and sandbox behavior; setting their cwd
+does not sandbox arbitrary native tools or commands. Poise's own filesystem
+services use checked checkout paths, bounded reads and atomic writes.
+
+Uploaded files have server-issued, session-owned records. Editor handoffs use
+separate staged copies and version-checked writeback; conflicts are preserved.
+Revert requires a trustworthy pre-image and an unchanged post-image. A failed
+read must never be interpreted as proof that a file did not exist.
+
+Provider credentials are not transferred into the browser or another agent.
+Claude's existing subscription isolation applies to SDK sessions as well as
+one-shot work. The other installed CLIs retain their own login state.

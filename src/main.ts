@@ -5,6 +5,7 @@ import { initMenu } from './menu'
 import { initMainView, refreshMainView, stopMainRefresh } from './views/main-view'
 import { initCurrentView, stopCurrentPolling } from './views/current-view'
 import { initSwarmView, stopSwarmRefresh, focusRow as focusSwarmRow } from './views/swarm-view'
+import { initChatView, stopChatRefresh, openChatSession, openChatWithContext, type NewSessionPrefill } from './views/chat-view'
 import { initBehaviorsView, stopBehaviorsRefresh } from './views/behaviors-view'
 import { initSnippetsView } from './views/snippets-view'
 import { initEditorView, stopEditorRefresh } from './views/editor-view'
@@ -15,18 +16,20 @@ import { initClaudeAuth } from './claude-auth'
 const viewMainEl = document.getElementById('view-main')!
 const viewCurrentEl = document.getElementById('view-current')!
 const viewSwarmEl = document.getElementById('view-swarm')!
+const viewChatEl = document.getElementById('view-chat')!
 const viewBehaviorsEl = document.getElementById('view-behaviors')!
 const viewSnippetsEl = document.getElementById('view-snippets')!
 const viewEditorEl = document.getElementById('view-editor')!
 
-type ViewSlug = 'main' | 'current' | 'swarm' | 'behaviors' | 'snippets' | 'editor'
+type ViewSlug = 'main' | 'current' | 'swarm' | 'chat' | 'behaviors' | 'snippets' | 'editor'
 
 function showView(v: ViewSlug) {
-  const all = [viewMainEl, viewCurrentEl, viewSwarmEl, viewBehaviorsEl, viewSnippetsEl, viewEditorEl]
+  const all = [viewMainEl, viewCurrentEl, viewSwarmEl, viewChatEl, viewBehaviorsEl, viewSnippetsEl, viewEditorEl]
   const target =
       v === 'main'      ? viewMainEl
     : v === 'current'   ? viewCurrentEl
     : v === 'swarm'     ? viewSwarmEl
+    : v === 'chat'      ? viewChatEl
     : v === 'behaviors' ? viewBehaviorsEl
     : v === 'snippets'  ? viewSnippetsEl
     :                     viewEditorEl
@@ -63,6 +66,9 @@ function showView(v: ViewSlug) {
   // And Archive, the fourth and last. Every view in this app shipped a
   // leave-cleanup that nothing invoked.
   if (v !== 'main') stopMainRefresh()
+  // Chat keeps its socket (a running turn keeps being mirrored) but stops
+  // the per-second tick and parks the composer draft.
+  if (v !== 'chat') stopChatRefresh()
   // The chat pane is bound to whatever card or document opened it, so it does
   // not belong to the next view. It had no leave-cleanup at all: it stayed
   // open over whatever came next, kept polling for the rest of the session,
@@ -74,6 +80,7 @@ function showView(v: ViewSlug) {
   if (v === 'main')           initMainView()
   else if (v === 'current')   initCurrentView()
   else if (v === 'swarm')     initSwarmView()
+  else if (v === 'chat')      void initChatView()
   else if (v === 'behaviors') initBehaviorsView()
   else if (v === 'snippets')  initSnippetsView()
   else                        initEditorView()
@@ -177,6 +184,20 @@ window.addEventListener('poise:open-chat', (ev) => {
     onEditLeave: detail.onEditLeave,
     onEditAccept: detail.onEditAccept,
     onEditDecline: detail.onEditDecline,
+  })
+})
+
+// Chat handoffs. `{ id }` opens an existing session (Swarm's Target column);
+// `{ context, repo, branch }` opens the New session dialog prefilled from a
+// Current card or an Editor document, so the person confirms agent, model
+// and branch before anything runs.
+window.addEventListener('poise:open-chat-session', (ev) => {
+  const detail = (ev as CustomEvent<{ id?: string } & NewSessionPrefill>).detail
+  if (!detail) return
+  menu.switchTo('chat')
+  window.requestAnimationFrame(() => {
+    if (detail.id) void openChatSession(detail.id)
+    else void openChatWithContext(detail)
   })
 })
 

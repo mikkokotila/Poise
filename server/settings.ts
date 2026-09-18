@@ -15,6 +15,49 @@ export interface Settings {
   // Per place: the identity the user picked as default and as fallback. What
   // actually launches is resolved against the live catalog (server/models.ts).
   models: ModelSettings
+  chat: ChatSettings
+}
+
+// Chat v1 (server/chat): the prefix of branches new sessions cut from the
+// default branch, and how long an idle agent process is kept alive.
+export interface ChatSettings {
+  branchPrefix: string
+  idleTimeoutMinutes: number
+}
+
+export const DEFAULT_CHAT_SETTINGS: ChatSettings = { branchPrefix: 'chat/', idleTimeoutMinutes: 120 }
+const BRANCH_PREFIX = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}\/$/
+
+export function getChatSettings(): ChatSettings {
+  const raw = getMeta('chat_settings')
+  if (!raw) return { ...DEFAULT_CHAT_SETTINGS }
+  try {
+    const parsed = JSON.parse(raw) as Partial<ChatSettings>
+    return {
+      branchPrefix: typeof parsed.branchPrefix === 'string' && BRANCH_PREFIX.test(parsed.branchPrefix) ? parsed.branchPrefix : DEFAULT_CHAT_SETTINGS.branchPrefix,
+      idleTimeoutMinutes: Number.isSafeInteger(parsed.idleTimeoutMinutes) && Number(parsed.idleTimeoutMinutes) >= 0 ? Number(parsed.idleTimeoutMinutes) : DEFAULT_CHAT_SETTINGS.idleTimeoutMinutes,
+    }
+  } catch {
+    return { ...DEFAULT_CHAT_SETTINGS }
+  }
+}
+
+function validateChatSettings(value: unknown): ChatSettings {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('chat settings must be an object')
+  const current = getChatSettings()
+  const input = value as Record<string, unknown>
+  const next = { ...current }
+  if ('branchPrefix' in input) {
+    const prefix = String(input.branchPrefix ?? '').trim()
+    if (!BRANCH_PREFIX.test(prefix)) throw new Error('branch prefix must be a short branch namespace ending in /, like chat/')
+    next.branchPrefix = prefix
+  }
+  if ('idleTimeoutMinutes' in input) {
+    const minutes = Number(input.idleTimeoutMinutes)
+    if (!Number.isSafeInteger(minutes) || minutes < 0 || minutes > 10_080) throw new Error('idle timeout must be a whole number of minutes between 0 and 10080')
+    next.idleTimeoutMinutes = minutes
+  }
+  return next
 }
 
 const TEXT_KEYS = ['org', 'me', 'timezone'] as const
@@ -54,6 +97,7 @@ export function getSettings(): Settings {
     me: getMeta('me') || '',
     timezone: getMeta('timezone') || '',
     models: getModelSettings(),
+    chat: getChatSettings(),
   }
 }
 
@@ -77,12 +121,15 @@ export function setSettings(partial: Partial<Settings>, catalog?: Catalog): Sett
     if (!catalog) throw new Error('the model catalog is unavailable; model settings were not saved')
     models = { ...getModelSettings(), ...validateModelSettings(catalog, partial.models) }
   }
+  let chat: ChatSettings | undefined
+  if ('chat' in partial && partial.chat !== undefined) chat = validateChatSettings(partial.chat)
   const orgChanged = typeof next.org === 'string' && next.org !== (getMeta('org') || '')
   for (const k of TEXT_KEYS) {
     const v = next[k]
     if (typeof v === 'string') setMeta(k, v)
   }
   if (models) setMeta('models', JSON.stringify(models))
+  if (chat) setMeta('chat_settings', JSON.stringify(chat))
   if (orgChanged) invalidateRepoListCache()
   return getSettings()
 }

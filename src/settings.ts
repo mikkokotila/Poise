@@ -44,6 +44,8 @@ let panelEl: HTMLElement | null = null
 let orgInput: HTMLInputElement | null = null
 let meInput: HTMLInputElement | null = null
 let tzSelect: HTMLSelectElement | null = null
+let branchPrefixInput: HTMLInputElement | null = null
+let idleTimeoutInput: HTMLInputElement | null = null
 let saveBtn: HTMLButtonElement | null = null
 let helpEl: HTMLElement | null = null
 let modelsEl: HTMLElement | null = null
@@ -73,7 +75,13 @@ function syncFieldsFromCache() {
     const fallback = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone } catch { return 'UTC' } })()
     tzSelect.value = ensureTimezoneOption(s.timezone || fallback)
   }
+  if (branchPrefixInput && branchPrefixInput !== active) branchPrefixInput.value = s.chat?.branchPrefix ?? CHAT_DEFAULTS.branchPrefix
+  if (idleTimeoutInput && idleTimeoutInput !== active) idleTimeoutInput.value = String(s.chat?.idleTimeoutMinutes ?? CHAT_DEFAULTS.idleTimeoutMinutes)
 }
+
+// What the server applies when nothing is stored; shown so an empty field
+// never reads as "no prefix" or "never times out".
+const CHAT_DEFAULTS = { branchPrefix: 'chat/', idleTimeoutMinutes: 120 }
 
 // A <select> silently renders blank when told to show a value it has no option
 // for — and the engine's list is not guaranteed to contain the browser's own
@@ -283,6 +291,8 @@ async function saveAll() {
   const me = meInput.value.trim()
   const tz = tzSelect.value
   const models = collectModels()
+  const branchPrefix = (branchPrefixInput?.value ?? CHAT_DEFAULTS.branchPrefix).trim() || CHAT_DEFAULTS.branchPrefix
+  const idleTimeoutMinutes = Number(idleTimeoutInput?.value ?? CHAT_DEFAULTS.idleTimeoutMinutes)
 
   if (!org || !me) {
     setHelp('Org and username are required.', 'error')
@@ -296,6 +306,18 @@ async function saveAll() {
   if (!GITHUB_NAME.test(me)) {
     setHelp('Username must be a GitHub login, not a URL or email.', 'error')
     meInput.focus()
+    return
+  }
+  // A branch prefix is a git ref fragment: no spaces, no `..`, no leading
+  // slash. A bad one would make every new session fail at branch creation.
+  if (!/^[A-Za-z0-9._\/-]+$/.test(branchPrefix) || branchPrefix.startsWith('/') || branchPrefix.includes('..')) {
+    setHelp('Branch prefix must be a valid git ref fragment, like chat/.', 'error')
+    branchPrefixInput?.focus()
+    return
+  }
+  if (!Number.isInteger(idleTimeoutMinutes) || idleTimeoutMinutes < 1) {
+    setHelp('Idle timeout must be a whole number of minutes, at least 1.', 'error')
+    idleTimeoutInput?.focus()
     return
   }
   for (const [key, choice] of Object.entries(models || {})) {
@@ -319,7 +341,7 @@ async function saveAll() {
   try {
     const res = await fetch('/api/settings', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ org, me, timezone: tz, ...(models ? { models } : {}) }),
+      body: JSON.stringify({ org, me, timezone: tz, chat: { branchPrefix, idleTimeoutMinutes }, ...(models ? { models } : {}) }),
     })
     const data = await res.json()
     if (!res.ok) {
@@ -407,6 +429,20 @@ function buildPanel(): HTMLElement {
           <div class="st-help st-help-info">How often Current, Swarm, and Archive pull fresh data.</div>
         </div>
 
+        <div class="tp-group-label">Chat</div>
+
+        <div class="tp-section">
+          <label class="tp-label" for="st-chat-branch-prefix">Branch prefix for new chat sessions</label>
+          <input type="text" id="st-chat-branch-prefix" class="st-input st-input-branch-prefix" autocomplete="off" spellcheck="false" placeholder="chat/" />
+          <div class="st-help st-help-info">Every new session gets its own branch cut from the default branch, named with this prefix.</div>
+        </div>
+
+        <div class="tp-section">
+          <label class="tp-label" for="st-chat-idle-timeout">Idle timeout (minutes)</label>
+          <input type="number" id="st-chat-idle-timeout" class="st-input st-input-idle-timeout" min="1" step="1" placeholder="120" />
+          <div class="st-help st-help-info">An idle session's agent process is closed after this long; the session itself stays and resumes on the next message.</div>
+        </div>
+
         <div class="tp-group-label">Appearance</div>
 
         <div class="tp-section">
@@ -460,6 +496,8 @@ function buildPanel(): HTMLElement {
   orgInput = panel.querySelector('.st-input-org') as HTMLInputElement
   meInput = panel.querySelector('.st-input-me') as HTMLInputElement
   tzSelect = panel.querySelector('.st-input-tz') as HTMLSelectElement
+  branchPrefixInput = panel.querySelector('.st-input-branch-prefix') as HTMLInputElement
+  idleTimeoutInput = panel.querySelector('.st-input-idle-timeout') as HTMLInputElement
   saveBtn = panel.querySelector('.st-save') as HTMLButtonElement
   modelsEl = panel.querySelector('.st-models')
   fixedEl = panel.querySelector('.st-models-fixed')
@@ -478,7 +516,7 @@ function buildPanel(): HTMLElement {
   tzSelect.value = browserTz
 
   saveBtn.addEventListener('click', saveAll)
-  for (const inp of [orgInput, meInput]) {
+  for (const inp of [orgInput, meInput, branchPrefixInput, idleTimeoutInput]) {
     inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveAll() })
   }
 

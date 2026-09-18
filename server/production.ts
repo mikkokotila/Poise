@@ -11,7 +11,7 @@ import type { ClaudeAuthRuntime } from './cache-plugin'
 // Security validation must run before dotenv reads the file and before modules
 // that derive database/runtime paths from process.env are evaluated.
 await loadSecureDotenv()
-const { createPoiseMiddleware, stopPoiseRuntime } = await import('./cache-plugin')
+const { attachChatSockets, createPoiseMiddleware, stopPoiseRuntime } = await import('./cache-plugin')
 const { closeDatabase } = await import('./db')
 
 const DEFAULT_HOST = '127.0.0.1'
@@ -365,6 +365,7 @@ export function createProductionServer(options: ProductionServerOptions = {}): S
   const api = createPoiseMiddleware({
     reviewAgentUsername: options.reviewAgentUsername ?? process.env.REVIEW_AGENT_USERNAME ?? '',
     claudeAuth: options.claudeAuth,
+    instanceLabel: 'production',
   })
 
   const server = createServer((req, res) => {
@@ -387,6 +388,8 @@ export function createProductionServer(options: ProductionServerOptions = {}): S
       sendFailure(res, 500, error)
     })
   })
+  // /ws/chat: the same host/origin checks as the API, on the upgrade itself.
+  attachChatSockets(server)
   server.headersTimeout = 10_000
   server.requestTimeout = 30_000
   server.keepAliveTimeout = 5_000

@@ -14,6 +14,9 @@ export interface AppSettings {
   // Per place that launches a model (chat, editor, pr_review, pr_approve):
   // the identities picked as default and fallback. Absent = Caller default.
   models?: Partial<Record<string, ModelChoice>>
+  // Chat view: the prefix for branches new sessions cut, and how long an idle
+  // session keeps its agent process alive.
+  chat?: { branchPrefix: string, idleTimeoutMinutes: number }
 }
 
 let current: AppSettings = { org: '', me: '', timezone: '' }

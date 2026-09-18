@@ -26,10 +26,14 @@ function poiseApiPlugin(env: Record<string, string>): Plugin {
       for (const key of RUNTIME_ENV_KEYS) {
         if (env[key] && process.env[key] === undefined) process.env[key] = env[key]
       }
-      const { createPoiseMiddleware, stopPoiseRuntime } = await import('./server/cache-plugin')
+      const { attachChatSockets, createPoiseMiddleware, stopPoiseRuntime } = await import('./server/cache-plugin')
       server.middlewares.use(createPoiseMiddleware({
         reviewAgentUsername: env.REVIEW_AGENT_USERNAME || '',
+        instanceLabel: 'dev',
       }))
+      // Chat's WebSocket shares the dev server; Vite's own HMR socket is
+      // untouched because only /ws/chat upgrades are claimed.
+      if (server.httpServer) attachChatSockets(server.httpServer as import('node:http').Server)
       server.httpServer?.once('close', () => { void stopPoiseRuntime() })
     },
   }

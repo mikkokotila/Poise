@@ -10,6 +10,8 @@ export default tseslint.config(
       'playwright-report/**',
       'test-results/**',
       '.playwright-mcp/**',
+      // Generated from the installed Codex and Muse binaries; never hand-edited.
+      'server/chat/generated/**',
     ],
   },
   ...tseslint.configs.recommended,

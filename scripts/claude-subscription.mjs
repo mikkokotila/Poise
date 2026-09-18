@@ -295,9 +295,16 @@ const settings = JSON.stringify({
   },
 })
 
+// The Claude Agent SDK (Chat sessions) launches without --print: it drives
+// the CLI through `--input-format stream-json` / `--output-format stream-json`
+// on stdin/stdout. That is a model process like any other and gets the same
+// first-party preflight; only `auth status`, `auth login` and version probes
+// are exempt.
+const streamJsonMode = args.includes('--input-format') || args.includes('--output-format')
 const modelInvocation = args.includes('--print')
   || args.includes('-p')
   || args.some((value) => value.startsWith('--print='))
+  || streamJsonMode
 
 function subscriptionReady() {
   const result = spawnSync(

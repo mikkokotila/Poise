@@ -316,6 +316,9 @@ const ICON_FOCUS_EXIT  = '<svg width="14" height="14" viewBox="0 0 14 14" fill="
 // per-selection annotation button. Same 14×14 stroke weight as the
 // rest of the bar so the row stays visually even.
 const ICON_CHAT  = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 3.5a1.5 1.5 0 0 1 1.5-1.5h7A1.5 1.5 0 0 1 12 3.5v5A1.5 1.5 0 0 1 10.5 10H6l-2.5 2V10A1.5 1.5 0 0 1 2 8.5v-5z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M4.5 5h5M4.5 7h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>'
+// Same bubble with a prompt chevron inside — a Chat *session* about the
+// document (the Chat view), as opposed to the pane above.
+const ICON_CHAT_SESSION = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 3.5a1.5 1.5 0 0 1 1.5-1.5h7A1.5 1.5 0 0 1 12 3.5v5A1.5 1.5 0 0 1 10.5 10H6l-2.5 2V10A1.5 1.5 0 0 1 2 8.5v-5z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5 4.5l2 1.5-2 1.5M7.5 7.5h2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
 
 function renderShell(): string {
   // .view-header carries the standard cross-view alignment (vertical
@@ -329,7 +332,8 @@ function renderShell(): string {
         <button type="button" class="editor-bar-btn editor-focus-btn"  title="Writer mode" aria-label="Toggle writer mode" aria-pressed="false">${ICON_FOCUS_ENTER}</button>
         <button type="button" class="editor-bar-btn editor-new-btn"    title="New (⌘N)" aria-label="New">${ICON_PLUS}</button>
         <button type="button" class="editor-bar-btn editor-copy-btn"   title="Copy document" aria-label="Copy document">${ICON_COPY}</button>
-        <button type="button" class="editor-bar-btn editor-chat-btn"   title="Chat about this document" aria-label="Open chat">${ICON_CHAT}</button>
+        <button type="button" class="editor-bar-btn editor-chat-btn"   title="Chat about this document (pane)" aria-label="Open chat">${ICON_CHAT}</button>
+        <button type="button" class="editor-bar-btn editor-chat-session-btn" title="Chat about this document" aria-label="Chat about this document">${ICON_CHAT_SESSION}</button>
         <button type="button" class="editor-bar-btn editor-delete-btn" title="Delete" aria-label="Delete">${ICON_TRASH}</button>
       </div>
       <div class="editor-bar-right">
@@ -4018,6 +4022,16 @@ function attachHandlers() {
   copyBtnEl.addEventListener('click', () => { void copyDoc() })
   viewEl.querySelector<HTMLButtonElement>('.editor-chat-btn')!
     .addEventListener('click', () => { void openChatForCurrentDoc() })
+  // Chat view handoff: the person picks the repository the session runs in;
+  // the runtime stages the document into that checkout.
+  viewEl.querySelector<HTMLButtonElement>('.editor-chat-session-btn')!
+    .addEventListener('click', () => {
+      if (!currentSlug) return
+      const d = currentDoc()
+      window.dispatchEvent(new CustomEvent('poise:open-chat-session', {
+        detail: { context: { kind: 'document', slug: currentSlug, title: d?.title || currentSlug }, pickRepo: true },
+      }))
+    })
 
   const focusBtn = viewEl.querySelector<HTMLButtonElement>('.editor-focus-btn')!
   focusBtn.addEventListener('click', () => {

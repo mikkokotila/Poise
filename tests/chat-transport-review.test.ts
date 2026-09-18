@@ -1,0 +1,174 @@
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { EventEmitter } from 'node:events'
+import { createServer, type Server } from 'node:http'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { WebSocket } from 'ws'
+import type { ChatRuntime } from '../server/chat/runtime'
+import type { ChatSocketServer as SocketServerType } from '../server/chat/transport'
+
+let root = ''
+let ChatSocketServer: typeof SocketServerType
+let http: Server
+let transport: SocketServerType
+const sockets: WebSocket[] = []
+beforeAll(async () => {
+  root = await mkdtemp(join(tmpdir(), 'poise-transport-review-'))
+  vi.stubEnv('POISE_DB', join(root, 'chat.sqlite3'))
+  vi.stubEnv('POISE_EDITOR_DIR', join(root, 'editor'))
+  vi.stubEnv('POISE_LOCK_DIR', join(root, 'locks'))
+  ;({ ChatSocketServer } = await import('../server/chat/transport'))
+})
+afterEach(async () => {
+  for (const socket of sockets.splice(0)) socket.terminate()
+  await transport?.close()
+  await new Promise<void>(resolve => http ? http.close(() => resolve()) : resolve())
+})
+afterAll(async () => { vi.unstubAllEnvs(); await rm(root, { recursive: true, force: true }) })
+
+async function serve(create: (request: unknown) => Promise<unknown>) {
+  const runtime = Object.assign(new EventEmitter(), { instance: 'transport-review', create })
+  transport = new ChatSocketServer(runtime as unknown as ChatRuntime)
+  http = createServer((_req, res) => { res.statusCode = 404; res.end() })
+  transport.attach(http)
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve))
+  const address = http.address() as { port: number }
+  const url = `ws://127.0.0.1:${address.port}/ws/chat`
+  return async () => {
+    const socket = new WebSocket(url, { origin: `http://127.0.0.1:${address.port}` })
+    sockets.push(socket)
+    await new Promise<void>((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject) })
+    return socket
+  }
+}
+function command(id: string, title = 'one') {
+  return JSON.stringify({ id, command: { type: 'session.new', agent: 'grok', model: 'fixture', repo: 'fixture/repo', branch: { existing: 'main' }, title } })
+}
+function ack(socket: WebSocket, id: string): Promise<{ ok: boolean, error?: string }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { socket.off('message', listener); reject(new Error('ack deadline')) }, 1500)
+    const listener = (raw: import('ws').RawData) => {
+      const frame = JSON.parse(raw.toString())
+      if (frame.kind === 'ack' && frame.id === id) { clearTimeout(timer); socket.off('message', listener); resolve(frame) }
+    }
+    socket.on('message', listener)
+  })
+}
+
+describe('Chat command replay safety over real WebSockets', () => {
+  it('coalesces identical commands received while the first is still in flight', async () => {
+    let finish!: (value: unknown) => void
+    const pending = new Promise(resolve => { finish = resolve })
+    const create = vi.fn(() => pending)
+    const connect = await serve(create)
+    const socket = await connect()
+    const response = ack(socket, 'inflight')
+    socket.send(command('inflight'))
+    socket.send(command('inflight'))
+    await new Promise(resolve => setTimeout(resolve, 50))
+    finish({ id: 'created' })
+    await response
+    expect(create).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not repeat a mutation when its request id is resent on a new connection', async () => {
+    const create = vi.fn(async () => ({ id: 'created' }))
+    const connect = await serve(create)
+    const first = await connect()
+    const original = ack(first, 'reconnect')
+    first.send(command('reconnect'))
+    expect((await original).ok).toBe(true)
+    first.terminate()
+    const second = await connect()
+    const retried = ack(second, 'reconnect')
+    second.send(command('reconnect'))
+    expect((await retried).ok).toBe(true)
+    expect(create).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects reuse of an acknowledged id for a different mutation payload', async () => {
+    const create = vi.fn(async () => ({ id: 'created' }))
+    const connect = await serve(create)
+    const socket = await connect()
+    const original = ack(socket, 'conflict')
+    socket.send(command('conflict', 'original'))
+    expect((await original).ok).toBe(true)
+    const conflicting = ack(socket, 'conflict')
+    socket.send(command('conflict', 'different'))
+    expect((await conflicting).ok).toBe(false)
+    expect(create).toHaveBeenCalledTimes(1)
+  })
+})
+
+it('preserves completed mutation receipts across a new socket-server instance', async () => {
+  const create = vi.fn(async () => ({ id: 'created' }))
+  const connect = await serve(create)
+  const first = await connect()
+  const original = ack(first, 'server-restart')
+  first.send(command('server-restart'))
+  expect((await original).ok).toBe(true)
+  first.terminate()
+  await transport.close()
+  await new Promise<void>(resolve => http.close(() => resolve()))
+  const reconnect = await serve(create)
+  const second = await reconnect()
+  const retried = ack(second, 'server-restart')
+  second.send(command('server-restart'))
+  expect((await retried).ok).toBe(true)
+  expect(create).toHaveBeenCalledTimes(1)
+})
+
+
+it('does not replay a durable command whose outcome is unknown', async () => {
+  const { executeCommandOnce } = await import('../server/chat/command-receipts')
+  const frame = JSON.parse(command('orphaned-receipt'))
+  const uncertain = await executeCommandOnce('transport-review', frame.id, frame.command, async () => {
+    throw new Error('simulated interruption before outcome persistence')
+  })
+  expect(uncertain).toMatchObject({ ok: false, code: 'command_in_doubt' })
+  const create = vi.fn(async () => ({ id: 'must-not-execute' }))
+  const connect = await serve(create)
+  const socket = await connect()
+  const response = ack(socket, frame.id)
+  socket.send(JSON.stringify(frame))
+  expect(await response).toMatchObject({ ok: false, code: 'command_in_doubt' })
+  expect(create).not.toHaveBeenCalled()
+})
+
+
+it('rejects a cross-origin browser before accepting a Chat WebSocket', async () => {
+  const create = vi.fn(async () => ({}))
+  await serve(create)
+  const { port } = http.address() as { port: number }
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/ws/chat`, { origin: 'https://example.invalid' })
+  sockets.push(socket)
+  socket.on('error', () => undefined)
+  const status = await new Promise<number>(resolve => {
+    socket.once('unexpected-response', (_request, response) => {
+      resolve(response.statusCode || 0)
+      response.destroy()
+      socket.terminate()
+    })
+  })
+  expect(status).toBe(403)
+  expect(create).not.toHaveBeenCalled()
+})
+
+
+it('bounds server shutdown when a WebSocket peer does not read the close handshake', async () => {
+  const connect = await serve(vi.fn(async () => ({})))
+  const socket = await connect()
+  ;(socket as unknown as { _socket: import('node:net').Socket })._socket.pause()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const closed = await Promise.race([
+      transport.close().then(() => true),
+      new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), 2_000) }),
+    ])
+    expect(closed).toBe(true)
+  } finally {
+    if (timer) clearTimeout(timer)
+    socket.terminate()
+  }
+})
