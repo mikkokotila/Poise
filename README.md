@@ -22,6 +22,10 @@ with a framework-free browser client, a Node server, and a small SQLite store.
   `claude auth login --claudeai`. Poise does not require an Anthropic API key.
   On Linux/WSL, in-app sign-in requires an active graphical desktop session.
 - `github-datastore`, `github-interface`, and `agent-interface` on `PATH`.
+- The other provider CLIs the catalog offers — `codex`, `grok` (Grok Build),
+  `agy` (Antigravity), `muse` — each signed in. The production services run
+  with their own `PATH` (Caller's release, then `~/.local/bin`, then Homebrew
+  and the system), not the shell's; `npm run doctor` looks each CLI up there.
 - A local checkout of `agent-interface`; set `AGENT_INTERFACE_ROOT` when it is
   not at `~/dev/caller/agent_interface`.
 - Espanso is optional and only required for system-wide snippet expansion.
