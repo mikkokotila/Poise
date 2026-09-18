@@ -18,6 +18,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config as loadDotenv } from 'dotenv'
 import { installStopGate } from './stop-gate-runtime.mjs'
+import { servicePath } from './production-path.mjs'
 
 const projectRoot = await realpath(fileURLToPath(new URL('..', import.meta.url)))
 const trackedRelease = JSON.parse(await readFile(
@@ -431,7 +432,7 @@ async function main() {
     mkdir(logRoot, { recursive: true, mode: 0o700 }),
     mkdir(agentData, { recursive: true, mode: 0o700 }),
   ])
-  const path = `${binRoot}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`
+  const path = servicePath(home, binRoot)
   const environment = {
     AGENT_INTERFACE_DATA_DIR: agentData,
     AGENT_INTERFACE_ROOT: agentRoot,

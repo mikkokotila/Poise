@@ -13,6 +13,7 @@ import {
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { config as loadDotenv } from 'dotenv'
+import { servicePath } from './production-path.mjs'
 
 const envPath = join(process.cwd(), '.env')
 const claudeSubscriptionWrapper = join(process.cwd(), 'scripts', 'claude-subscription.mjs')
@@ -210,6 +211,20 @@ const checks = [
     validateOutput: () => chatModel !== null,
     validationFailure: 'the catalog names no chat model (Update Caller)',
   },
+  // The provider CLIs behind the catalog, looked up on the PATH the launchd
+  // services run with rather than this shell's: a CLI only the shell can
+  // find fails every review and refresh that reaches for it in production.
+  ...[
+    ['codex', 'Codex CLI'],
+    ['grok', 'Grok Build CLI'],
+    ['agy', 'Antigravity CLI'],
+    ['muse', 'Muse CLI'],
+  ].map(([command, name]) => ({
+    command,
+    args: ['--version'],
+    label: `${name} on the service PATH`,
+    env: { PATH: servicePath(homedir()) },
+  })),
   ...(wrapperProbe ? [{
     command: 'agent-interface',
     args: [
