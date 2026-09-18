@@ -173,13 +173,13 @@ Final validation on the implementation checkout:
 
 | Check | Result |
 | --- | --- |
-| `npm run verify` | Passed: 607 unit/integration tests in 57 files, lint, all three typechecks, production client/server builds and 26 Playwright tests |
-| Companion Caller Python suite | 215 tests passed in isolated data directories |
+| `npm run verify` | Passed: 607 unit/integration tests in 57 files, lint, all three typechecks, production client/server builds and 27 Playwright tests |
+| Companion Caller Python suite | 299 installed-package tests passed across all three packages, with isolated data |
 | Actual Poise TypeScript to companion Caller CLI | Recorded completed/cancelled turns; repeated start/finish deduplicated; no provider calls |
 | `npm audit --omit=dev --audit-level=high` | Zero vulnerabilities reported |
 
 The detailed local logs are retained under `/tmp/poise-chat-v1/`, notably
-`final-verify.log`, `continue-caller-tests.log`, `caller-bridge-result.log` and
+`pr-final-verify.log`, `caller-ci-local.log`, `caller-bridge-result.log` and
 `production-dependency-audit.log`. Temporary evidence is not a substitute for
 rerunning the checked-in regression suites after later source changes.
 
@@ -195,12 +195,36 @@ The following is deliberately separate from fixture coverage:
 
 | Agent | Live evidence recorded during implementation | Remaining qualification |
 | --- | --- | --- |
-| Grok | Native text, steering request, permission and question roundtrips, Stop, subsequent use and native-ID resume observed | Submit-to-first-token timing does not measure the provider-event-to-browser rendering requirement |
+| Grok | Native text, steering request, permission and question roundtrips, Stop, subsequent use and native-ID resume observed | A separate real-browser probe measured 72 ms from native stdout to paint; see the PR follow-up below |
 | Claude | Native startup/text, steering with the revised reply, an actual question answered B, permissions during a file write, Stop/subsequent use, native-ID resume with remembered context, and file creation/Revert observed | Native user hooks remain active; a fixture repository can trigger hook warnings. Not every model/effort combination was exercised |
 | Muse | Text, steering, actual permission/question roundtrips, Stop/subsequent use and native-ID resume observed. Separate checks verified auto-approved file creation/diff/Revert and Stop with a queued steer | The queued-steer Stop observation was 211 ms, followed by a successful prompt; this is a measured instance, not a worst-case guarantee |
 | Codex | Native interface/schema inspection and scripted app-server tests | Live turns were blocked by the account's usage limit; no repeated attempts or credential fallback were used |
 
-Passing fixtures do not remove these qualifications. In particular, complete
-live validation of all four agents and a measured browser streaming latency
-requirement must not be inferred from a green build. Production was not
-updated as part of these checks.
+Passing fixtures do not remove these qualifications. Complete live validation
+of Codex is still blocked by quota, and the latency observations below are
+not universal worst-case guarantees. These validation runs did not change
+production services or data.
+
+
+## PR verification follow-up — 2026-09-18
+
+`tests/e2e/chat-latency.spec.ts` now measures the complete rendering path:
+separate ACP process -> real Grok adapter -> ChatRuntime/SQLite -> real
+WebSocket -> the built Chat view in Chromium -> a rendering opportunity.
+The default test uses a deterministic, timestamped ACP process and makes no
+provider calls. Eight streamed samples measured 18–29 ms across the local runs on the development
+machine; the test requires every sample to render within 1,000 ms. Reload
+also verifies transcript restoration without launching another agent.
+
+An explicit `POISE_CHAT_LATENCY_LIVE=grok` run substitutes the installed Grok
+executable, using temporary checkout/database state and one harmless prompt.
+That observed first native text frame reached browser paint in 72 ms. This
+is an observed native-stdout-to-paint measurement, not an assertion about
+provider generation time or every future load condition. The test attaches
+its JSON timing record to the Playwright results.
+
+The initial Poise PR passed Linux CI on Node 20, 22 and 24. Caller CI exposed
+an installed-package versus source-test gate-path mismatch and bounded `ps`
+output on Linux. The fix tests the gate shipped with the imported package
+and requests an untruncated process command; the installed-package local
+suite passed 299 tests, including the independent identity checks.
