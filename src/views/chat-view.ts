@@ -394,6 +394,7 @@ async function deleteSession(id: string): Promise<void> {
       // Nothing is on screen now; selecting the next session must treat it
       // as a switch (fresh transcript, its own draft), not a no-op.
       activeId = null
+      composerStateFor(null)
       transcript.clear()
       if (order[0]) void selectSession(order[0])
       else { composer.setDraft(freshDraft); setNotice(null) }
@@ -425,6 +426,9 @@ async function selectSession(id: string): Promise<void> {
     setNotice(e.error)
     scrollToBottom(true)
   }
+  // Identity changes are synchronous: an upload resolving before the next
+  // animation frame must not attach itself to the newly selected draft.
+  composerStateFor(e)
   queueRender()
   if (!e.loaded && !e.loading && !e.pending) await loadHistory(e)
   composer.focus()
@@ -926,7 +930,10 @@ async function createSessionEntry(req: NewSessionRequest, draft: ComposerDraft |
     const e = upsertRecord(r.session, { pending: false })
     e.model = temporary.model
     e.draft = temporary.draft
-    if (activeId === tempId) activeId = r.session.id
+    if (activeId === tempId) {
+      activeId = r.session.id
+      composerStateFor(e)
+    }
     chatClient.subscribe(r.session.id, 0)
     e.loaded = true
     queueRender()
@@ -937,6 +944,7 @@ async function createSessionEntry(req: NewSessionRequest, draft: ComposerDraft |
     order = order.filter(x => x !== tempId)
     if (activeId === tempId) {
       activeId = null
+      composerStateFor(null)
       transcript.clear()
       composer.setDraft(draft || freshDraft)
     }

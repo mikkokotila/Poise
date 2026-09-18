@@ -155,6 +155,24 @@ function makeState(sessions: SessionRecord[], history: Record<string, ChatEnvelo
 
 const input = (page: Page) => page.locator('.chat-v-composer .chat-input')
 
+// Hold view renders to expose the interval between a session-identity change
+// and its next animation frame. Composer-owned uploads must still be correct.
+async function pauseViewFrames(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const raf = window.requestAnimationFrame.bind(window)
+    const queued: FrameRequestCallback[] = []
+    window.requestAnimationFrame = callback => { queued.push(callback); return queued.length }
+    ;(window as any).__resumeViewFrames = () => {
+      window.requestAnimationFrame = raf
+      queued.forEach(callback => raf(callback))
+    }
+  })
+}
+async function resumeViewFrames(page: Page): Promise<void> {
+  await page.evaluate(() => (window as any).__resumeViewFrames())
+}
+
+
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     if (!sessionStorage.getItem('chat-fixture-initialized')) {
@@ -799,8 +817,10 @@ test('accepts a file from a fresh console and retains its text in the same sessi
   await page.goto('/')
   await expect(page.getByRole('button', { name: 'Attach file' })).toBeEnabled()
   await input(page).fill('Read this note')
+  await pauseViewFrames(page)
   await page.locator('.chat-file-input').setInputFiles({ name: 'note.txt', mimeType: 'text/plain', buffer: Buffer.from('note') })
   await expect(page.locator('.chat-attachment-chip')).toContainText('note.txt')
+  await resumeViewFrames(page)
   await expect(input(page)).toHaveValue('Read this note')
   await expect(input(page)).toBeEnabled()
   await input(page).press('Enter')
@@ -938,13 +958,15 @@ test('keeps a slow attachment with its original session when another session is 
   await input(page).fill('Original draft')
   await page.locator('.chat-file-input').setInputFiles({ name: 'slow.txt', mimeType: 'text/plain', buffer: Buffer.from('note') })
   await expect.poll(() => uploading).toBe(true)
-  await page.locator('.chat-session-item[data-id="s2"]').click()
+  await pauseViewFrames(page)
+  await page.locator('.chat-session-item[data-id="s2"]').dispatchEvent('keydown', { key: 'Enter' })
   await sock.subscribed('s2')
   await input(page).fill('Other draft')
   release()
   await expect(page.getByRole('button', { name: 'Attach file' })).toBeEnabled()
   await expect(page.locator('.chat-attachment-chip')).toHaveCount(0)
   await expect(input(page)).toHaveValue('Other draft')
+  await resumeViewFrames(page)
   await page.locator('.chat-session-item[data-id="s1"]').click()
   await expect(input(page)).toHaveValue('Original draft')
   await expect(page.locator('.chat-attachment-chip')).toContainText('slow.txt')
