@@ -161,7 +161,11 @@ function scripted() {
     view('session/statusChanged', { status: 'running' })
     view('turn/started', { turnId: turn.id, commandId: turn.id })
     item('item/completed', { itemId: uuid('user'), kind: 'userMessage', status: 'completed', text: prompt, commandId: turn.id })
-    item('item/started', { itemId: uuid('reminder'), kind: 'reminderChild', fallbackText: 'Reminder child session', childSessionId: uuid('child'), reminderAgentId: 'skill-reminder', generationId: 1, taskId: uuid('task') })
+    const reminderId = uuid('reminder')
+    item('item/started', { itemId: reminderId, kind: 'reminderChild', fallbackText: 'Reminder child session', childSessionId: uuid('child'), reminderAgentId: 'skill-reminder', generationId: 1, taskId: uuid('task') })
+    view('item/delta', { itemId: reminderId, field: 'text', delta: 'reminder-internal-output' })
+    item('item/updated', { itemId: reminderId, kind: 'reminderChild', fallbackText: 'Reminder child session', status: 'inProgress' })
+    item('item/completed', { itemId: reminderId, kind: 'reminderChild', fallbackText: 'Reminder child session', status: 'completed' })
 
     if (prompt.startsWith('fail')) {
       await completeTurn('failed', { error: { kind: 'modelError', message: 'provider returned 503', retryable: true } })

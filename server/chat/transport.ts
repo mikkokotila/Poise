@@ -1,3 +1,4 @@
+import { readChatFile } from './file-preview'
 // The browser-facing side of Chat v1: the WebSocket at /ws/chat (events
 // down, commands up) and the REST routes under /api/chat.
 //
@@ -353,6 +354,11 @@ export async function handleChatApi(req: IncomingMessage, res: ServerResponse, u
       const session = runtime.get(query.get('session') || '')
       if (!session) throw new ChatError(404, 'unknown session', 'unknown_session')
       return json(res, 200, { files: await listFiles(session.checkout, query.get('q') || '') }), true
+    }
+    if (path === '/api/chat/file' && req.method === 'GET') {
+      const session = runtime.get(query.get('session') || '')
+      if (!session) throw new ChatError(404, 'unknown session', 'unknown_session')
+      return json(res, 200, await readChatFile(session.checkout, query.get('path') || '')), true
     }
     if (path === '/api/chat/diff' && req.method === 'GET') {
       const session = runtime.get(query.get('session') || '')

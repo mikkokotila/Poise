@@ -27,6 +27,8 @@ import {
 import { createComposer, emptyDraft, type Composer, type ComposerDraft } from './chat-composer'
 import { quickSessionRequest, QUICK_SESSION_MODEL, consoleModelLabel } from '../chat-catalog'
 import { attachChatSidebar } from './chat-sidebar'
+import { createFilePreview } from './chat-file-preview'
+import { ICON_FORK, ICON_HANDOFF, ICON_ACTIVITY } from './chat-icons'
 
 interface SessionEntry {
   record: SessionRecord
@@ -52,6 +54,7 @@ let dialogEl: HTMLElement
 let noticeEl: HTMLElement
 let transcript: TranscriptView
 let composer: Composer
+let filePreview: ReturnType<typeof createFilePreview>
 
 const sessions = new Map<string, SessionEntry>()
 let order: string[] = []
@@ -70,6 +73,9 @@ let firstPromptPending = false
 const CLICK_DELAY_MS = 220
 const STICK_TO_BOTTOM_PX = 40
 const DELETE_ARM_MS = 4000
+const ACTIVITY_KEY = 'poise-chat-show-activity'
+let showActivity = true
+try { showActivity = localStorage.getItem(ACTIVITY_KEY) !== 'false' } catch { /* optional preference */ }
 
 const ICON_PLUS = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 2v10M2 7h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
 const ICON_SIDEBAR = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="1.5" y="2.5" width="11" height="9" rx="1.5" stroke="currentColor" stroke-width="1.2"/><path d="M5 2.5v9" stroke="currentColor" stroke-width="1.2"/></svg>'
@@ -138,7 +144,7 @@ function renderShell(): void {
     <header class="view-header">
       <div class="filter-cluster chat-view-controls">
         <button type="button" class="chat-icon-btn chat-sidebar-toggle" title="Toggle sessions" aria-label="Toggle sessions" aria-controls="chat-sessions-pane" aria-expanded="true" aria-pressed="true">${ICON_SIDEBAR}</button>
-        <button type="button" class="chat-new-btn" title="New session">${ICON_PLUS}<span>New session</span></button>
+        <button type="button" class="chat-icon-btn chat-new-btn" title="New session" aria-label="New session">${ICON_PLUS}</button>
         <span class="chat-conn" role="status" hidden></span>
       </div>
     </header>
@@ -153,7 +159,7 @@ function renderShell(): void {
           <div class="chat-notice st-help st-help-error" role="status" hidden></div>
           <div class="chat-transcript-scroll">
             <div class="chat-empty chat-transcript-loading" hidden>Loading…</div>
-            <div class="chat-transcript"></div>
+            <div id="chat-transcript" class="chat-transcript"></div>
           </div>
           <div class="chat-dock"></div>
           <div class="chat-new-dialog" role="dialog" aria-label="New session" hidden></div>
@@ -172,7 +178,9 @@ function renderShell(): void {
 
   viewEl.querySelector<HTMLButtonElement>('.chat-new-btn')!.addEventListener('click', () => { void openNewSessionDialog() })
 
+  filePreview = createFilePreview(viewEl, (sessionId, reference) => chatClient.filePreview(sessionId, reference))
   transcript = createTranscriptView(transcriptEl, {
+    onFile: (reference) => { if (activeId) void filePreview.show(activeId, reference) },
     onPermission: (id, optionId) => { void respondPermission(id, optionId) },
     onQuestion: (id, answers) => { void answerQuestion(id, answers) },
     onRevert: (diffId) => { void revertDiff(diffId) },
@@ -429,6 +437,7 @@ async function selectSession(id: string): Promise<void> {
     if (prev) prev.draft = composer.getDraft()
   }
   const switching = activeId !== id
+  if (switching) filePreview.close()
   activeId = id
   closeDialog()
   if (switching) {
@@ -753,8 +762,9 @@ function headerHtml(): string {
       <span class="chat-h-status" data-status="${s.status}">${escapeHtml(statusText(s))}</span>
       <span class="chat-controls-spacer"></span>
       ${isRunning(s.status) ? `<button type="button" class="chat-h-btn chat-h-stop" title="Stop the turn (⌘.)">${ICON_STOP} Stop</button>` : ''}
-      ${s.capabilities?.fork ? `<button type="button" class="chat-h-btn chat-h-fork"${between ? '' : ' disabled'}>Fork</button>` : ''}
-      ${others.length ? `<span class="chat-h-handoff-wrap"><button type="button" class="chat-h-btn chat-h-handoff" aria-haspopup="true" aria-expanded="${handoffOpen}">Hand off…</button>${handoffOpen ? handoffMenu(others) : ''}</span>` : ''}
+      ${s.capabilities?.fork ? `<button type="button" class="chat-icon-btn chat-h-fork" title="Fork session" aria-label="Fork"${between ? '' : ' disabled'}>${ICON_FORK}</button>` : ''}
+      <button type="button" class="chat-icon-btn chat-h-activity" aria-label="${showActivity ? 'Hide activity' : 'Show activity'}" title="${showActivity ? 'Hide' : 'Show'} thinking and tool activity" aria-pressed="${showActivity}" aria-controls="chat-transcript">${ICON_ACTIVITY}</button>
+      ${others.length ? `<span class="chat-h-handoff-wrap"><button type="button" class="chat-icon-btn chat-h-handoff" title="Hand off to another agent" aria-label="Hand off…" aria-haspopup="true" aria-expanded="${handoffOpen}">${ICON_HANDOFF}</button>${handoffOpen ? handoffMenu(others) : ''}</span>` : ''}
     </div>
     ${s.orphanNotice ? `<div class="st-help st-help-error">${escapeHtml(s.orphanNotice)}</div>` : ''}
   `
@@ -791,6 +801,14 @@ function attachHeader(): void {
   headerEl.addEventListener('click', (e) => {
     const t = e.target as HTMLElement
     if (t.closest('.chat-h-stop')) { void cancelTurn(); return }
+    if (t.closest('.chat-h-activity')) {
+      showActivity = !showActivity
+      try { localStorage.setItem(ACTIVITY_KEY, String(showActivity)) } catch { /* optional preference */ }
+      renderHeader()
+      headerEl.querySelector<HTMLButtonElement>('.chat-h-activity')?.focus()
+      queueRender()
+      return
+    }
     if (t.closest('.chat-h-fork')) { void forkActive(); return }
     if (t.closest('.chat-h-handoff')) { handoffOpen = !handoffOpen; renderHeader(); return }
     if (t.closest('.chat-ho-go')) {
@@ -891,7 +909,7 @@ function render(): void {
   const distance = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
   const wasAtBottom = distance <= STICK_TO_BOTTOM_PX
   if (e) {
-    transcript.render(e.model, { running: isRunning(e.record.status) || !!e.model.running, interruptedTurnId: e.record.interruptedTurnId })
+    transcript.render(e.model, { showActivity, agent: e.record.agent, running: isRunning(e.record.status) || !!e.model.running, interruptedTurnId: e.record.interruptedTurnId })
   } else {
     transcript.clear()
   }
@@ -1045,6 +1063,7 @@ export async function initChatView(): Promise<void> {
 // and its subscriptions stay so a running turn keeps being mirrored and the
 // sidebar is current when the view comes back.
 export function stopChatRefresh(): void {
+  filePreview?.close()
   splitPane?.cancelResize()
   if (tickTimer) { clearInterval(tickTimer); tickTimer = null }
   if (composer && activeId) {

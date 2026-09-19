@@ -390,6 +390,10 @@ export class ChatClient {
     return post('/api/chat/sessions', req)
   }
 
+  filePreview(sessionId: string, reference: string): Promise<import('./chat-file-reference').ChatFilePreview> {
+    return jsonFetch(`/api/chat/file?session=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(reference)}`)
+  }
+
   async fetchDiff(sessionId: string, diffId: string): Promise<Extract<ChatEnvelope['event'], { type: 'diff' }>> {
     const result = await jsonFetch<{ diff: Extract<ChatEnvelope['event'], { type: 'diff' }> }>(
       `/api/chat/diff?session=${encodeURIComponent(sessionId)}&id=${encodeURIComponent(diffId)}`)

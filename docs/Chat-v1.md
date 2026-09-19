@@ -54,6 +54,26 @@ The fresh console has a 640 px maximum width, a taller writing area and a
 slightly elevated position. Its border uses a low-opacity neutral hairline,
 with no resting or focus shadow, in both light and dark themes.
 
+## Transcript presentation and file links
+
+New session, Fork and Hand off use icon buttons with accessible labels and
+hover titles. The activity icon beside Fork shows or hides thinking, tool
+cards, plans, completed interaction cards and turn statistics. The preference
+is remembered in this browser. Hiding detail does not stop work or discard
+transcript data or expansion state; unanswered questions, permission requests
+and errors remain visible. Muse reminder-child items are internal housekeeping,
+not task output. The adapter omits them and old reminder cards are hidden on
+history replay without changing the stored transcript or normal subagent work.
+
+Local Markdown links open a read-only file preview inside Chat. The preview
+shows the current working copy, not a historical snapshot; line references
+such as `#L12-L18` are highlighted. Reading happens only on click and never
+wakes an agent or changes a branch. It is limited to the session workspace
+and tracked Poise source in the running installation or the configured,
+identity-verified Poise development checkout. Private paths, unsafe schemes,
+symlink escapes, binary files and files over 512 KiB are refused. Long text
+previews stop at 5,000 lines. File text never executes as HTML.
+
 ## Sessions and working context
 
 New session offers **Model** and **Effort**, with model families grouped across

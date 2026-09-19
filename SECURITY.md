@@ -79,3 +79,16 @@ directory inside Poise. Its private Git repository has no remote and never
 uses the enclosing source checkout for checkpoints. Symlinked storage roots
 and unowned non-empty workspace directories are refused. Existing sessions
 retain their original boundaries; no histories or documents are relocated.
+
+### Chat file previews
+
+Clicking a local Markdown link requests a bounded, read-only text preview.
+The existing loopback/origin checks and runtime session ownership apply.
+Paths must resolve inside that session's checkout or a tracked Poise source
+checkout. The latter is the running installation or the configured checkout
+for the repository in Poise's own package metadata, with its origin verified;
+a link cannot name a different repository to authorize. Hidden/private paths,
+credential-like files, symlink escapes and non-regular files are not served.
+Reads use a no-follow file descriptor, a 512 KiB byte ceiling and a 5,000-line
+presentation limit. Contents render as text, never active HTML. Previews do
+not launch an agent or switch checkouts; they describe the current file only.
