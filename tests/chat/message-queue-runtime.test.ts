@@ -318,3 +318,20 @@ it('QC: native effort limits from one model do not reject another model family',
   const updated = await w.runtime.setModel(s.id, 'fable-5.1-max')
   expect(updated).toMatchObject({ model: 'fable-5.1-max', effort: 'max' })
 })
+
+
+it('does not dispatch an armed queue when startup reconciliation fails', async () => {
+  const w = await world({ deferStart: true }); await w.add('Only after successful recovery')
+  const turnId = randomUUID(); storage.reserveQueueTurn(w.s.id, turnId)
+  storage.finalizeTurn(w.s.id, { type: 'turn.finished', turnId, stopReason: 'end_turn' })
+  const recovering = w.make()
+  const probe = vi.spyOn(storage, 'listWorkers').mockImplementationOnce(() => { throw new Error('fixture recovery failure') })
+  await expect(recovering.recover()).rejects.toThrow('fixture recovery failure')
+  await new Promise(resolve => setTimeout(resolve, 500))
+  expect(w.c.calls).toHaveLength(0)
+  expect(recovering.get(w.s.id)?.queue?.ready).toBe(true)
+  probe.mockRestore()
+  await recovering.recover()
+  await until(() => recovering.get(w.s.id)?.queue?.items.length === 0)
+  expect(w.c.calls).toHaveLength(1)
+})

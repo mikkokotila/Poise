@@ -43,6 +43,7 @@ import { isTerminal, nextPollDelay, POLL_ACTIVE_MS, POLL_IDLE_MS, selectChangeFo
 import { takeDraftSnapshot, buildDraftSnapshot, saveDraftSnapshot, type DraftSnapshot } from '../self-update-drafts'
 import { installSelfUpdateWatch, registerDraftProvider, registerReloadGuard } from '../self-update-watch'
 import { BUILD_SHA } from '../build-identity'
+import { RELOADED_RELEASE_KEY } from '../self-update-reload'
 import type { SelfChange, SelfUpdateStatus } from '../self-update-types'
 
 // The build watch is app-wide (it guards every view), but it has to start
@@ -224,7 +225,7 @@ function renderShell(): void {
             <div id="chat-transcript" class="chat-transcript"></div>
           </div>
           <div class="chat-dock"></div>
-          <div class="chat-new-dialog" role="dialog" aria-label="New session" hidden></div>
+          <div class="chat-new-dialog" role="dialog" aria-modal="true" aria-label="New session" tabindex="-1" hidden></div>
         </section>
       </div>
     </main>
@@ -239,10 +240,22 @@ function renderShell(): void {
   noticeEl = viewEl.querySelector<HTMLElement>('.chat-notice')!
   dialogEl.addEventListener('keydown', event => {
     if (event.isComposing || event.keyCode === 229) return
-    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeDialog(); viewEl.querySelector<HTMLButtonElement>('.chat-new-btn')?.focus() }
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeDialog(); return }
+    if (event.key === 'Tab') {
+      const controls = [...dialogEl.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]')]
+        .filter(control => control.getClientRects().length > 0 && !control.closest('[hidden], [inert]'))
+      const first = controls[0], last = controls[controls.length - 1]
+      if (!first) { event.preventDefault(); dialogEl.focus(); return }
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialogEl)) { event.preventDefault(); last?.focus() }
+      else if (!event.shiftKey && (document.activeElement === last || document.activeElement === dialogEl)) { event.preventDefault(); first.focus() }
+    }
   })
 
-  viewEl.querySelector<HTMLButtonElement>('.chat-new-btn')!.addEventListener('click', () => { void openNewSessionDialog() })
+  viewEl.querySelector<HTMLButtonElement>('.chat-new-btn')!.addEventListener('click', event => {
+    // WebKit does not focus a button on pointer click. Remember the actual opener.
+    (event.currentTarget as HTMLButtonElement).focus({ preventScroll: true })
+    void openNewSessionDialog()
+  })
 
   filePreview = createFilePreview(viewEl, (sessionId, reference) => chatClient.filePreview(sessionId, reference))
   transcript = createTranscriptView(transcriptEl, {
@@ -1029,14 +1042,24 @@ async function sendPrompt(draft: ComposerDraft): Promise<void> {
   if (poise) { await startPoiseChange(poise, draft); return }
   let e = entry()
   if (!e || e.pending) {
-    if (firstPromptPending) return
+    if (firstPromptPending) {
+      // Two Send actions can be released by one Memories save before the
+      // first session exists. Only the first may launch it; keep the other
+      // draft with that session instead of silently dropping its text.
+      const startup = quickSessionPromise
+      try {
+        const target = startup ? await startup : e
+        restoreDraftTo(target?.record.id ?? sourceId, draft)
+      } catch { restoreDraftTo(sourceId, draft) }
+      queueRender()
+      return
+    }
     firstPromptPending = true
     try {
       e = await ensureQuickSession(draft)
       freshDraft = null
     } catch (err) {
-      freshDraft = draft
-      if (!activeId) composer.setDraft(draft)
+      restoreDraftTo(null, draft)
       commandFailed(err, 'Start session')
       queueRender()
       return
@@ -1506,12 +1529,19 @@ function render(): void {
 
 export interface NewSessionPrefill { context?: SessionContext }
 
+let dialogGeneration = 0
+let dialogOpener: HTMLElement | null = null
+
 async function openNewSessionDialog(prefill: NewSessionPrefill = {}): Promise<void> {
+  const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
   closeDialog()
+  dialogOpener = opener
+  const generation = ++dialogGeneration
   dialogEl.hidden = false
-  dialogEl.innerHTML = '<div class="chat-dialog-body"><div class="chat-empty">Loading models…</div></div>'
+  dialogEl.innerHTML = '<div class="chat-dialog-body"><div class="chat-empty" role="status">Loading models…</div></div>'
+  dialogEl.focus({ preventScroll: true })
   const agents = await loadAgents(true)
-  if (dialogEl.hidden) return
+  if (dialogEl.hidden || generation !== dialogGeneration) return
   if (!agents) {
     dialogEl.innerHTML = '<div class="chat-dialog-body"><div class="st-help st-help-error">Could not load the model catalogue.</div><button type="button" class="st-clear chat-dialog-cancel">Close</button></div>'
     dialogEl.querySelector('.chat-dialog-cancel')!.addEventListener('click', closeDialog)
@@ -1522,8 +1552,11 @@ async function openNewSessionDialog(prefill: NewSessionPrefill = {}): Promise<vo
 
 function closeDialog(): void {
   if (!dialogEl) return
+  dialogGeneration++
+  if (dialogEl.contains(document.activeElement) && dialogOpener?.isConnected) dialogOpener.focus({ preventScroll: true })
   dialogEl.hidden = true
   dialogEl.innerHTML = ''
+  dialogOpener = null
 }
 
 async function createSessionEntry(req: NewSessionRequest, draft: ComposerDraft | null = null,
@@ -1616,9 +1649,14 @@ export async function initChatView(): Promise<void> {
   if (!initialized) {
     initialized = true
     renderShell()
-    // An update snapshot takes precedence over this tab's ordinary reload
-    // draft. Both are consumed once; neither can execute a prompt.
-    try { restoredSnapshot = takeDraftSnapshot(localStorage) || takeDraftSnapshot(sessionStorage) } catch { restoredSnapshot = null }
+    // Both ordinary and update snapshots belong to this tab. A different
+    // tab must never consume shared text left by an older release.
+    try { restoredSnapshot = takeDraftSnapshot(sessionStorage) } catch { restoredSnapshot = null }
+    if (!restoredSnapshot) {
+      // Upgrade compatibility: old builds wrote to localStorage and marked
+      // the initiating tab. Only that marked tab may consume the legacy file.
+      try { if (sessionStorage.getItem(RELOADED_RELEASE_KEY)) restoredSnapshot = takeDraftSnapshot(localStorage) } catch { /* optional recovery */ }
+    }
     // Events keep folding into the per-session models while the view is
     // hidden — that is what lets a running turn be re-joined on return
     // without a refetch — so these listeners live for the app's lifetime.

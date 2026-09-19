@@ -338,7 +338,7 @@ test('restores every draft, the fresh model and the active session from the snap
   await page.addInitScript(() => {
     if (sessionStorage.getItem('snapshot-seeded')) return
     sessionStorage.setItem('snapshot-seeded', '1')
-    localStorage.setItem('poise-chat-draft-snapshot', JSON.stringify({
+    sessionStorage.setItem('poise-chat-draft-snapshot', JSON.stringify({
       version: 1, savedAt: Date.now(), fromSha: null, activeSessionId: 'older',
       fresh: { draft: { text: 'fresh thought', attachments: [], mentions: [], mode: null }, modelIdentity: 'gpt-6-astra-max' },
       sessions: {
@@ -376,7 +376,7 @@ test('restores the fresh console draft and model choice without opening a sessio
   await page.addInitScript(() => {
     if (sessionStorage.getItem('fresh-snapshot-seeded')) return
     sessionStorage.setItem('fresh-snapshot-seeded', '1')
-    localStorage.setItem('poise-chat-draft-snapshot', JSON.stringify({
+    sessionStorage.setItem('poise-chat-draft-snapshot', JSON.stringify({
       version: 1, savedAt: Date.now(), fromSha: null, activeSessionId: null,
       fresh: { draft: { text: 'fresh thought', attachments: [], mentions: [], mode: null }, modelIdentity: 'gpt-6-astra-max' },
       sessions: {},

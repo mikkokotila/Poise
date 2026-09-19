@@ -83,7 +83,9 @@ export function createMemoriesEditor(io: MemoriesIO) {
     get state() { return { text, loaded, dirty, saving: !!saving, loading: !!loading, error, conflict } },
     subscribe(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener) },
     edit(value: string) {
-      text = value; dirty = text !== base.text
+      // A conflict means the saved value is no longer our baseline. Typing
+      // the old value back is still an unsaved choice, not a successful save.
+      text = value; dirty = conflict || text !== base.text
       if (!conflict) error = null
       persist(); notify(); clearTimeout(timer)
       if (dirty && !conflict) timer = setTimeout(() => { void flush().catch(() => undefined) }, io.delayMs ?? 350)

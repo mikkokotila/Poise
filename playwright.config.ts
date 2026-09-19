@@ -36,6 +36,11 @@ export default defineConfig({
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
     },
+    // Optional human-journey QC: keep the normal CI/install footprint unchanged.
+    ...(process.env.POISE_BROWSER_QC === '1' ? [
+      { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
+      { name: 'webkit', use: { ...devices['Desktop Safari'] } },
+    ] : []),
   ],
   webServer: {
     command: 'npm run preview',

@@ -348,11 +348,12 @@ test('Enter sends, Shift+Enter breaks the line, Enter steers while running, and 
   await expect(page.locator('.chat-v-composer .chat-send')).toHaveAttribute('aria-label', 'Send')
 })
 
-test('streams text, sticks to the bottom only when there, and never runs agent HTML', async ({ page }) => {
+test('streams text, sticks to the bottom only when there, and never runs agent HTML', async ({ page, browserName }) => {
   const state = makeState([session({ status: 'running' })], { s1: [env('s1', 1, { type: 'turn.started', turnId: 't1', prompt: { text: 'go', attachments: [], mentions: [] } })] })
   await installRoutes(page, state)
   const sock = await installSocket(page)
-  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
+  // Firefox/WebKit use the trusted Copy click; Chromium exposes these grants.
+  if (browserName === 'chromium') await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
   await page.goto('/')
   await sock.subscribed('s1')
   sock.seq = 1
@@ -1905,4 +1906,72 @@ test('QC: refreshing restores a half-written answer without submitting it', asyn
   await page.reload()
   await expect(page.locator('.chat-q-text')).toHaveValue('My unfinished answer')
   expect(sock.framesOf('question.answer')).toHaveLength(0)
+})
+
+
+test('QC: a new tab never consumes another tab\'s update draft', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state)
+  await page.addInitScript(() => {
+    localStorage.setItem('poise-chat-draft-snapshot', JSON.stringify({ version: 1, savedAt: Date.now(), fromSha: 'a'.repeat(40), activeSessionId: 's1',
+      fresh: { draft: null, modelIdentity: null }, sessions: { s1: { text: 'Draft belonging to another tab', attachments: [], mentions: [], mode: null } } }))
+  })
+  await page.goto('/'); await sock.subscribed('s1')
+  await expect(input(page)).toHaveValue('')
+  expect(await page.evaluate(() => localStorage.getItem('poise-chat-draft-snapshot'))).not.toBeNull()
+})
+
+test('QC: New session keeps keyboard focus inside while loading and after the models arrive', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state); await installSocket(page, state)
+  await page.goto('/'); await expect(page.locator('.chat-session-item.active')).toBeVisible()
+  let release!: () => void
+  const hold = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/chat/agents', async route => { await hold; await route.fulfill({ json: AGENTS }) })
+  await page.getByRole('button', { name: 'New session', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'New session', exact: true })
+  await expect(dialog).toBeVisible()
+  await page.keyboard.press('Tab')
+  expect(await dialog.evaluate(el => el.contains(document.activeElement))).toBe(true)
+  release()
+  await expect(dialog.getByRole('combobox', { name: 'Model', exact: true })).toBeFocused()
+  await page.keyboard.press('Shift+Tab')
+  await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(dialog.getByRole('combobox', { name: 'Model', exact: true })).toBeFocused()
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'New session', exact: true })).toBeFocused()
+})
+
+
+test('QC: rapid fresh messages during a Memories save never drop the second message', async ({ page }) => {
+  const state = makeState([]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); const saved = await installMemoryRoutes(page)
+  await page.goto('/'); await memoryToggle(page).click(); await expect(memoryText(page)).toBeEnabled()
+  let release!: () => void
+  const hold = new Promise<void>(resolve => { release = resolve }); saved.wait = () => hold
+  await memoryText(page).fill('Use the test suite')
+  // A shared autosave holds both Send actions before either can start a session.
+  await input(page).fill('First request'); await input(page).press('Enter')
+  await input(page).fill('Second request, do not lose this'); await input(page).press('Enter')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  release()
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ text: 'First request' })
+  await expect(input(page)).toHaveValue('Second request, do not lose this')
+  expect(state.calls.filter(call => call.path === '/api/chat/sessions' && call.method === 'POST')).toHaveLength(1)
+})
+
+
+test('QC: the tab that initiated an older release update can recover its legacy draft', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state)
+  await page.addInitScript(() => {
+    sessionStorage.setItem('poise-self-update-reloaded-release', 'legacy-upgrade')
+    localStorage.setItem('poise-chat-draft-snapshot', JSON.stringify({ version: 1, savedAt: Date.now(), fromSha: 'a'.repeat(40), activeSessionId: 's1',
+      fresh: { draft: null, modelIdentity: null }, sessions: { s1: { text: 'My pre-upgrade draft', attachments: [], mentions: [], mode: null } } }))
+  })
+  await page.goto('/'); await sock.subscribed('s1')
+  await expect(input(page)).toHaveValue('My pre-upgrade draft')
+  expect(await page.evaluate(() => localStorage.getItem('poise-chat-draft-snapshot'))).toBeNull()
+  expect(sock.framesOf('prompt')).toHaveLength(0)
 })

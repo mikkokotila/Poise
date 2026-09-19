@@ -880,6 +880,8 @@ export function createTranscriptView(container: HTMLElement, handlers: Transcrip
     const file = target.closest<HTMLAnchorElement>('a[data-chat-file]')
     if (file && handlers.onFile) {
       e.preventDefault()
+      // Native dialog restoration needs the clicked link focused in WebKit too.
+      file.focus({ preventScroll: true })
       handlers.onFile(file.dataset.chatFile!)
       return
     }
