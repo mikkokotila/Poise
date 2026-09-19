@@ -23,6 +23,8 @@
 
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
+import { autoMergeInstructions, withAutoMergeInstructions } from './auto-merge'
+import type { AutoMergeAck } from './protocol'
 import type { ChildProcess } from 'node:child_process'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname } from 'node:path'
@@ -114,6 +116,8 @@ interface RunningTurn {
   /** What the transcript shows as the prompt when the agent got more (a
    *  server-injected runbook around the person's request). */
   shown?: PromptInput
+  /** True only once the native prompt was invoked, not while queued/startup. */
+  agentInvoked?: boolean
 }
 
 interface LiveSession {
@@ -134,6 +138,8 @@ interface LiveSession {
   staged: StagedDocument | null
   /** Serializes lifecycle operations on one session. */
   chain: Promise<unknown>
+  /** Mode updates and steering serialize separately from the running turn. */
+  steering: Promise<unknown>
   /** Operations queued on or running in `chain`; part of the busy count. */
   pendingOps: number
 }
@@ -525,7 +531,7 @@ export class ChatRuntime extends EventEmitter {
     if (!live) {
       // The staged document rides on the record: the live object and the
       // persisted one are the same reference, so saving the record saves it.
-      live = { record, adapter: null, worker: null, lease: null, turn: null, pending: new Map(), grants: new Map(), idleTimer: null, lifecycle: new AbortController(), services: 0, draining: false, staged: record.staged ?? null, chain: Promise.resolve(), pendingOps: 0 }
+      live = { record, adapter: null, worker: null, lease: null, turn: null, pending: new Map(), grants: new Map(), idleTimer: null, lifecycle: new AbortController(), services: 0, draining: false, staged: record.staged ?? null, chain: Promise.resolve(), steering: Promise.resolve(), pendingOps: 0 }
       this.live.set(id, live)
     }
     return live
@@ -546,6 +552,7 @@ export class ChatRuntime extends EventEmitter {
 
   private async createSession(request: NewSessionRequest): Promise<SessionRecord> {
     if (this.stopped) throw new ChatError(503, 'the chat runtime is stopping', 'agent_error')
+    if (request.autoMerge !== undefined && typeof request.autoMerge !== 'boolean') throw new ChatError(400, 'autoMerge must be a boolean', 'invalid')
     if (!AGENT_IDS.includes(request.agent)) throw new ChatError(400, `unknown agent ${String(request.agent)}`, 'invalid')
     const { agent, model, effort } = await this.resolveModel(request.model, request.effort)
     if (agent !== request.agent) throw new ChatError(400, `${request.model} is a ${agent} model, not ${request.agent}`, 'invalid')
@@ -578,6 +585,7 @@ export class ChatRuntime extends EventEmitter {
       pendingRequests: [],
       instance: this.instance,
       context: request.context,
+      ...(request.autoMerge !== undefined ? { autoMerge: request.autoMerge } : {}),
     }
     storage.insertSession(record)
     const live = this.requireLive(record.id)
@@ -779,6 +787,7 @@ export class ChatRuntime extends EventEmitter {
       repo: source.record.repo,
       branch: { existing: source.record.branch.name },
       title: `${source.record.title} → ${AGENT_LABEL[target.agent]}`.slice(0, CHAT_LIMITS.titleChars),
+      autoMerge: source.record.autoMerge,
       context: { kind: 'handoff', title: source.record.title, body: summary, fromSession: source.record.id },
     })
     const live = this.requireLive(created.id)
@@ -912,6 +921,7 @@ export class ChatRuntime extends EventEmitter {
       checkout,
       workspaceKind: 'poise-change',
       selfChangeId: id,
+      autoMerge: source.autoMerge,
       branch: { name: prepared.branch, origin: 'existing', provisional: false, baseSha: prepared.baseSha },
       title: `Poise: ${title}`.slice(0, CHAT_LIMITS.titleChars),
       createdAt: now,
@@ -1196,7 +1206,8 @@ export class ChatRuntime extends EventEmitter {
       if (turn.abort.signal.aborted) throw new Error(turn.failure || 'cancelled before the agent prompt')
       this.setStatus(session, 'running')
       agentInvoked = true
-      const result = await adapter.prompt(turn.id, adapterInput, turn.abort.signal)
+      turn.agentInvoked = true
+      const result = await adapter.prompt(turn.id, withAutoMergeInstructions(adapterInput, record.autoMerge, turn.implementsChange), turn.abort.signal)
       agentSettled = true
       stopReason = result.stopReason
       error = result.error
@@ -1321,15 +1332,62 @@ export class ChatRuntime extends EventEmitter {
     return { ...input, text: `${parts.join('\n')}\n\n${input.text}` }
   }
 
+  /** Independent of the lifecycle chain: waiting on that chain would wait
+   *  for the very turn the user is trying to steer to finish. */
+  private control<T>(session: LiveSession, operation: () => Promise<T>): Promise<T> {
+    const task = this.track(() => session.steering.then(operation, operation))
+    session.steering = task.catch(() => undefined)
+    return task
+  }
+
+  setAutoMerge(id: string, enabled: boolean): Promise<AutoMergeAck> {
+    this.assertAcceptingWork()
+    if (typeof enabled !== 'boolean') throw new ChatError(400, 'enabled must be a boolean', 'invalid')
+    const session = this.requireLive(id)
+    return this.control(session, async () => {
+      if (!this.ownsSession(id)) throw new ChatError(404, 'unknown session', 'unknown_session')
+      const previous = session.record.autoMerge
+      if (previous === enabled) return { session: session.record, applies: 'next_turn' }
+      session.record.autoMerge = enabled
+      try { this.saveRecord(session) } catch (error) { session.record.autoMerge = previous; throw error }
+      this.emit_(id, { type: 'session.updated', session: session.record })
+      const turn = session.turn
+      let applies: AutoMergeAck['applies'] = 'next_turn'
+      let warning: string | undefined
+      if (turn?.agentInvoked && !turn.stopping && !turn.abort.signal.aborted && session.adapter?.alive) {
+        try {
+          await session.adapter.steer(autoMergeInstructions(enabled, turn.implementsChange))
+          applies = 'current_turn'
+        } catch (error) {
+          warning = `Auto-merge ${enabled ? 'on' : 'off'} is saved for the next message, but the running agent could not receive the update: ${error instanceof Error ? error.message : String(error)}. Use Stop to end its current work.`
+        }
+      }
+      // Opt-in also releases existing native tool approval cards; questions
+      // still need actual answers and are never fabricated on the user's behalf.
+      if (enabled && !warning && session.turn && !session.turn.stopping) {
+        for (const [requestId, pending] of session.pending) {
+          const once = pending.kind === 'permission' && pending.options?.find(option => option.kind === 'allow_once')
+          if (once) this.resolvePermission(session, requestId, once.id, 'auto_merge')
+        }
+      }
+      return { session: session.record, applies, ...(warning ? { warning } : {}) }
+    })
+  }
+
   async steer(id: string, text: string): Promise<void> {
     this.assertAcceptingWork()
     const session = this.requireLive(id)
-    if (!session.turn || session.turn.stopping) throw new ChatError(409, 'no turn is running', 'no_turn')
+    const turn = session.turn
+    if (!turn || turn.stopping) throw new ChatError(409, 'no turn is running', 'no_turn')
     if (!session.record.capabilities.steer) throw new ChatError(409, `${AGENT_LABEL[session.record.agent]} does not support steering`, 'unsupported')
     const trimmed = String(text || '').trim()
     if (!trimmed) throw new ChatError(400, 'text is required', 'invalid')
-    await session.adapter!.steer(trimmed)
-    this.emit_(id, { type: 'steer.sent', turnId: session.turn.id, text: trimmed })
+    await this.control(session, async () => {
+      if (session.turn !== turn || turn.stopping || turn.abort.signal.aborted) throw new ChatError(409, 'the turn has ended', 'no_turn')
+      const input = withAutoMergeInstructions({ text: trimmed, attachments: [], mentions: [] }, session.record.autoMerge, turn.implementsChange)
+      await session.adapter!.steer(input.text)
+      this.emit_(id, { type: 'steer.sent', turnId: turn.id, text: trimmed })
+    })
   }
 
   /** Cancel the running turn. Resolves when the agent acknowledged or after
@@ -1374,7 +1432,11 @@ export class ChatRuntime extends EventEmitter {
   // ── Requests from the agent ────────────────────────────────────────────
 
   respondPermission(id: string, requestId: string, optionId: string): void {
-    const session = this.requireLive(id)
+    this.resolvePermission(this.requireLive(id), requestId, optionId, 'user')
+  }
+
+  private resolvePermission(session: LiveSession, requestId: string, optionId: string, by: 'user' | 'auto_merge'): void {
+    const id = session.record.id
     const pending = session.pending.get(requestId)
     if (!pending || pending.kind !== 'permission') {
       // A request that outlived its process (crash, restart) is closed out
@@ -1387,7 +1449,7 @@ export class ChatRuntime extends EventEmitter {
     const option = pending.options!.find((o) => o.id === optionId)
     if (!option) throw new ChatError(400, 'unknown option', 'invalid')
     session.pending.delete(requestId)
-    this.emit_(id, { type: 'permission.resolved', id: requestId, optionId, by: 'user' })
+    this.emit_(id, { type: 'permission.resolved', id: requestId, optionId, by })
     // "Always" means this session, in Poise's memory — never the agent's own
     // persistence, which outlives the session. The agent is told "once".
     let onWire = optionId
@@ -1719,6 +1781,12 @@ export class ChatRuntime extends EventEmitter {
       this.emit_(session.record.id, { type: 'permission.requested', id: requestId, turnId: turn.id, toolId: request.toolId, title: request.title, description: request.description, input: request.input, options: request.options })
       this.emit_(session.record.id, { type: 'permission.resolved', id: requestId, optionId: granted, by: 'session' })
       return onWire?.id ?? granted
+    }
+    const once = session.record.autoMerge === true && request.options.find(option => option.kind === 'allow_once')
+    if (once) {
+      this.emit_(session.record.id, { type: 'permission.requested', id: requestId, turnId: turn.id, toolId: request.toolId, title: request.title, description: request.description, input: request.input, options: request.options })
+      this.emit_(session.record.id, { type: 'permission.resolved', id: requestId, optionId: once.id, by: 'auto_merge' })
+      return once.id
     }
     return new Promise<string>((resolve, reject) => {
       session.pending.set(requestId, { kind: 'permission', turnId: turn.id, options: request.options, grantKey, resolve, reject })

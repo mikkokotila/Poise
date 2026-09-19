@@ -271,3 +271,12 @@ changes do not require another merge confirmation.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Auto-merge batches
+
+The rightmost Chat header icon enables **Auto-merge** for the selected session.
+The agent carries all requested slices and PRs across repositories through
+checks, fixes and verified merges, deferring non-blocking questions until the
+end. It is off by default, retained per session, and available before the
+first message. Native tool approvals use once-only decisions recorded in the
+transcript. See [Auto-merge mode](docs/Auto-merge.md).

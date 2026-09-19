@@ -27,8 +27,8 @@ afterEach(async () => {
 })
 afterAll(async () => { vi.unstubAllEnvs(); await rm(root, { recursive: true, force: true }) })
 
-async function serve(create: (request: unknown) => Promise<unknown>) {
-  const runtime = Object.assign(new EventEmitter(), { instance: 'transport-review', create })
+async function serve(create: (request: unknown) => Promise<unknown>, extra: Record<string, unknown> = {}) {
+  const runtime = Object.assign(new EventEmitter(), { instance: 'transport-review', create, ...extra })
   transport = new ChatSocketServer(runtime as unknown as ChatRuntime)
   http = createServer((_req, res) => { res.statusCode = 404; res.end() })
   transport.attach(http)
@@ -199,4 +199,24 @@ it('does not let REST session creation choose a repository, branch or filesystem
   expect(request).not.toHaveProperty('repo')
   expect(request).not.toHaveProperty('branch')
   expect(request).not.toHaveProperty('checkout')
+})
+
+it('records the Auto-merge mutation once across reconnect and rejects conflicting reuse of its id', async () => {
+  const setAutoMerge = vi.fn(async (sessionId: string, enabled: boolean) => ({ session: { id: sessionId, autoMerge: enabled }, applies: 'next_turn' }))
+  const connect = await serve(async () => ({}), { setAutoMerge })
+  const frame = (enabled: boolean) => JSON.stringify({ id: 'auto-merge-on', command: { type: 'set_auto_merge', sessionId: 's1', enabled } })
+  const first = await connect()
+  const initial = ack(first, 'auto-merge-on')
+  first.send(frame(true))
+  expect((await initial).ok).toBe(true)
+  first.terminate()
+  const second = await connect()
+  const repeated = ack(second, 'auto-merge-on')
+  second.send(frame(true))
+  expect((await repeated).ok).toBe(true)
+  expect(setAutoMerge).toHaveBeenCalledExactlyOnceWith('s1', true)
+  const conflict = ack(second, 'auto-merge-on')
+  second.send(frame(false))
+  expect((await conflict).ok).toBe(false)
+  expect(setAutoMerge).toHaveBeenCalledTimes(1)
 })

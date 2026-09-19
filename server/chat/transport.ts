@@ -246,6 +246,8 @@ export class ChatSocketServer {
         return {}
       case 'set_model':
         return { session: await runtime.setModel(String(command.sessionId || ''), String(command.model || ''), command.effort ? String(command.effort) : undefined) }
+      case 'set_auto_merge':
+        return await runtime.setAutoMerge(String(command.sessionId || ''), command.enabled)
       case 'set_mode':
         await runtime.setMode(String(command.sessionId || ''), String(command.mode || ''))
         return {}
@@ -448,5 +450,6 @@ function localSessionRequest(body: any): import('./protocol').NewSessionRequest 
     title: typeof body.title === 'string' ? body.title : undefined,
     context: body.context && typeof body.context === 'object' ? sanitizeContext(body.context) : undefined,
     fallbackModel: typeof body.fallbackModel === 'string' ? body.fallbackModel : undefined,
+    ...(body.autoMerge !== undefined ? { autoMerge: body.autoMerge } : {}),
   }
 }

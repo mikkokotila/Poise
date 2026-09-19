@@ -4,7 +4,8 @@ A Poise implementation request is a delegation for that change: implement it,
 validate it, open and merge its PR, and make it available in the current tab.
 There is no second merge-approval step for ordinary Poise improvements.
 Discussion is still discussion. Other repositories retain explicit human merge
-approval; a model cannot expand the controller's fixed repository identity.
+approval unless the user enables the separate session-level [Auto-merge mode](Auto-merge.md).
+That opt-in does not expand the controller's fixed repository identity.
 
 For example, type **Add a search box above the session list so I can filter
 sessions by their titles.** The deployment card follows the request through

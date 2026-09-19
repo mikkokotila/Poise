@@ -28,7 +28,7 @@ import { createComposer, emptyDraft, type Composer, type ComposerDraft } from '.
 import { quickSessionRequest, QUICK_SESSION_MODEL, consoleModelLabel } from '../chat-catalog'
 import { attachChatSidebar } from './chat-sidebar'
 import { createFilePreview } from './chat-file-preview'
-import { ICON_FORK, ICON_HANDOFF, ICON_ACTIVITY } from './chat-icons'
+import { ICON_FORK, ICON_HANDOFF, ICON_ACTIVITY, ICON_AUTO_MERGE } from './chat-icons'
 import { createDeployCard, type DeployCard, type LocalPendingChange } from './chat-deploy-card'
 import { recognisePoiseRequest } from '../poise-request-intent'
 import { parsePoiseCommand, reconcilePendingChanges, releaseChangeId, reserveChangeId, type PoiseCommand } from '../self-update-command'
@@ -82,6 +82,18 @@ let freshDraft: ComposerDraft | null = null
 let freshModelIdentity = QUICK_SESSION_MODEL
 let quickSessionPromise: Promise<SessionEntry> | null = null
 let firstPromptPending = false
+const AUTO_MERGE_DRAFT_KEY = 'poise-chat-fresh-auto-merge'
+let freshAutoMerge = false
+try { freshAutoMerge = sessionStorage.getItem(AUTO_MERGE_DRAFT_KEY) === 'true' } catch { /* optional draft state */ }
+const autoMergeUpdates = new Map<string, Promise<boolean>>()
+
+function setFreshAutoMerge(enabled: boolean): void {
+  freshAutoMerge = enabled
+  try {
+    if (enabled) sessionStorage.setItem(AUTO_MERGE_DRAFT_KEY, 'true')
+    else sessionStorage.removeItem(AUTO_MERGE_DRAFT_KEY)
+  } catch { /* the current draft still keeps the choice */ }
+}
 
 // ── Self-improvement state ─────────────────────────────────────────────────
 // The deploy card follows the supervisor's status for the session on screen.
@@ -607,14 +619,17 @@ function ensureQuickSession(firstPrompt?: ComposerDraft, title?: string): Promis
   if (current) return Promise.reject(new Error('The session is still being created.'))
   const draft = firstPrompt ? null : composer.getDraft()
   const selectedModel = freshModelIdentity
+  const selectedAutoMerge = freshAutoMerge
   quickSessionPromise = (async () => {
     const catalogue = await loadAgents(true)
     if (!catalogue) throw new Error('Could not load the model catalogue. Your message has not been sent.')
     const request = quickSessionRequest(catalogue.agents, selectedModel)
+    if (selectedAutoMerge) request.autoMerge = true
     if (firstPrompt?.text) request.title = firstPrompt.text.slice(0, 200)
     else if (title) request.title = title.slice(0, 200)
     const created = await createSessionEntry(request, draft, firstPrompt, null)
     freshModelIdentity = QUICK_SESSION_MODEL
+    setFreshAutoMerge(false)
     return created
   })().finally(() => { quickSessionPromise = null; queueRender() })
   queueRender()
@@ -824,9 +839,18 @@ function renderDeployCard(): void {
 }
 
 async function sendPrompt(draft: ComposerDraft): Promise<void> {
+  const sourceId = activeId
+  const modeUpdate = sourceId ? autoMergeUpdates.get(sourceId) : null
+  if (modeUpdate) {
+    const saved = await modeUpdate
+    if (!saved || activeId !== sourceId) { keepDraft(sourceId, draft); return }
+  }
   const current = entry()?.record
   const explicit = parsePoiseCommand(draft.text)
-  const natural = explicit ? null : recognisePoiseRequest(draft.text, { poiseChangeSession: current?.workspaceKind === 'poise-change' })
+  // A batch stays with its agent even when it includes Poise. Only the
+  // explicit command selects the independent one-change release controller.
+  const autoMerge = current ? current.autoMerge === true : freshAutoMerge
+  const natural = explicit || autoMerge ? null : recognisePoiseRequest(draft.text, { poiseChangeSession: current?.workspaceKind === 'poise-change' })
   // Vocabulary alone must not reinterpret work on another repository as a
   // Poise request. An explicit Poise target still means what the user wrote.
   const otherRepository = !!current?.repo && current.repo.toLowerCase() !== 'mikkokotila/poise'
@@ -1039,9 +1063,55 @@ function renderHeader(): void {
   headerEl.innerHTML = html
 }
 
+function autoMergeButton(enabled: boolean, pending = false): string {
+  const title = enabled
+    ? 'Auto-merge on — finish and merge the requested PRs across repositories; defer non-blocking questions until the end. Click to turn off.'
+    : 'Auto-merge off — click to let this agent complete and merge the whole requested batch across repositories without merge confirmations.'
+  return `<button type="button" class="chat-icon-btn chat-h-auto-merge" aria-label="Auto-merge" aria-pressed="${enabled}" title="${title}"${pending ? ' disabled aria-busy="true"' : ''}>${ICON_AUTO_MERGE}</button>`
+}
+
+async function toggleAutoMerge(): Promise<void> {
+  const e = entry()
+  if (!e) {
+    if (quickSessionPromise || firstPromptPending) return
+    setFreshAutoMerge(!freshAutoMerge)
+    renderHeader()
+    headerEl.querySelector<HTMLButtonElement>('.chat-h-auto-merge')?.focus()
+    return
+  }
+  const id = e.record.id
+  if (e.pending || autoMergeUpdates.has(id)) return
+  const enabled = e.record.autoMerge !== true
+  const hadFocus = !!document.activeElement?.closest('.chat-h-auto-merge')
+  const update = (async (): Promise<boolean> => {
+    try {
+      const result = await chatClient.setAutoMerge(id, enabled)
+      // Do not replace a newer update received from another tab with an old ack.
+      if (result.session.lastSeq >= e.record.lastSeq) upsertRecord(result.session)
+      if (activeId === id) setNotice(result.warning || null, result.warning ? 'error' : 'info')
+      return true
+    } catch (error) {
+      if (activeId === id) commandFailed(error, 'Auto-merge')
+      else e.error = `Auto-merge update failed — ${(error as Error).message}`
+      return false
+    } finally {
+      autoMergeUpdates.delete(id)
+      if (activeId === id) {
+        const restoreFocus = hadFocus && (document.activeElement === document.body || !!document.activeElement?.closest('.chat-h-auto-merge'))
+        renderHeader()
+        if (restoreFocus) headerEl.querySelector<HTMLButtonElement>('.chat-h-auto-merge')?.focus()
+      }
+      queueRender()
+    }
+  })()
+  autoMergeUpdates.set(id, update)
+  renderHeader()
+  await update
+}
+
 function headerHtml(): string {
   const e = entry()
-  if (!e) return ''
+  if (!e) return `<div class="chat-h-row chat-h-fresh"><span class="chat-controls-spacer"></span>${autoMergeButton(freshAutoMerge, !!quickSessionPromise || firstPromptPending)}</div>`
   const s = e.record
   const agent = agentFor(s.agent)
   const between = !isRunning(s.status) && s.status !== 'starting' && s.status !== 'closed'
@@ -1068,6 +1138,7 @@ function headerHtml(): string {
       ${s.capabilities?.fork ? `<button type="button" class="chat-icon-btn chat-h-fork" title="Fork session" aria-label="Fork"${between ? '' : ' disabled'}>${ICON_FORK}</button>` : ''}
       <button type="button" class="chat-icon-btn chat-h-activity" aria-label="${showActivity ? 'Hide activity' : 'Show activity'}" title="${showActivity ? 'Hide' : 'Show'} thinking and tool activity" aria-pressed="${showActivity}" aria-controls="chat-transcript">${ICON_ACTIVITY}</button>
       ${others.length ? `<span class="chat-h-handoff-wrap"><button type="button" class="chat-icon-btn chat-h-handoff" title="Hand off to another agent" aria-label="Hand off…" aria-haspopup="true" aria-expanded="${handoffOpen}">${ICON_HANDOFF}</button>${handoffOpen ? handoffMenu(others) : ''}</span>` : ''}
+      ${autoMergeButton(s.autoMerge === true, e.pending || autoMergeUpdates.has(s.id))}
     </div>
     ${s.orphanNotice ? `<div class="st-help st-help-error">${escapeHtml(s.orphanNotice)}</div>` : ''}
   `
@@ -1104,6 +1175,7 @@ function attachHeader(): void {
   headerEl.addEventListener('click', (e) => {
     const t = e.target as HTMLElement
     if (t.closest('.chat-h-stop')) { void cancelTurn(); return }
+    if (t.closest('.chat-h-auto-merge')) { void toggleAutoMerge(); return }
     if (t.closest('.chat-h-activity')) {
       showActivity = !showActivity
       try { localStorage.setItem(ACTIVITY_KEY, String(showActivity)) } catch { /* optional preference */ }
@@ -1255,7 +1327,7 @@ async function createSessionEntry(req: NewSessionRequest, draft: ComposerDraft |
     branch: { name: '', origin: 'new', provisional: true },
     title: req.title || req.context?.title || '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'starting',
     capabilities: { steer: true, fork: false, thought: false, plan: false, commands: false, modes: false, permissions: true, questions: true, resume: true, images: false },
-    lastSeq: 0, pendingRequests: [], instance: '', context: req.context,
+    lastSeq: 0, pendingRequests: [], instance: '', context: req.context, autoMerge: req.autoMerge,
   }
   const temporary = upsertRecord(placeholder, { pending: true })
   temporary.draft = draft
@@ -1294,7 +1366,9 @@ async function createSessionEntry(req: NewSessionRequest, draft: ComposerDraft |
 
 async function createSession(req: NewSessionRequest, errorEl: HTMLElement): Promise<void> {
   try {
-    await createSessionEntry(req, activeId ? null : composer.getDraft())
+    const fresh = !activeId
+    await createSessionEntry(fresh && freshAutoMerge ? { ...req, autoMerge: true } : req, activeId ? null : composer.getDraft())
+    if (fresh) setFreshAutoMerge(false)
   } catch (err) {
     const code = err instanceof ChatHttpError ? err.code : undefined
     const message = (err as Error).message

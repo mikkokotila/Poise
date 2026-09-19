@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import type { ChatEnvelope, ChatEvent, PromptInput, SessionRecord } from '../../server/chat/protocol'
+import type { AgentId, ChatEnvelope, ChatEvent, PromptInput, SessionRecord } from '../../server/chat/protocol'
 import type { Adapter, AdapterHost, AdapterStartOptions } from '../../server/chat/adapters/types'
 import type { CallerTurns } from '../../server/chat/caller-turns'
 import { CATALOG } from '../model-catalog-fixture'
@@ -30,7 +30,7 @@ interface FakeControls {
   failStart?: string
 }
 class FakeAdapter implements Adapter {
-  agent = 'grok' as const
+  agent: AgentId = 'grok'
   nativeSessionId: string | undefined
   capabilities = { steer: true, fork: true, thought: true, plan: true, commands: true, modes: false, permissions: true, questions: true, resume: true, images: false }
   alive = false
@@ -81,12 +81,12 @@ function fakeCaller(): CallerTurns & { starts: any[], finishes: any[] } {
 
 const runtimes: Array<import('../../server/chat/runtime').ChatRuntime> = []
 
-function makeRuntime(options: { instance?: string, controls?: FakeControls, caller?: CallerTurns | null, leaseProbes?: import('../../server/chat/checkout-lock').CheckoutLeaseOptions } = {}) {
+function makeRuntime(options: { agent?: AgentId, instance?: string, controls?: FakeControls, caller?: CallerTurns | null, leaseProbes?: import('../../server/chat/checkout-lock').CheckoutLeaseOptions } = {}) {
   const controls: FakeControls = options.controls ?? { hosts: [], adapters: [], startCount: 0 }
   const runtime = new runtimeModule.ChatRuntime({
     instance: options.instance ?? 'poise-test:db',
     instanceLabel: 'test',
-    adapters: { grok: (host) => { const a = new FakeAdapter(host, controls); controls.hosts.push(host); controls.adapters.push(a); return a } },
+    adapters: { [options.agent ?? 'grok']: (host: AdapterHost) => { const a = new FakeAdapter(host, controls); a.agent = options.agent ?? 'grok'; controls.hosts.push(host); controls.adapters.push(a); return a } },
     callerTurns: options.caller === undefined ? fakeCaller() : options.caller,
     catalog: async () => CATALOG as any,
     resolveCheckout: async () => repo,
@@ -511,3 +511,133 @@ describe('chat attachments and mentions', () => {
 
 // Keep the SessionRecord import meaningful for the type checker.
 export type _Record = SessionRecord
+
+// Auto-merge is a session setting passed through the common runtime, not
+// a model-specific capability and not a restriction to the session's repo.
+describe('Auto-merge sessions', () => {
+  it.each(['claude', 'codex', 'grok', 'muse'] as const)('instructs %s to finish the entire batch while keeping the original prompt in history', async (agent) => {
+    const { runtime, controls, events } = makeRuntime({ agent })
+    const model = CATALOG.models.find(m => m.provider === agent)!.identity
+    const session = await runtime.create({ agent, model, autoMerge: true, repo: 'acme/tools', branch: { existing: 'main' } })
+    await waitFor(() => runtime.get(session.id)?.status === 'idle')
+    const text = 'Finish all slices across acme/tools, acme/app and Poise.'
+    runtime.prompt(session.id, { text, attachments: [], mentions: [] })
+    await waitFor(() => ofType(events, session.id, 'turn.finished').length === 1)
+    expect(controls.adapters[0].inputs[0].text).toContain('Auto-merge ON')
+    expect(controls.adapters[0].inputs[0].text).toContain('every repository')
+    expect(controls.adapters[0].inputs[0].text).toContain(text)
+    expect(ofType(events, session.id, 'turn.started')[0].prompt.text).toBe(text)
+    expect(runtime.get(session.id)?.autoMerge).toBe(true)
+  })
+
+  it('persists the choice across recovery without waking an agent and explicitly clears native instructions on disable', async () => {
+    const first = makeRuntime({ instance: 'auto-merge-persist' })
+    const s = await first.runtime.create({ agent: 'grok', model: 'grok-4.6-high', repo: 'acme/any', branch: { existing: 'main' } })
+    await waitFor(() => first.runtime.get(s.id)?.status === 'idle')
+    expect(first.runtime.get(s.id)?.autoMerge).toBeUndefined()
+    await first.runtime.setAutoMerge(s.id, true)
+    expect(first.controls.adapters[0].inputs).toHaveLength(0)
+    expect(first.controls.adapters[0].steered).toHaveLength(0)
+    await first.runtime.stop()
+    const revived = makeRuntime({ instance: 'auto-merge-persist' })
+    await revived.runtime.recover()
+    expect(revived.runtime.list().find(r => r.id === s.id)?.autoMerge).toBe(true)
+    expect(revived.controls.startCount).toBe(0)
+    await revived.runtime.setAutoMerge(s.id, false)
+    expect(revived.controls.startCount).toBe(0)
+    revived.runtime.prompt(s.id, { text: 'Continue normally', attachments: [], mentions: [] })
+    await waitFor(() => ofType(revived.events, s.id, 'turn.finished').length === 1)
+    expect(revived.controls.adapters[0].inputs[0].text).toContain('Auto-merge OFF')
+    expect(ofType(revived.events, s.id, 'turn.started')[0].prompt.text).toBe('Continue normally')
+  })
+
+  it('updates a running turn, releases a pending once-only tool approval, and stops automatic approvals when disabled', async () => {
+    const { runtime, controls, events } = makeRuntime()
+    const s = await runtime.create({ agent: 'grok', model: 'grok-4.6-high', repo: 'acme/tools', branch: { existing: 'main' } })
+    await waitFor(() => runtime.get(s.id)?.status === 'idle')
+    const adapter = controls.adapters[0]; adapter.auto = false
+    runtime.prompt(s.id, { text: 'Finish the PRs', attachments: [], mentions: [] })
+    await waitFor(() => adapter.inputs.length === 1)
+    const host = controls.hosts[0]
+    const request = { title: 'Merge the checked PR in acme/other', input: { command: 'gh pr merge 7 --repo acme/other --merge' }, options: [{ id: 'once', name: 'Once', kind: 'allow_once' as const }, { id: 'no', name: 'Reject', kind: 'reject_once' as const }] }
+    const waiting = host.requestPermission(request)
+    await waitFor(() => runtime.get(s.id)?.status === 'waiting')
+    expect((await runtime.setAutoMerge(s.id, true)).applies).toBe('current_turn')
+    await expect(waiting).resolves.toBe('once')
+    expect(adapter.steered[0]).toContain('Auto-merge ON')
+    expect(ofType(events, s.id, 'permission.resolved').at(-1)).toMatchObject({ optionId: 'once', by: 'auto_merge' })
+    await expect(host.requestPermission(request)).resolves.toBe('once')
+    await runtime.steer(s.id, 'Also finish the independent docs PR')
+    expect(adapter.steered.at(-1)).toContain('Auto-merge ON')
+    expect(ofType(events, s.id, 'steer.sent')[0].text).toBe('Also finish the independent docs PR')
+    expect(ofType(events, s.id, 'steer.sent')).toHaveLength(1)
+    await runtime.setAutoMerge(s.id, false)
+    expect(adapter.steered.at(-1)).toContain('Auto-merge OFF')
+    const count = ofType(events, s.id, 'permission.resolved').length
+    const manual = host.requestPermission(request)
+    await waitFor(() => runtime.get(s.id)?.status === 'waiting')
+    expect(ofType(events, s.id, 'permission.resolved')).toHaveLength(count)
+    runtime.respondPermission(s.id, ofType(events, s.id, 'permission.requested').at(-1).id, 'no')
+    await expect(manual).resolves.toBe('no')
+    expect(adapter.inputs).toHaveLength(1)
+    adapter.finish()
+  })
+
+  it('serializes mode changes and reports failed live delivery without starting another turn', async () => {
+    const { runtime, controls, events } = makeRuntime()
+    const s = await runtime.create({ agent: 'grok', model: 'grok-4.6-high', repo: 'acme/tools', branch: { existing: 'main' } })
+    await waitFor(() => runtime.get(s.id)?.status === 'idle')
+    const adapter = controls.adapters[0]; adapter.auto = false
+    runtime.prompt(s.id, { text: 'Work through the batch', attachments: [], mentions: [] })
+    await waitFor(() => adapter.inputs.length === 1)
+    await Promise.all([runtime.setAutoMerge(s.id, true), runtime.setAutoMerge(s.id, true), runtime.setAutoMerge(s.id, false)])
+    expect(adapter.steered).toHaveLength(2)
+    expect(adapter.steered[0]).toContain('Auto-merge ON')
+    expect(adapter.steered[1]).toContain('Auto-merge OFF')
+    adapter.steer = async () => { throw new Error('native connection lost') }
+    const failed = await runtime.setAutoMerge(s.id, true)
+    expect(failed).toMatchObject({ applies: 'next_turn', session: { autoMerge: true }, warning: expect.stringContaining('native connection lost') })
+    expect(adapter.inputs).toHaveLength(1)
+    expect(ofType(events, s.id, 'steer.sent')).toHaveLength(0)
+    adapter.finish()
+  })
+
+  it('does not invent answers to questions or grant session-wide native permissions', async () => {
+    const { runtime, controls, events } = makeRuntime()
+    const s = await runtime.create({ agent: 'grok', model: 'grok-4.6-high', autoMerge: true, repo: 'acme/tools', branch: { existing: 'main' } })
+    await waitFor(() => runtime.get(s.id)?.status === 'idle')
+    const adapter = controls.adapters[0]; adapter.auto = false
+    runtime.prompt(s.id, { text: 'Finish the batch', attachments: [], mentions: [] })
+    await waitFor(() => adapter.inputs.length === 1)
+    const question = controls.hosts[0].askQuestion({ questions: [{ id: 'q', question: 'Which missing account?', options: [], freeText: true, multiSelect: false }] })
+    await waitFor(() => ofType(events, s.id, 'question.asked').length === 1)
+    expect(ofType(events, s.id, 'question.answered')).toHaveLength(0)
+    runtime.answerQuestion(s.id, ofType(events, s.id, 'question.asked')[0].id, { q: 'My test account' })
+    await expect(question).resolves.toEqual({ q: 'My test account' })
+    const permission = controls.hosts[0].requestPermission({ title: 'Persistent native grant', options: [{ id: 'always', name: 'Always', kind: 'allow_always' }, { id: 'no', name: 'Reject', kind: 'reject_once' }] })
+    await waitFor(() => ofType(events, s.id, 'permission.requested').length === 1)
+    expect(ofType(events, s.id, 'permission.resolved')).toHaveLength(0)
+    runtime.respondPermission(s.id, ofType(events, s.id, 'permission.requested')[0].id, 'no')
+    await expect(permission).resolves.toBe('no')
+    adapter.finish()
+  })
+
+  it('validates explicit booleans and session ownership, and inherits the choice on deliberate forks and handoffs', async () => {
+    const { runtime, events } = makeRuntime()
+    const request = { agent: 'grok' as const, model: 'grok-4.6-high', repo: 'acme/tools', branch: { existing: 'main' } }
+    await expect(runtime.create({ ...request, autoMerge: 'yes' as unknown as boolean })).rejects.toThrow(/boolean/)
+    const s = await runtime.create({ ...request, autoMerge: true })
+    await waitFor(() => runtime.get(s.id)?.status === 'idle')
+    expect(() => runtime.setAutoMerge(s.id, 'false' as unknown as boolean)).toThrow(/boolean/)
+    const foreign = makeRuntime({ instance: 'auto-merge-other-server' })
+    expect(() => foreign.runtime.setAutoMerge(s.id, true)).toThrow(/another Poise server/)
+    const fork = await runtime.fork(s.id)
+    expect(fork.autoMerge).toBe(true)
+    await waitFor(() => runtime.get(fork.id)?.status === 'idle')
+    const handoff = await runtime.handoff(s.id, { agent: 'grok', model: 'grok-4.6-high' })
+    expect(handoff.autoMerge).toBe(true)
+    await waitFor(() => ofType(events, handoff.id, 'turn.finished').length === 1)
+    const unrelated = await runtime.create(request)
+    expect(unrelated.autoMerge).toBeUndefined()
+  })
+})

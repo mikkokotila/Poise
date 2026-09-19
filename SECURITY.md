@@ -118,3 +118,17 @@ effects, or stolen credentials by reverting source code. Persistent data and
 Caller remain outside the replaceable Poise artifact and retain their existing
 locations and permissions. Deployment handover waits for admitted work;
 shutdown of a browser connection is not proof that its file operation ended.
+
+## Explicit session Auto-merge delegation
+
+The user can separately enable Auto-merge in a Chat session for requested work
+across repositories. The server validates a boolean command, session ownership
+and durable replay receipts; agent output cannot toggle the setting. Native
+tool requests with an allow-once option are then resolved with an audited
+`auto_merge` decision. This is broad delegation to the selected coding agent,
+not an OS sandbox or a persistent native permission grant. Existing explicit
+refusals remain effective, real questions remain unanswered until addressed,
+and disabling stops automatic tool approvals. Shared instructions require
+normal repository checks/protections and verified merges; those are not
+replaced by a new general-purpose server merge gate. The Poise-only release
+controller and its credential scope remain unchanged.

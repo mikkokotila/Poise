@@ -5915,3 +5915,15 @@ body:has(#view-chat:not([hidden])) #app { padding-bottom: 0; }
 @media (prefers-reduced-motion: reduce) {
   .chat-deploy-state.moving::before { animation: none; opacity: 1; }
 }
+
+/* A pre-session choice must not move the fresh console or its model menu. */
+.chat-session-header:has(.chat-h-fresh) {
+  position: absolute;
+  inset: 0 0 auto;
+  border-bottom: none;
+  pointer-events: none;
+  z-index: 1;
+}
+.chat-h-fresh .chat-h-auto-merge { pointer-events: auto; }
+.chat-h-auto-merge { flex: 0 0 28px; }
+.chat-h-auto-merge:focus-visible { outline: 1px solid var(--text-secondary); outline-offset: 2px; }
