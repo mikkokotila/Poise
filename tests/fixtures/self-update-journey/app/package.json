@@ -5,7 +5,7 @@
   "description": "Zero-dependency stand-in for Poise used by the release journey integration test.",
   "type": "module",
   "scripts": {
-    "check": "node --test tests/greeting.spec.mjs",
+    "check": "node --test --test-reporter=tap tests/greeting.spec.mjs",
     "build": "node scripts/build.mjs",
     "start": "node dist/server.js"
   }

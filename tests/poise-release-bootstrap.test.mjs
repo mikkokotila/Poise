@@ -18,7 +18,8 @@ const SHA = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678'
 const NEXT_SHA = 'b'.repeat(40)
 const CALLER_SHA = 'cddc30284e6057c1f835fcc8ffa6924d07a2537d'
 const TOKEN = `github_pat_${'x'.repeat(60)}`
-const UID = 501
+// File ownership is real even though launchd is simulated.
+const UID = process.getuid?.() ?? 501
 
 let home
 beforeEach(async () => { home = await mkdtemp(join(tmpdir(), 'poise-bootstrap-')) })
