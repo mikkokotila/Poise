@@ -94,11 +94,13 @@ describe('Chat runtime lifecycle regression cases', () => {
     const id = await session()
     await runtime.prompt(id, input)
     await until(() => promptCount === 1)
-    const closing = runtime.close(id)
-    const finished = await Promise.race([closing.then(() => true), pause(400).then(() => false)])
-    currentFinish?.({ stopReason: 'cancelled' })
-    await closing
-    expect(finished).toBe(true)
+    // The fake turn can finish only when close reaches adapter.cancel().
+    // Await it without manually resolving the turn: queueing close behind
+    // the coding turn would deadlock and fail the test timeout. A 400 ms
+    // stopwatch instead measured unrelated concurrent build/disk contention.
+    const closed = await runtime.close(id)
+    expect(closed.status).toBe('closed')
+    expect(currentFinish).toBeNull()
   })
 
   it('refuses agent filesystem writes while its session is idle and holds no lease', async () => {
