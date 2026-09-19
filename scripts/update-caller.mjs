@@ -1,3 +1,4 @@
+import { selfUpdateRoot, selfUpdateEnabled, supervisorRequest } from './self-update-bridge.mjs'
 import { spawn } from 'node:child_process'
 import { readFile, realpath } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -126,6 +127,23 @@ export async function reconcileRuntime(options = {}) {
     caller: validCommit(previous?.caller) ? previous.caller : null,
   }
   try {
+    // A managed release controller is the only promoter once opted in. Even
+    // when it is down, do not reinstall rejected code or update Caller here.
+    const root = selfUpdateRoot(home)
+    const managed = options.selfUpdateStatus
+      ? await options.selfUpdateStatus()
+      : await selfUpdateEnabled(root) ? await supervisorRequest(root, 'POST', '/tick', {}) : null
+    if (managed) {
+      if (!managed.enabled || !managed.activeRelease?.sha) throw new Error('Self-update controller has no verified active release')
+      state.poise.deployed = requireCommit(managed.activeRelease.sha, 'Active release')
+      state.poise.installed = state.poise.deployed
+      state.poise.remote = managed.hold?.sha || managed.remoteSha || state.poise.deployed
+      state.caller = managed.activeRelease.callerSha || state.caller
+      if (managed.hold) throw new Error(`Automatic promotion held: ${managed.hold.reason}`)
+      state.status = 'current'
+      state.action = 'managed-self-update'
+      return { action: 'managed-self-update', poiseCommit: state.poise.deployed }
+    }
     const result = await reconcile({ ...options, home, run, previous, state })
     state.status = result.action === 'current' ? 'current' : 'updated'
     state.action = result.action

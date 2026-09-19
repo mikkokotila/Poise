@@ -1,14 +1,18 @@
 // New Chat sessions use ignored Poise-owned storage. Its private Git
 // repository is only a checkpoint mechanism; it never switches Poise itself.
 import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { CLAUDE_SUBSCRIPTION_CLI, runFile } from '../process'
 import { CheckoutLease, canonicalCheckout } from './checkout-lock'
 import { runGuarded } from './git'
 import { pgidAlive } from './worker'
 
 export const POISE_ROOT = dirname(dirname(CLAUDE_SUBSCRIPTION_CLI))
-export const LOCAL_CHAT_ROOT = join(POISE_ROOT, '.poise-chat')
+const DEFAULT_LOCAL_CHAT_ROOT = join(POISE_ROOT, '.poise-chat')
+// Immutable releases keep user data in the original installation's ignored
+// workspace, selected by the trusted launcher, never a browser request.
+export const LOCAL_CHAT_ROOT = process.env.POISE_CHAT_ROOT
+  ? resolve(process.env.POISE_CHAT_ROOT) : DEFAULT_LOCAL_CHAT_ROOT
 const OWNER = 'Poise local Chat workspace v1\n'
 
 async function privateDirectory(path: string): Promise<void> {
@@ -35,7 +39,7 @@ async function readyWorkspace(checkout: string): Promise<boolean> {
 }
 
 export async function ensureLocalWorkspace(root = LOCAL_CHAT_ROOT, instance = 'poise'): Promise<string> {
-  if (root === LOCAL_CHAT_ROOT) {
+  if (root === DEFAULT_LOCAL_CHAT_ROOT) {
     await runFile('git', ['check-ignore', '--quiet', '--no-index', '.poise-chat/workspace'], { cwd: POISE_ROOT })
       .catch(() => { throw new Error('Poise must ignore /.poise-chat/ before local Chat storage can be created') })
   }

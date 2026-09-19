@@ -1,5 +1,6 @@
 import { defineConfig, loadEnv, type Plugin } from 'vite'
 import { resolve } from 'node:path'
+import { buildSourceSha } from './scripts/build-identity.mjs'
 import { validateConfabUrl } from './server/runtime-config'
 
 const RUNTIME_ENV_KEYS = [
@@ -46,6 +47,7 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [poiseApiPlugin(env)],
+    define: { __POISE_BUILD_SHA__: JSON.stringify(buildSourceSha()) },
     build: {
       outDir: 'dist/client',
     },

@@ -9,6 +9,8 @@
 // everything after the last `seq` it acknowledged and renders the transcript
 // from the mirror alone — the agent is never woken to show history.
 
+import type { SelfChange } from '../../src/self-update-types'
+
 export type AgentId = 'claude' | 'codex' | 'grok' | 'muse'
 
 export const AGENT_IDS: readonly AgentId[] = ['claude', 'codex', 'grok', 'muse']
@@ -75,7 +77,13 @@ export interface SessionRecord {
   repo: string
   /** Absolute canonical path of the checkout the session runs in. */
   checkout: string
-  workspaceKind?: 'poise-local'
+  /** `poise-local`: Poise-owned scratch storage. `poise-change`: a checkout
+   *  the self-update controller prepared for one `/poise` change; the
+   *  session was created by the server, never from a browser repo choice. */
+  workspaceKind?: 'poise-local' | 'poise-change'
+  /** The self-update change this session implements (`workspaceKind` is
+   *  `poise-change`). Its first turn's settlement is reported to the controller. */
+  selfChangeId?: string
   branch: BranchBinding
   title: string
   createdAt: string
@@ -142,14 +150,16 @@ export interface WorkspaceState {
 }
 
 export interface SessionContext {
-  kind: 'card' | 'document' | 'handoff'
+  /** `poise-change`: the exact `/poise` request (`body`) and the session it
+   *  was typed in (`fromSession`); the server composes the first prompt. */
+  kind: 'card' | 'document' | 'handoff' | 'poise-change'
   title: string
   body?: string
   url?: string
   headSha?: string
   /** Editor document slug for `document` context. */
   slug?: string
-  /** Source session for an explicit cross-agent handoff. */
+  /** Source session for an explicit cross-agent handoff or a `/poise` change. */
   fromSession?: string
 }
 
@@ -298,8 +308,17 @@ export type ChatCommand =
   | { type: 'set_model', sessionId: string, model: string, effort?: string }
   | { type: 'set_mode', sessionId: string, mode: string }
   | { type: 'revert', sessionId: string, diffId: string }
+  /** Implement and auto-release one Poise change. Only ever sent by the
+   *  browser for a typed `/poise …` message; `changeId` is minted once per
+   *  request so a resend after an in-doubt answer never starts a second
+   *  change. The ack is a `PoiseChangeAck`. */
+  | { type: 'poise.change', sessionId: string, text: string, changeId: string }
 
 export type ChatCommandType = ChatCommand['type']
+
+/** Ack payload of `poise.change`: the dedicated session the change runs in
+ *  (already selected model, controller-prepared checkout) and the change. */
+export interface PoiseChangeAck { session: SessionRecord, change: SelfChange }
 
 /** Client → server frame. `id` is a client-chosen request id; a frame with an
  *  id the server already answered is answered again from its cache instead of
@@ -329,6 +348,10 @@ export type ChatErrorCode =
   | 'invalid'
   | 'compat'
   | 'agent_error'
+  /** Poise is installing an update: new work is refused until it restarts. */
+  | 'draining'
+  /** `/poise` needs the separately installed self-update controller. */
+  | 'self_update_unavailable'
 
 export const WS_PATH = '/ws/chat'
 

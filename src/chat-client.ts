@@ -20,7 +20,10 @@ import type {
   ServerFrame,
   SessionRecord,
   AgentId,
+  PoiseChangeAck,
 } from '../server/chat/protocol'
+import type { SelfChange, SelfUpdateStatus } from './self-update-types'
+import { parseChange, parseSelfUpdateStatus } from './self-update-state'
 
 export type ConnectionState = 'connecting' | 'open' | 'closed'
 
@@ -352,6 +355,26 @@ export class ChatClient {
     })
   }
 
+  /** Commands sent and not yet acknowledged; a reload while any exist could
+   *  lose the answer to something that already reached the agent. */
+  pendingCount(): number {
+    return this.pending.size
+  }
+
+  /** Start one Poise self-change from `sessionId`. `changeId` is minted once
+   *  in the browser and kept for any retry, so the durable receipt answers a
+   *  resend instead of preparing a second change. The ack carries the new
+   *  dedicated session and the change record; anything else is an error. */
+  async startPoiseChange(sessionId: string, text: string, changeId: string): Promise<PoiseChangeAck> {
+    const result = await this.send({ type: 'poise.change', sessionId, text, changeId }) as { session?: unknown, change?: unknown } | null
+    const change = parseChange(result?.change)
+    const session = result?.session && typeof result.session === 'object' ? result.session as SessionRecord : null
+    if (!session || typeof session.id !== 'string' || !change) {
+      throw new ChatCommandError('the server accepted the change but did not describe it; check the session list before repeating it', 'command_in_doubt')
+    }
+    return { session, change }
+  }
+
   /** Whether a session is subscribed, and from which seq. */
   subscribedAfter(sessionId: string): number | undefined {
     return this.subscriptions.get(sessionId)
@@ -442,6 +465,29 @@ export class ChatClient {
 
   files(sessionId: string, q: string): Promise<{ files: string[] }> {
     return jsonFetch(`/api/chat/files?session=${encodeURIComponent(sessionId)}&q=${encodeURIComponent(q)}`)
+  }
+
+  // ── Self-improvement ────────────────────────────────────────────────────
+
+  /** Status for the changes visible to one session. `null` means the feature
+   *  is not there at all (older server, no bridge) — never an exception, so a
+   *  missing supervisor leaves the view untouched. */
+  async selfUpdateStatus(sessionId: string): Promise<SelfUpdateStatus | null> {
+    const res = await fetch(`/api/self-update?session=${encodeURIComponent(sessionId)}`, { cache: 'no-store' })
+    if (res.status === 404 || res.status === 501) return null
+    if (!res.ok) throw await readError(res)
+    let body: unknown = null
+    try { body = await res.json() } catch { return null }
+    return parseSelfUpdateStatus(body)
+  }
+
+  /** One-click rollback, bound to the exact release the card showed. The
+   *  server deduplicates by change id; a repeated click shares the operation. */
+  async revertSelfChange(changeId: string, expectedReleaseId: string): Promise<SelfChange> {
+    const result = await post<{ change?: unknown }>('/api/self-update/revert', { changeId, expectedReleaseId })
+    const change = parseChange(result?.change)
+    if (!change) throw new ChatHttpError(200, 'the rollback was accepted but the server did not describe the change', 'invalid')
+    return change
   }
 
   async uploadAttachment(sessionId: string, file: File): Promise<Attachment> {

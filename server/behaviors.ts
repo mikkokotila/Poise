@@ -1,3 +1,4 @@
+import { releaseBackgroundPaused, trackReleaseBackground } from './release-background'
 // Server-side behavior runtime. Lives with the Poise HTTP server
 // so the toggle keeps working when the browser tab is closed,
 // reloaded, or backgrounded — none of which the original
@@ -1983,6 +1984,7 @@ let tickerStarted = false
 let tickTimer: ReturnType<typeof setTimeout> | null = null
 let runtimeGeneration = 0
 export const BEHAVIOR_TICK_MS = 60_000
+
 export const BEHAVIOR_OPERATION_TIMEOUT_MS = 55_000
 const BEHAVIOR_HEALTH_GRACE_MS = 5_000
 let runtimeStartedAtMs: number | null = null
@@ -1999,6 +2001,7 @@ function serializeBehaviorOperation<T>(
   key: BehaviorKey,
   operation: () => Promise<T>,
 ): Promise<T> {
+  const releaseOperation = trackReleaseBackground()
   const previous = behaviorOperationTails.get(key) || Promise.resolve()
   const execute = async () => {
     const startedAt = Date.now()
@@ -2016,7 +2019,7 @@ function serializeBehaviorOperation<T>(
       }
     }
   }
-  const run = previous.then(execute, execute)
+  const run = previous.then(execute, execute).finally(releaseOperation)
   const tail = run.then(() => undefined, () => undefined)
   behaviorOperationTails.set(key, tail)
   void tail.finally(() => {
@@ -2053,6 +2056,7 @@ async function runBehaviorCycle(
 export async function runEnabledBehaviorsOnce(
   options: RunEnabledBehaviorsOptions = {},
 ): Promise<void> {
+  if (releaseBackgroundPaused()) return
   const operations: Promise<void>[] = []
   if (isEnabled('review-new-prs')
     && (!options.skipBusy || !behaviorOperationTails.has('review-new-prs'))) {

@@ -19,6 +19,7 @@
 // previous bundle is moved aside and restored rather than trusted in place.
 
 import { spawn } from 'node:child_process'
+import { buildSourceSha } from './build-identity.mjs'
 import { createHash } from 'node:crypto'
 import { readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve } from 'node:path'
@@ -36,6 +37,8 @@ const SOURCE_FILES = [
   'vite.config.ts',
   'tsconfig.json',
   'tsconfig.server.json',
+  'scripts/build-server.mjs',
+  'scripts/build-identity.mjs',
 ]
 
 async function collectDirectory(root, dir, into) {
@@ -61,7 +64,7 @@ async function collectDirectory(root, dir, into) {
 // and it is the same signal a build cache uses. A checkout, pull or merge
 // rewrites mtimes, which is exactly the case that must force a rebuild.
 export async function computeBuildStamp(root = projectRoot) {
-  const parts = []
+  const parts = [`source:${buildSourceSha(root) || 'development'}`]
   for (const dir of SOURCE_DIRECTORIES) {
     await collectDirectory(root, join(root, dir), parts)
   }

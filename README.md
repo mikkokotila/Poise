@@ -252,6 +252,22 @@ open read-only previews, and internal Muse reminder cards are not displayed.
 See [Chat v1](docs/Chat-v1.md) for architecture, recovery, release integration
 and the distinction between automated coverage and live-agent verification.
 
+## Improve Poise from Poise
+
+After the one-time release-controller installation, a Poise implementation
+request in Chat can proceed through implementation, checks, CI, automatic PR
+merge, a verified release and safe tab refresh. Natural requests are supported;
+`/poise` is an optional shortcut. Other repositories do not inherit this merge
+authority. The persistent deployment card provides one-click **Revert** for
+the latest eligible change, backed by a retained release rather than another
+agent turn. Caller and persistent application data keep their existing versions
+and locations.
+
+See [Self-improvement](docs/Self-improvement.md) for the setup commands, release
+boundary, independent recovery, maintenance, and verification record. The
+initial controller/bootstrap PR is reviewed manually; routine eligible Poise
+changes do not require another merge confirmation.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

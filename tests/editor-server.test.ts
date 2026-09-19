@@ -234,7 +234,7 @@ describe('editor file integrity', () => {
     }
 
     const results = await Promise.all(jobs.map((job) => job.result))
-    expect(results.filter((result) => result.ok)).toHaveLength(1)
+    expect(results.filter((result) => result.ok), JSON.stringify(results)).toHaveLength(1)
     const winner = results[0].ok ? 0 : 1
     const success = results[winner]
     const conflict = results[1 - winner]
@@ -285,7 +285,7 @@ describe('editor file integrity', () => {
     }
 
     const results = await Promise.all(jobs.map((job) => job.result))
-    expect(results.filter((result) => result.ok)).toHaveLength(1)
+    expect(results.filter((result) => result.ok), JSON.stringify(results)).toHaveLength(1)
     const winner = results[0].ok ? 0 : 1
     const success = results[winner]
     const conflict = results[1 - winner]

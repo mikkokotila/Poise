@@ -26,7 +26,7 @@ export function validateConfabUrl(value: string): string {
   return url.toString()
 }
 
-export async function assertSecureDotenv(cwd: string = process.cwd()): Promise<void> {
+export async function assertSecureDotenv(cwd: string = process.env.POISE_ENV_ROOT || process.cwd()): Promise<void> {
   const path = resolve(cwd, '.env')
   let fileStat
   try {
@@ -43,7 +43,7 @@ export async function assertSecureDotenv(cwd: string = process.cwd()): Promise<v
   }
 }
 
-export async function loadSecureDotenv(cwd: string = process.cwd()): Promise<void> {
+export async function loadSecureDotenv(cwd: string = process.env.POISE_ENV_ROOT || process.cwd()): Promise<void> {
   await assertSecureDotenv(cwd)
   const result = loadDotenv({ path: resolve(cwd, '.env'), quiet: true })
   if (result.error && (result.error as NodeJS.ErrnoException).code !== 'ENOENT') {

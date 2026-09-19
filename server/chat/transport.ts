@@ -252,6 +252,14 @@ export class ChatSocketServer {
       case 'revert':
         await runtime.revert(String(command.sessionId || ''), String(command.diffId || ''))
         return {}
+      case 'poise.change': {
+        // Only these three fields exist: the browser never names a
+        // repository, branch or path for a change — the controller does.
+        const changeId = String(command.changeId || '')
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(changeId)) throw new ChatError(400, 'changeId must be a UUID', 'invalid')
+        const result: import('./protocol').PoiseChangeAck = await runtime.startPoiseChange(String(command.sessionId || ''), String(command.text || ''), changeId)
+        return result
+      }
       default:
         throw new ChatError(400, `unknown command ${String((command as any).type)}`, 'invalid')
     }
