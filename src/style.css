@@ -5626,12 +5626,68 @@ body:has(#view-chat:not([hidden])) #app { padding-bottom: 0; }
   border-color: color-mix(in srgb, var(--hairline) 68%, transparent);
   box-shadow: var(--e-0);
 }
+/* The draft's model is a quiet control with a bounded catalogue dropdown. */
+.chat-model-control { position: relative; min-width: 0; }
+.chat-model-control[hidden], .chat-model-menu[hidden] { display: none; }
 .chat-default-model {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  max-width: 100%;
+  min-height: 26px;
+  font-family: inherit;
   font-size: 0.6875rem;
   color: var(--text-tertiary);
   padding: 0 var(--sp-1);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--t-quick) ease, color var(--t-quick) ease;
 }
-.chat-default-model[hidden] { display: none; }   /* the popover rises above it */
+.chat-model-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-default-model svg { flex: 0 0 auto; }
+.chat-default-model:hover:not(:disabled), .chat-default-model[aria-expanded="true"] { color: var(--text); background: var(--hover); }
+.chat-default-model:disabled { cursor: default; opacity: 0.6; }
+.chat-model-menu {
+  position: absolute;
+  z-index: 32;
+  bottom: calc(100% + var(--sp-2));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--sp-1);
+  background: var(--surface);
+  border: var(--b-hair);
+  border-radius: var(--r-md);
+  box-shadow: var(--e-2);
+  animation: chat-model-enter var(--t-quick) ease-out;
+}
+.chat-model-menu[data-side="below"] { bottom: auto; top: calc(100% + var(--sp-2)); }
+.chat-model-group + .chat-model-group { border-top: var(--b-hair); margin-top: var(--sp-1); }
+.chat-model-provider { padding: var(--sp-2); color: var(--text-tertiary); font-size: 0.6875rem; font-weight: 600; }
+.chat-model-unavailable, .chat-model-status { padding: 0 var(--sp-2) var(--sp-2); font-size: 0.6875rem; color: var(--text-secondary); line-height: 1.5; }
+.chat-model-status { padding-top: var(--sp-2); }
+.chat-model-option, .chat-model-retry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.75rem;
+  text-align: left;
+  cursor: pointer;
+}
+.chat-model-option[aria-disabled="true"] { color: var(--text-tertiary); cursor: not-allowed; }
+.chat-model-option[aria-selected="true"], .chat-model-option:hover:not([aria-disabled="true"]), .chat-model-retry:hover { background: var(--hover); }
+.chat-model-option:focus-visible, .chat-model-retry:focus-visible { outline-offset: -2px; }
+.chat-model-check { flex: 0 0 12px; color: var(--text-secondary); }
+@keyframes chat-model-enter { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
 .chat-v-composer .chat-input-wrap.drag-over { border-color: var(--a1); }
 .chat-input-row { position: relative; }
 /* The chip lives inside the textarea's box; chat-composer.ts measures it and

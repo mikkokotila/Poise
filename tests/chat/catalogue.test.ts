@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { catalogueAgents } from '../../server/chat/catalog-agents'
-import { catalogueFamilies, familyForIdentity, quickSessionRequest } from '../../src/chat-catalog'
+import { catalogueFamilies, familyForIdentity, quickSessionRequest, consoleModelLabel } from '../../src/chat-catalog'
 import { CATALOG } from '../model-catalog-fixture'
 
 describe('Chat uses the whole catalogue', () => {
@@ -48,5 +48,25 @@ describe('Fresh console model policy', () => {
   it('does not silently fall back when Claude is signed out', async () => {
     const agents = await catalogueAgents(catalog, false, async () => ({ ok: true }))
     expect(() => quickSessionRequest(agents)).toThrow(/unavailable/)
+  })
+})
+
+
+describe('Console model selection', () => {
+  it('resolves every launchable catalogue variant, not just the default', async () => {
+    const agents = await catalogueAgents(CATALOG, true, async () => ({ ok: true }))
+    for (const agent of agents.filter(a => a.available)) for (const model of agent.models) {
+      expect(quickSessionRequest(agents, model.identity)).toEqual({ agent: agent.id, model: model.identity, effort: model.effort })
+    }
+  })
+  it('keeps unavailable and retired selections from silently becoming a different model', async () => {
+    const agents = await catalogueAgents(CATALOG, true, async () => ({ ok: true }))
+    expect(() => quickSessionRequest(agents, 'gemini-3.8-flash-high')).toThrow(/unavailable/)
+    expect(() => quickSessionRequest(agents, 'retired-model-max')).toThrow(/not in the current catalogue/)
+  })
+  it('labels the actual family and effort without changing catalogue identities', () => {
+    expect(consoleModelLabel('opus-5-high')).toBe('Opus 5 · High')
+    expect(consoleModelLabel('gpt-6-astra-max')).toBe('GPT 6 Astra · Max')
+    expect(consoleModelLabel('muse-spark-1.3-contributor-xhigh')).toBe('Muse Spark 1.3 Contributor · Extra high')
   })
 })

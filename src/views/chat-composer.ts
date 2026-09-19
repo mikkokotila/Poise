@@ -10,6 +10,8 @@
 
 import type { Attachment, CommandOption, Mention } from '../../server/chat/protocol'
 import { escapeHtml } from '../markdown'
+import type { AgentInfo } from '../chat-client'
+import { attachModelPicker } from './chat-model-picker'
 
 export interface ComposerDraft {
   text: string
@@ -24,8 +26,9 @@ export interface ComposerState {
   /** Nothing can be sent; `placeholder` says why. */
   disabled: boolean
   placeholder?: string
-  /** Quiet label for the implicit fresh-session model. */
+  /** Draft model choice, shown before a session is created. */
   modelLabel?: string
+  modelIdentity?: string
   /** Offer a Resume button (the session was interrupted). */
   resume?: boolean
   /** Whether the session has an upload target. */
@@ -34,6 +37,8 @@ export interface ComposerState {
 
 export interface ComposerHandlers {
   onSend(draft: ComposerDraft): void
+  loadModels(): Promise<AgentInfo[]>
+  onModelSelect(identity: string): void
   onSteer(text: string): void
   onStop(): void
   onResume(): void
@@ -90,7 +95,13 @@ export function createComposer(handlers: ComposerHandlers): Composer {
       </div>
       <div class="chat-controls">
         <button class="chat-attach" type="button" aria-label="Attach file" title="Attach file">${ICON_PLUS}</button>
-        <span class="chat-default-model" hidden></span>
+        <div class="chat-model-control" hidden>
+          <button type="button" class="chat-default-model" aria-haspopup="listbox" aria-expanded="false" aria-controls="chat-console-models" title="Choose model and effort">
+            <span class="chat-model-label"></span>
+            <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="m3 4.5 3 3 3-3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <div id="chat-console-models" class="chat-model-menu" role="listbox" aria-label="Console model" tabindex="-1" hidden></div>
+        </div>
         <span class="chat-steer-hint" hidden>steering</span>
         <span class="chat-controls-spacer"></span>
         <button class="chat-resume-btn" type="button" hidden>Resume</button>
@@ -109,7 +120,9 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   const resumeBtn = el.querySelector<HTMLButtonElement>('.chat-resume-btn')!
   const fileInput = el.querySelector<HTMLInputElement>('.chat-file-input')!
   const steerHint = el.querySelector<HTMLElement>('.chat-steer-hint')!
-  const modelLabel = el.querySelector<HTMLElement>('.chat-default-model')!
+  const modelPicker = attachModelPicker(el.querySelector<HTMLElement>('.chat-model-control')!, {
+    loadModels: handlers.loadModels, onSelect: handlers.onModelSelect,
+  })
   const popover = el.querySelector<HTMLElement>('.chat-popover')!
 
   let uploading = 0
@@ -485,8 +498,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     attachBtn.disabled = state.disabled || uploading > 0
     input.placeholder = state.disabled ? (state.placeholder || 'Unavailable') : (state.running ? 'Steer the agent… (Enter)' : (state.placeholder || DEFAULT_PLACEHOLDER))
     sendBtn.disabled = state.disabled || (uploading > 0 && !state.running)
-    modelLabel.hidden = !state.modelLabel
-    modelLabel.textContent = state.modelLabel || ''
+    modelPicker.setState({ identity: state.modelIdentity || '', label: state.modelLabel || '', visible: !!state.modelLabel, disabled: state.disabled || uploading > 0 })
     sendBtn.innerHTML = state.running ? ICON_STOP : ICON_SEND
     sendBtn.setAttribute('aria-label', state.running ? 'Stop' : 'Send')
     sendBtn.title = state.running ? 'Stop (⌘.)' : 'Send (Enter)'
@@ -516,7 +528,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
       // The view calls this on every render, including each streamed delta;
       // only a real change touches the DOM.
       const same = state.running === next.running && state.disabled === next.disabled
-        && state.modelLabel === next.modelLabel && state.placeholder === next.placeholder && state.resume === next.resume && state.sessionId === next.sessionId
+        && state.modelIdentity === next.modelIdentity && state.modelLabel === next.modelLabel && state.placeholder === next.placeholder && state.resume === next.resume && state.sessionId === next.sessionId
       state = next
       if (!same) applyState()
     },
@@ -524,6 +536,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
       return { text: input.value, attachments: attachments.slice(), mentions: mentions.slice(), mode: activeMode }
     },
     setDraft(draft) {
+      modelPicker.close()
       const d = draft || emptyDraft()
       input.value = d.text
       attachments = d.attachments.slice()
@@ -534,6 +547,6 @@ export function createComposer(handlers: ComposerHandlers): Composer {
       autoResize()
     },
     focus() { input.focus() },
-    layout() { autoResize(); if (activeMode) applyMode(activeMode) },
+    layout() { autoResize(); modelPicker.layout(); if (activeMode) applyMode(activeMode) },
   }
 }

@@ -28,12 +28,23 @@ export function familyForIdentity(families: ModelFamily[], identity: string): Mo
   return families.find(family => family.models.some(model => model.identity === identity))
 }
 
-/** The fresh console has a deliberate default, independent of dialog settings.
- * Resolve it in the current catalogue; never silently send to another model. */
-export function quickSessionRequest(agents: AgentInfo[]): import('../server/chat/protocol').NewSessionRequest {
-  const agent = agents.find(candidate => candidate.id === 'claude')
-  const model = agent?.models.find(candidate => candidate.identity === 'opus-5-high' && candidate.effort === 'high')
-  if (!model) throw new Error('Opus 5 High is not in the current catalogue. Choose a model with New session.')
-  if (!agent?.available) throw new Error(`Opus 5 High is unavailable: ${agent?.reason || 'Claude Code is not ready'}. Choose a model with New session.`)
-  return { agent: 'claude', model: model.identity, effort: model.effort }
+export const QUICK_SESSION_MODEL = 'opus-5-high'
+
+/** Display only: submission always uses an actual catalogue row, never a label. */
+export function consoleModelLabel(identity: string, effort = identity.split('-').pop() || ''): string {
+  const suffix = `-${effort}`
+  const family = identity.endsWith(suffix) ? identity.slice(0, -suffix.length) : identity
+  const name = family.split('-').map(part => part === 'gpt' ? 'GPT' : part.charAt(0).toUpperCase() + part.slice(1)).join(' ')
+  const level = effort === 'xhigh' ? 'Extra high' : effort.charAt(0).toUpperCase() + effort.slice(1)
+  return `${name} · ${level}`
+}
+
+/** Resolve the draft's choice again at Send/Attach, without silent fallback. */
+export function quickSessionRequest(agents: AgentInfo[], identity = QUICK_SESSION_MODEL): import('../server/chat/protocol').NewSessionRequest {
+  const agent = agents.find(candidate => candidate.models.some(model => model.identity === identity))
+  const model = agent?.models.find(candidate => candidate.identity === identity)
+  const label = consoleModelLabel(identity)
+  if (!model) throw new Error(`${label} is not in the current catalogue. Choose another model in the console or with New session.`)
+  if (!agent?.available) throw new Error(`${label} is unavailable: ${agent?.reason || 'The provider is not ready'}. Choose another model in the console or with New session.`)
+  return { agent: agent.id as import('../server/chat/protocol').AgentId, model: model.identity, effort: model.effort }
 }

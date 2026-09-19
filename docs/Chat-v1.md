@@ -26,14 +26,21 @@ pi, image input, worktrees and parallel turns on the same checkout are outside v
 ## Fresh console and split pane
 
 The empty console is writable without selecting or creating a session first.
-Its first send creates one Poise-local session using the current catalogue's
-`opus-5-high` identity and sends the message to it. Clicking, focusing or typing
-alone does not launch an agent. Attaching a file can lazily create the same
-kind of session; the text and uploaded file stay together. The New session
-dialog remains the explicit way to choose another model and effort.
+Its initial choice is the current catalogue's `opus-5-high` identity. Clicking
+the model label opens an anchored dropdown grouped by provider, with each
+model's catalogue effort variants and a checkmark on the current choice.
+Unavailable variants remain visible with their provider's reason and cannot
+be selected. Arrow keys, Home/End, Enter and Escape operate the dropdown;
+Tab or clicking outside dismisses it. A failed catalogue load can be retried.
 
-If Opus 5 High is absent or unavailable, the draft is retained and the reason
-is shown. There is no silent fallback. Session-creation and first-send errors
+Selecting a model changes the fresh draft only: it neither creates a session
+nor sends the message. The first Send or Attach validates that exact choice
+against a freshly loaded catalogue and creates one Poise-local session for it.
+The text and uploaded files stay together. New session remains available for
+explicit session creation; existing sessions keep their current model controls.
+
+If the selected model is absent or unavailable, the draft and choice are retained
+and the reason is shown. There is no silent fallback. Session-creation and first-send errors
 preserve the message, and repeated submission while creating cannot launch
 another session. The console also returns to this writable state after the
 last session is deleted. A selected session still starting its native agent
