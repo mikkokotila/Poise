@@ -72,3 +72,10 @@ read must never be interpreted as proof that a file did not exist.
 Provider credentials are not transferred into the browser or another agent.
 Claude's existing subscription isolation applies to SDK sessions as well as
 one-shot work. The other installed CLIs retain their own login state.
+
+New-session creation does not accept a repository, branch or filesystem path
+from the browser. Workspace files live under the ignored `.poise-chat/`
+directory inside Poise. Its private Git repository has no remote and never
+uses the enclosing source checkout for checkpoints. Symlinked storage roots
+and unowned non-empty workspace directories are refused. Existing sessions
+retain their original boundaries; no histories or documents are relocated.

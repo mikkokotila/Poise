@@ -5017,17 +5017,62 @@ body:has(#view-chat:not([hidden])) #app { padding-bottom: 0; }
 
 /* ── Sidebar ── */
 .chat-sidebar {
-  flex: 0 0 260px;
-  width: 260px;
-  border-right: var(--b-base);
+  position: relative;
+  flex: 0 0 var(--chat-sidebar-width, 260px);
+  width: var(--chat-sidebar-width, 260px);
+  min-width: 0;
+  border-right: var(--b-hair);
   background: var(--n1);
-  overflow-y: auto;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
+  transition: flex-basis .32s cubic-bezier(.22,1,.36,1), width .32s cubic-bezier(.22,1,.36,1), border-color .24s ease;
 }
-#view-chat.chat-sidebar-collapsed .chat-sidebar { display: none; }
+#view-chat.chat-sidebar-collapsed .chat-sidebar {
+  flex-basis: 0;
+  width: 0;
+  border-right-width: 0;
+  border-color: transparent;
+  pointer-events: none;
+}
+.chat-session-list {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: var(--chat-sidebar-width, 260px);
+  padding: var(--sp-2);
+  gap: 2px;
+  overflow-y: auto;
+  transition: opacity var(--t-base) ease, transform .32s cubic-bezier(.22,1,.36,1);
+}
+.chat-sidebar-collapsed .chat-session-list { opacity: 0; transform: translateX(-8px); }
+.chat-sidebar-resize {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 8px;
+  z-index: 2;
+  cursor: col-resize;
+  touch-action: none;
+}
+.chat-sidebar-resize::after {
+  content: '';
+  position: absolute;
+  inset: 0 1px 0 auto;
+  width: 1px;
+  background: var(--text-tertiary);
+  opacity: 0;
+  transition: opacity var(--t-base) ease;
+}
+.chat-sidebar-resize:hover::after,
+.chat-sidebar-resize:focus-visible::after,
+.chat-sidebar-resizing .chat-sidebar-resize::after { opacity: .45; }
+.chat-sidebar-resize:focus-visible { outline-offset: -3px; }
+.chat-sidebar-resizing,
+.chat-sidebar-resizing * { cursor: col-resize !important; user-select: none !important; }
+.chat-sidebar-resizing .chat-sidebar,
+.chat-sidebar-resizing .chat-session-list { transition: none; }
 
-.chat-session-list { display: flex; flex-direction: column; padding: var(--sp-2); gap: 2px; }
 .chat-sidebar-empty { padding: var(--sp-6) var(--sp-3); line-height: 1.5; }
 
 .chat-session-item {
@@ -5559,25 +5604,34 @@ body:has(#view-chat:not([hidden])) #app { padding-bottom: 0; }
   padding: var(--sp-2) var(--sp-4) var(--sp-4);
   transition: transform .36s cubic-bezier(.2,0,0,1);
 }
-/* Before the first turn the composer waits mid-screen with the welcome
-   line; the first send lets it settle to the bottom (Confab's 0.36 s). */
+/* The fresh console is a quiet, taller writing surface above centre. */
 .chat-empty-session .chat-dock { transform: translateY(calc(-1 * var(--chat-dock-lift, 40vh))); }
-.chat-welcome {
-  max-width: var(--typo-width, 960px);
-  margin: 0 auto var(--sp-4);
-  text-align: center;
-  font-size: 1rem;
-  font-weight: 600;
-  color: var(--text-secondary);
-}
-.chat-welcome[hidden] { display: none; }
 .chat-v-composer {
+  width: 100%;
   max-width: var(--typo-width, 960px);
   margin: 0 auto;
   padding: 0;
   border-top: none;
+  transition: max-width .36s cubic-bezier(.2,0,0,1);
 }
-.chat-v-composer .chat-input-wrap { position: relative; overflow: visible; }   /* the popover rises above it */
+.chat-empty-session .chat-v-composer { max-width: min(640px, var(--typo-width, 960px)); }
+.chat-empty-session .chat-v-composer .chat-input { min-height: 104px; padding-top: var(--sp-4); }
+.chat-v-composer .chat-input-wrap {
+  position: relative;
+  overflow: visible;
+  border-color: color-mix(in srgb, var(--hairline) 38%, transparent);
+  box-shadow: var(--e-0);
+}
+.chat-v-composer .chat-input-wrap:focus-within {
+  border-color: color-mix(in srgb, var(--hairline) 68%, transparent);
+  box-shadow: var(--e-0);
+}
+.chat-default-model {
+  font-size: 0.6875rem;
+  color: var(--text-tertiary);
+  padding: 0 var(--sp-1);
+}
+.chat-default-model[hidden] { display: none; }   /* the popover rises above it */
 .chat-v-composer .chat-input-wrap.drag-over { border-color: var(--a1); }
 .chat-input-row { position: relative; }
 /* The chip lives inside the textarea's box; chat-composer.ts measures it and
@@ -5718,6 +5772,10 @@ body:has(#view-chat:not([hidden])) #app { padding-bottom: 0; }
 .chat-dialog-body .st-row { margin-top: var(--sp-2); }
 
 @media (max-width: 820px) {
-  .chat-sidebar { flex-basis: 200px; width: 200px; }
   .chat-h-repo { max-width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-sidebar, .chat-session-list, .chat-sidebar-resize::after,
+  .chat-dock, .chat-v-composer { transition: none; }
 }

@@ -23,9 +23,11 @@ function session(overrides: Partial<SessionRecord> = {}): SessionRecord {
 
 const AGENTS: { agents: unknown[], defaults: { model: string, fallback: string, fallbackReason?: string }, settings: unknown } = {
   agents: [
-    { id: 'claude', label: 'Claude Code', available: true, models: [{ identity: 'opus-5-max', selector: 'claude-opus-5', effort: 'max' }, { identity: 'opus-5-xhigh', selector: 'claude-opus-5', effort: 'xhigh' }], efforts: ['max', 'xhigh'] },
-    { id: 'codex', label: 'Codex', available: true, models: [{ identity: 'gpt-6-astra-ultra', selector: 'gpt-6-astra', effort: 'ultra' }], efforts: ['ultra', 'max'] },
+    { id: 'claude', label: 'Claude Code', available: true, models: [{ identity: 'opus-5-max', selector: 'claude-opus-5', effort: 'max' }, { identity: 'opus-5-xhigh', selector: 'claude-opus-5', effort: 'xhigh' }, { identity: 'opus-5-high', selector: 'claude-opus-5', effort: 'high' }], efforts: ['max', 'xhigh', 'high'] },
+    { id: 'codex', label: 'Codex', available: true, models: [{ identity: 'gpt-6-astra-ultra', selector: 'gpt-6-astra', effort: 'ultra' }, { identity: 'gpt-6-astra-max', selector: 'gpt-6-astra', effort: 'max' }], efforts: ['ultra', 'max'] },
     { id: 'grok', label: 'Grok Build', available: false, reason: 'not signed in', models: [{ identity: 'grok-4.6-xhigh', selector: 'grok-4.6', effort: 'xhigh' }], efforts: ['xhigh'] },
+    { id: 'antigravity', label: 'Antigravity (Google)', available: false, reason: 'No interactive permission/question channel', models: [{ identity: 'gemini-3.8-flash-high', selector: 'gemini-3.8-flash', effort: 'high' }, { identity: 'gemini-3.8-flash-medium', selector: 'gemini-3.8-flash', effort: 'medium' }], efforts: ['high', 'medium'] },
+    { id: 'muse', label: 'Muse', available: true, models: [{ identity: 'muse-spark-1.3-contributor-max', selector: 'muse-spark-1.3-contributor', effort: 'max' }, { identity: 'muse-spark-1.3-contributor-xhigh', selector: 'muse-spark-1.3-contributor', effort: 'xhigh' }], efforts: ['max', 'xhigh'] },
   ],
   defaults: { model: 'opus-5-max', fallback: 'gpt-6-astra-ultra' },
   settings: { branchPrefix: 'chat/', idleTimeoutMinutes: 120 },
@@ -66,9 +68,10 @@ async function installRoutes(page: Page, state: ServerState): Promise<void> {
     if (path === '/api/chat/sessions' && method === 'GET') { await route.fulfill({ json: { sessions: state.sessions, instance: 'poise-dev:test' } }); return }
     if (path === '/api/chat/sessions' && method === 'POST') {
       if (state.createDelay) await state.createDelay()
-      const req2 = body as { agent: SessionRecord['agent'], model: string, repo: string, branch: { new?: string, existing?: string, pr?: number } }
-      const created = session({ id: `new-${state.sessions.length + 1}`, agent: req2.agent, model: req2.model, repo: req2.repo, title: '', status: 'starting', createdAt: new Date().toISOString(),
-        branch: req2.branch.pr ? { name: 'feature/login', origin: 'pr', pr: req2.branch.pr, provisional: false } : { name: req2.branch.new || req2.branch.existing || '', origin: req2.branch.new ? 'new' : 'existing', provisional: !!req2.branch.new } })
+      const req2 = body as { agent: SessionRecord['agent'], model: string, effort: string }
+      const created = session({ id: `new-${state.sessions.length + 1}`, agent: req2.agent, model: req2.model, effort: req2.effort,
+        repo: '', checkout: '/poise/.poise-chat/workspace', workspaceKind: 'poise-local', title: '', status: 'starting', createdAt: new Date().toISOString(),
+        branch: { name: 'chat/generated', origin: 'new', provisional: true } })
       state.sessions.unshift(created)
       state.history[created.id] = []
       await route.fulfill({ status: 201, json: { session: created } })
@@ -152,10 +155,31 @@ function makeState(sessions: SessionRecord[], history: Record<string, ChatEnvelo
 
 const input = (page: Page) => page.locator('.chat-v-composer .chat-input')
 
+// Hold view renders to expose the interval between a session-identity change
+// and its next animation frame. Composer-owned uploads must still be correct.
+async function pauseViewFrames(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const raf = window.requestAnimationFrame.bind(window)
+    const queued: FrameRequestCallback[] = []
+    window.requestAnimationFrame = callback => { queued.push(callback); return queued.length }
+    ;(window as any).__resumeViewFrames = () => {
+      window.requestAnimationFrame = raf
+      queued.forEach(callback => raf(callback))
+    }
+  })
+}
+async function resumeViewFrames(page: Page): Promise<void> {
+  await page.evaluate(() => (window as any).__resumeViewFrames())
+}
+
+
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
-    localStorage.clear()
-    localStorage.setItem('poise-view', 'chat')
+    if (!sessionStorage.getItem('chat-fixture-initialized')) {
+      localStorage.clear()
+      localStorage.setItem('poise-view', 'chat')
+      sessionStorage.setItem('chat-fixture-initialized', '1')
+    }
   })
   await page.route(/https:\/\/(?:rsms\.me|fonts\.googleapis\.com|fonts\.gstatic\.com)\//, (route) => route.abort())
 })
@@ -199,7 +223,7 @@ test('shows the pending entry the instant the first prompt is sent, and lifts th
   await sock.subscribed('fresh')
   const main = page.locator('.chat-main')
   await expect(main).toHaveClass(/chat-empty-session/)
-  await expect(page.locator('.chat-welcome')).toContainText('Claude Code')
+  await expect(page.locator('.chat-welcome')).toHaveCount(0)
   expect(await page.locator('.chat-dock').evaluate((el) => getComputedStyle(el).transitionDuration)).toBe('0.36s')
   expect(await page.locator('.chat-dock').evaluate((el) => getComputedStyle(el).transitionTimingFunction)).toBe('cubic-bezier(0.2, 0, 0, 1)')
   sock.autoAck = false
@@ -247,17 +271,17 @@ test('locks a slash command into a chip and unlocks it, and caps the textarea at
   await ta.fill('/mo')
   await expect(page.locator('.chat-pop-label')).toHaveText(['/model', '/mode'])
   await ta.press('Escape')
-  // Auto-resize: one line is line-height + padding; twenty lines cap at 120px.
+  // The fresh console keeps its taller writing floor; twenty lines still cap at 120px.
   await ta.fill('')
   const single = await ta.evaluate((el) => el.getBoundingClientRect().height)
-  expect(single).toBeLessThan(40)
+  expect(single).toBe(104)
   await ta.fill(Array.from({ length: 20 }, (_, i) => `line ${i}`).join('\n'))
   await expect(page.locator('.chat-input-wrap')).toHaveClass(/multiline/)
   expect(await ta.evaluate((el) => el.getBoundingClientRect().height)).toBe(120)
   await expect(ta).toHaveCSS('overflow-y', 'auto')
   await ta.fill('one\ntwo')
   const two = await ta.evaluate((el) => el.getBoundingClientRect().height)
-  expect(two).toBeGreaterThan(single)
+  expect(two).toBeGreaterThanOrEqual(single)
   expect(two).toBeLessThan(120)
 })
 
@@ -500,16 +524,15 @@ test('creates a session from the dialog with a pending entry before the server a
   await expect(page.locator('.chat-sidebar-empty')).toContainText('No sessions yet')
   await page.getByRole('button', { name: 'New session' }).click()
   const dialog = page.getByRole('dialog', { name: 'New session' })
-  await expect(dialog.getByLabel('Agent')).toHaveValue('claude')
-  await expect(dialog.getByLabel('Agent').locator('option[disabled]')).toHaveText(/Grok Build — not signed in/)
+  await expect(dialog.getByLabel('Agent')).toHaveCount(0)
+  await expect(dialog.getByLabel('Repository')).toHaveCount(0)
+  await expect(dialog.locator('input[name="branch"]')).toHaveCount(0)
+  await expect(dialog.getByLabel('Model').locator('optgroup')).toHaveCount(5)
   await expect(dialog.getByLabel('Model')).toHaveValue('opus-5-max')
   await expect(dialog.getByLabel('Effort')).toHaveValue('max')
-  await expect(dialog.locator('.chat-d-branch-new')).toHaveValue(/^chat\/session-/)
-  await expect(dialog.locator('.chat-d-branch-existing')).toHaveValue('main')
-  await expect(dialog.locator('.chat-d-branch-pr option')).toHaveText(['#42 Add login (feature/login)'])
-  await dialog.getByLabel('Agent').selectOption('codex')
-  await expect(dialog.getByLabel('Model')).toHaveValue('gpt-6-astra-ultra')
-  await dialog.locator('.chat-d-branch-new').fill('chat/try-codex')
+  await dialog.getByLabel('Model').selectOption('gpt-6-astra-ultra')
+  await expect(dialog.getByLabel('Effort').locator('option')).toHaveText(['ultra', 'max'])
+  await dialog.getByLabel('Effort').selectOption('max')
   await dialog.getByRole('button', { name: 'Create' }).click()
   // Pending entry, selected, before the POST resolves.
   await expect(page.locator('.chat-session-item.pending')).toHaveCount(1)
@@ -520,7 +543,10 @@ test('creates a session from the dialog with a pending entry before the server a
   await expect(page.locator('.chat-session-item.pending')).toHaveCount(0)
   await expect(page.locator('.chat-session-item')).toHaveCount(1)
   const created = state.calls.find((c) => c.method === 'POST' && c.path === '/api/chat/sessions')!.body
-  expect(created).toMatchObject({ agent: 'codex', model: 'gpt-6-astra-ultra', effort: 'ultra', repo: 'acme/app', branch: { new: 'chat/try-codex' } })
+  expect(created).toMatchObject({ agent: 'codex', model: 'gpt-6-astra-max', effort: 'max' })
+  expect(created).not.toHaveProperty('repo')
+  expect(created).not.toHaveProperty('branch')
+  expect(state.calls.filter(c => c.path === '/api/chat/repo')).toHaveLength(0)
   await expect.poll(() => sock.framesOf('subscribe').map((f) => f.command)).toContainEqual({ type: 'subscribe', sessionId: 'new-1', afterSeq: 0 })
   await expect(page.locator('.chat-h-status')).toHaveText('starting…')
   sock.push('new-1', { type: 'session.updated', session: { ...state.sessions[0], status: 'idle' } })
@@ -543,7 +569,6 @@ test('offers an explicit fallback choice when the default provider is not signed
   await expect(dialog.locator('.chat-dialog-fallback')).toContainText('Claude is not signed in')
   await expect(dialog.locator('input[name="fallback"][value="default"]')).toBeChecked()
   await dialog.locator('input[name="fallback"][value="fallback"]').check()
-  await expect(dialog.getByLabel('Agent')).toHaveValue('codex')
   await expect(dialog.getByLabel('Model')).toHaveValue('gpt-6-astra-ultra')
   await dialog.getByRole('button', { name: 'Create' }).click()
   await expect(page.getByRole('dialog', { name: 'New session' }).getByRole('alert')).toContainText('uncommitted changes')
@@ -567,20 +592,18 @@ test('hands a Current card and an Editor document off to a prefilled New session
   await expect(page.locator('#view-chat')).toBeVisible()
   const dialog = page.getByRole('dialog', { name: 'New session' })
   await expect(dialog).toContainText('Add login')
-  await expect(dialog.getByLabel('Repository')).toHaveValue('acme/app')
-  await expect(dialog.locator('input[name="branch"][value="pr"]')).toBeChecked()
-  await expect(dialog.locator('.chat-d-branch-pr')).toHaveValue('42')
-  await expect(dialog.getByLabel('Agent')).toHaveValue('claude')
+  await expect(dialog.getByLabel('Repository')).toHaveCount(0)
+  await expect(dialog.locator('input[name="branch"]')).toHaveCount(0)
+  await expect(dialog.getByLabel('Model')).toHaveValue('opus-5-max')
   await dialog.getByRole('button', { name: 'Cancel' }).click()
   await page.getByRole('button', { name: 'Current', exact: true }).click()
   const issue = page.locator('.card-live', { hasText: 'Broken logout' })
   await issue.hover()
   await issue.getByRole('button', { name: 'Open in Chat' }).click()
-  await expect(dialog.locator('input[name="branch"][value="new"]')).toBeChecked()
-  await expect(dialog.locator('.chat-d-branch-new')).toHaveValue('chat/issue-7')
+  await expect(dialog.locator('input[name="branch"]')).toHaveCount(0)
   await dialog.getByRole('button', { name: 'Create' }).click()
   await expect.poll(() => state.calls.filter((c) => c.method === 'POST' && c.path === '/api/chat/sessions').map((c) => c.body)).toEqual([
-    expect.objectContaining({ repo: 'acme/app', branch: { new: 'chat/issue-7' }, context: { kind: 'card', title: 'Broken logout', body: '', url: 'https://github.com/acme/app/issues/7' } }),
+    expect.objectContaining({ context: { kind: 'card', title: 'Broken logout', body: '', url: 'https://github.com/acme/app/issues/7' } }),
   ])
 })
 
@@ -672,4 +695,279 @@ test('loads a complete large diff on demand before enabling Revert', async ({ pa
   await tool.locator('.chat-revert-btn').click()
   await expect.poll(() => sock.framesOf('revert').length).toBe(1)
   expect(sock.framesOf('revert')[0].command).toMatchObject({ sessionId: 's1', diffId: 'large-diff' })
+})
+
+test('shows all five catalogue providers and keeps efforts specific to each model', async ({ page }) => {
+  const state = makeState([], {})
+  await installRoutes(page, state)
+  await installSocket(page)
+  await page.goto('/')
+  await page.getByRole('button', { name: 'New session' }).click()
+  const dialog = page.getByRole('dialog', { name: 'New session' })
+  const model = dialog.getByLabel('Model'), effort = dialog.getByLabel('Effort')
+  expect(await model.locator('optgroup').evaluateAll(groups => groups.map(group => group.getAttribute('label'))))
+    .toEqual(['Claude Code', 'Codex', 'Grok Build', 'Antigravity (Google)', 'Muse'])
+  await model.selectOption('gemini-3.8-flash-high')
+  await expect(effort.locator('option')).toHaveText(['high', 'medium'])
+  await effort.selectOption('medium')
+  await expect(dialog.getByRole('status')).toContainText('permission/question')
+  await expect(dialog.getByRole('button', { name: 'Create', exact: true })).toBeDisabled()
+  await model.selectOption('grok-4.6-xhigh')
+  await expect(dialog.getByRole('status')).toContainText('not signed in')
+  await expect(model.locator('option[data-provider="grok"]')).toHaveCount(1)
+  await model.selectOption('muse-spark-1.3-contributor-max')
+  await expect(effort.locator('option')).toHaveText(['max', 'xhigh'])
+  await effort.selectOption('xhigh')
+  await dialog.getByRole('button', { name: 'Create', exact: true }).click()
+  await expect.poll(() => state.calls.filter(c => c.path === '/api/chat/sessions' && c.method === 'POST').map(c => c.body)).toEqual([
+    { agent: 'muse', model: 'muse-spark-1.3-contributor-xhigh', effort: 'xhigh' },
+  ])
+  await expect(page.locator('.chat-h-repo')).toHaveText(/Poise · local/)
+})
+
+
+test('starts a fresh console with Opus 5 High on first send, exactly once', async ({ page }) => {
+  const state = makeState([])
+  let release = () => {}
+  state.createDelay = () => new Promise<void>(resolve => { release = resolve })
+  await installRoutes(page, state)
+  const sock = await installSocket(page)
+  await page.goto('/')
+  await expect(input(page)).toBeEnabled()
+  await expect(page.getByText('Pick a session on the left, or start a new one.')).toHaveCount(0)
+  await expect(page.locator('.chat-default-model')).toHaveText('Opus 5 · High')
+  await input(page).fill('First line')
+  await input(page).press('Shift+Enter')
+  await input(page).pressSequentially('Second line')
+  expect(state.calls.filter(c => c.method === 'POST')).toHaveLength(0)
+  await input(page).press('Enter')
+  await expect(page.locator('.chat-session-item.pending')).toHaveCount(1)
+  await expect(page.locator('.chat-msg-user')).toHaveText('First line\nSecond line')
+  await expect(input(page)).toBeDisabled()
+  await page.locator('.chat-v-composer').dispatchEvent('submit')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  expect(state.calls.filter(c => c.method === 'POST' && c.path === '/api/chat/sessions')).toHaveLength(1)
+  expect(state.calls.find(c => c.method === 'POST')?.body).toMatchObject({ agent: 'claude', model: 'opus-5-high', effort: 'high' })
+  expect(state.calls.find(c => c.method === 'POST')?.body).not.toHaveProperty('repo')
+  release()
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ sessionId: 'new-1', text: 'First line\nSecond line', attachments: [], mentions: [] })
+  await expect(page.locator('.chat-msg-user')).toHaveCount(1)
+  await expect(page.getByRole('dialog', { name: 'New session' })).toBeHidden()
+})
+
+test('keeps a failed fresh message editable without switching model or opening a dialog', async ({ page }) => {
+  const state = makeState([])
+  await installRoutes(page, state)
+  let attempts = 0
+  await page.route('**/api/chat/sessions', async route => {
+    if (route.request().method() === 'POST' && attempts++ === 0) {
+      await route.fulfill({ status: 503, json: { error: 'Temporary startup failure' } })
+    } else await route.fallback()
+  })
+  const sock = await installSocket(page)
+  await page.goto('/')
+  await input(page).fill('Keep this message')
+  await input(page).press('Enter')
+  await expect(page.locator('.chat-notice')).toContainText('Temporary startup failure')
+  await expect(input(page)).toHaveValue('Keep this message')
+  await expect(input(page)).toBeEnabled()
+  await expect(page.locator('.chat-session-item')).toHaveCount(0)
+  await expect(page.getByRole('dialog')).toBeHidden()
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(attempts).toBe(2)
+})
+
+test('keeps a fresh message when its default provider is unavailable', async ({ page }) => {
+  const state = makeState([])
+  state.agents = structuredClone(AGENTS)
+  Object.assign(state.agents.agents[0] as object, { available: false, reason: 'Sign-in required' })
+  await installRoutes(page, state)
+  const sock = await installSocket(page)
+  await page.goto('/')
+  await input(page).fill('No silent fallback')
+  await input(page).press('Enter')
+  await expect(page.locator('.chat-notice')).toContainText('Sign-in required')
+  await expect(input(page)).toHaveValue('No silent fallback')
+  await expect(input(page)).toBeEnabled()
+  expect(state.calls.filter(c => c.method === 'POST')).toHaveLength(0)
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  // Choosing another model is explicit and carries the unsent text with it.
+  await page.getByRole('button', { name: 'New session' }).click()
+  const dialog = page.getByRole('dialog', { name: 'New session' })
+  await dialog.getByLabel('Model', { exact: true }).selectOption('gpt-6-astra-ultra')
+  await dialog.getByRole('button', { name: 'Create' }).click()
+  await expect(input(page)).toBeEnabled()
+  await expect(input(page)).toHaveValue('No silent fallback')
+  await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+})
+
+test('accepts a file from a fresh console and retains its text in the same session', async ({ page }) => {
+  const state = makeState([])
+  await installRoutes(page, state)
+  const attachment = { id: 'file-1', name: 'note.txt', path: '.poise-chat/uploads/new-1/note.txt', size: 4 }
+  await page.route('**/api/chat/attachments?**', async route => {
+    expect(new URL(route.request().url()).searchParams.get('session')).toBe('new-1')
+    await route.fulfill({ json: { attachment } })
+  })
+  const sock = await installSocket(page)
+  await page.goto('/')
+  await expect(page.getByRole('button', { name: 'Attach file' })).toBeEnabled()
+  await input(page).fill('Read this note')
+  await pauseViewFrames(page)
+  await page.locator('.chat-file-input').setInputFiles({ name: 'note.txt', mimeType: 'text/plain', buffer: Buffer.from('note') })
+  await expect(page.locator('.chat-attachment-chip')).toContainText('note.txt')
+  await resumeViewFrames(page)
+  await expect(input(page)).toHaveValue('Read this note')
+  await expect(input(page)).toBeEnabled()
+  await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ sessionId: 'new-1', text: 'Read this note', attachments: [attachment] })
+  expect(state.calls.filter(c => c.method === 'POST' && c.path === '/api/chat/sessions')).toHaveLength(1)
+})
+
+test('leaves a writable fresh console after the final session is deleted', async ({ page }) => {
+  const state = makeState([session()])
+  await installRoutes(page, state)
+  const sock = await installSocket(page)
+  await page.goto('/')
+  await sock.subscribed('s1')
+  const remove = page.locator('.chat-session-delete')
+  await page.locator('.chat-session-item').hover()
+  await remove.click()
+  await remove.click()
+  await expect(page.locator('.chat-session-item')).toHaveCount(0)
+  await expect(input(page)).toBeEnabled()
+  await expect(input(page)).toHaveValue('')
+  await input(page).fill('A fresh start')
+  await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(state.calls.find(c => c.method === 'POST' && c.path === '/api/chat/sessions')?.body).toMatchObject({ model: 'opus-5-high', effort: 'high' })
+})
+
+test('resizes the sessions pane from its edge and remembers width across reload and collapse', async ({ page }) => {
+  await installRoutes(page, makeState([session()]))
+  await installSocket(page)
+  await page.goto('/')
+  const pane = page.locator('.chat-sidebar')
+  const handle = page.getByRole('separator', { name: 'Resize sessions pane' })
+  const edge = (await handle.boundingBox())!
+  await page.mouse.move(edge.x + edge.width / 2, edge.y + 80)
+  await page.mouse.down()
+  await page.mouse.move(edge.x + edge.width / 2 + 96, edge.y + 80, { steps: 8 })
+  await page.mouse.up()
+  await expect.poll(async () => Math.round((await pane.boundingBox())!.width)).toBe(356)
+  expect(await page.evaluate(() => localStorage.getItem('poise-chat-sidebar-width'))).toBe('356')
+  await page.reload()
+  await expect.poll(async () => Math.round((await pane.boundingBox())!.width)).toBe(356)
+  await page.getByRole('button', { name: 'Toggle sessions' }).click()
+  await expect.poll(async () => (await pane.boundingBox())!.width).toBe(0)
+  await page.getByRole('button', { name: 'Toggle sessions' }).click()
+  await expect.poll(async () => Math.round((await pane.boundingBox())!.width)).toBe(356)
+  await handle.focus()
+  await handle.press('ArrowRight')
+  await expect(handle).toHaveAttribute('aria-valuenow', '372')
+  await handle.press('Home')
+  await expect(handle).toHaveAttribute('aria-valuenow', '200')
+  await handle.press('End')
+  await expect(handle).toHaveAttribute('aria-valuenow', '480')
+  await handle.dblclick()
+  await expect(handle).toHaveAttribute('aria-valuenow', '260')
+  await expect.poll(async () => Math.round((await pane.boundingBox())!.width)).toBe(260)
+  await page.setViewportSize({ width: 680, height: 720 })
+  await expect.poll(async () => (await pane.boundingBox())!.width).toBeLessThanOrEqual(360)
+})
+
+test('eases the sidebar closed without detaching it or losing the composer draft', async ({ page }) => {
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  await installRoutes(page, makeState([]))
+  await installSocket(page)
+  await page.goto('/')
+  await input(page).fill('Unsent draft')
+  const widths = await page.evaluate(async () => {
+    const sidebar = document.querySelector<HTMLElement>('.chat-sidebar')!
+    const samples = [sidebar.getBoundingClientRect().width]
+    document.querySelector<HTMLButtonElement>('.chat-sidebar-toggle')!.click()
+    const start = performance.now()
+    await new Promise<void>(resolve => {
+      const frame = () => {
+        samples.push(sidebar.getBoundingClientRect().width)
+        if (performance.now() - start < 400) requestAnimationFrame(frame)
+        else resolve()
+      }
+      requestAnimationFrame(frame)
+    })
+    return samples
+  })
+  expect(widths.some(width => width > 0 && width < widths[0])).toBe(true)
+  expect(widths.at(-1)).toBe(0)
+  await expect(page.locator('.chat-sidebar')).toHaveCount(1)
+  expect(await page.locator('.chat-sidebar').evaluate(el => (el as HTMLElement).inert)).toBe(true)
+  await expect(input(page)).toHaveValue('Unsent draft')
+  await page.getByRole('button', { name: 'Toggle sessions' }).click()
+  await expect.poll(() => page.locator('.chat-sidebar').evaluate(el => el.getBoundingClientRect().width)).toBe(260)
+  await expect(input(page)).toHaveValue('Unsent draft')
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  expect(await page.locator('.chat-sidebar').evaluate(el => parseFloat(getComputedStyle(el).transitionDuration))).toBeLessThan(.001)
+  await page.getByRole('button', { name: 'Toggle sessions' }).click()
+  await expect.poll(() => page.locator('.chat-sidebar').evaluate(el => el.getBoundingClientRect().width)).toBe(0)
+  expect(errors).toEqual([])
+})
+
+test('gives the fresh console a narrower taller low-contrast surface in both themes', async ({ page }, info) => {
+  await installRoutes(page, makeState([]))
+  await installSocket(page)
+  await page.goto('/')
+  await expect(input(page)).toBeEnabled()
+  const composer = page.locator('.chat-v-composer')
+  await expect.poll(() => composer.evaluate(el => Math.round(el.getBoundingClientRect().width))).toBe(640)
+  const box = (await composer.boundingBox())!
+  const main = (await page.locator('.chat-main').boundingBox())!
+  expect(box.height).toBeGreaterThanOrEqual(130)
+  await expect.poll(() => composer.evaluate(el => el.getBoundingClientRect().y)).toBeLessThan(main.y + main.height * .45)
+  const surface = page.locator('.chat-v-composer .chat-input-wrap')
+  expect(await surface.evaluate(el => getComputedStyle(el).boxShadow)).toBe('none')
+  const border = await surface.evaluate(el => getComputedStyle(el).borderTopColor)
+  expect(border).toMatch(/(?:0\.38|0\.3[0-9]+)/)
+  await page.screenshot({ path: info.outputPath('fresh-console-light.png'), animations: 'disabled' })
+  await input(page).focus()
+  expect(await surface.evaluate(el => getComputedStyle(el).boxShadow)).toBe('none')
+  await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'))
+  await page.screenshot({ path: info.outputPath('fresh-console-dark.png'), animations: 'disabled' })
+})
+
+
+test('keeps a slow attachment with its original session when another session is selected', async ({ page }) => {
+  const state = makeState([session({ id: 's1' }), session({ id: 's2', title: 'Other conversation' })])
+  await installRoutes(page, state)
+  let release = () => {}
+  let uploading = false
+  const attachment = { id: 'file-s1', name: 'slow.txt', path: '.poise-chat/uploads/s1/slow.txt', size: 4 }
+  await page.route('**/api/chat/attachments?**', async route => {
+    uploading = true
+    await new Promise<void>(resolve => { release = resolve })
+    await route.fulfill({ json: { attachment } })
+  })
+  const sock = await installSocket(page)
+  await page.goto('/')
+  await sock.subscribed('s1')
+  await input(page).fill('Original draft')
+  await page.locator('.chat-file-input').setInputFiles({ name: 'slow.txt', mimeType: 'text/plain', buffer: Buffer.from('note') })
+  await expect.poll(() => uploading).toBe(true)
+  await pauseViewFrames(page)
+  await page.locator('.chat-session-item[data-id="s2"]').dispatchEvent('keydown', { key: 'Enter' })
+  await sock.subscribed('s2')
+  await input(page).fill('Other draft')
+  release()
+  await expect(page.getByRole('button', { name: 'Attach file' })).toBeEnabled()
+  await expect(page.locator('.chat-attachment-chip')).toHaveCount(0)
+  await expect(input(page)).toHaveValue('Other draft')
+  await resumeViewFrames(page)
+  await page.locator('.chat-session-item[data-id="s1"]').click()
+  await expect(input(page)).toHaveValue('Original draft')
+  await expect(page.locator('.chat-attachment-chip')).toContainText('slow.txt')
 })

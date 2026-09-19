@@ -24,6 +24,8 @@ export interface ComposerState {
   /** Nothing can be sent; `placeholder` says why. */
   disabled: boolean
   placeholder?: string
+  /** Quiet label for the implicit fresh-session model. */
+  modelLabel?: string
   /** Offer a Resume button (the session was interrupted). */
   resume?: boolean
   /** Whether the session has an upload target. */
@@ -37,13 +39,15 @@ export interface ComposerHandlers {
   onResume(): void
   /** `/model x`, `/mode y`, `/fork` — Poise's own commands. */
   onCommand(name: string, arg: string): void
-  upload(file: File): Promise<Attachment>
+  /** Lazily create an upload target for an untouched console. */
+  prepareUpload(): Promise<string>
+  upload(file: File, sessionId: string): Promise<Attachment>
   searchFiles(q: string): Promise<string[]>
 }
 
 export interface Composer {
   el: HTMLElement
-  setCommands(agentCommands: CommandOption[], own: { modes: boolean, fork: boolean }): void
+  setCommands(agentCommands: CommandOption[], own: { model?: boolean, modes: boolean, fork: boolean }): void
   setState(state: ComposerState): void
   getDraft(): ComposerDraft
   setDraft(draft: ComposerDraft | null): void
@@ -86,6 +90,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
       </div>
       <div class="chat-controls">
         <button class="chat-attach" type="button" aria-label="Attach file" title="Attach file">${ICON_PLUS}</button>
+        <span class="chat-default-model" hidden></span>
         <span class="chat-steer-hint" hidden>steering</span>
         <span class="chat-controls-spacer"></span>
         <button class="chat-resume-btn" type="button" hidden>Resume</button>
@@ -104,8 +109,10 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   const resumeBtn = el.querySelector<HTMLButtonElement>('.chat-resume-btn')!
   const fileInput = el.querySelector<HTMLInputElement>('.chat-file-input')!
   const steerHint = el.querySelector<HTMLElement>('.chat-steer-hint')!
+  const modelLabel = el.querySelector<HTMLElement>('.chat-default-model')!
   const popover = el.querySelector<HTMLElement>('.chat-popover')!
 
+  let uploading = 0
   let attachments: Attachment[] = []
   let mentions: Mention[] = []
   let activeMode: string | null = null
@@ -124,16 +131,17 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     const lh = parseFloat(cs.lineHeight) || 19
     const padV = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0)
     const single = Math.ceil(lh + padV)
+    const minimum = Math.max(single, parseFloat(cs.minHeight) || 0)
     input.style.height = 'auto'
     const sh = input.scrollHeight
-    const multiline = input.value.includes('\n') || sh > MULTILINE_THRESHOLD_PX
+    const multiline = input.value.includes('\n') || sh > Math.max(MULTILINE_THRESHOLD_PX, minimum + 1)
     wrap.classList.toggle('multiline', multiline)
     let wanted = single
     if (multiline) {
       const lines = Math.max(input.value.split('\n').length, Math.round((sh - padV) / lh))
       wanted = Math.ceil(lines * lh + padV)
     }
-    const height = Math.min(Math.max(wanted, single), MAX_INPUT_PX)
+    const height = Math.min(Math.max(wanted, minimum), MAX_INPUT_PX)
     input.style.height = `${height}px`
     input.style.overflowY = wanted > MAX_INPUT_PX ? 'auto' : 'hidden'
   }
@@ -212,16 +220,29 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   }
 
   async function uploadFiles(files: File[]): Promise<void> {
-    if (!state.sessionId) return
-    for (const f of files) {
-      try {
-        const a = await handlers.upload(f)
-        attachments.push(a)
-        renderChips()
-      } catch (err) {
-        console.error('[chat] attachment upload failed:', err)
-        showNote(`Couldn't attach "${f.name}": ${(err as Error).message}`)
+    if (state.disabled || uploading) return
+    uploading += 1
+    applyState()
+    let target = state.sessionId
+    try {
+      target ||= await handlers.prepareUpload()
+      for (const file of files) {
+        try {
+          const attachment = await handlers.upload(file, target)
+          // The view saves an off-screen upload in that session's own draft.
+          if (state.sessionId === target) {
+            attachments.push(attachment)
+            renderChips()
+          }
+        } catch (err) {
+          if (state.sessionId === target) showNote(`Couldn't attach "${file.name}": ${(err as Error).message}`)
+        }
       }
+    } catch (err) {
+      showNote(`Couldn't attach: ${(err as Error).message}`)
+    } finally {
+      uploading -= 1
+      applyState()
     }
   }
 
@@ -349,7 +370,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   }
 
   function submit(): void {
-    if (state.disabled) return
+    if (state.disabled || uploading) return
     const text = input.value.trim()
     if (state.running) {
       if (!text) return
@@ -392,6 +413,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
 
   el.addEventListener('submit', (e) => {
     e.preventDefault()
+    if (state.disabled) return
     if (state.running) handlers.onStop()
     else submit()
   })
@@ -460,9 +482,11 @@ export function createComposer(handlers: ComposerHandlers): Composer {
 
   function applyState(): void {
     input.disabled = state.disabled
-    attachBtn.disabled = state.disabled || !state.sessionId
+    attachBtn.disabled = state.disabled || uploading > 0
     input.placeholder = state.disabled ? (state.placeholder || 'Unavailable') : (state.running ? 'Steer the agent… (Enter)' : (state.placeholder || DEFAULT_PLACEHOLDER))
-    sendBtn.disabled = state.disabled
+    sendBtn.disabled = state.disabled || (uploading > 0 && !state.running)
+    modelLabel.hidden = !state.modelLabel
+    modelLabel.textContent = state.modelLabel || ''
     sendBtn.innerHTML = state.running ? ICON_STOP : ICON_SEND
     sendBtn.setAttribute('aria-label', state.running ? 'Stop' : 'Send')
     sendBtn.title = state.running ? 'Stop (⌘.)' : 'Send (Enter)'
@@ -472,18 +496,27 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   }
   applyState()
   autoResize()
+  let observedWidth = 0
+  const widthObserver = new ResizeObserver(([box]) => {
+    if (!box || !box.contentRect.width || box.contentRect.width === observedWidth) return
+    observedWidth = box.contentRect.width
+    // Resize the text outside observer delivery, avoiding a resize loop when
+    // wrapping changes the composer height while its width is animating.
+    requestAnimationFrame(autoResize)
+  })
+  widthObserver.observe(el)
 
   return {
     el,
     setCommands(list, own) {
       agentCommands = list
-      ownCommands = OWN_COMMANDS.filter((c) => c.name === 'model' || (c.name === 'mode' && own.modes) || (c.name === 'fork' && own.fork))
+      ownCommands = OWN_COMMANDS.filter((c) => (c.name === 'model' && own.model !== false) || (c.name === 'mode' && own.modes) || (c.name === 'fork' && own.fork))
     },
     setState(next) {
       // The view calls this on every render, including each streamed delta;
       // only a real change touches the DOM.
       const same = state.running === next.running && state.disabled === next.disabled
-        && state.placeholder === next.placeholder && state.resume === next.resume && state.sessionId === next.sessionId
+        && state.modelLabel === next.modelLabel && state.placeholder === next.placeholder && state.resume === next.resume && state.sessionId === next.sessionId
       state = next
       if (!same) applyState()
     },

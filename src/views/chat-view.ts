@@ -15,17 +15,18 @@ import type {
   SessionRecord,
   SessionStatus,
   AgentId,
-  BranchRequest,
 } from '../../server/chat/protocol'
 import { AGENT_LABELS } from '../../server/chat/protocol'
 import { chatClient, ChatCommandError, ChatHttpError, type AgentsResponse, type AgentInfo } from '../chat-client'
 import { escapeHtml } from '../markdown'
-import { getSettings } from '../config'
+import { renderNewSessionDialog } from './chat-new-session'
 import {
   createModel, applyEvent, addOptimisticTurn, dropOptimisticTurns, focusedPending, createTranscriptView, pickQuestionOption,
   type TranscriptModel, type TranscriptView,
 } from './chat-transcript'
-import { createComposer, type Composer, type ComposerDraft } from './chat-composer'
+import { createComposer, emptyDraft, type Composer, type ComposerDraft } from './chat-composer'
+import { quickSessionRequest } from '../chat-catalog'
+import { attachChatSidebar } from './chat-sidebar'
 
 interface SessionEntry {
   record: SessionRecord
@@ -47,7 +48,6 @@ let mainEl: HTMLElement
 let scrollEl: HTMLElement
 let transcriptEl: HTMLElement
 let dockEl: HTMLElement
-let welcomeEl: HTMLElement
 let dialogEl: HTMLElement
 let noticeEl: HTMLElement
 let transcript: TranscriptView
@@ -61,7 +61,10 @@ let agentsPromise: Promise<AgentsResponse | null> | null = null
 let renderQueued = false
 let tickTimer: ReturnType<typeof setInterval> | null = null
 
-const SIDEBAR_KEY = 'poise-chat-sidebar'
+let splitPane: ReturnType<typeof attachChatSidebar>
+let freshDraft: ComposerDraft | null = null
+let quickSessionPromise: Promise<SessionEntry> | null = null
+let firstPromptPending = false
 /** A single click waits this long so a double-click renames without opening. */
 const CLICK_DELAY_MS = 220
 const STICK_TO_BOTTOM_PX = 40
@@ -103,15 +106,7 @@ function dateLabel(iso: string): string {
   return sameDay ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
 
-function slugify(text: string): string {
-  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40)
-}
-
-function branchPrefix(): string {
-  return agentsInfo?.settings.branchPrefix || getSettings().chat?.branchPrefix || 'chat/'
-}
-
-function agentFor(id: AgentId): AgentInfo | undefined {
+function agentFor(id: string): AgentInfo | undefined {
   return agentsInfo?.agents.find((a) => a.id === id)
 }
 
@@ -141,15 +136,16 @@ function renderShell(): void {
   viewEl.innerHTML = `
     <header class="view-header">
       <div class="filter-cluster chat-view-controls">
-        <button type="button" class="chat-icon-btn chat-sidebar-toggle" title="Toggle sessions" aria-label="Toggle sessions" aria-pressed="true">${ICON_SIDEBAR}</button>
+        <button type="button" class="chat-icon-btn chat-sidebar-toggle" title="Toggle sessions" aria-label="Toggle sessions" aria-controls="chat-sessions-pane" aria-expanded="true" aria-pressed="true">${ICON_SIDEBAR}</button>
         <button type="button" class="chat-new-btn" title="New session">${ICON_PLUS}<span>New session</span></button>
         <span class="chat-conn" role="status" hidden></span>
       </div>
     </header>
     <main class="chat-shell">
       <div class="chat-layout">
-        <aside class="chat-sidebar" aria-label="Sessions">
+        <aside id="chat-sessions-pane" class="chat-sidebar" aria-label="Sessions">
           <div class="chat-session-list" role="list"></div>
+          <div class="chat-sidebar-resize" role="separator" aria-label="Resize sessions pane" aria-orientation="vertical" aria-controls="chat-sessions-pane" tabindex="0" title="Drag to resize; double-click to reset"></div>
         </aside>
         <section class="chat-main">
           <div class="chat-session-header" hidden></div>
@@ -158,9 +154,7 @@ function renderShell(): void {
             <div class="chat-empty chat-transcript-loading" hidden>Loading…</div>
             <div class="chat-transcript"></div>
           </div>
-          <div class="chat-dock">
-            <div class="chat-welcome"></div>
-          </div>
+          <div class="chat-dock"></div>
           <div class="chat-new-dialog" role="dialog" aria-label="New session" hidden></div>
         </section>
       </div>
@@ -172,19 +166,9 @@ function renderShell(): void {
   scrollEl = viewEl.querySelector<HTMLElement>('.chat-transcript-scroll')!
   transcriptEl = viewEl.querySelector<HTMLElement>('.chat-transcript')!
   dockEl = viewEl.querySelector<HTMLElement>('.chat-dock')!
-  welcomeEl = viewEl.querySelector<HTMLElement>('.chat-welcome')!
   dialogEl = viewEl.querySelector<HTMLElement>('.chat-new-dialog')!
   noticeEl = viewEl.querySelector<HTMLElement>('.chat-notice')!
 
-  const collapsed = localStorage.getItem(SIDEBAR_KEY) === 'collapsed'
-  viewEl.classList.toggle('chat-sidebar-collapsed', collapsed)
-  const toggle = viewEl.querySelector<HTMLButtonElement>('.chat-sidebar-toggle')!
-  toggle.setAttribute('aria-pressed', collapsed ? 'false' : 'true')
-  toggle.addEventListener('click', () => {
-    const now = viewEl.classList.toggle('chat-sidebar-collapsed')
-    toggle.setAttribute('aria-pressed', now ? 'false' : 'true')
-    localStorage.setItem(SIDEBAR_KEY, now ? 'collapsed' : 'open')
-  })
   viewEl.querySelector<HTMLButtonElement>('.chat-new-btn')!.addEventListener('click', () => { void openNewSessionDialog() })
 
   transcript = createTranscriptView(transcriptEl, {
@@ -201,9 +185,18 @@ function renderShell(): void {
     onStop: () => { void cancelTurn() },
     onResume: () => { void resumeActive() },
     onCommand: (name, arg) => { void runOwnCommand(name, arg) },
-    upload: (file) => {
-      if (!activeId) return Promise.reject(new Error('No session'))
-      return chatClient.uploadAttachment(activeId, file)
+    prepareUpload: async () => (await ensureQuickSession()).record.id,
+    upload: async (file, sessionId) => {
+      const attachment = await chatClient.uploadAttachment(sessionId, file)
+      // A slow upload belongs to its original draft, even if the user switched.
+      if (activeId !== sessionId) {
+        const target = sessions.get(sessionId)
+        if (target) {
+          const draft = target.draft || emptyDraft()
+          target.draft = { ...draft, attachments: [...draft.attachments, attachment] }
+        }
+      }
+      return attachment
     },
     searchFiles: async (q) => {
       if (!activeId) return []
@@ -212,6 +205,10 @@ function renderShell(): void {
     },
   })
   dockEl.appendChild(composer.el)
+  splitPane = attachChatSidebar(viewEl, () => { composer.layout(); queueRender() })
+  const layoutObserver = new ResizeObserver(() => queueRender())
+  layoutObserver.observe(mainEl)
+  layoutObserver.observe(dockEl)
 
   attachSidebar()
   attachHeader()
@@ -281,7 +278,7 @@ function renderSidebar(): void {
 
 function sidebarHtml(): string {
   if (!order.length) {
-    return '<div class="chat-empty chat-sidebar-empty">No sessions yet.<br>Start one with New session.</div>'
+    return '<div class="chat-empty chat-sidebar-empty">No sessions yet.</div>'
   }
   return order.map((id) => {
     const e = sessions.get(id)!
@@ -397,8 +394,10 @@ async function deleteSession(id: string): Promise<void> {
       // Nothing is on screen now; selecting the next session must treat it
       // as a switch (fresh transcript, its own draft), not a no-op.
       activeId = null
+      composerStateFor(null)
       transcript.clear()
       if (order[0]) void selectSession(order[0])
+      else { composer.setDraft(freshDraft); setNotice(null) }
     }
     queueRender()
   } catch (err) {
@@ -412,6 +411,7 @@ async function deleteSession(id: string): Promise<void> {
 async function selectSession(id: string): Promise<void> {
   const e = sessions.get(id)
   if (!e) return
+  if (!activeId) freshDraft = composer.getDraft()
   if (activeId && activeId !== id) {
     const prev = sessions.get(activeId)
     if (prev) prev.draft = composer.getDraft()
@@ -426,6 +426,9 @@ async function selectSession(id: string): Promise<void> {
     setNotice(e.error)
     scrollToBottom(true)
   }
+  // Identity changes are synchronous: an upload resolving before the next
+  // animation frame must not attach itself to the newly selected draft.
+  composerStateFor(e)
   queueRender()
   if (!e.loaded && !e.loading && !e.pending) await loadHistory(e)
   composer.focus()
@@ -490,25 +493,55 @@ function commandFailed(err: unknown, what: string): void {
   setNotice(`${what} failed${code ? ` (${code})` : ''} — ${message}`)
 }
 
+/** One user action creates one session; neither focus nor typing launches an agent. */
+function ensureQuickSession(firstPrompt?: ComposerDraft): Promise<SessionEntry> {
+  if (quickSessionPromise) return quickSessionPromise
+  const current = entry()
+  if (current && !current.pending) return Promise.resolve(current)
+  if (current) return Promise.reject(new Error('The session is still being created.'))
+  const draft = firstPrompt ? null : composer.getDraft()
+  quickSessionPromise = (async () => {
+    const catalogue = await loadAgents(true)
+    if (!catalogue) throw new Error('Could not load the model catalogue. Your message has not been sent.')
+    const request = quickSessionRequest(catalogue.agents)
+    if (firstPrompt?.text) request.title = firstPrompt.text.slice(0, 200)
+    return createSessionEntry(request, draft, firstPrompt, null)
+  })().finally(() => { quickSessionPromise = null; queueRender() })
+  queueRender()
+  return quickSessionPromise
+}
+
 async function sendPrompt(draft: ComposerDraft): Promise<void> {
-  const e = entry()
-  if (!e) return
+  let e = entry()
+  if (!e || e.pending) {
+    if (firstPromptPending) return
+    firstPromptPending = true
+    try {
+      e = await ensureQuickSession(draft)
+      freshDraft = null
+    } catch (err) {
+      freshDraft = draft
+      if (!activeId) composer.setDraft(draft)
+      commandFailed(err, 'Start session')
+      queueRender()
+      return
+    } finally { firstPromptPending = false }
+  }
   const prompt = { text: draft.text, attachments: draft.attachments, mentions: draft.mentions }
-  // On screen the instant it is sent: the turn in the transcript, the title
-  // in the sidebar, the status in the header — all before the ack.
+  // Reuse the immediate first-message preview made during session creation.
+  dropOptimisticTurns(e.model)
   addOptimisticTurn(e.model, prompt)
   if (!e.record.title) e.record = { ...e.record, title: draft.text.slice(0, 200) }
   e.record = { ...e.record, status: 'running' }
-  setNotice(null)
+  if (activeId === e.record.id) { setNotice(null); scrollToBottom(true) }
   queueRender()
-  scrollToBottom(true)
   try {
-    await chatClient.send({ type: 'prompt', sessionId: e.record.id, text: draft.text, attachments: draft.attachments, mentions: draft.mentions })
+    await chatClient.send({ type: 'prompt', sessionId: e.record.id, ...prompt })
   } catch (err) {
     dropOptimisticTurns(e.model)
     if (e.record.status === 'running' && !e.model.running) e.record = { ...e.record, status: 'idle' }
-    commandFailed(err, 'Send')
-    composer.setDraft(draft)
+    if (activeId === e.record.id) { commandFailed(err, 'Send'); composer.setDraft(draft) }
+    else { e.draft = draft; e.error = `Send failed — ${(err as Error).message}` }
     queueRender()
   }
 }
@@ -700,7 +733,7 @@ function headerHtml(): string {
         <select class="chat-h-select chat-model-select" aria-label="Model"${between ? '' : ' disabled'}>${models.map((m) => `<option value="${escapeHtml(m)}"${m === s.model ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('')}</select>
         ${efforts.length ? `<select class="chat-h-select chat-effort-select" aria-label="Effort"${between ? '' : ' disabled'}>${(efforts.includes(s.effort) ? efforts : [s.effort, ...efforts]).map((x) => `<option value="${escapeHtml(x)}"${x === s.effort ? ' selected' : ''}>${escapeHtml(x)}</option>`).join('')}</select>` : `<span class="chat-h-effort">${escapeHtml(s.effort)}</span>`}
       </span>
-      <span class="chat-h-repo" title="${escapeHtml(s.checkout || '')}"><code>${escapeHtml(s.repo || 'local')}</code> · <code>${escapeHtml(s.branch?.name || '')}</code>${ws.text ? ` <span class="chat-h-ws ${ws.cls}">${escapeHtml(ws.text)}</span>` : ''}</span>
+      <span class="chat-h-repo" title="${escapeHtml(s.checkout || '')}">${s.workspaceKind === 'poise-local' ? '<span>Poise · local</span>' : `<code>${escapeHtml(s.repo || 'local')}</code> · <code>${escapeHtml(s.branch?.name || '')}</code>`}${ws.text ? ` <span class="chat-h-ws ${ws.cls}">${escapeHtml(ws.text)}</span>` : ''}</span>
       ${modeSel}
       <span class="chat-h-status" data-status="${s.status}">${escapeHtml(statusText(s))}</span>
       <span class="chat-controls-spacer"></span>
@@ -790,14 +823,15 @@ function attachKeys(): void {
 
 function composerStateFor(e: SessionEntry | null): void {
   if (!e) {
-    composer.setState({ running: false, disabled: true, placeholder: 'Start a session to chat', sessionId: null })
+    composer.setCommands([], { model: false, modes: false, fork: false })
+    composer.setState({ running: false, disabled: !!quickSessionPromise, placeholder: quickSessionPromise ? 'Starting the session…' : undefined, modelLabel: 'Opus 5 · High', sessionId: null })
     return
   }
   const s = e.record
   const running = isRunning(s.status) || !!e.model.running
   let disabled = false
   let placeholder: string | undefined
-  if (e.pending || s.status === 'starting') { disabled = true; placeholder = 'Starting the session…' }
+  if (e.pending) { disabled = true; placeholder = 'Starting the session…' }
   else if (s.status === 'closed') { disabled = true; placeholder = 'This session is closed' }
   else if (s.status === 'interrupted') { disabled = true; placeholder = 'Interrupted by a restart — resume to continue' }
   else if (s.status === 'error') { disabled = true; placeholder = 'The session failed — resume to try again' }
@@ -832,15 +866,11 @@ function render(): void {
   const e = entry()
   composerStateFor(e)
   const empty = !e || (!e.model.blocks.length && !e.loading)
-  // Before the first turn the composer sits mid-screen with the welcome
-  // line; the first send lets it settle to the bottom. The lift is half the
-  // transcript's height, published for the CSS transition to animate.
-  mainEl.style.setProperty('--chat-dock-lift', `${Math.round(scrollEl.clientHeight / 2)}px`)
   mainEl.classList.toggle('chat-empty-session', empty)
-  welcomeEl.hidden = !empty
-  welcomeEl.textContent = !e
-    ? 'Pick a session on the left, or start a new one.'
-    : `Start a conversation with ${AGENT_LABELS[e.record.agent] || e.record.agent} on ${e.record.repo || 'a local checkout'} · ${e.record.branch?.name || ''}`
+  // The fresh console sits slightly above centre. Its own height participates
+  // in the calculation, so a taller draft never pushes it off-screen.
+  if (lastEmpty !== empty) { lastEmpty = empty; composer.layout() }
+  mainEl.style.setProperty('--chat-dock-lift', `${Math.max(0, Math.round(mainEl.clientHeight * 0.58 - dockEl.offsetHeight / 2))}px`)
   viewEl.querySelector<HTMLElement>('.chat-transcript-loading')!.hidden = !(e && e.loading && !e.model.blocks.length)
   // Scrolling sticks to the bottom only for someone already reading there.
   const distance = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
@@ -852,173 +882,24 @@ function render(): void {
   }
   if (wasAtBottom || forceBottom) scrollEl.scrollTop = scrollEl.scrollHeight
   forceBottom = false
-  if (lastEmpty !== empty) {
-    lastEmpty = empty
-    composer.layout()
-  }
 }
 
 // ── New session dialog ─────────────────────────────────────────────────────
 
-export interface NewSessionPrefill {
-  context?: SessionContext
-  repo?: string
-  branch?: BranchRequest
-  /** Open with the repository picker focused (document handoff). */
-  pickRepo?: boolean
-}
-
-let dialogRepoSeq = 0
+export interface NewSessionPrefill { context?: SessionContext }
 
 async function openNewSessionDialog(prefill: NewSessionPrefill = {}): Promise<void> {
   closeDialog()
   dialogEl.hidden = false
-  dialogEl.innerHTML = '<div class="chat-dialog-body"><div class="chat-empty">Loading agents…</div></div>'
-  const [agents, reposRes] = await Promise.all([
-    loadAgents(true),
-    chatClient.repos().catch(() => ({ repos: [] as string[] })),
-  ])
+  dialogEl.innerHTML = '<div class="chat-dialog-body"><div class="chat-empty">Loading models…</div></div>'
+  const agents = await loadAgents(true)
   if (dialogEl.hidden) return
   if (!agents) {
-    dialogEl.innerHTML = '<div class="chat-dialog-body"><div class="st-help st-help-error">Could not load the agent list.</div><button type="button" class="st-clear chat-dialog-cancel">Close</button></div>'
+    dialogEl.innerHTML = '<div class="chat-dialog-body"><div class="st-help st-help-error">Could not load the model catalogue.</div><button type="button" class="st-clear chat-dialog-cancel">Close</button></div>'
+    dialogEl.querySelector('.chat-dialog-cancel')!.addEventListener('click', closeDialog)
     return
   }
-  const repos = reposRes.repos || []
-  const defaultAgent = agents.agents.find((a) => a.models.some((m) => m.identity === agents.defaults.model))
-    || agents.agents.find((a) => a.available) || agents.agents[0]
-  const repo = prefill.repo && repos.includes(prefill.repo) ? prefill.repo : (prefill.repo || repos[0] || '')
-  const slugBase = prefill.context?.title ? slugify(prefill.context.title) : ''
-  const branchNew = prefill.branch && 'new' in prefill.branch ? prefill.branch.new
-    : `${branchPrefix()}${slugBase || `session-${Date.now().toString(36).slice(-5)}`}`
-  const branchKind: 'new' | 'existing' | 'pr' = prefill.branch ? ('pr' in prefill.branch ? 'pr' : 'existing' in prefill.branch ? 'existing' : 'new') : 'new'
-  const fallbackAgent = agents.agents.find((a) => a.models.some((m) => m.identity === agents.defaults.fallback))
-  const fallback = agents.defaults.fallbackReason ? `
-    <fieldset class="chat-dialog-field chat-dialog-fallback">
-      <legend>Model provider</legend>
-      <div class="st-help st-help-error">${escapeHtml(agents.defaults.fallbackReason)}</div>
-      <label class="chat-radio"><input type="radio" name="fallback" value="default" checked> Use the default, <code>${escapeHtml(agents.defaults.model)}</code></label>
-      <label class="chat-radio"><input type="radio" name="fallback" value="fallback"> Use the fallback, <code>${escapeHtml(agents.defaults.fallback)}</code>${fallbackAgent ? ` (${escapeHtml(fallbackAgent.label)})` : ''}</label>
-    </fieldset>` : ''
-  const ctx = prefill.context
-  dialogEl.innerHTML = `
-    <form class="chat-dialog-body">
-      <div class="chat-dialog-title">New session</div>
-      ${ctx ? `<div class="chat-dialog-context"><span class="chat-pill">${escapeHtml(ctx.kind)}</span> ${escapeHtml(ctx.title)}</div>` : ''}
-      <label class="chat-dialog-field">Agent
-        <select class="st-select chat-d-agent" aria-label="Agent">${agents.agents.map((a) => `<option value="${a.id}"${a.id === defaultAgent?.id ? ' selected' : ''}${a.available ? '' : ' disabled'}>${escapeHtml(a.label)}${a.available ? '' : ` — ${escapeHtml(a.reason || 'unavailable')}`}</option>`).join('')}</select>
-      </label>
-      <div class="chat-dialog-row">
-        <label class="chat-dialog-field">Model
-          <select class="st-select chat-d-model" aria-label="Model"></select>
-        </label>
-        <label class="chat-dialog-field">Effort
-          <select class="st-select chat-d-effort" aria-label="Effort"></select>
-        </label>
-      </div>
-      ${fallback}
-      <label class="chat-dialog-field">Repository
-        <select class="st-select chat-d-repo" aria-label="Repository">${repos.map((r) => `<option value="${escapeHtml(r)}"${r === repo ? ' selected' : ''}>${escapeHtml(r)}</option>`).join('')}${repos.length ? '' : '<option value="">No repositories configured</option>'}</select>
-      </label>
-      <fieldset class="chat-dialog-field chat-dialog-branch">
-        <legend>Branch</legend>
-        <label class="chat-radio"><input type="radio" name="branch" value="new"${branchKind === 'new' ? ' checked' : ''}> New branch
-          <input type="text" class="st-input chat-d-branch-new" aria-label="New branch name" value="${escapeHtml(branchNew)}" spellcheck="false">
-        </label>
-        <label class="chat-radio"><input type="radio" name="branch" value="existing"${branchKind === 'existing' ? ' checked' : ''}> Existing branch
-          <select class="st-select chat-d-branch-existing" aria-label="Existing branch"><option value="">Loading…</option></select>
-        </label>
-        <label class="chat-radio"><input type="radio" name="branch" value="pr"${branchKind === 'pr' ? ' checked' : ''}> Pull request
-          <select class="st-select chat-d-branch-pr" aria-label="Pull request"><option value="">Loading…</option></select>
-        </label>
-        <div class="st-help st-help-info chat-d-repo-state"></div>
-      </fieldset>
-      <div class="st-help st-help-error chat-dialog-error" role="alert" hidden></div>
-      <div class="st-row">
-        <button type="submit" class="st-save chat-dialog-create">Create</button>
-        <button type="button" class="st-clear chat-dialog-cancel">Cancel</button>
-      </div>
-    </form>
-  `
-  const form = dialogEl.querySelector<HTMLFormElement>('form')!
-  const agentSel = form.querySelector<HTMLSelectElement>('.chat-d-agent')!
-  const modelSel = form.querySelector<HTMLSelectElement>('.chat-d-model')!
-  const effortSel = form.querySelector<HTMLSelectElement>('.chat-d-effort')!
-  const repoSel = form.querySelector<HTMLSelectElement>('.chat-d-repo')!
-  const errorEl = form.querySelector<HTMLElement>('.chat-dialog-error')!
-
-  const fillModels = (agent: AgentInfo | undefined, wanted?: string) => {
-    const models = agent?.models || []
-    modelSel.innerHTML = models.map((m) => `<option value="${escapeHtml(m.identity)}"${m.identity === wanted ? ' selected' : ''}>${escapeHtml(m.identity)}</option>`).join('')
-    const efforts = agent?.efforts || []
-    const current = models.find((m) => m.identity === modelSel.value)
-    effortSel.innerHTML = efforts.map((x) => `<option value="${escapeHtml(x)}"${x === current?.effort ? ' selected' : ''}>${escapeHtml(x)}</option>`).join('')
-    effortSel.disabled = !efforts.length
-  }
-  fillModels(defaultAgent, agents.defaults.model)
-  agentSel.addEventListener('change', () => fillModels(agentFor(agentSel.value as AgentId)))
-  modelSel.addEventListener('change', () => {
-    const m = agentFor(agentSel.value as AgentId)?.models.find((x) => x.identity === modelSel.value)
-    if (m && [...effortSel.options].some((o) => o.value === m.effort)) effortSel.value = m.effort
-  })
-  form.querySelectorAll<HTMLInputElement>('input[name="fallback"]').forEach((r) => r.addEventListener('change', () => {
-    const useFallback = r.value === 'fallback' && r.checked
-    const target = useFallback ? fallbackAgent : defaultAgent
-    if (!target) return
-    agentSel.value = target.id
-    fillModels(target, useFallback ? agents.defaults.fallback : agents.defaults.model)
-  }))
-
-  const loadRepo = async () => {
-    const name = repoSel.value
-    const seq = ++dialogRepoSeq
-    const existing = form.querySelector<HTMLSelectElement>('.chat-d-branch-existing')!
-    const prs = form.querySelector<HTMLSelectElement>('.chat-d-branch-pr')!
-    const stateEl = form.querySelector<HTMLElement>('.chat-d-repo-state')!
-    if (!name) { existing.innerHTML = '<option value="">—</option>'; prs.innerHTML = '<option value="">—</option>'; return }
-    try {
-      const info = await chatClient.repo(name)
-      if (seq !== dialogRepoSeq) return
-      const wantExisting = prefill.branch && 'existing' in prefill.branch ? prefill.branch.existing : info.currentBranch
-      existing.innerHTML = info.branches.map((b) => `<option value="${escapeHtml(b)}"${b === wantExisting ? ' selected' : ''}>${escapeHtml(b)}</option>`).join('') || '<option value="">No branches</option>'
-      const wantPr = prefill.branch && 'pr' in prefill.branch ? prefill.branch.pr : undefined
-      prs.innerHTML = info.prs.map((p) => `<option value="${p.number}"${p.number === wantPr ? ' selected' : ''}>#${p.number} ${escapeHtml(p.title)} (${escapeHtml(p.branch)})</option>`).join('') || '<option value="">No open pull requests</option>'
-      if (wantPr !== undefined && !info.prs.some((p) => p.number === wantPr)) prs.insertAdjacentHTML('afterbegin', `<option value="${wantPr}" selected>#${wantPr}</option>`)
-      stateEl.textContent = `Checkout ${info.checkout} on ${info.currentBranch}${info.dirty ? ` · ${info.dirtyFiles} uncommitted file${info.dirtyFiles === 1 ? '' : 's'}` : ' · clean'}; new branches cut from ${info.defaultBranch}.`
-    } catch (err) {
-      if (seq !== dialogRepoSeq) return
-      stateEl.textContent = `Could not read the repository — ${(err as Error).message}`
-    }
-  }
-  repoSel.addEventListener('change', () => { void loadRepo() })
-  void loadRepo()
-  form.querySelector<HTMLElement>('.chat-dialog-cancel')!.addEventListener('click', () => closeDialog())
-  form.addEventListener('submit', (e) => {
-    e.preventDefault()
-    const kind = (form.querySelector<HTMLInputElement>('input[name="branch"]:checked')?.value || 'new') as 'new' | 'existing' | 'pr'
-    let branch: BranchRequest
-    if (kind === 'new') branch = { new: form.querySelector<HTMLInputElement>('.chat-d-branch-new')!.value.trim() }
-    else if (kind === 'existing') branch = { existing: form.querySelector<HTMLSelectElement>('.chat-d-branch-existing')!.value }
-    else branch = { pr: Number(form.querySelector<HTMLSelectElement>('.chat-d-branch-pr')!.value) }
-    if (('new' in branch && !branch.new) || ('existing' in branch && !branch.existing) || ('pr' in branch && !branch.pr)) {
-      errorEl.textContent = 'Pick a branch for the session.'
-      errorEl.hidden = false
-      return
-    }
-    const useFallback = form.querySelector<HTMLInputElement>('input[name="fallback"][value="fallback"]')?.checked
-    const req: NewSessionRequest = {
-      agent: agentSel.value as AgentId,
-      model: modelSel.value,
-      effort: effortSel.value || undefined,
-      repo: repoSel.value,
-      branch,
-      context: prefill.context,
-      ...(useFallback ? { fallbackModel: agents.defaults.fallback } : {}),
-    }
-    if (!req.model) { errorEl.textContent = 'Pick a model.'; errorEl.hidden = false; return }
-    void createSession(req, errorEl)
-  })
-  if (prefill.pickRepo) repoSel.focus()
-  else agentSel.focus()
+  renderNewSessionDialog(dialogEl, agents, prefill.context, (request, error) => { void createSession(request, error) }, closeDialog)
 }
 
 function closeDialog(): void {
@@ -1027,41 +908,62 @@ function closeDialog(): void {
   dialogEl.innerHTML = ''
 }
 
-async function createSession(req: NewSessionRequest, errorEl: HTMLElement): Promise<void> {
-  const tempId = `pending-${Date.now().toString(36)}`
+async function createSessionEntry(req: NewSessionRequest, draft: ComposerDraft | null = null,
+  firstPrompt?: ComposerDraft, expectedActiveId = activeId): Promise<SessionEntry> {
+  const tempId = `pending-${crypto.randomUUID()}`
   const placeholder: SessionRecord = {
-    id: tempId, agent: req.agent, model: req.model, modelId: req.model, effort: req.effort || '', repo: req.repo, checkout: '',
-    branch: { name: 'new' in req.branch ? req.branch.new : 'existing' in req.branch ? req.branch.existing : `pr-${req.branch.pr}`, origin: 'new' in req.branch ? 'new' : 'existing' in req.branch ? 'existing' : 'pr', pr: 'pr' in req.branch ? req.branch.pr : undefined, provisional: 'new' in req.branch },
-    title: req.context?.title || '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'starting',
+    id: tempId, agent: req.agent, model: req.model, modelId: req.model, effort: req.effort || '', repo: '', checkout: '', workspaceKind: 'poise-local',
+    branch: { name: '', origin: 'new', provisional: true },
+    title: req.title || req.context?.title || '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'starting',
     capabilities: { steer: true, fork: false, thought: false, plan: false, commands: false, modes: false, permissions: true, questions: true, resume: true, images: false },
     lastSeq: 0, pendingRequests: [], instance: '', context: req.context,
   }
-  // The entry is in the sidebar and selected before the server has answered.
-  upsertRecord(placeholder, { pending: true })
-  closeDialog()
-  await selectSession(tempId)
+  const temporary = upsertRecord(placeholder, { pending: true })
+  temporary.draft = draft
+  if (firstPrompt) addOptimisticTurn(temporary.model, firstPrompt)
+  if (activeId === expectedActiveId) await selectSession(tempId)
+  queueRender()
   try {
     const r = await chatClient.createSession(req)
     sessions.delete(tempId)
-    order = order.filter((x) => x !== tempId)
+    order = order.filter(x => x !== tempId)
     const e = upsertRecord(r.session, { pending: false })
-    if (activeId === tempId) activeId = r.session.id
+    e.model = temporary.model
+    e.draft = temporary.draft
+    if (activeId === tempId) {
+      activeId = r.session.id
+      composerStateFor(e)
+    }
     chatClient.subscribe(r.session.id, 0)
     e.loaded = true
     queueRender()
-    composer.focus()
+    if (activeId === r.session.id) composer.focus()
+    return e
   } catch (err) {
     sessions.delete(tempId)
-    order = order.filter((x) => x !== tempId)
-    if (activeId === tempId) activeId = null
+    order = order.filter(x => x !== tempId)
+    if (activeId === tempId) {
+      activeId = null
+      composerStateFor(null)
+      transcript.clear()
+      composer.setDraft(draft || freshDraft)
+    }
+    queueRender()
+    throw err
+  }
+}
+
+async function createSession(req: NewSessionRequest, errorEl: HTMLElement): Promise<void> {
+  try {
+    await createSessionEntry(req, activeId ? null : composer.getDraft())
+  } catch (err) {
     const code = err instanceof ChatHttpError ? err.code : undefined
     const message = (err as Error).message
     const text = code === 'checkout_dirty' ? `The checkout has uncommitted changes on a branch no session owns — commit or stash them first. ${message}`
       : code === 'checkout_busy' ? `The checkout is busy with another session. ${message}`
       : code === 'compat' ? `Caller needs updating (no --record-turn). ${message}`
       : message
-    // Reopen the dialog with the reason, so the choice can be adjusted.
-    await openNewSessionDialog({ context: req.context, repo: req.repo, branch: req.branch })
+    await openNewSessionDialog({ context: req.context })
     const el = dialogEl.querySelector<HTMLElement>('.chat-dialog-error') || errorEl
     el.textContent = text
     el.hidden = false
@@ -1120,7 +1022,7 @@ export async function initChatView(): Promise<void> {
   await loadSessions()
   // A handoff may have opened the New session dialog while the list loaded;
   // auto-selecting would close it.
-  if (!activeId && order.length && dialogEl.hidden) await selectSession(order[0])
+  if (!activeId && !quickSessionPromise && !composer.getDraft().text && order.length && dialogEl.hidden) await selectSession(order[0])
   queueRender()
 }
 
@@ -1128,6 +1030,7 @@ export async function initChatView(): Promise<void> {
 // and its subscriptions stay so a running turn keeps being mirrored and the
 // sidebar is current when the view comes back.
 export function stopChatRefresh(): void {
+  splitPane?.cancelResize()
   if (tickTimer) { clearInterval(tickTimer); tickTimer = null }
   if (composer && activeId) {
     const e = sessions.get(activeId)

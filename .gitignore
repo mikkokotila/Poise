@@ -15,3 +15,6 @@ test-results/
 # Claude-local
 .claude/plans/
 .claude/worktrees/
+
+# Poise-owned Chat workspace and session files
+/.poise-chat/
