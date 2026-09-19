@@ -25,7 +25,7 @@ import {
   type TranscriptModel, type TranscriptView,
 } from './chat-transcript'
 import { createComposer, emptyDraft, type Composer, type ComposerDraft } from './chat-composer'
-import { quickSessionRequest } from '../chat-catalog'
+import { quickSessionRequest, QUICK_SESSION_MODEL, consoleModelLabel } from '../chat-catalog'
 import { attachChatSidebar } from './chat-sidebar'
 
 interface SessionEntry {
@@ -63,6 +63,7 @@ let tickTimer: ReturnType<typeof setInterval> | null = null
 
 let splitPane: ReturnType<typeof attachChatSidebar>
 let freshDraft: ComposerDraft | null = null
+let freshModelIdentity = QUICK_SESSION_MODEL
 let quickSessionPromise: Promise<SessionEntry> | null = null
 let firstPromptPending = false
 /** A single click waits this long so a double-click renames without opening. */
@@ -181,6 +182,17 @@ function renderShell(): void {
 
   composer = createComposer({
     onSend: (draft) => { void sendPrompt(draft) },
+    loadModels: async () => {
+      const catalogue = await loadAgents(true)
+      if (!catalogue) throw new Error('Could not load the model catalogue')
+      return catalogue.agents
+    },
+    onModelSelect: (identity) => {
+      if (entry() || quickSessionPromise || firstPromptPending) return
+      freshModelIdentity = identity
+      setNotice(null)
+      composerStateFor(null)
+    },
     onSteer: (text) => { void steer(text) },
     onStop: () => { void cancelTurn() },
     onResume: () => { void resumeActive() },
@@ -500,12 +512,15 @@ function ensureQuickSession(firstPrompt?: ComposerDraft): Promise<SessionEntry> 
   if (current && !current.pending) return Promise.resolve(current)
   if (current) return Promise.reject(new Error('The session is still being created.'))
   const draft = firstPrompt ? null : composer.getDraft()
+  const selectedModel = freshModelIdentity
   quickSessionPromise = (async () => {
     const catalogue = await loadAgents(true)
     if (!catalogue) throw new Error('Could not load the model catalogue. Your message has not been sent.')
-    const request = quickSessionRequest(catalogue.agents)
+    const request = quickSessionRequest(catalogue.agents, selectedModel)
     if (firstPrompt?.text) request.title = firstPrompt.text.slice(0, 200)
-    return createSessionEntry(request, draft, firstPrompt, null)
+    const created = await createSessionEntry(request, draft, firstPrompt, null)
+    freshModelIdentity = QUICK_SESSION_MODEL
+    return created
   })().finally(() => { quickSessionPromise = null; queueRender() })
   queueRender()
   return quickSessionPromise
@@ -824,7 +839,7 @@ function attachKeys(): void {
 function composerStateFor(e: SessionEntry | null): void {
   if (!e) {
     composer.setCommands([], { model: false, modes: false, fork: false })
-    composer.setState({ running: false, disabled: !!quickSessionPromise, placeholder: quickSessionPromise ? 'Starting the session…' : undefined, modelLabel: 'Opus 5 · High', sessionId: null })
+    composer.setState({ running: false, disabled: !!quickSessionPromise, placeholder: quickSessionPromise ? 'Starting the session…' : undefined, modelLabel: consoleModelLabel(freshModelIdentity), modelIdentity: freshModelIdentity, sessionId: null })
     return
   }
   const s = e.record

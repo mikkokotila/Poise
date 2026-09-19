@@ -233,8 +233,10 @@ handoffs. It requires the companion Caller turn-recording and checkout-lock
 changes; the existing pane stays available for `/content`, `/consensus` and
 Editor annotations in v1.
 
-The fresh console accepts a message directly: first Send creates an Opus 5
-High session, without a dialog. Its draft survives startup errors. The sessions
+The fresh console accepts a message directly. Opus 5 High is the starting
+default; click its label in the console to choose another catalogue model and
+effort from the dropdown. First Send uses that choice without a creation dialog.
+The draft and model choice survive session-creation errors. The sessions
 pane is edge-resizable, remembers its width, and expands/collapses smoothly
 while respecting reduced-motion preferences.
 
