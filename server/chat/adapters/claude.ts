@@ -1,3 +1,4 @@
+import { appendMemories } from '../memory-content'
 // Claude Code through the Claude Agent SDK (pinned to the installed Claude
 // Code: package.json pins @anthropic-ai/claude-agent-sdk 0.3.274, whose
 // claudeCodeVersion is 2.1.274). The SDK runs in-process and spawns the CLI;
@@ -613,7 +614,7 @@ export function createClaudeAdapter(host: AdapterHost, options: { exitGraceMs?: 
         const onAbort = () => { void adapter.cancel() }
         signal.addEventListener('abort', onAbort, { once: true })
         current.resolve = (result: TurnResult) => { signal.removeEventListener('abort', onAbort); resolve(result) }
-        send(current, parts.join('\n'))
+        send(current, appendMemories(parts.join('\n'), input.memories))
       })
     },
 

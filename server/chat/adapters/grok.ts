@@ -1,3 +1,4 @@
+import { memorySuffix } from '../memory-content'
 // Grok Build over the Agent Client Protocol (protocol version 1), which is
 // Chat's internal vocabulary, so this adapter is mostly a pass-through.
 // Verified against grok 1.0.34 on 2026-09-18 (docs/Chat-v1.md):
@@ -433,6 +434,8 @@ export function createGrokAdapter(host: AdapterHost): Adapter {
           blocks.push({ type: 'resource_link', uri: `file://${host.checkout}/${attachment.path}`, name: attachment.name })
         }
       }
+      const suffix = memorySuffix(input.memories)
+      if (suffix) blocks.push({ type: 'text', text: suffix })
       const onAbort = () => { void adapter.cancel() }
       signal.addEventListener('abort', onAbort, { once: true })
       try {

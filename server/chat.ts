@@ -14,6 +14,8 @@
 // transcript for one card. Each entry's `prompt` is the user message;
 // the agent's reply lives at `agent-interface --read-response <hash>`.
 
+import { readMemories } from './chat/memories'
+import { appendMemories } from './chat/memory-content'
 import { join, resolve, isAbsolute, sep } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { chmod, lstat, mkdir, open, writeFile, readdir, rename, rmdir, stat, unlink } from 'node:fs/promises'
@@ -488,6 +490,7 @@ export async function sendChat(
   }
 
   try {
+    prompt = appendMemories(prompt, readMemories().text)
     assertHttpArgumentSize(prompt, 'chat prompt')
     if (claude) await claudeAuth.requireReady()
     await spawnDetached(

@@ -289,3 +289,12 @@ checks, fixes and verified merges, deferring non-blocking questions until the
 end. It is off by default, retained per session, and available before the
 first message. Native tool approvals use once-only decisions recorded in the
 transcript. See [Auto-merge mode](docs/Auto-merge.md).
+
+## Chat memories
+
+The rightmost **Memories** icon opens a free-text pane. Its autosaved text is
+shared across Chat sessions and included last in every outgoing Chat prompt,
+after attachments and other injected context. This includes queued tasks,
+steering, handoffs and Poise implementation messages. Closing the pane leaves
+memories active; clearing the text removes the appendix from future messages.
+See [Memories](docs/Memories.md) for persistence and recovery details.

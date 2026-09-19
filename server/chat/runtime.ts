@@ -21,6 +21,8 @@
 // - close/delete cancel and stop outside the per-session operation chain,
 //   so they are never queued behind a whole coding turn.
 
+import { readMemories } from './memories'
+import { appendMemories } from './memory-content'
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { enqueueMessage, readQueue, updateQueuedModel, removeQueuedMessage, pauseQueue, QueueError, queueOwner, delegateQueue } from './message-queue'
@@ -1386,7 +1388,7 @@ export class ChatRuntime extends EventEmitter {
       agentInvoked = true
       turn.agentInvoked = true
       if (record.queuedHandoff) adapterInput.text = `${record.queuedHandoff}\n\n[Queued task]\n${adapterInput.text}`
-      const result = await adapter.prompt(turn.id, withAutoMergeInstructions(adapterInput, record.autoMerge, turn.implementsChange), turn.abort.signal)
+      const result = await adapter.prompt(turn.id, withAutoMergeInstructions({ ...adapterInput, memories: readMemories().text }, record.autoMerge, turn.implementsChange), turn.abort.signal)
       agentSettled = true
       if (record.queuedHandoff && result.stopReason === 'end_turn') { record.queuedHandoff = undefined; this.saveRecord(session) }
       stopReason = turn.stopping || turn.abort.signal.aborted ? 'cancelled' : result.stopReason
@@ -1539,7 +1541,7 @@ export class ChatRuntime extends EventEmitter {
       let warning: string | undefined
       if (turn?.agentInvoked && !turn.stopping && !turn.abort.signal.aborted && session.adapter?.alive) {
         try {
-          await session.adapter.steer(autoMergeInstructions(enabled, turn.implementsChange))
+          await session.adapter.steer(appendMemories(autoMergeInstructions(enabled, turn.implementsChange), readMemories().text))
           applies = 'current_turn'
         } catch (error) {
           warning = `Auto-merge ${enabled ? 'on' : 'off'} is saved for the next message, but the running agent could not receive the update: ${error instanceof Error ? error.message : String(error)}. Use Stop to end its current work.`
@@ -1568,7 +1570,7 @@ export class ChatRuntime extends EventEmitter {
     await this.control(session, async () => {
       if (session.turn !== turn || turn.stopping || turn.abort.signal.aborted) throw new ChatError(409, 'the turn has ended', 'no_turn')
       const input = withAutoMergeInstructions({ text: trimmed, attachments: [], mentions: [] }, session.record.autoMerge, turn.implementsChange)
-      await session.adapter!.steer(input.text)
+      await session.adapter!.steer(appendMemories(input.text, readMemories().text))
       this.emit_(id, { type: 'steer.sent', turnId: turn.id, text: trimmed })
     })
   }

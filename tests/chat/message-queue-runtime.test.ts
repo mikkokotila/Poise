@@ -264,3 +264,30 @@ describe('deferred message execution', () => {
   })
 
 })
+
+it('uses the latest shared memories at dispatch for normal messages, queued tasks, steering and mode updates', async () => {
+  const memories = await import('../../server/chat/memories')
+  const save = (text: string) => memories.saveMemories({ text, revision: memories.readMemories().revision })
+  const w = await world({ auto: false, deferStart: true, autoMerge: true })
+  try {
+    save('First memory')
+    await w.add('Queued later')
+    w.runtime.prompt(w.s.id, input('First task'))
+    await until(() => w.c.calls.length === 1)
+    expect(w.c.calls[0].input.memories).toBe('First memory')
+    expect(w.c.calls[0].input.text).toContain('Auto-merge')
+    save('Latest memory')
+    await w.runtime.steer(w.s.id, 'Extra instruction')
+    expect(w.c.adapters[0].steered.at(-1)).toMatch(/Latest memory$/)
+    await w.runtime.setAutoMerge(w.s.id, false)
+    expect(w.c.adapters[0].steered.at(-1)).toMatch(/Latest memory$/)
+    w.c.auto = true; w.finish()
+    await until(() => w.turns().length === 2 && w.runtime.get(w.s.id)?.status === 'idle')
+    expect(w.c.calls[1].input.memories).toBe('Latest memory')
+    expect(w.runtime.events(w.s.id, 0).events.filter(e => e.event.type === 'turn.started').map(e => e.event.type === 'turn.started' && e.event.prompt.text)).toEqual(['First task', 'Queued later'])
+    save('')
+    w.runtime.prompt(w.s.id, input('Without memories'))
+    await until(() => w.turns().length === 3)
+    expect(w.c.calls[2].input.memories).toBe('')
+  } finally { save('') }
+}, 15_000)

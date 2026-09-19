@@ -51,6 +51,12 @@ test('executes an idle five-item queue after the first task through real ACP, SQ
     expect(before.events.filter((e: any) => e.event.type === 'turn.started')).toEqual([])
     await page.reload()
     await expect(page.locator('.chat-queue-item')).toHaveCount(5)
+    // Memories edited after enqueue must still be included when items run.
+    await page.getByRole('button', { name: 'Memories', exact: true }).click()
+    const memory = page.getByRole('textbox', { name: 'Memories text' })
+    await expect(memory).toBeEnabled()
+    await memory.fill('Remember this on every queued task: äö.')
+    await page.getByRole('button', { name: 'Close memories' }).click()
     await input.fill('First now'); await input.press('Enter')
     await expect(page.locator('.chat-msg-user')).toContainText('First now')
     await page.reload() // execution belongs to the server, not this tab's event listener
@@ -60,6 +66,10 @@ test('executes an idle five-item queue after the first task through real ACP, SQ
     const after = await (await page.request.get(`${origin}/__test__/timings`)).json()
     expect(after.events.filter((e: any) => e.event.type === 'turn.started').map((e: any) => e.event.prompt.text)).toEqual(['First now', 'Item 1', 'Item 2', 'Item 3', 'Item 4', 'Item 5'])
     expect(after.spawnCount).toBe(1)
+    expect(after.nativeInputs).toHaveLength(6)
+    for (const blocks of after.nativeInputs) {
+      expect(blocks.at(-1)).toEqual({ type: 'text', text: '\n\n[Memories]\nRemember this on every queued task: äö.' })
+    }
     await page.reload()
     await expect(page.locator('.chat-msg-user')).toHaveCount(6)
     expect((await (await page.request.get(`${origin}/__test__/timings`)).json()).spawnCount).toBe(1)

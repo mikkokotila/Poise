@@ -1344,7 +1344,7 @@ test('shows file-preview errors and ignores late responses after closing', async
   await expect(preview).toBeHidden()
 })
 
-test('Auto-merge is the rightmost icon, follows the selected session, and persists through reload without sending a prompt', async ({ page }) => {
+test('Auto-merge stays beside Memories, follows the selected session, and persists through reload without sending a prompt', async ({ page }) => {
   const state = makeState([session(), session({ id: 's2', title: 'Other repository', repo: 'acme/tools' })])
   await installRoutes(page, state)
   const sock = await installSocket(page, state)
@@ -1354,7 +1354,7 @@ test('Auto-merge is the rightmost icon, follows the selected session, and persis
   await expect(toggle).toHaveAttribute('aria-pressed', 'false')
   await expect(toggle.locator('svg')).toHaveCount(1)
   expect(await toggle.textContent()).toBe('')
-  expect(await toggle.evaluate(el => el.parentElement?.lastElementChild === el)).toBe(true)
+  expect(await toggle.evaluate(el => el.nextElementSibling?.getAttribute('aria-label'))).toBe('Memories')
   await input(page).fill('Keep this draft')
   await toggle.focus()
   await toggle.press('Space')
@@ -1591,4 +1591,106 @@ test('the expanded queue leaves the console usable in a small window', async ({ 
   expect(panel!.y).toBeGreaterThanOrEqual(header!.y + header!.height - 1)
   expect(panel!.x).toBeGreaterThanOrEqual(0); expect(panel!.x + panel!.width).toBeLessThanOrEqual(600)
   await page.screenshot({ path: info.outputPath('queue-small.png'), animations: 'disabled' })
+})
+
+async function installMemoryRoutes(page: Page) {
+  const state = { text: '', revision: 0, writes: [] as string[], fail: false, wait: null as (() => Promise<void>) | null }
+  await page.route('**/api/chat/memories', async route => {
+    if (route.request().method() === 'GET') { await route.fulfill({ json: { text: state.text, revision: state.revision } }); return }
+    const body = route.request().postDataJSON() as { text: string, revision: number }
+    state.writes.push(body.text)
+    if (state.wait) await state.wait()
+    if (state.fail) { await route.fulfill({ status: 503, json: { error: 'fixture save unavailable' } }); return }
+    if (body.revision !== state.revision && body.text !== state.text) { await route.fulfill({ status: 409, json: { error: 'Memories changed in another tab.' } }); return }
+    state.text = body.text; state.revision++
+    await route.fulfill({ json: { text: state.text, revision: state.revision } })
+  })
+  return state
+}
+const memoryToggle = (page: Page) => page.getByRole('button', { name: 'Memories', exact: true })
+const memoryText = (page: Page) => page.getByRole('textbox', { name: 'Memories text', exact: true })
+
+test('Memories is the rightmost icon and opens a shared autosaved pane without starting a session', async ({ page }, info) => {
+  const state = makeState([])
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  const saved = await installMemoryRoutes(page)
+  await page.goto('/')
+  const toggle = memoryToggle(page)
+  expect(await toggle.evaluate(el => el.parentElement?.lastElementChild === el)).toBe(true)
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  await expect(memoryText(page)).toBeEnabled()
+  await memoryText(page).fill('Prefer small, tested changes.\nKeep Finnish text: äö.')
+  await expect.poll(() => saved.text).toBe('Prefer small, tested changes.\nKeep Finnish text: äö.')
+  await expect(page.locator('.chat-memories-status')).toHaveText('Saved automatically')
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate(value => { document.documentElement.dataset.theme = value }, theme)
+    await page.screenshot({ path: info.outputPath(`memories-${theme}.png`) })
+  }
+  await memoryText(page).press('Escape')
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(page.locator('#chat-memories-pane')).toHaveAttribute('aria-hidden', 'true')
+  await toggle.click(); await expect(memoryText(page)).toHaveValue(saved.text)
+  await page.reload(); await expect(memoryText(page)).toHaveValue(saved.text)
+  expect(state.calls.filter(call => call.method === 'POST' && call.path === '/api/chat/sessions')).toHaveLength(0)
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('Memories save finishes before a message is dispatched, including when the pane is closed', async ({ page }) => {
+  const state = makeState([session()])
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  const saved = await installMemoryRoutes(page)
+  await page.goto('/'); await sock.subscribed('s1')
+  await memoryToggle(page).click(); await expect(memoryText(page)).toBeEnabled()
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  saved.wait = () => held
+  await memoryText(page).fill('Always run the tests.')
+  await page.getByRole('button', { name: 'Close memories' }).click()
+  await input(page).fill('Implement the next slice'); await input(page).press('Enter')
+  await expect.poll(() => saved.writes.length).toBe(1)
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  release()
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ text: 'Implement the next slice' })
+  expect(saved.text).toBe('Always run the tests.')
+})
+
+test('a failed Memories save keeps both drafts and does not send a message missing its context', async ({ page }) => {
+  const state = makeState([session()])
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  const saved = await installMemoryRoutes(page)
+  await page.goto('/'); await sock.subscribed('s1')
+  await memoryToggle(page).click(); await expect(memoryText(page)).toBeEnabled()
+  saved.fail = true
+  await memoryText(page).fill('Remember this context')
+  await input(page).fill('Do not lose my message'); await input(page).press('Enter')
+  await expect(input(page)).toHaveValue('Do not lose my message')
+  await expect(page.locator('.chat-notice')).toContainText('Message not sent')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  await expect(memoryText(page)).toHaveValue('Remember this context')
+  saved.fail = false
+  await page.getByRole('button', { name: 'Retry save' }).click()
+  await expect(page.locator('.chat-memories-status')).toHaveText('Saved automatically')
+  await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+})
+
+test('Memories stay editable across sessions and streaming, fit small windows, and clearing is saved', async ({ page }) => {
+  const state = makeState([session(), session({ id: 's2', title: 'Second session' })])
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  const saved = await installMemoryRoutes(page)
+  await page.goto('/'); await sock.subscribed('s1')
+  await memoryToggle(page).click(); await expect(memoryText(page)).toBeEnabled()
+  await memoryText(page).fill('Shared across all sessions')
+  await expect.poll(() => saved.text).toBe('Shared across all sessions')
+  const handle = await memoryText(page).elementHandle()
+  sock.push('s1', { type: 'text.delta', turnId: 't1', messageId: 'm1', delta: 'Streaming content' })
+  await page.locator('.chat-session-item[data-id="s2"]').click()
+  await expect(memoryText(page)).toHaveValue(saved.text)
+  expect(await handle!.evaluate(el => el.isConnected)).toBe(true)
+  await page.setViewportSize({ width: 600, height: 500 })
+  await expect.poll(async () => { const b = await memoryText(page).boundingBox(); return !!b && b.x >= 0 && b.x + b.width <= 600 && b.y + b.height <= 500 }).toBe(true)
+  await memoryText(page).fill('')
+  await expect.poll(() => saved.text).toBe('')
 })

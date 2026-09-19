@@ -1,4 +1,5 @@
 import { readChatFile } from './file-preview'
+import { readMemories, saveMemories } from './memories'
 // The browser-facing side of Chat v1: the WebSocket at /ws/chat (events
 // down, commands up) and the REST routes under /api/chat.
 //
@@ -338,6 +339,11 @@ export async function handleChatApi(req: IncomingMessage, res: ServerResponse, u
   const query = new URLSearchParams(url.split('?')[1] || '')
   if (!path.startsWith('/api/chat/')) return false
   try {
+    if (path === '/api/chat/memories') {
+      if (req.method === 'GET') return json(res, 200, readMemories()), true
+      if (req.method === 'PUT') return json(res, 200, saveMemories(await readJson(req))), true
+      return json(res, 405, { error: 'Use GET or PUT for memories.' }), true
+    }
     if (path === '/api/chat/agents' && req.method === 'GET') {
       const { agents, catalog } = await runtime.agents()
       const { resolveChoice } = await import('../models')
