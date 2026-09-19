@@ -1,3 +1,4 @@
+import { releaseBackgroundPaused, trackReleaseBackground } from './release-background'
 import { randomUUID } from 'node:crypto'
 import { link, lstat, mkdir, open, readdir, unlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -1009,6 +1010,11 @@ function scheduleRuntime(delayMs: number): void {
       runtimeStopped = true
       return
     }
+    if (releaseBackgroundPaused()) {
+      scheduleRuntime(runtimeOptions.intervalMs ?? DEFAULT_INTERVAL_MS)
+      return
+    }
+    const releaseOperation = trackReleaseBackground()
     const dependencies = resolvedDependencies(runtimeOptions.dependencies)
     runtimeRun = (async () => {
       const now = Date.now()
@@ -1040,6 +1046,7 @@ function scheduleRuntime(delayMs: number): void {
         console.error('[content-jobs] reconciliation failed:', error)
       })
       .finally(() => {
+        releaseOperation()
         runtimeRun = null
         scheduleRuntime(runtimeOptions.intervalMs ?? DEFAULT_INTERVAL_MS)
       })

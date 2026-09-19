@@ -18,7 +18,7 @@
     "clean": "node scripts/clean-dist.mjs",
     "build": "npm run clean && npm run typecheck && npm run build:client && npm run build:server",
     "build:client": "vite build",
-    "build:server": "esbuild server/production.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/server.js",
+    "build:server": "node scripts/build-server.mjs",
     "start": "node dist/server.js",
     "start:production": "node scripts/start-production.mjs",
     "preview": "npm run build && npm run start",
@@ -38,7 +38,13 @@
     "test:e2e:update": "npm run prepare:e2e && playwright test --update-snapshots",
     "doctor": "node scripts/check-external-clis.mjs",
     "check": "npm run lint && npm test && npm run build",
-    "verify": "npm run check && npm run test:e2e"
+    "verify": "npm run check && npm run test:e2e",
+    "self-update:enable": "node scripts/install-self-update.mjs enable",
+    "self-update:status": "node scripts/install-self-update.mjs status",
+    "self-update:doctor": "node scripts/install-self-update.mjs doctor",
+    "self-update:disable": "node scripts/install-self-update.mjs disable",
+    "self-update:uninstall": "node scripts/install-self-update.mjs uninstall",
+    "self-update:control": "node scripts/self-update/cli.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",

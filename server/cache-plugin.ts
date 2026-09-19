@@ -19,6 +19,8 @@ import { ATTACHMENT_MAX_BYTES, enforceApiRequest, httpStatus, readBuffer, readJs
 import { ChatRuntime } from './chat/runtime'
 import { ChatSocketServer, handleChatApi } from './chat/transport'
 import { getChatSettings } from './settings'
+import { buildIdentity } from './build-identity'
+import { SelfUpdateService, createSelfUpdateBridge, drainAllowsPath, handleSelfUpdateApi, isSelfUpdateControlRoute, resolveSelfUpdateRoot, unconfiguredSelfUpdateBridge, type SelfUpdateBridge } from './self-update'
 import type { Server } from 'node:http'
 
 function json(res: ServerResponse, status: number, body: unknown) {
@@ -39,6 +41,10 @@ export interface CachePluginOptions {
   /** Which Poise server this is; chat sessions are owned per instance and
    *  the dev and production servers never adopt each other's. */
   instanceLabel?: 'dev' | 'production'
+  /** The self-update controller client. Omitted: resolved from
+   *  POISE_SELF_UPDATE_ROOT / the production default root. `null`: never
+   *  configured (tests). */
+  selfUpdateBridge?: SelfUpdateBridge | null
 }
 
 // Chat v1: one runtime per server process. Sessions are keyed by instance
@@ -46,10 +52,16 @@ export interface CachePluginOptions {
 // servers' sessions and two different databases never mix.
 let chatRuntime: ChatRuntime | null = null
 let chatSockets: ChatSocketServer | null = null
+let selfUpdate: SelfUpdateService | null = null
 
 export function getChatRuntime(): ChatRuntime {
   if (!chatRuntime) throw new Error('the chat runtime is not started')
   return chatRuntime
+}
+
+export function getSelfUpdateService(): SelfUpdateService {
+  if (!selfUpdate) throw new Error('the chat runtime is not started')
+  return selfUpdate
 }
 
 /** Serve /ws/chat on an HTTP server (production server or Vite's). */
@@ -76,14 +88,21 @@ export function startPoiseRuntime(opts: CachePluginOptions = {}): void {
   startContentFinalizer()
   if (!chatRuntime) {
     const label = opts.instanceLabel ?? 'dev'
+    // The self-update controller is separately installed; without a root
+    // (development, tests) the bridge is inert and `/poise` says so.
+    const bridge = opts.selfUpdateBridge === undefined
+      ? createSelfUpdateBridge({ root: resolveSelfUpdateRoot(label) })
+      : opts.selfUpdateBridge ?? unconfiguredSelfUpdateBridge()
     chatRuntime = new ChatRuntime({
       instance: `poise-${label}:${process.env.POISE_DB || 'default'}`,
       instanceLabel: label,
       idleTimeoutMinutes: () => getChatSettings().idleTimeoutMinutes,
       branchPrefix: () => getChatSettings().branchPrefix,
+      selfUpdate: bridge,
     })
     chatRuntime.on('log', (line: string) => console.log(line))
     chatSockets = new ChatSocketServer(chatRuntime, { allowedHosts: opts.allowedHosts })
+    selfUpdate = new SelfUpdateService(chatRuntime, bridge)
     void chatRuntime.recover().catch((error: unknown) => {
       console.error('[chat] startup reconciliation failed:', error)
     })
@@ -95,8 +114,10 @@ export async function stopPoiseRuntime(): Promise<void> {
   activeClaudeAuthRuntimes.clear()
   const chatStop = chatRuntime?.stop() ?? Promise.resolve()
   const socketStop = chatSockets?.close() ?? Promise.resolve()
+  selfUpdate?.reset()
   chatRuntime = null
   chatSockets = null
+  selfUpdate = null
   await Promise.all([stopBehaviorsRuntime(), stopContentFinalizer(), chatStop, socketStop, ...authStops])
 }
 
@@ -105,8 +126,23 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
       const auth = opts.claudeAuth ?? claudeAuth
       return async (req, res, next) => {
         const url = req.url || ''
-
         if (!url.startsWith('/api/')) return next()
+        // A mutating request counts towards release readiness from before
+        // the drain gate until its handler has actually finished — not until
+        // the response closed, since a client can disconnect while a
+        // handler's writes are still settling. The controller's own
+        // readiness/drain/resume calls are the one exemption.
+        const path = url.split('?')[0]
+        const mutating = req.method !== 'GET' && req.method !== 'HEAD'
+        const release = selfUpdate && mutating && !isSelfUpdateControlRoute(path) ? selfUpdate.beginApiWrite() : null
+        try {
+          return await handleApi(req, res, next, url, path, mutating)
+        } finally {
+          release?.()
+        }
+      }
+
+      async function handleApi(req: Parameters<Connect.NextHandleFunction>[0], res: ServerResponse, next: Connect.NextFunction, url: string, path: string, mutating: boolean): Promise<void> {
         setApiHeaders(res)
         try {
           enforceApiRequest(req, { allowedHosts: opts.allowedHosts })
@@ -116,6 +152,20 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
         if (req.method === 'OPTIONS') {
           return json(res, 405, { error: 'cross-origin preflight is not supported' })
         }
+
+        // ── Self-update: the controller's private endpoints and the public
+        // status/revert, ahead of the drain gate they are exempt from ──
+        if (selfUpdate && (path === '/api/self-update' || path.startsWith('/api/self-update/'))) {
+          if (await handleSelfUpdateApi(req, res, url, selfUpdate)) return
+        }
+        // Every other mutating request is refused once the controller drains
+        // this server, except the few that settle work (cancel, close, stop).
+        // It was registered before this check, so a request that was in
+        // before the drain is never missed by readiness.
+        if (selfUpdate && mutating && selfUpdate.draining && !drainAllowsPath(path)) {
+          return json(res, 503, { error: 'Poise is installing an update; try again after it restarts', code: 'draining' })
+        }
+
         if (url === '/api/health' && req.method === 'GET') {
           const scheduler = getBehaviorsRuntimeHealth()
           const claudeAuthState = auth.snapshot()
@@ -131,12 +181,17 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
           // `production` is informational: a stalled updater leaves the
           // running service healthy, so it does not turn this degraded — the
           // health monitor raises that on its own and Settings shows it.
+          // `build` is what the release controller verifies after a switch
+          // and what the browser compares its own bundle against; both come
+          // from the compiled bundle, never from a checkout on disk.
           return json(res, healthy ? 200 : 503, {
             status: healthy ? 'ok' : 'degraded',
             scheduler,
             claudeAuth: claudeAuthState,
             callerRelease,
             production,
+            build: buildIdentity(),
+            selfUpdate: selfUpdate?.summary() ?? { configured: false, draining: false },
           })
         }
 

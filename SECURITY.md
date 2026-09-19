@@ -92,3 +92,29 @@ credential-like files, symlink escapes and non-regular files are not served.
 Reads use a no-follow file descriptor, a 512 KiB byte ceiling and a 5,000-line
 presentation limit. Contents render as text, never active HTML. Previews do
 not launch an agent or switch checkouts; they describe the current file only.
+
+## Poise self-improvement releases
+
+Self-improvement authority is limited to a user-authored Poise change request.
+The independently installed controller fixes the repository to
+`mikkokotila/Poise`; model output cannot select a different repository or grant
+merge authority. A protected change to release/rollback, validation or
+authorization machinery, credentials, destructive migrations, or another
+package's release configuration requires separate review.
+
+The controller holds the release credential; it is not forwarded to native
+agents, candidate builds, or the browser. Exact revision checks and CI precede
+automatic merge. Retained complete releases, an atomic active pointer and a
+separate recovery service make software restoration independent of models,
+GitHub and rebuilds. A rollback hold prevents automatic re-promotion of the
+rejected release. Current/previous identities refer to the served artifact,
+not merely a checkout revision.
+
+These are local, same-user processes. Environment isolation and scoped tool
+permissions are not an operating-system sandbox: native tools, dependencies
+and candidate code must still be treated as code running as the local user.
+The workflow does not promise to undo arbitrary data loss, external side
+effects, or stolen credentials by reverting source code. Persistent data and
+Caller remain outside the replaceable Poise artifact and retain their existing
+locations and permissions. Deployment handover waits for admitted work;
+shutdown of a browser connection is not proof that its file operation ended.

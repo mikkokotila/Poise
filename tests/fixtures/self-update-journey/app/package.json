@@ -1,0 +1,12 @@
+{
+  "name": "poise-journey-fixture",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Zero-dependency stand-in for Poise used by the release journey integration test.",
+  "type": "module",
+  "scripts": {
+    "check": "node --test tests/greeting.spec.mjs",
+    "build": "node scripts/build.mjs",
+    "start": "node dist/server.js"
+  }
+}

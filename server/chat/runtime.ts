@@ -54,6 +54,10 @@ import { createCodexAdapter } from './adapters/codex'
 import { createGrokAdapter } from './adapters/grok'
 import { createMuseAdapter } from './adapters/muse'
 import type { Adapter, AdapterHost, PermissionRequest, QuestionAnswers, QuestionRequest } from './adapters/types'
+import { SELF_UPDATE_REPOSITORY, SelfUpdateBridgeError, SelfUpdateUnavailableError, UUID_PATTERN, type SelfUpdateBridge } from '../self-update-bridge'
+import * as finishOutbox from '../self-update-outbox'
+import { poiseChangePrompt, poiseChangeTitle } from '../self-update-runbook'
+import type { SelfChange } from '../../src/self-update-types'
 
 export type AdapterFactory = (host: AdapterHost) => Adapter
 
@@ -104,6 +108,12 @@ interface RunningTurn {
   stopping: boolean
   /** Set when the turn must end as an error (mirror failure, lost lease, forced stop). */
   failure?: string
+  /** The one implementing turn of a `/poise` change: its settlement is the
+   *  change's outcome; later discussion turns in the session are not. */
+  implementsChange?: boolean
+  /** What the transcript shows as the prompt when the agent got more (a
+   *  server-injected runbook around the person's request). */
+  shown?: PromptInput
 }
 
 interface LiveSession {
@@ -124,6 +134,8 @@ interface LiveSession {
   staged: StagedDocument | null
   /** Serializes lifecycle operations on one session. */
   chain: Promise<unknown>
+  /** Operations queued on or running in `chain`; part of the busy count. */
+  pendingOps: number
 }
 
 export interface RuntimeOptions {
@@ -142,7 +154,17 @@ export interface RuntimeOptions {
   probeAgent?: (agent: AgentId) => Promise<{ ok: boolean, reason?: string }>
   /** Lease liveness probes; tests use them to make this host look dead. */
   leaseProbes?: CheckoutLeaseOptions
+  /** The self-update controller client. Absent or unconfigured: `/poise`
+   *  answers with an actionable error and no controller IO ever happens. */
+  selfUpdate?: SelfUpdateBridge | null
 }
+
+/** What the release controller sees before restarting this server. */
+export interface DrainState { releaseId: string, since: string }
+
+export interface PoiseChangeResult { session: SessionRecord, change: SelfChange }
+
+const ACTIVE_STATUSES: readonly SessionStatus[] = ['starting', 'queued', 'running', 'waiting', 'stopping']
 
 export interface AgentAvailability {
   id: string
@@ -167,11 +189,18 @@ export class ChatRuntime extends EventEmitter {
   private readonly leaseProbes: CheckoutLeaseOptions
   private readonly hostPid: number
   private readonly availability = new Map<AgentId, { at: number, result: { ok: boolean, reason?: string } }>()
+  private readonly selfUpdate: SelfUpdateBridge | null
+  private readonly changeStarts = new Map<string, { sourceId: string, request: string, promise: Promise<PoiseChangeResult> }>()
   private stopped = false
+  private drainState: DrainState | null = null
+  /** Public operations in flight that are not (yet) a turn or a chain entry. */
+  private inflightOps = 0
+  private recovering = false
 
   constructor(private readonly options: RuntimeOptions) {
     super()
     this.instance = options.instance
+    this.selfUpdate = options.selfUpdate ?? null
     this.adapters = { ...DEFAULT_ADAPTERS, ...(options.adapters ?? {}) } as Record<AgentId, AdapterFactory>
     this.caller = options.callerTurns === undefined ? defaultCallerTurns : options.callerTurns
     this.catalog = options.catalog ?? (() => loadCatalog())
@@ -195,6 +224,15 @@ export class ChatRuntime extends EventEmitter {
    *  same instance name). Turns that were open are marked interrupted and
    *  their prompts cancelled; nothing is replayed. */
   async recover(): Promise<void> {
+    this.recovering = true
+    try {
+      await this.recoverState()
+    } finally {
+      this.recovering = false
+    }
+  }
+
+  private async recoverState(): Promise<void> {
     // Sessions whose lease another live server of this instance holds are
     // that server's: their workers, turns and Caller rows are left alone.
     const protectedSessions = new Set<string>()
@@ -275,6 +313,40 @@ export class ChatRuntime extends EventEmitter {
         record.status = record.nativeSessionId ? 'interrupted' : 'idle'
         storage.saveSession(record)
       }
+      // A change session whose outcome was never recorded ended with the
+      // crash: the workers above are gone, nothing is replayed, and the
+      // controller must hear "failed" rather than wait forever. A turn that
+      // did finish before the outbox row was written keeps its own outcome.
+      if (record.selfChangeId && !finishOutbox.getFinish(record.selfChangeId)) {
+        const terminal = implementingTurnOutcome(record.id).finished
+        finishOutbox.queueFinish({
+          changeId: record.selfChangeId, instance: this.instance, sessionId: record.id,
+          outcome: terminal?.stopReason === 'end_turn' && !record.orphanNotice ? 'completed' : 'failed',
+          error: terminal ? (terminal.stopReason === 'end_turn' ? record.orphanNotice ?? null : terminal.error || `the change turn ended with ${terminal.stopReason}`)
+            : 'Poise restarted before the change turn settled',
+        })
+      }
+    }
+    await this.flushSelfUpdateOutbox()
+  }
+
+  /** Deliver every recorded change outcome the controller has not
+   *  acknowledged. Safe to call at any time: rows are immutable and a
+   *  delivery that fails stays queued. */
+  async flushSelfUpdateOutbox(): Promise<void> {
+    if (!this.selfUpdate?.configured) return
+    for (const row of finishOutbox.listUndelivered(this.instance)) {
+      try {
+        await this.selfUpdate.finish(row.changeId, { outcome: row.outcome, ...(row.error ? { error: row.error } : {}) })
+        finishOutbox.markDelivered(row.changeId)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        finishOutbox.markAttempt(row.changeId, message)
+        this.emit('log', `[chat] self-update finish for change ${row.changeId.slice(0, 8)} still undelivered: ${message}`)
+        // A refusal (unknown or already settled change) does not block the
+        // rows behind it; an unreachable controller ends the pass.
+        if (error instanceof SelfUpdateUnavailableError) return
+      }
     }
   }
 
@@ -310,6 +382,75 @@ export class ChatRuntime extends EventEmitter {
     if (session.turn) return // still running after forceStop: leave it, the lease stays
     await this.stopProcess(session)
     if (session.record.status !== 'closed' && session.record.status !== 'error') this.setStatus(session, 'idle')
+  }
+
+  // ── Drain and readiness ────────────────────────────────────────────────
+  //
+  // The release controller drains this server before restarting it: from
+  // that moment no new turn, session, upload or model change is accepted,
+  // while everything already running finishes on its own. Cancel, close,
+  // answering the agent's requests and reads stay available, so a person is
+  // never locked out of ending a turn that is in the way.
+
+  get draining(): DrainState | null {
+    return this.drainState
+  }
+
+  /** Refuse new work from now on. Synchronous: no request that arrives
+   *  after this returns can start a turn. Idle agent processes are then
+   *  closed in each session's own lifecycle queue (their native ids stay,
+   *  so they resume on the next prompt after the restart); a turn that is
+   *  running finishes on its own and closes its process afterwards.
+   *  Calling it again only updates the release it is for. */
+  startDrain(releaseId: string): DrainState {
+    if (!this.drainState || this.drainState.releaseId !== releaseId) this.drainState = { releaseId, since: new Date().toISOString() }
+    for (const session of this.live.values()) {
+      if (session.turn || !(session.adapter?.alive || session.worker?.alive)) continue
+      void this.serialized(session, () => this.closeForDrain(session)).catch(() => undefined)
+    }
+    return this.drainState
+  }
+
+  endDrain(): void {
+    this.drainState = null
+  }
+
+  /** Inside the session's chain: close an idle agent process for the
+   *  restart. Verifiable — a process that will not go stays counted. */
+  private async closeForDrain(session: LiveSession): Promise<void> {
+    if (!this.drainState || session.turn || session.record.status === 'closed') return
+    if (!(session.adapter?.alive || session.worker?.alive)) return
+    if (session.idleTimer) { clearTimeout(session.idleTimer); session.idleTimer = null }
+    await this.stopProcess(session)
+    this.emit_(session.record.id, { type: 'status.changed', status: session.record.status, detail: 'agent process closed for the Poise update; it resumes on the next prompt' })
+  }
+
+  /** Work that a restart would cut: turns, startups, the agent's Poise-served
+   *  file operations, queued lifecycle operations, live agent processes,
+   *  recovery and any public operation still between its call and its
+   *  acknowledgement. Zero means quiescent; anything the runtime is unsure
+   *  about counts. */
+  busy(): number {
+    let count = this.inflightOps + (this.recovering ? 1 : 0)
+    for (const session of this.live.values()) {
+      const own = (session.turn ? 1 : 0) + session.services + session.pendingOps
+      count += own > 0 ? own : ACTIVE_STATUSES.includes(session.record.status) || session.adapter?.alive || session.worker?.alive ? 1 : 0
+    }
+    return count
+  }
+
+  private assertAcceptingWork(): void {
+    if (this.drainState) throw new ChatError(503, 'Poise is installing an update; new work is refused until it restarts', 'draining')
+  }
+
+  /** Count a public operation from its call to its settlement. */
+  private async track<T>(operation: () => Promise<T>): Promise<T> {
+    this.inflightOps += 1
+    try {
+      return await operation()
+    } finally {
+      this.inflightOps -= 1
+    }
   }
 
   // ── Catalog and agents ─────────────────────────────────────────────────
@@ -384,19 +525,26 @@ export class ChatRuntime extends EventEmitter {
     if (!live) {
       // The staged document rides on the record: the live object and the
       // persisted one are the same reference, so saving the record saves it.
-      live = { record, adapter: null, worker: null, lease: null, turn: null, pending: new Map(), grants: new Map(), idleTimer: null, lifecycle: new AbortController(), services: 0, draining: false, staged: record.staged ?? null, chain: Promise.resolve() }
+      live = { record, adapter: null, worker: null, lease: null, turn: null, pending: new Map(), grants: new Map(), idleTimer: null, lifecycle: new AbortController(), services: 0, draining: false, staged: record.staged ?? null, chain: Promise.resolve(), pendingOps: 0 }
       this.live.set(id, live)
     }
     return live
   }
 
   private serialized<T>(session: LiveSession, operation: () => Promise<T>): Promise<T> {
-    const run = session.chain.then(operation, operation)
+    session.pendingOps += 1
+    const settle = <R>(value: R): R => { session.pendingOps -= 1; return value }
+    const run = session.chain.then(operation, operation).then(settle, (error) => { settle(undefined); throw error })
     session.chain = run.catch(() => undefined)
     return run
   }
 
   async create(request: NewSessionRequest): Promise<SessionRecord> {
+    this.assertAcceptingWork() // before any await: the drain flag is checked atomically
+    return this.track(() => this.createSession(request))
+  }
+
+  private async createSession(request: NewSessionRequest): Promise<SessionRecord> {
     if (this.stopped) throw new ChatError(503, 'the chat runtime is stopping', 'agent_error')
     if (!AGENT_IDS.includes(request.agent)) throw new ChatError(400, `unknown agent ${String(request.agent)}`, 'invalid')
     const { agent, model, effort } = await this.resolveModel(request.model, request.effort)
@@ -485,6 +633,8 @@ export class ChatRuntime extends EventEmitter {
       this.setStatus(session, 'idle')
       this.emit_(record.id, { type: 'session.resumed', session: record })
       this.armIdleTimer(session)
+      // A start that was already under way when the drain began ends idle.
+      if (this.drainState && !session.turn) await this.closeForDrain(session).catch(() => undefined) // an orphan stays counted
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       try { this.emit_(record.id, { type: 'error', message, recoverable: true }) } catch { /* mirror */ }
@@ -503,6 +653,7 @@ export class ChatRuntime extends EventEmitter {
   }
 
   async resume(id: string): Promise<SessionRecord> {
+    this.assertAcceptingWork()
     const session = this.requireLive(id)
     await this.serialized(session, async () => {
       if (session.record.status === 'closed' || session.lifecycle.signal.aborted) { session.lifecycle = new AbortController(); session.record.status = 'idle' }
@@ -512,6 +663,7 @@ export class ChatRuntime extends EventEmitter {
   }
 
   async rename(id: string, title: string): Promise<SessionRecord> {
+    this.assertAcceptingWork()
     const session = this.requireLive(id)
     const next = String(title || '').trim().slice(0, CHAT_LIMITS.titleChars)
     if (!next) throw new ChatError(400, 'title is required', 'invalid')
@@ -521,20 +673,28 @@ export class ChatRuntime extends EventEmitter {
     return session.record
   }
 
-  async close(id: string): Promise<SessionRecord> {
-    const session = this.requireLive(id)
-    session.lifecycle.abort()
-    await this.forceStop(session, 'session closed')
-    await this.serialized(session, async () => {
-      await this.shutdownSession(session)
-      if (session.turn) throw new ChatError(409, 'the agent could not be stopped; the session stays open', 'agent_error')
-      this.setStatus(session, 'closed')
-      this.emit_(id, { type: 'session.closed', reason: 'closed by user' })
+  /** Allowed while draining: closing settles work rather than starting it. */
+  close(id: string): Promise<SessionRecord> {
+    return this.track(async () => {
+      const session = this.requireLive(id)
+      session.lifecycle.abort()
+      await this.forceStop(session, 'session closed')
+      await this.serialized(session, async () => {
+        await this.shutdownSession(session)
+        if (session.turn) throw new ChatError(409, 'the agent could not be stopped; the session stays open', 'agent_error')
+        this.setStatus(session, 'closed')
+        this.emit_(id, { type: 'session.closed', reason: 'closed by user' })
+      })
+      return session.record
     })
-    return session.record
   }
 
   async delete(id: string): Promise<void> {
+    this.assertAcceptingWork()
+    return this.track(() => this.deleteSession(id))
+  }
+
+  private async deleteSession(id: string): Promise<void> {
     const session = this.requireLive(id)
     session.lifecycle.abort()
     await this.forceStop(session, 'session deleted')
@@ -566,7 +726,9 @@ export class ChatRuntime extends EventEmitter {
   }
 
   async fork(id: string): Promise<SessionRecord> {
+    this.assertAcceptingWork()
     const source = this.requireLive(id)
+    if (source.record.selfChangeId) throw new ChatError(409, 'a Poise change session cannot be forked; its checkout belongs to the release controller', 'unsupported')
     return this.serialized(source, async () => {
       if (!source.record.capabilities.fork) throw new ChatError(409, `${AGENT_LABEL[source.record.agent]} sessions cannot be forked`, 'unsupported')
       if (source.turn) throw new ChatError(409, 'a turn is running; fork after it finishes', 'turn_in_progress')
@@ -605,8 +767,10 @@ export class ChatRuntime extends EventEmitter {
    *  first turn is a labelled summary — never a pretence that the native
    *  session moved. The new session binds to the same branch as it is. */
   async handoff(id: string, target: { agent: AgentId, model: string, effort?: string }): Promise<SessionRecord> {
+    this.assertAcceptingWork()
     const source = this.requireLive(id)
     if (source.turn) throw new ChatError(409, 'a turn is running; hand off after it finishes', 'turn_in_progress')
+    if (source.record.selfChangeId) throw new ChatError(409, 'a Poise change session cannot be handed off; its checkout belongs to the release controller', 'unsupported')
     const summary = this.handoffSummary(source.record)
     const created = await this.create({
       agent: target.agent,
@@ -661,6 +825,175 @@ export class ChatRuntime extends EventEmitter {
     return lines.join('\n')
   }
 
+  // ── Poise self-improvement ─────────────────────────────────────────────
+
+  /** `/poise <request>` typed in `sourceId`: ask the controller to prepare an
+   *  isolated checkout for the change, open a dedicated session in it with
+   *  the source session's model, bind that session to the change, and
+   *  reserve its one implementing turn (runbook + the exact request) before
+   *  answering — so no browser prompt can slip in first and a resend of the
+   *  same `changeId` finds the session instead of making a second one. */
+  async startPoiseChange(sourceId: string, text: string, changeId: string): Promise<PoiseChangeResult> {
+    this.assertAcceptingWork()
+    const request = String(text || '').trim()
+    // Two arrivals of one change id (a resend under a new request id while
+    // the first is still preparing) share the one start — but only for the
+    // same request from the same session; a second prepare and bind would
+    // make the controller refuse the real session, and a different request
+    // under a reused id is a conflict, not a replay.
+    const key = String(changeId).toLowerCase()
+    const running = this.changeStarts.get(key)
+    if (running) {
+      if (running.sourceId !== sourceId || running.request !== request) throw changeIdConflict()
+      return running.promise
+    }
+    const promise = this.track(() => this.startChange(sourceId, request, changeId)).finally(() => this.changeStarts.delete(key))
+    this.changeStarts.set(key, { sourceId, request, promise })
+    return promise
+  }
+
+  private async startChange(sourceId: string, request: string, changeId: string): Promise<PoiseChangeResult> {
+    if (this.stopped) throw new ChatError(503, 'the chat runtime is stopping', 'agent_error')
+    const bridge = this.selfUpdate
+    if (!bridge?.configured) {
+      throw new ChatError(503, 'Poise self-improvement is not set up on this server: install and enable the self-update controller before using /poise', 'self_update_unavailable')
+    }
+    if (!UUID_PATTERN.test(changeId)) throw new ChatError(400, 'changeId must be a UUID', 'invalid')
+    if (!request) throw new ChatError(400, 'say what to change: /poise <request>', 'invalid')
+    if (Buffer.byteLength(request, 'utf8') > CHAT_LIMITS.promptBytes) throw new ChatError(413, `request exceeds ${CHAT_LIMITS.promptBytes} bytes`, 'invalid')
+    const source = this.get(sourceId)
+    if (!source) throw new ChatError(404, 'unknown session', 'unknown_session')
+    const id = changeId.toLowerCase()
+
+    // The same change id from the same session with the same request is
+    // the same change: answer with the session it already has rather than
+    // preparing a second checkout. Anything else under that id is refused.
+    const existing = storage.listSessions(this.instance).find((record) => record.selfChangeId === id)
+    if (existing) {
+      if (existing.context?.kind !== 'poise-change' || existing.context.fromSession !== source.id || existing.context.body !== request) throw changeIdConflict()
+      const status = await this.bridgeCall(() => bridge.status())
+      const change = status.changes.find((c) => String(c.id).toLowerCase() === id)
+      if (!change || change.instance !== this.instance) throw new ChatError(409, 'this change is no longer known to the release controller', 'self_update_unavailable')
+      return { session: this.withLive(existing), change }
+    }
+
+    if (source.agent === 'claude') await this.requireClaudeReady()
+    const title = poiseChangeTitle(request)
+    const prepared = await this.bridgeCall(() => bridge.prepareChange({ id, sessionId: source.id, instance: this.instance, request, title }))
+    const change = prepared.change
+    if (String(change?.id).toLowerCase() !== id || change.repository !== SELF_UPDATE_REPOSITORY || change.instance !== this.instance) {
+      await this.abandonChange(bridge, id, 'the controller answered for a different change')
+      throw new ChatError(502, 'the release controller answered for a different change or repository; nothing was started', 'agent_error')
+    }
+    if (typeof prepared.workspace !== 'string' || !prepared.workspace.startsWith('/') || typeof prepared.branch !== 'string' || !prepared.branch) {
+      await this.abandonChange(bridge, id, 'the controller returned no usable workspace')
+      throw new ChatError(502, 'the release controller returned no usable workspace; nothing was started', 'agent_error')
+    }
+    let checkout: string
+    try {
+      checkout = canonicalCheckout(prepared.workspace)
+      const state = await inspectCheckout(checkout)
+      if (state.currentBranch !== prepared.branch) throw new Error(`the prepared checkout is on ${state.currentBranch || 'a detached HEAD'}, not ${prepared.branch}`)
+      if (state.dirty) throw new Error(`the prepared checkout has ${state.dirtyFiles} uncommitted change(s)`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      await this.abandonChange(bridge, id, message)
+      throw new ChatError(502, `the prepared workspace is not usable: ${message}`, 'agent_error')
+    }
+
+    const now = new Date().toISOString()
+    const record: SessionRecord = {
+      id: randomUUID(),
+      agent: source.agent,
+      model: source.model,
+      modelId: source.modelId,
+      effort: source.effort,
+      repo: SELF_UPDATE_REPOSITORY,
+      checkout,
+      workspaceKind: 'poise-change',
+      selfChangeId: id,
+      branch: { name: prepared.branch, origin: 'existing', provisional: false, baseSha: prepared.baseSha },
+      title: `Poise: ${title}`.slice(0, CHAT_LIMITS.titleChars),
+      createdAt: now,
+      updatedAt: now,
+      status: 'starting',
+      capabilities: emptyCapabilities(),
+      lastSeq: 0,
+      pendingRequests: [],
+      instance: this.instance,
+      context: { kind: 'poise-change', title, body: request, fromSession: source.id },
+    }
+    storage.insertSession(record)
+    const live = this.requireLive(record.id)
+    this.emit_(record.id, { type: 'session.created', session: record })
+    let bound: SelfChange
+    try {
+      bound = await this.bridgeCall(() => bridge.bindSession(id, { sessionId: record.id, instance: this.instance }))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      try { this.emit_(record.id, { type: 'error', message: `the release controller did not accept this session: ${message}`, recoverable: false }) } catch { /* mirror */ }
+      this.setStatus(live, 'error', message)
+      await this.abandonChange(bridge, id, `the runtime session could not be bound: ${message}`, record.id)
+      throw error
+    }
+    // Reserved synchronously: the ack goes out with the turn already taken.
+    // The agent gets the runbook around the request; the transcript shows
+    // the request as the person typed it.
+    const turn = this.reserveTurn(live)
+    turn.implementsChange = true
+    turn.shown = { text: request, attachments: [], mentions: [] }
+    const prompt: PromptInput = { text: poiseChangePrompt({ request, branch: prepared.branch, baseSha: prepared.baseSha, workspace: checkout }), attachments: [], mentions: [] }
+    void this.serialized(live, () => this.runTurn(live, turn, prompt)).catch(() => undefined)
+    return { session: live.record, change: bound }
+  }
+
+  /** The controller's own refusals are shown as they are; an unreachable
+   *  controller is the actionable "not set up" error. */
+  private async bridgeCall<T>(call: () => Promise<T>): Promise<T> {
+    try {
+      return await call()
+    } catch (error) {
+      if (error instanceof SelfUpdateUnavailableError) throw new ChatError(503, error.message, 'self_update_unavailable')
+      if (error instanceof SelfUpdateBridgeError) throw new ChatError(error.statusCode >= 400 && error.statusCode < 500 ? error.statusCode : 502, error.message, 'agent_error')
+      throw error
+    }
+  }
+
+  /** A change that never got its turn is failed at the controller so the
+   *  single lane is free again; a controller that cannot hear it now hears
+   *  it from the outbox on the next start. */
+  private async abandonChange(bridge: SelfUpdateBridge, changeId: string, error: string, sessionId = ''): Promise<void> {
+    finishOutbox.queueFinish({ changeId, instance: this.instance, sessionId, outcome: 'failed', error })
+    try {
+      await bridge.finish(changeId, { outcome: 'failed', error })
+      finishOutbox.markDelivered(changeId)
+    } catch (failure) {
+      finishOutbox.markAttempt(changeId, failure instanceof Error ? failure.message : String(failure))
+    }
+  }
+
+  /** The change turn's settlement, after the worker is verifiably gone and
+   *  the checkout released: the first outcome is recorded durably, then
+   *  delivered; the controller checks the branch itself, so nothing the
+   *  agent said is forwarded — only whether the turn ended cleanly. */
+  private async settleChange(session: LiveSession, outcome: { stopReason: StopReason, error?: string, freed: boolean, terminalRecorded: boolean }): Promise<void> {
+    const changeId = session.record.selfChangeId
+    if (!changeId) return
+    const completed = outcome.terminalRecorded && outcome.freed && outcome.stopReason === 'end_turn'
+    const error = completed ? undefined
+      : !outcome.terminalRecorded ? 'the turn outcome could not be recorded'
+      : !outcome.freed ? (session.record.orphanNotice || 'the agent process could not be stopped')
+      : outcome.error || `the change turn ended with ${outcome.stopReason}`
+    const { fresh } = finishOutbox.queueFinish({ changeId, instance: this.instance, sessionId: session.record.id, outcome: completed ? 'completed' : 'failed', error })
+    if (fresh) {
+      try {
+        this.emit_(session.record.id, { type: 'status.changed', status: session.record.status,
+          detail: completed ? 'handed to the release controller: it checks, opens the PR, merges and releases from here' : `not released: ${error}` })
+      } catch { /* mirror */ }
+    }
+    await this.flushSelfUpdateOutbox()
+  }
+
   // ── Turns ──────────────────────────────────────────────────────────────
 
   /** Reserve the turn synchronously — before any await — so a second prompt
@@ -677,6 +1010,7 @@ export class ChatRuntime extends EventEmitter {
   }
 
   prompt(id: string, input: PromptInput): { turnId: string } {
+    this.assertAcceptingWork()
     const session = this.requireLive(id)
     const text = String(input.text || '').trim()
     if (!text && !input.attachments?.length) throw new ChatError(400, 'prompt is required', 'invalid')
@@ -705,6 +1039,11 @@ export class ChatRuntime extends EventEmitter {
    *  own, so it cannot interleave with close, delete or the next turn. The
    *  record is issued inside the protected operation. */
   async saveAttachment(id: string, filename: string, body: Buffer): Promise<Attachment> {
+    this.assertAcceptingWork()
+    return this.track(() => this.stageAttachment(id, filename, body))
+  }
+
+  private async stageAttachment(id: string, filename: string, body: Buffer): Promise<Attachment> {
     const session = this.requireLive(id)
     const record = session.record
     if (record.status === 'closed' || session.lifecycle.signal.aborted) throw new ChatError(409, 'the session is closed', 'no_turn')
@@ -815,7 +1154,8 @@ export class ChatRuntime extends EventEmitter {
       if (!session.adapter?.alive) await this.startSession(session)
       const adapter = session.adapter!
       const isFirst = !storage.findEvent(record.id, (e) => e.type === 'turn.started')
-      if (record.title === 'New session' || isFirst) {
+      // A change session is titled by its request, not by the runbook's first line.
+      if ((record.title === 'New session' || isFirst) && !record.selfChangeId) {
         record.title = (input.text.split('\n')[0] || record.title).slice(0, TITLE_CHARS) || record.title
         this.saveRecord(session)
         this.emit_(record.id, { type: 'session.updated', session: record })
@@ -826,7 +1166,7 @@ export class ChatRuntime extends EventEmitter {
         storage.setOpenTurn(record.id, turn.id, turn.callId)
       }
       const nativeInput = await this.composePrompt(session, input, isFirst)
-      this.emit_(record.id, { type: 'turn.started', turnId: turn.id, prompt: nativeInput, callId: turn.callId ?? undefined })
+      this.emit_(record.id, { type: 'turn.started', turnId: turn.id, prompt: turn.shown ?? nativeInput, callId: turn.callId ?? undefined })
       started = true
       this.setStatus(session, 'queued')
       // Created after the title settled: the label names what is queued behind.
@@ -870,7 +1210,7 @@ export class ChatRuntime extends EventEmitter {
         ? (turn.failure && turn.failure !== 'cancelled before it started' ? turn.failure : undefined)
         : err instanceof CallerCompatError ? err.message : `${err instanceof Error ? err.message : String(err)}`
       try {
-        if (!started) this.emit_(record.id, { type: 'turn.started', turnId: turn.id, prompt: input, callId: turn.callId ?? undefined })
+        if (!started) this.emit_(record.id, { type: 'turn.started', turnId: turn.id, prompt: turn.shown ?? input, callId: turn.callId ?? undefined })
         if (!cancelled) this.emit_(record.id, { type: 'error', message: error || 'turn failed', recoverable: true })
       } catch { /* mirror */ }
     } finally {
@@ -951,6 +1291,14 @@ export class ChatRuntime extends EventEmitter {
         else this.setStatus(session, 'interrupted')
       }
       this.armIdleTimer(session)
+      // Last: the controller hears about a change only once its worker is
+      // verifiably gone and the checkout is released above. Only the
+      // implementing turn settles it; later discussion in the session does not.
+      if (turn.implementsChange && record.selfChangeId) {
+        try { await this.settleChange(session, { stopReason, error, freed, terminalRecorded }) }
+        catch (failure) { this.emit('log', `[chat ${record.id.slice(0, 8)}] change settlement failed: ${failure instanceof Error ? failure.message : String(failure)}`) }
+      }
+      if (this.drainState) await this.closeForDrain(session).catch(() => undefined)
     }
   }
 
@@ -968,12 +1316,13 @@ export class ChatRuntime extends EventEmitter {
     } else if (context.kind === 'document' && session.staged) {
       parts.push(stagedDocumentPrompt(session.staged, context.title))
     } else {
-      return input // a handoff summary is the prompt itself
+      return input // a handoff summary or a change runbook is the prompt itself
     }
     return { ...input, text: `${parts.join('\n')}\n\n${input.text}` }
   }
 
   async steer(id: string, text: string): Promise<void> {
+    this.assertAcceptingWork()
     const session = this.requireLive(id)
     if (!session.turn || session.turn.stopping) throw new ChatError(409, 'no turn is running', 'no_turn')
     if (!session.record.capabilities.steer) throw new ChatError(409, `${AGENT_LABEL[session.record.agent]} does not support steering`, 'unsupported')
@@ -986,17 +1335,19 @@ export class ChatRuntime extends EventEmitter {
   /** Cancel the running turn. Resolves when the agent acknowledged or after
    *  the stop target elapsed with the session in `stopping` — never by
    *  pretending the turn ended. */
-  async cancel(id: string): Promise<{ settled: boolean }> {
-    const session = this.requireLive(id)
-    const turn = session.turn
-    if (!turn) return { settled: true }
-    turn.stopping = true
-    this.settlePending(session, 'cancelled')
-    turn.abort.abort()
-    try { await session.adapter?.cancel() } catch { /* the abort signal also reaches prompt() */ }
-    const settled = await this.waitForTurnEnd(session, STOP_SETTLE_MS)
-    if (!settled) this.setStatus(session, 'stopping', 'the agent has not acknowledged the stop yet')
-    return { settled }
+  cancel(id: string): Promise<{ settled: boolean }> {
+    return this.track(async () => {
+      const session = this.requireLive(id)
+      const turn = session.turn
+      if (!turn) return { settled: true }
+      turn.stopping = true
+      this.settlePending(session, 'cancelled')
+      turn.abort.abort()
+      try { await session.adapter?.cancel() } catch { /* the abort signal also reaches prompt() */ }
+      const settled = await this.waitForTurnEnd(session, STOP_SETTLE_MS)
+      if (!settled) this.setStatus(session, 'stopping', 'the agent has not acknowledged the stop yet')
+      return { settled }
+    })
   }
 
   private waitForTurnEnd(session: LiveSession, ms: number): Promise<boolean> {
@@ -1084,6 +1435,7 @@ export class ChatRuntime extends EventEmitter {
   // ── Model, mode, revert ────────────────────────────────────────────────
 
   async setModel(id: string, identity: string, effortOverride?: string): Promise<SessionRecord> {
+    this.assertAcceptingWork()
     const session = this.requireLive(id)
     return this.serialized(session, async () => {
       if (session.turn) throw new ChatError(409, 'change the model between turns', 'turn_in_progress')
@@ -1107,6 +1459,7 @@ export class ChatRuntime extends EventEmitter {
   }
 
   async setMode(id: string, mode: string): Promise<void> {
+    this.assertAcceptingWork()
     const session = this.requireLive(id)
     await this.serialized(session, async () => {
       if (session.turn) throw new ChatError(409, 'change the mode between turns', 'turn_in_progress')
@@ -1119,6 +1472,7 @@ export class ChatRuntime extends EventEmitter {
   }
 
   async revert(id: string, diffId: string): Promise<void> {
+    this.assertAcceptingWork()
     const session = this.requireLive(id)
     const found = storage.findEvent(id, (e) => e.type === 'diff' && e.diffId === diffId)
     if (!found || found.event.type !== 'diff') throw new ChatError(404, 'unknown change', 'invalid')
@@ -1492,6 +1846,28 @@ function validateAnswers(questions: Question[], answers: unknown): QuestionAnswe
     }
   }
   return out
+}
+
+function changeIdConflict(): ChatError {
+  return new ChatError(409, 'this change id was already used for a different request or session; start the request again', 'invalid')
+}
+
+/** The implementing turn of a change session is its first turn; its
+ *  terminal event, if any, is the change's outcome — later discussion is not. */
+function implementingTurnOutcome(sessionId: string): { started: boolean, finished: Extract<ChatEvent, { type: 'turn.finished' }> | null } {
+  let cursor = 0
+  let turnId: string | null = null
+  while (turnId === null) {
+    const page = storage.listEvents(sessionId, cursor)
+    for (const { event } of page.events) {
+      if (event.type === 'turn.started') { turnId = event.turnId; break }
+    }
+    if (turnId !== null || !page.truncated || !page.events.length) break
+    cursor = page.events[page.events.length - 1].seq
+  }
+  if (turnId === null) return { started: false, finished: null }
+  const found = storage.findEvent(sessionId, (e) => e.type === 'turn.finished' && e.turnId === turnId)
+  return { started: true, finished: found?.event.type === 'turn.finished' ? found.event : null }
 }
 
 function clip(text: string, max: number): string {

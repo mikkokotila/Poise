@@ -1,3 +1,4 @@
+import { registerReloadGuard } from '../self-update-watch'
 // Editor — minimalist markdown writing surface.
 //
 // Single horizontal control bar at the top, sharing the exact alignment
@@ -244,6 +245,13 @@ const annotationsSaveQueue = createSerializedSaveQueue(
     console.error('[editor] save annotations failed:', error)
     setMeta((error as Error)?.message?.includes('changed since') ? 'Conflict — reload' : 'Annotation save failed')
   },
+)
+
+// A hidden Editor can still own an unsaved document or annotation.
+// A release refresh must wait for the actual queues, not visible status text.
+registerReloadGuard(() =>
+  documentSaveQueue.isDirty() || annotationsSaveQueue.isDirty() || saveTimer || annotationsSaveTimer || deletingSlug
+    ? ['save'] : [],
 )
 
 function isEditorVersion(value: unknown): value is string {

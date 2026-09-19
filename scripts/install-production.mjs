@@ -20,6 +20,13 @@ import { config as loadDotenv } from 'dotenv'
 import { installStopGate } from './stop-gate-runtime.mjs'
 import { servicePath } from './production-path.mjs'
 
+import { selfUpdateEnabled } from './self-update-bridge.mjs'
+
+// Do not overwrite the trusted launcher or frozen Caller environment.
+if (await selfUpdateEnabled()) {
+  throw new Error('Production is managed by the self-update controller. Use its manual maintenance workflow instead of install:production.')
+}
+
 const projectRoot = await realpath(fileURLToPath(new URL('..', import.meta.url)))
 const trackedRelease = JSON.parse(await readFile(
   join(projectRoot, 'config', 'caller-release.json'),

@@ -5835,3 +5835,83 @@ body:has(#view-chat:not([hidden])) #app { padding-bottom: 0; }
 .chat-file-line { display: block; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 1.6em; }
 .chat-file-line::before { content: attr(data-line); display: inline-block; min-width: 4ch; margin-right: 2ch; color: var(--text-tertiary); user-select: none; text-align: right; }
 .chat-file-line.selected { background: var(--tint-a1); }
+
+/* ── Poise self-change: deploy card and build banner ── */
+/* The card sits after the transcript in the same scroll and matches its
+   measure; the activity toggle never touches it. */
+.chat-deploy-host { max-width: var(--typo-width, 960px); margin: var(--sp-4) auto 0; }
+.chat-deploy-host[hidden] { display: none; }
+.chat-deploy { gap: var(--sp-2); }
+.chat-deploy[data-level="busy"] { border-color: var(--a2); }
+.chat-deploy[data-level="ok"] { border-color: var(--a3); }
+.chat-deploy[data-level="error"] { border-color: var(--a5); }
+.chat-deploy-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-3); }
+.chat-deploy-state {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.chat-deploy[data-level="ok"] .chat-deploy-state { color: var(--a3); }
+.chat-deploy[data-level="error"] .chat-deploy-state { color: var(--a5); }
+.chat-deploy-state.moving::before {
+  content: '';
+  display: inline-block;
+  width: 6px; height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--a2);
+  animation: chat-deploy-pulse 1.4s ease-in-out infinite;
+}
+@keyframes chat-deploy-pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+.chat-deploy-request { color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-deploy-rows { display: flex; flex-direction: column; gap: 2px; font-size: 0.75rem; color: var(--text-secondary); }
+.chat-deploy-row { display: flex; gap: var(--sp-2); align-items: baseline; }
+.chat-deploy-row code { font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace; font-size: 0.6875rem; }
+.chat-deploy-row a { color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
+.chat-deploy-k { flex: 0 0 5em; color: var(--text-tertiary); }
+.chat-deploy-error { color: var(--a5); }
+.chat-deploy-evidence { font-size: 0.75rem; color: var(--text-secondary); text-decoration: underline; text-underline-offset: 2px; }
+.chat-deploy-revert:hover:not(:disabled) { background: var(--tint-a5); border-color: var(--red-soft); color: var(--a5); }
+.chat-deploy-revert:disabled { opacity: 0.6; cursor: default; }
+
+/* A quiet, fixed banner: the served build moved on and this tab has not. It
+   sits above the side panels (100–110) and the nav band (130): a person who
+   opened Settings must still be able to reach Refresh. */
+.self-update-banner {
+  position: fixed;
+  right: var(--sp-4);
+  bottom: var(--sp-4);
+  z-index: 140;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  max-width: min(520px, calc(100vw - 32px));
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--e-2);
+  font-size: 0.8125rem;
+}
+.self-update-banner[hidden] { display: none; }
+.self-update-banner-text { color: var(--text-secondary); }
+.self-update-refresh {
+  flex: 0 0 auto;
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+.self-update-refresh:hover:not(:disabled) { border-color: var(--text-tertiary); }
+.self-update-refresh:disabled { opacity: 0.6; cursor: default; }
+@media (prefers-reduced-motion: reduce) {
+  .chat-deploy-state.moving::before { animation: none; opacity: 1; }
+}

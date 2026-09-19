@@ -52,13 +52,15 @@ export interface ComposerHandlers {
 
 export interface Composer {
   el: HTMLElement
-  setCommands(agentCommands: CommandOption[], own: { model?: boolean, modes: boolean, fork: boolean }): void
+  setCommands(agentCommands: CommandOption[], own: { model?: boolean, modes: boolean, fork: boolean, poise?: boolean }): void
   setState(state: ComposerState): void
   getDraft(): ComposerDraft
   setDraft(draft: ComposerDraft | null): void
   focus(): void
   /** Recompute the textarea height, e.g. after the composer became visible. */
   layout(): void
+  /** A File is on its way to the server; it cannot be carried across a reload. */
+  isUploading(): boolean
 }
 
 export function emptyDraft(): ComposerDraft {
@@ -81,6 +83,7 @@ const OWN_COMMANDS: CommandOption[] = [
   { name: 'model', description: 'Switch model', hint: '<identity>' },
   { name: 'mode', description: 'Switch mode', hint: '<mode>' },
   { name: 'fork', description: 'Fork this session' },
+  { name: 'poise', description: 'Implement and release a Poise change', hint: '<request>' },
 ]
 
 export function createComposer(handlers: ComposerHandlers): Composer {
@@ -522,7 +525,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     el,
     setCommands(list, own) {
       agentCommands = list
-      ownCommands = OWN_COMMANDS.filter((c) => (c.name === 'model' && own.model !== false) || (c.name === 'mode' && own.modes) || (c.name === 'fork' && own.fork))
+      ownCommands = OWN_COMMANDS.filter((c) => (c.name === 'model' && own.model !== false) || (c.name === 'mode' && own.modes) || (c.name === 'fork' && own.fork) || (c.name === 'poise' && own.poise !== false))
     },
     setState(next) {
       // The view calls this on every render, including each streamed delta;
@@ -548,5 +551,6 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     },
     focus() { input.focus() },
     layout() { autoResize(); modelPicker.layout(); if (activeMode) applyMode(activeMode) },
+    isUploading() { return uploading > 0 },
   }
 }

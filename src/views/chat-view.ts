@@ -29,6 +29,18 @@ import { quickSessionRequest, QUICK_SESSION_MODEL, consoleModelLabel } from '../
 import { attachChatSidebar } from './chat-sidebar'
 import { createFilePreview } from './chat-file-preview'
 import { ICON_FORK, ICON_HANDOFF, ICON_ACTIVITY } from './chat-icons'
+import { createDeployCard, type DeployCard, type LocalPendingChange } from './chat-deploy-card'
+import { parsePoiseCommand, reconcilePendingChanges, releaseChangeId, reserveChangeId, type PoiseCommand } from '../self-update-command'
+import { isTerminal, nextPollDelay, POLL_ACTIVE_MS, POLL_IDLE_MS, selectChangeForSession } from '../self-update-state'
+import { takeDraftSnapshot, type DraftSnapshot } from '../self-update-drafts'
+import { installSelfUpdateWatch, registerDraftProvider, registerReloadGuard } from '../self-update-watch'
+import { BUILD_SHA } from '../build-identity'
+import type { SelfChange, SelfUpdateStatus } from '../self-update-types'
+
+// The build watch is app-wide (it guards every view), but it has to start
+// somewhere main.ts already imports; this module is that place until the
+// bootstrap moves into main.ts. Installing twice is a no-op.
+installSelfUpdateWatch()
 
 interface SessionEntry {
   record: SessionRecord
@@ -69,6 +81,30 @@ let freshDraft: ComposerDraft | null = null
 let freshModelIdentity = QUICK_SESSION_MODEL
 let quickSessionPromise: Promise<SessionEntry> | null = null
 let firstPromptPending = false
+
+// ── Self-improvement state ─────────────────────────────────────────────────
+// The deploy card follows the supervisor's status for the session on screen.
+// `local` holds a `/poise` request between Enter and the server's ack, so the
+// card appears at once; `changeSessions` remembers which sessions a change
+// belongs to (its source and its dedicated workspace) from the ack itself,
+// so the card shows even before the session record carries the link.
+let deployCard: DeployCard
+let selfStatus: SelfUpdateStatus | null = null
+let selfStatusError: string | null = null
+const localChanges = new Map<string, LocalPendingChange>()
+const changeSessions = new Map<string, Set<string>>()
+const reverting = new Set<string>()
+const revertNotes = new Map<string, { text: string, level: 'info' | 'error' }>()
+const lastStates = new Map<string, SelfChange['state']>()
+let poiseInFlight = false
+let selfPollTimer: ReturnType<typeof setTimeout> | null = null
+let selfPollDelay = POLL_IDLE_MS
+let selfPollSeq = 0
+let restoredSnapshot: DraftSnapshot | null = null
+/** Where a pending change id is kept between attempts; memory when storage is off. */
+const pendingStore = (() => {
+  try { return typeof localStorage !== 'undefined' ? localStorage : null } catch { return null }
+})() || (() => { const m = new Map<string, string>(); return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => { m.set(k, v) }, removeItem: (k: string) => { m.delete(k) } } })()
 /** A single click waits this long so a double-click renames without opening. */
 const CLICK_DELAY_MS = 220
 const STICK_TO_BOTTOM_PX = 40
@@ -225,6 +261,8 @@ function renderShell(): void {
     },
   })
   dockEl.appendChild(composer.el)
+  // After the transcript, inside the same scroll, outside the activity toggle.
+  deployCard = createDeployCard(scrollEl, { onRevert: (changeId, releaseId) => { void revertChange(changeId, releaseId) } })
   splitPane = attachChatSidebar(viewEl, () => { composer.layout(); queueRender() })
   const layoutObserver = new ResizeObserver(() => queueRender())
   layoutObserver.observe(mainEl)
@@ -233,6 +271,51 @@ function renderShell(): void {
   attachSidebar()
   attachHeader()
   attachKeys()
+  attachReloadGuards()
+}
+
+// ── Safe-reload cooperation ────────────────────────────────────────────────
+// What this view cannot carry across a reload, and what it can. Drafts are
+// serialisable and go into the snapshot; everything listed as a blocker is
+// not, so the build watch waits for it.
+
+function attachReloadGuards(): void {
+  registerReloadGuard(() => {
+    const blockers: string[] = []
+    if (chatClient.pendingCount() > 0) blockers.push('command')
+    if (composer.isUploading()) blockers.push('upload')
+    if (quickSessionPromise || firstPromptPending) blockers.push('session-create')
+    for (const e of sessions.values()) if (e.pending) { blockers.push('session-create'); break }
+    const active = entry()
+    if (active && (focusedPending(active.model) || (active.record.pendingRequests?.length || 0) > 0)) blockers.push('pending-request')
+    if (poiseInFlight || localChanges.size) blockers.push('poise-change')
+    if (reverting.size) blockers.push('command')
+    return blockers
+  })
+  registerDraftProvider(() => {
+    const drafts: [string, ComposerDraft | null][] = []
+    for (const [id, e] of sessions) drafts.push([id, id === activeId ? composer.getDraft() : e.draft])
+    return {
+      fromSha: BUILD_SHA,
+      activeSessionId: activeId,
+      fresh: { draft: activeId ? freshDraft : composer.getDraft(), modelIdentity: freshModelIdentity },
+      sessions: drafts,
+    }
+  })
+}
+
+/** Put a consumed snapshot back where it came from, once the session list is known. */
+function applyRestoredSnapshot(): void {
+  const snap = restoredSnapshot
+  if (!snap) return
+  restoredSnapshot = null
+  for (const [id, draft] of Object.entries(snap.sessions)) {
+    const e = sessions.get(id)
+    if (e) e.draft = { text: draft.text, attachments: draft.attachments, mentions: draft.mentions, mode: draft.mode }
+  }
+  if (snap.fresh.modelIdentity) freshModelIdentity = snap.fresh.modelIdentity
+  if (snap.fresh.draft) freshDraft = { text: snap.fresh.draft.text, attachments: snap.fresh.draft.attachments, mentions: snap.fresh.draft.mentions, mode: snap.fresh.draft.mode }
+  if (!activeId && freshDraft) composer.setDraft(freshDraft)
 }
 
 // ── Sessions list ──────────────────────────────────────────────────────────
@@ -451,6 +534,7 @@ async function selectSession(id: string): Promise<void> {
   // animation frame must not attach itself to the newly selected draft.
   composerStateFor(e)
   queueRender()
+  if (switching) scheduleSelfPoll(0)
   if (!e.loaded && !e.loading && !e.pending) await loadHistory(e)
   composer.focus()
 }
@@ -515,7 +599,7 @@ function commandFailed(err: unknown, what: string): void {
 }
 
 /** One user action creates one session; neither focus nor typing launches an agent. */
-function ensureQuickSession(firstPrompt?: ComposerDraft): Promise<SessionEntry> {
+function ensureQuickSession(firstPrompt?: ComposerDraft, title?: string): Promise<SessionEntry> {
   if (quickSessionPromise) return quickSessionPromise
   const current = entry()
   if (current && !current.pending) return Promise.resolve(current)
@@ -527,6 +611,7 @@ function ensureQuickSession(firstPrompt?: ComposerDraft): Promise<SessionEntry> 
     if (!catalogue) throw new Error('Could not load the model catalogue. Your message has not been sent.')
     const request = quickSessionRequest(catalogue.agents, selectedModel)
     if (firstPrompt?.text) request.title = firstPrompt.text.slice(0, 200)
+    else if (title) request.title = title.slice(0, 200)
     const created = await createSessionEntry(request, draft, firstPrompt, null)
     freshModelIdentity = QUICK_SESSION_MODEL
     return created
@@ -535,7 +620,211 @@ function ensureQuickSession(firstPrompt?: ComposerDraft): Promise<SessionEntry> 
   return quickSessionPromise
 }
 
+// ── Poise self-change ──────────────────────────────────────────────────────
+
+/** Put a request that did not start back where the person can edit it. */
+function keepDraft(sessionId: string | null, draft: ComposerDraft): void {
+  if (!activeId || activeId === sessionId) { composer.setDraft(draft); return }
+  const e = sessionId ? sessions.get(sessionId) : null
+  if (e) e.draft = draft
+  else composer.setDraft(draft)
+}
+
+/** `/poise <request>`: one explicit command, one change id, one dedicated
+ *  session. The source session gets no ordinary prompt — the request travels
+ *  inside the command and the server injects it into the new session's first
+ *  turn — so nothing is ever sent twice. */
+async function startPoiseChange(cmd: PoiseCommand, draft: ComposerDraft): Promise<void> {
+  // The composer clears itself right after handing over the draft; anything
+  // put back synchronously would be wiped, so give it that turn first.
+  await Promise.resolve()
+  if (!cmd.request) {
+    setNotice('Type the change after /poise — for example: /poise Add a Stop button to the Swarm header', 'info')
+    keepDraft(activeId, draft)
+    return
+  }
+  if (poiseInFlight) {
+    setNotice('A Poise change is already being started; wait for it to be acknowledged.', 'info')
+    keepDraft(activeId, draft)
+    return
+  }
+  poiseInFlight = true
+  let source: SessionEntry | null = null
+  let changeId: string | null = null
+  try {
+    source = entry()
+    if (!source || source.pending) {
+      // A fresh console needs an ordinary local session on the chosen model
+      // to be the source; it receives no prompt.
+      firstPromptPending = true
+      try { source = await ensureQuickSession(undefined, `Poise: ${cmd.request}`) } finally { firstPromptPending = false }
+      freshDraft = null
+    }
+    const sessionId = source.record.id
+    changeId = reserveChangeId(pendingStore, sessionId, cmd.request)
+    localChanges.set(sessionId, { id: changeId, request: cmd.request, sessionId, startedAt: Date.now() })
+    setNotice(null)
+    queueRender()
+    const ack = await chatClient.startPoiseChange(sessionId, cmd.request, changeId)
+    releaseChangeId(pendingStore, changeId)
+    localChanges.delete(sessionId)
+    rememberChange(ack.change, [sessionId, ack.session.id])
+    mergeChange(ack.change)
+    upsertRecord(ack.session, { pending: false })
+    await selectSession(ack.session.id)
+    scheduleSelfPoll(POLL_ACTIVE_MS)
+  } catch (err) {
+    if (source) localChanges.delete(source.record.id)
+    const code = err instanceof ChatCommandError ? err.code : err instanceof ChatHttpError ? err.code : undefined
+    const message = (err as Error).message || String(err)
+    if (code === 'command_in_doubt') {
+      // The reserved id stays: resending the same request replays it.
+      setNotice(`Poise change not acknowledged — ${message} If no new session appears, send the same request again; it reuses the same change id.`)
+    } else {
+      if (changeId) releaseChangeId(pendingStore, changeId)
+      const why = code === 'self_update_unavailable' ? `Poise self-updates are not set up on this server — ${message}`
+        : code === 'draining' ? `Poise is installing an update and refuses new work until it restarts — ${message}`
+        : `Poise change not started${code ? ` (${code})` : ''} — ${message}`
+      setNotice(`${why} Your request is still in the composer; nothing was sent to a model.`)
+    }
+    keepDraft(source?.record.id ?? null, draft)
+    queueRender()
+  } finally {
+    poiseInFlight = false
+    queueRender()
+  }
+}
+
+function rememberChange(change: SelfChange, sessionIds: string[]): void {
+  let set = changeSessions.get(change.id)
+  if (!set) { set = new Set(); changeSessions.set(change.id, set) }
+  for (const id of sessionIds) set.add(id)
+  if (change.sessionId) set.add(change.sessionId)
+}
+
+/** Fold one change record into the last status without waiting for a poll. */
+function mergeChange(change: SelfChange): void {
+  const base: SelfUpdateStatus = selfStatus || { enabled: true, available: true, activeRelease: null, previousRelease: null, hold: null, changes: [] }
+  const changes = base.changes.filter((c) => c.id !== change.id)
+  changes.push(change)
+  selfStatus = { ...base, changes }
+}
+
+function linkedChangeIds(sessionId: string | null): Set<string> {
+  const ids = new Set<string>()
+  if (!sessionId) return ids
+  for (const [changeId, set] of changeSessions) if (set.has(sessionId)) ids.add(changeId)
+  const local = localChanges.get(sessionId)
+  if (local) ids.add(local.id)
+  return ids
+}
+
+function activeChange(): SelfChange | null {
+  const e = entry()
+  if (!e || !selfStatus) return null
+  return selectChangeForSession(selfStatus.changes, e.record.id, e.record.selfChangeId, linkedChangeIds(e.record.id))
+}
+
+function scheduleSelfPoll(delay: number): void {
+  if (selfPollTimer) clearTimeout(selfPollTimer)
+  selfPollTimer = setTimeout(() => { selfPollTimer = null; void pollSelfStatus() }, delay)
+}
+
+/** Ask the status endpoint for the session on screen. Independent of the
+ *  agent: a change keeps being followed after its session went quiet. */
+async function pollSelfStatus(): Promise<void> {
+  if (!viewEl || viewEl.hidden) return
+  const e = entry()
+  if (!e || e.pending) { scheduleSelfPoll(POLL_IDLE_MS); return }
+  const seq = ++selfPollSeq
+  const sessionId = e.record.id
+  let failed = false
+  let available = false
+  try {
+    const status = await chatClient.selfUpdateStatus(sessionId)
+    if (seq !== selfPollSeq) return
+    selfStatusError = null
+    if (status) {
+      available = status.available
+      // Keep changes this page learned from acks that a filtered answer omits.
+      const known = (selfStatus?.changes || []).filter((c) => linkedChangeIds(sessionId).has(c.id) && !status.changes.some((s) => s.id === c.id))
+      selfStatus = { ...status, changes: [...status.changes, ...known] }
+      let promoted = false
+      for (const c of status.changes) {
+        rememberChange(c, [])
+        const before = lastStates.get(c.id)
+        if (before && before !== c.state && (c.state === 'live' || c.state === 'reverted')) promoted = true
+        lastStates.set(c.id, c.state)
+      }
+      // A promotion or rollback just changed the served build: let the build
+      // watch see it now rather than at its next interval.
+      if (promoted) void installSelfUpdateWatch().poll()
+      // Ids the server lists are held durably there; a retry from here would
+      // only be answered from its receipt.
+      reconcilePendingChanges(pendingStore, status.changes.map((c) => c.id))
+    } else if (selfStatus && !linkedChangeIds(sessionId).size) {
+      selfStatus = null
+    }
+  } catch (err) {
+    if (seq !== selfPollSeq) return
+    failed = true
+    selfStatusError = `Could not read the update status — ${(err as Error).message}`
+  }
+  const change = activeChange()
+  // A moving change, or a running turn that may still turn into one, keeps
+  // the fast cadence; the endpoint is a local socket read.
+  const moving = (!!change && !isTerminal(change.state)) || (!!selfStatus?.enabled && available && isRunning(e.record.status))
+  selfPollDelay = nextPollDelay({ available, failed, moving, previous: selfPollDelay })
+  scheduleSelfPoll(selfPollDelay)
+  queueRender()
+}
+
+/** One click, one POST bound to the exact release; no confirmation dialog.
+ *  The server deduplicates by change, so an uncertain answer is reported and
+ *  never repeated blindly. */
+async function revertChange(changeId: string, expectedReleaseId: string): Promise<void> {
+  if (reverting.has(changeId)) return
+  reverting.add(changeId)
+  revertNotes.delete(changeId)
+  queueRender()
+  try {
+    const change = await chatClient.revertSelfChange(changeId, expectedReleaseId)
+    mergeChange(change)
+    rememberChange(change, [])
+    revertNotes.set(changeId, { text: 'Revert requested; the previous release is being restored.', level: 'info' })
+  } catch (err) {
+    const message = (err as Error).message || String(err)
+    const uncertain = !(err instanceof ChatHttpError)
+    revertNotes.set(changeId, {
+      text: uncertain ? `Revert request did not get an answer — ${message}. The status below will show whether it went through.` : `Revert refused — ${message}`,
+      level: 'error',
+    })
+  } finally {
+    reverting.delete(changeId)
+    scheduleSelfPoll(0)
+    queueRender()
+  }
+}
+
+function renderDeployCard(): void {
+  const e = entry()
+  const change = activeChange()
+  const local = e ? localChanges.get(e.record.id) || null : null
+  const showLocal = local && !change ? local : null
+  deployCard.render({
+    status: selfStatus,
+    change,
+    local: showLocal,
+    browserSha: BUILD_SHA,
+    reverting: !!change && reverting.has(change.id),
+    revertNote: change ? revertNotes.get(change.id) || null : null,
+    statusError: change ? selfStatusError : null,
+  })
+}
+
 async function sendPrompt(draft: ComposerDraft): Promise<void> {
+  const poise = parsePoiseCommand(draft.text)
+  if (poise) { await startPoiseChange(poise, draft); return }
   let e = entry()
   if (!e || e.pending) {
     if (firstPromptPending) return
@@ -561,6 +850,9 @@ async function sendPrompt(draft: ComposerDraft): Promise<void> {
   queueRender()
   try {
     await chatClient.send({ type: 'prompt', sessionId: e.record.id, ...prompt })
+    // A natural-language request can become a change server-side without the
+    // shortcut; ask for its status soon rather than at the next idle interval.
+    if (activeId === e.record.id) scheduleSelfPoll(POLL_ACTIVE_MS)
   } catch (err) {
     dropOptimisticTurns(e.model)
     if (e.record.status === 'running' && !e.model.running) e.record = { ...e.record, status: 'idle' }
@@ -694,6 +986,11 @@ async function resumeActive(): Promise<void> {
 }
 
 async function runOwnCommand(name: string, arg: string): Promise<void> {
+  if (name === 'poise') {
+    // The chip form of the command; the fresh console may run it too.
+    await startPoiseChange({ request: arg.trim(), form: 'slash' }, { ...emptyDraft(), text: `/poise ${arg}`.trim() })
+    return
+  }
   const e = entry()
   if (!e) return
   if (name === 'model') await setModel(arg, e.record.effort)
@@ -757,7 +1054,7 @@ function headerHtml(): string {
         <select class="chat-h-select chat-model-select" aria-label="Model"${between ? '' : ' disabled'}>${models.map((m) => `<option value="${escapeHtml(m)}"${m === s.model ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('')}</select>
         ${efforts.length ? `<select class="chat-h-select chat-effort-select" aria-label="Effort"${between ? '' : ' disabled'}>${(efforts.includes(s.effort) ? efforts : [s.effort, ...efforts]).map((x) => `<option value="${escapeHtml(x)}"${x === s.effort ? ' selected' : ''}>${escapeHtml(x)}</option>`).join('')}</select>` : `<span class="chat-h-effort">${escapeHtml(s.effort)}</span>`}
       </span>
-      <span class="chat-h-repo" title="${escapeHtml(s.checkout || '')}">${s.workspaceKind === 'poise-local' ? '<span>Poise · local</span>' : `<code>${escapeHtml(s.repo || 'local')}</code> · <code>${escapeHtml(s.branch?.name || '')}</code>`}${ws.text ? ` <span class="chat-h-ws ${ws.cls}">${escapeHtml(ws.text)}</span>` : ''}</span>
+      <span class="chat-h-repo" title="${escapeHtml(s.checkout || '')}">${s.workspaceKind === 'poise-local' ? '<span>Poise · local</span>' : s.workspaceKind === 'poise-change' ? `<span>Poise · change</span> · <code>${escapeHtml(s.branch?.name || '')}</code>` : `<code>${escapeHtml(s.repo || 'local')}</code> · <code>${escapeHtml(s.branch?.name || '')}</code>`}${ws.text ? ` <span class="chat-h-ws ${ws.cls}">${escapeHtml(ws.text)}</span>` : ''}</span>
       ${modeSel}
       <span class="chat-h-status" data-status="${s.status}">${escapeHtml(statusText(s))}</span>
       <span class="chat-controls-spacer"></span>
@@ -898,7 +1195,9 @@ function render(): void {
   renderHeader()
   const e = entry()
   composerStateFor(e)
-  const empty = !e || (!e.model.blocks.length && !e.loading)
+  // A deploy card is content too: the console must not lift over it.
+  const hasCard = !!e && (!!activeChange() || localChanges.has(e.record.id))
+  const empty = !e || (!e.model.blocks.length && !e.loading && !hasCard)
   mainEl.classList.toggle('chat-empty-session', empty)
   // The fresh console sits slightly above centre. Its own height participates
   // in the calculation, so a taller draft never pushes it off-screen.
@@ -913,6 +1212,7 @@ function render(): void {
   } else {
     transcript.clear()
   }
+  renderDeployCard()
   if (wasAtBottom || forceBottom) scrollEl.scrollTop = scrollEl.scrollHeight
   forceBottom = false
 }
@@ -1029,6 +1329,9 @@ export async function initChatView(): Promise<void> {
   if (!initialized) {
     initialized = true
     renderShell()
+    // A snapshot exists only when the previous page reloaded itself onto a
+    // new build; it is consumed here exactly once.
+    try { restoredSnapshot = takeDraftSnapshot(localStorage) } catch { restoredSnapshot = null }
     // Events keep folding into the per-session models while the view is
     // hidden — that is what lets a running turn be re-joined on return
     // without a refetch — so these listeners live for the app's lifetime.
@@ -1047,15 +1350,23 @@ export async function initChatView(): Promise<void> {
         if (e.loaded) chatClient.subscribe(e.record.id, e.record.lastSeq || 0)
       }
       void loadSessions()
+      // A restart is what a promotion or rollback looks like from here.
+      scheduleSelfPoll(0)
+      void installSelfUpdateWatch().poll()
     })
   }
   if (!tickTimer) tickTimer = setInterval(() => { if (!viewEl.hidden) transcript.tick() }, 1000)
   chatClient.start()
   void loadAgents()
   await loadSessions()
+  const restoreActive = restoredSnapshot?.activeSessionId ?? null
+  applyRestoredSnapshot()
+  // The session that was on screen before a safe reload comes back first.
+  if (restoreActive && !activeId && sessions.has(restoreActive) && dialogEl.hidden) await selectSession(restoreActive)
   // A handoff may have opened the New session dialog while the list loaded;
   // auto-selecting would close it.
   if (!activeId && !quickSessionPromise && !composer.getDraft().text && order.length && dialogEl.hidden) await selectSession(order[0])
+  scheduleSelfPoll(0)
   queueRender()
 }
 
@@ -1066,6 +1377,7 @@ export function stopChatRefresh(): void {
   filePreview?.close()
   splitPane?.cancelResize()
   if (tickTimer) { clearInterval(tickTimer); tickTimer = null }
+  if (selfPollTimer) { clearTimeout(selfPollTimer); selfPollTimer = null }
   if (composer && activeId) {
     const e = sessions.get(activeId)
     if (e) e.draft = composer.getDraft()
