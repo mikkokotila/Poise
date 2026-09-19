@@ -245,6 +245,10 @@ model’s exact effort variants. Unavailable integrations, including the current
 Antigravity CLI’s missing interactive permission channel, remain visible with
 an explanation. Existing sessions are preserved.
 
+The activity icon beside Fork switches between the detailed transcript and
+messages with any pending questions, permissions or errors. Local file links
+open read-only previews, and internal Muse reminder cards are not displayed.
+
 See [Chat v1](docs/Chat-v1.md) for architecture, recovery, release integration
 and the distinction between automated coverage and live-agent verification.
 

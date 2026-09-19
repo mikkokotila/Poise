@@ -4978,24 +4978,11 @@ body:has(#view-chat:not([hidden])) #app { padding-bottom: 0; }
 .chat-icon-btn:hover,
 .chat-icon-btn[aria-pressed="true"] { color: var(--text); background: var(--hover); }
 
-.chat-new-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 28px;
-  padding: 0 10px 0 8px;
-  font-family: inherit;
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--n0);
-  background: var(--n5);
-  border: 1px solid var(--n5);
-  border-radius: var(--r-pill);
-  cursor: pointer;
-  transition: background var(--t-base) ease, border-color var(--t-base) ease;
-}
-.chat-new-btn:hover { background: var(--n6); border-color: var(--n6); }
+.chat-new-btn { flex: 0 0 28px; }
 .chat-new-btn svg { display: block; }
+.chat-icon-btn:disabled { cursor: default; opacity: 0.4; }
+.chat-icon-btn:disabled:hover { background: transparent; color: var(--text-tertiary); }
+.chat-item[hidden] { display: none; }
 
 .chat-conn {
   font-size: 0.6875rem;
@@ -5835,3 +5822,16 @@ body:has(#view-chat:not([hidden])) #app { padding-bottom: 0; }
   .chat-sidebar, .chat-session-list, .chat-sidebar-resize::after,
   .chat-dock, .chat-v-composer { transition: none; }
 }
+
+/* Click-initiated local text preview; no external file navigation or HTML. */
+.chat-file-preview { width: min(920px, calc(100vw - 48px)); max-height: calc(100vh - 64px); margin: auto; padding: var(--sp-4); border: var(--b-hair); border-radius: var(--r-md); background: var(--bg); color: var(--text); box-shadow: var(--e-3); }
+.chat-file-preview::backdrop { background: color-mix(in srgb, var(--n7) 28%, transparent); }
+.chat-file-header { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); }
+.chat-file-header h2 { font-size: 0.875rem; font-weight: 600; }
+.chat-file-path { font-family: monospace; font-size: 0.75rem; color: var(--text-secondary); overflow-wrap: anywhere; margin-top: var(--sp-2); }
+.chat-file-state { font-size: 0.75rem; color: var(--text-tertiary); margin: var(--sp-2) 0; }
+.chat-file-content { max-height: calc(100vh - 240px); overflow: auto; padding: var(--sp-2); font-size: 0.8125rem; line-height: 1.6; background: var(--surface); border: var(--b-hair); border-radius: var(--r-sm); }
+.chat-file-content:empty { display: none; }
+.chat-file-line { display: block; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 1.6em; }
+.chat-file-line::before { content: attr(data-line); display: inline-block; min-width: 4ch; margin-right: 2ch; color: var(--text-tertiary); user-select: none; text-align: right; }
+.chat-file-line.selected { background: var(--tint-a1); }

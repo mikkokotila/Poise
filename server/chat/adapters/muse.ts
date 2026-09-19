@@ -246,6 +246,8 @@ interface ActiveTurn {
   tools: Map<string, OpenTool>
   /** Item ids whose text streamed as deltas. */
   streamed: Set<string>
+  /** Native reminder housekeeping, never conversation content. */
+  internalItems: Set<string>
   usage?: TurnUsage
   /** Item completions still reading file snapshots; the turn settles after them. */
   pending: Set<Promise<void>>
@@ -617,11 +619,11 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
   }
 
   function handleItemStarted(turn: ActiveTurn, item: Item): void {
+    if (item.kind === 'reminderChild') { turn.internalItems.add(item.itemId); return }
     switch (item.kind) {
       case 'toolCall':
       case 'subagent':
       case 'workflow':
-      case 'reminderChild':
       case 'userShell':
         if (!turn.tools.has(item.itemId)) openTool(turn, item)
         return
@@ -631,6 +633,7 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
   }
 
   function handleItemCompleted(turn: ActiveTurn, item: Item): void {
+    if (item.kind === 'reminderChild') { turn.internalItems.add(item.itemId); return }
     switch (item.kind) {
       case 'agentMessage':
         if (!turn.streamed.has(item.itemId) && item.text) emit({ type: 'text.delta', turnId: turn.id, messageId: item.itemId, delta: item.text })
@@ -644,7 +647,6 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
       case 'toolCall':
       case 'subagent':
       case 'workflow':
-      case 'reminderChild':
       case 'userShell':
         completeTool(turn, item)
         return
@@ -681,6 +683,7 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
     on('item/updated', ({ item }) => {
       const turn = turnFor(item.turnId)
       if (!turn) return
+      if (item.kind === 'reminderChild') { turn.internalItems.add(item.itemId); return }
       if (item.status !== 'inProgress' && turn.tools.has(item.itemId)) {
         completeTool(turn, item)
         return
@@ -697,7 +700,7 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
 
     on('item/delta', ({ itemId, field, delta }) => {
       const turn = active
-      if (!turn || turn.done) return
+      if (!turn || turn.done || turn.internalItems.has(itemId)) return
       const tool = turn.tools.get(itemId)
       if (tool) {
         if (field === 'output' || field === undefined) {
@@ -1078,6 +1081,7 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
         interruptRequested: false,
         tools: new Map(),
         streamed: new Set(),
+        internalItems: new Set(),
         pending: new Set(),
         finishing: false,
         steers: new Set(),

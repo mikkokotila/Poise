@@ -23,6 +23,10 @@
 // longer a blockquote to any parser that reads it, and the grammar this
 // file shares with the editor reads raw markdown.
 
+import { chatFileReference } from './chat-file-reference'
+
+export interface MarkdownOptions { localFileLinks?: boolean }
+
 import {
   type BlockKind,
   type InlineSegment,
@@ -45,9 +49,9 @@ export function escapeHtml(s: string): string {
   ))
 }
 
-// Only http(s) links become anchors. Anything else — javascript:, data:,
-// a relative path — renders as its own text, so a reply cannot mint a
-// link that does something other than navigate.
+// Only http(s) links navigate. Chat can opt in to inert, app-handled file
+// links whose reads are authorized by the server; other consumers retain
+// the text-only fallback for local paths and all unsafe schemes.
 function safeHref(url: string): string | null {
   const trimmed = url.trim()
   if (!/^https?:\/\//i.test(trimmed)) return null
@@ -59,7 +63,7 @@ function safeHref(url: string): string | null {
   return trimmed
 }
 
-function inlineHtml(segments: InlineSegment[]): string {
+function inlineHtml(segments: InlineSegment[], options: MarkdownOptions): string {
   let out = ''
   for (const seg of segments) {
     switch (seg.kind) {
@@ -76,9 +80,10 @@ function inlineHtml(segments: InlineSegment[]): string {
         const href = safeHref(seg.url)
         // A rejected link falls back to the source that produced it —
         // escaped, inert, and still readable as what the agent wrote.
-        out += href
-          ? `<a href="${href}" target="_blank" rel="noopener">${escapeHtml(seg.text)}</a>`
-          : escapeHtml(inlineSource(seg))
+        if (href) out += `<a href="${escapeHtml(href)}" target="_blank" rel="noopener">${escapeHtml(seg.text)}</a>`
+        else if (options.localFileLinks && chatFileReference(seg.url)) {
+          out += `<a href="#chat-file=${encodeURIComponent(seg.url)}" data-chat-file="${escapeHtml(seg.url)}" title="Preview ${escapeHtml(seg.url)}">${escapeHtml(seg.text)}</a>`
+        } else out += escapeHtml(inlineSource(seg))
         break
       }
       default:
@@ -95,8 +100,8 @@ function contentOf(text: string, kind: BlockKind): string {
   return text.slice(blockMarkerLength(kind, text))
 }
 
-function inlineOf(text: string, kind: BlockKind): string {
-  return inlineHtml(parseInline(contentOf(text, kind)))
+function inlineOf(text: string, kind: BlockKind, options: MarkdownOptions): string {
+  return inlineHtml(parseInline(contentOf(text, kind)), options)
 }
 
 const ALIGN_STYLE: Record<string, string> = {
@@ -105,7 +110,7 @@ const ALIGN_STYLE: Record<string, string> = {
   right:  ' style="text-align:right"',
 }
 
-export function renderMarkdown(src: string): string {
+export function renderMarkdown(src: string, options: MarkdownOptions = {}): string {
   const lines = String(src ?? '').split('\n')
   const kinds = classifyLines(lines)
   const out: string[] = []
@@ -144,7 +149,7 @@ export function renderMarkdown(src: string): string {
         const parts = splitTableRow(row)
         if (!parts) return ''
         return parts.cells
-          .map((cell, c) => `<${tag}${ALIGN_STYLE[aligns[c] ?? ''] ?? ''}>${inlineHtml(parseInline(cell))}</${tag}>`)
+          .map((cell, c) => `<${tag}${ALIGN_STYLE[aligns[c] ?? ''] ?? ''}>${inlineHtml(parseInline(cell), options)}</${tag}>`)
           .join('')
       }
       const bodyHtml = rows.map((row) => `<tr>${cellsOf(row, 'td')}</tr>`).join('')
@@ -159,14 +164,14 @@ export function renderMarkdown(src: string): string {
     if (kind === 'rule') { out.push('<hr class="md-hr">'); i++; continue }
 
     if (kind[0] === 'h' && kind.length === 2) {
-      out.push(`<h${kind[1]} class="md-h">${inlineOf(line, kind)}</h${kind[1]}>`)
+      out.push(`<h${kind[1]} class="md-h">${inlineOf(line, kind, options)}</h${kind[1]}>`)
       i++
       continue
     }
 
     if (kind === 'quote') {
       const body = runOf((k) => k === 'quote')
-      out.push(`<blockquote class="md-quote">${body.map((l) => inlineOf(l, 'quote')).join('<br>')}</blockquote>`)
+      out.push(`<blockquote class="md-quote">${body.map((l) => inlineOf(l, 'quote', options)).join('<br>')}</blockquote>`)
       continue
     }
 
@@ -176,7 +181,7 @@ export function renderMarkdown(src: string): string {
       const numbered = /^\d/.test(line)
       const body = runOf((k, text) => k === 'list-item' && /^\d/.test(text) === numbered)
       const tag = numbered ? 'ol' : 'ul'
-      out.push(`<${tag} class="md-list">${body.map((l) => `<li>${inlineOf(l, 'list-item')}</li>`).join('')}</${tag}>`)
+      out.push(`<${tag} class="md-list">${body.map((l) => `<li>${inlineOf(l, 'list-item', options)}</li>`).join('')}</${tag}>`)
       continue
     }
 
@@ -186,7 +191,7 @@ export function renderMarkdown(src: string): string {
     // with hard breaks between them, which is how a reply's own line
     // wrapping is meant to read.
     const body = runOf((k, text) => k === 'body' && !/^\s*$/.test(text))
-    out.push(`<p>${body.map((l) => inlineOf(l, 'body')).join('<br>')}</p>`)
+    out.push(`<p>${body.map((l) => inlineOf(l, 'body', options)).join('<br>')}</p>`)
   }
 
   return out.join('')

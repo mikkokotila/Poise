@@ -71,9 +71,9 @@ describe('Muse adapter', () => {
     expect(result).toEqual({ stopReason: 'end_turn', usage: { inputTokens: 100, outputTokens: 30, totalTokens: 130 } })
     for (const event of host.events) expect((event as { turnId?: string }).turnId ?? 'turn-1').toBe('turn-1')
 
-    // The reminder child is a tool card of kind other.
-    const reminder = host.ofType('tool.started').find((event) => event.title === 'Reminder child session')
-    expect(reminder).toMatchObject({ kind: 'other' })
+    // Reminder children are native housekeeping, not user-facing tool work.
+    expect(JSON.stringify(host.events)).not.toContain('Reminder child session')
+    expect(JSON.stringify(host.events)).not.toContain('reminder-internal-output')
 
     expect(host.ofType('thought.delta')).toEqual([{ type: 'thought.delta', turnId: 'turn-1', messageId: expect.stringMatching(/^reasoning-/), delta: 'thinking…' }])
 
@@ -399,10 +399,18 @@ describe('Muse adapter', () => {
     expect(host.ofType('tool.finished').find((event) => event.id === bash.id)).toMatchObject({ status: 'completed', content: [{ type: 'terminal', text: '', exitCode: 0 }] })
     expect(host.ofType('text.delta')).toEqual([{ type: 'text.delta', turnId: 'turn-1', messageId: '8dcafdc6-38a2-47bb-943b-b4f8ee066289', delta: 'done' }])
 
+    // Synchronize with the native protocol, not a reminder card that should
+    // never have been part of the visible transcript.
+    let nativeOutput = ''
+    const observe = (chunk: Buffer) => { nativeOutput += chunk.toString() }
+    host.children[0].stdout!.on('data', observe)
     const second = adapter.prompt('turn-2', prompt('Count from 1 to 100, one number per line.'), new AbortController().signal)
-    await host.waitFor((event) => event.type === 'tool.started' && event.turnId === 'turn-2')
-    await adapter.cancel()
-    await expect(second).resolves.toMatchObject({ stopReason: 'cancelled' })
-    expect(host.ofType('tool.finished').filter((event) => event.turnId === 'turn-2')).toHaveLength(1)
+    try {
+      await until(() => nativeOutput.includes('"method":"turn/started"'))
+      await adapter.cancel()
+      await expect(second).resolves.toMatchObject({ stopReason: 'cancelled' })
+    } finally { host.children[0].stdout!.off('data', observe) }
+    expect(host.ofType('tool.finished').filter((event) => event.turnId === 'turn-2')).toHaveLength(0)
+    expect(JSON.stringify(host.events)).not.toContain('Reminder child session')
   })
 })

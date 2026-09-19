@@ -389,9 +389,12 @@ export interface TranscriptHandlers {
   onQuestion(id: string, answers: Record<string, string | string[]>): void
   onRevert(diffId: string): void
   onLoadDiff?(diffId: string): void
+  onFile?(reference: string): void
 }
 
 export interface RenderContext {
+  showActivity?: boolean
+  agent?: string
   /** A turn the runtime marked as cut by a crash or restart. */
   interruptedTurnId?: string
   /** Whether the session is running a turn right now (drives the dots). */
@@ -540,7 +543,7 @@ export function createTranscriptView(container: HTMLElement, handlers: Transcrip
 
   function textHtml(item: TextItem): string {
     texts.set(item.key, item.text)
-    return `<div class="chat-msg chat-msg-agent"><div class="chat-msg-body chat-msg-md">${renderMarkdown(item.text)}</div>`
+    return `<div class="chat-msg chat-msg-agent"><div class="chat-msg-body chat-msg-md">${renderMarkdown(item.text, { localFileLinks: !!handlers.onFile })}</div>`
       + `<button type="button" class="chat-copy-btn" data-copy="${escapeHtml(item.key)}" title="Copy" aria-label="Copy message">${ICON_COPY}<span class="chat-copy-label">Copy</span></button></div>`
   }
 
@@ -625,7 +628,7 @@ export function createTranscriptView(container: HTMLElement, handlers: Transcrip
       const blocks = tool.content.map((b, idx) => {
         if (b.type === 'terminal') return terminalHtml(b, tool.key, idx)
         if (b.type === 'diff') return diffHtml({ diffId: '', path: b.path, oldText: b.oldText, newText: b.newText, oldExists: true, newExists: true, unified: false, previewOnly: b.previewOnly }, false)
-        return `<div class="chat-tool-text">${renderMarkdown(b.text)}</div>`
+        return `<div class="chat-tool-text">${renderMarkdown(b.text, { localFileLinks: !!handlers.onFile })}</div>`
       })
       if (blocks.length) parts.push(`<div class="chat-tool-section"><div class="chat-tool-label">Output</div>${blocks.join('')}</div>`)
       if (tool.diffs.length) parts.push(`<div class="chat-tool-section"><div class="chat-edit-cards">${tool.diffs.map((d) => diffHtml(d)).join('')}</div></div>`)
@@ -696,9 +699,9 @@ export function createTranscriptView(container: HTMLElement, handlers: Transcrip
         const label = f.stopReason === 'error' ? `Error: ${f.error || 'unknown'}` : STOP_LABEL[f.stopReason]
         parts.push(`<span class="chat-turn-stop${f.stopReason === 'error' ? ' bad' : ''}">${escapeHtml(label)}</span>`)
       }
-      if (f.durationMs !== undefined) parts.push(`<span>${fmtDuration(f.durationMs)}</span>`)
+      if (ctx.showActivity !== false && f.durationMs !== undefined) parts.push(`<span>${fmtDuration(f.durationMs)}</span>`)
       const total = f.usage?.totalTokens ?? ((f.usage?.inputTokens ?? 0) + (f.usage?.outputTokens ?? 0) || undefined)
-      if (total) parts.push(`<span>${total.toLocaleString()} tokens</span>`)
+      if (ctx.showActivity !== false && total) parts.push(`<span>${total.toLocaleString()} tokens</span>`)
     } else if (ctx.interruptedTurnId === turn.turnId) {
       parts.push('<span class="chat-turn-stop">Interrupted</span>')
     }
@@ -744,6 +747,14 @@ export function createTranscriptView(container: HTMLElement, handlers: Transcrip
           case 'error': node.innerHTML = `<div class="chat-msg chat-msg-agent chat-msg-error"><div class="chat-msg-body">${escapeHtml(item.message)}</div></div>`; break
         }
       }
+      // Hide rather than destroy detail: preserve tool expansion, forms and
+      // live updates. Requests requiring a response and errors stay visible.
+      const internalReminder = ctx.agent === 'muse' && item.kind === 'tool'
+        && item.toolKind === 'other' && item.title === 'Reminder child session'
+        && item.input === undefined && !item.diffs.length && !item.locations?.length
+      const activity = item.kind === 'tool' || item.kind === 'readgroup' || item.kind === 'thought' || item.kind === 'plan'
+        || (item.kind === 'permission' && !!item.resolved) || (item.kind === 'question' && !!item.answered)
+      node.hidden = internalReminder || (ctx.showActivity === false && activity)
       cursor = node.nextElementSibling as HTMLElement | null
     }
     prune(items, keep)
@@ -765,7 +776,7 @@ export function createTranscriptView(container: HTMLElement, handlers: Transcrip
 
   function render(model: TranscriptModel, ctx: RenderContext): void {
     const focused = focusedPending(model)
-    const ctxKey = `${ctx.running ? 1 : 0}:${ctx.interruptedTurnId || ''}:${focused?.id || ''}`
+    const ctxKey = `${ctx.running ? 1 : 0}:${ctx.interruptedTurnId || ''}:${focused?.id || ''}:${ctx.showActivity !== false}:${ctx.agent || ''}`
     const ctxChanged = ctxKey !== lastCtxKey
     lastCtxKey = ctxKey
     const keep = new Set<string>()
@@ -812,6 +823,12 @@ export function createTranscriptView(container: HTMLElement, handlers: Transcrip
 
   container.addEventListener('click', (e) => {
     const target = e.target as HTMLElement
+    const file = target.closest<HTMLAnchorElement>('a[data-chat-file]')
+    if (file && handlers.onFile) {
+      e.preventDefault()
+      handlers.onFile(file.dataset.chatFile!)
+      return
+    }
     const toggle = target.closest<HTMLElement>('[data-toggle]')
     if (toggle) {
       const key = toggle.dataset.toggle!

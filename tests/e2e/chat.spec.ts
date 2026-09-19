@@ -1167,3 +1167,154 @@ test('keeps the console model dropdown within the conversation in light and dark
   expect(box!.y).toBeGreaterThanOrEqual(0)
   expect(box!.y + box!.height).toBeLessThanOrEqual(500)
 })
+
+test('uses accessible icon controls for New session, Fork and Hand off', async ({ page }) => {
+  const state = makeState([session()])
+  await installRoutes(page, state)
+  const sock = await installSocket(page)
+  await page.goto('/')
+  await sock.subscribed('s1')
+  for (const name of ['New session', 'Fork', 'Hand off…']) {
+    const button = page.getByRole('button', { name, exact: true })
+    await expect(button).toBeVisible()
+    await expect(button).toHaveText('')
+    await expect(button.locator('svg')).toHaveCount(1)
+    await expect(button).toHaveAttribute('title', /.+/)
+  }
+  expect(await page.locator('.chat-h-fork').evaluate(el => el.nextElementSibling?.classList.contains('chat-h-activity'))).toBe(true)
+  await page.getByRole('button', { name: 'Fork', exact: true }).click()
+  await expect.poll(() => state.calls.filter(call => call.path.endsWith('/fork')).length).toBe(1)
+})
+
+test('hides activity without hiding messages, errors or required interactions', async ({ page }, info) => {
+  const events: ChatEvent[] = [
+    { type: 'turn.started', turnId: 't1', prompt: { text: 'Review the code', attachments: [], mentions: [] } },
+    { type: 'tool.started', turnId: 't1', id: 'read', kind: 'execute', title: 'Inspect package', input: { command: 'cat package.json' } },
+    { type: 'tool.finished', turnId: 't1', id: 'read', status: 'completed', content: [{ type: 'terminal', text: 'package contents', exitCode: 0 }] },
+    { type: 'thought.delta', turnId: 't1', messageId: 'thought', delta: 'Thinking about the package' },
+    { type: 'plan.updated', turnId: 't1', entries: [{ content: 'Review', status: 'in_progress' }] },
+    { type: 'text.delta', turnId: 't1', messageId: 'reply', delta: 'Here is the actual reply.' },
+    { type: 'permission.requested', turnId: 't1', id: 'p1', title: 'Write file', options: [{ id: 'yes', name: 'Allow', kind: 'allow_once' }] },
+    { type: 'question.asked', turnId: 't1', id: 'q1', questions: [{ id: 'answer', question: 'How should I proceed?', options: [], multiSelect: false, freeText: true }] },
+    { type: 'error', message: 'A visible failure', recoverable: true },
+  ]
+  const state = makeState([session({ status: 'waiting', lastSeq: events.length })], { s1: events.map((event, i) => env('s1', i + 1, event)) })
+  await installRoutes(page, state)
+  const sock = await installSocket(page)
+  await page.goto('/')
+  await sock.subscribed('s1')
+  sock.seq = events.length
+  await page.locator('.chat-tool-head').click()
+  await expect(page.locator('.chat-tool-body')).toContainText('package contents')
+  await page.locator('.chat-q-text').fill('Keep this answer')
+  await page.getByRole('button', { name: 'Hide activity', exact: true }).click()
+  await expect(page.locator('.chat-tool')).toBeHidden()
+  await expect(page.locator('.chat-thought-toggle')).toBeHidden()
+  await expect(page.locator('.chat-plan')).toBeHidden()
+  await expect(page.locator('.chat-msg-user')).toContainText('Review the code')
+  await expect(page.locator('.chat-transcript')).toContainText('Here is the actual reply.')
+  await expect(page.locator('.chat-msg-error')).toContainText('A visible failure')
+  await expect(page.locator('.chat-permission')).toBeVisible()
+  await expect(page.locator('.chat-q-text')).toBeVisible()
+  await expect(page.locator('.chat-q-text')).toHaveValue('Keep this answer')
+  await page.screenshot({ path: info.outputPath('messages-only.png') })
+  await page.getByRole('button', { name: 'Show activity', exact: true }).click()
+  await expect(page.locator('.chat-tool-body')).toBeVisible()
+  await expect(page.locator('.chat-q-text')).toHaveValue('Keep this answer')
+  await page.getByRole('button', { name: 'Hide activity', exact: true }).click()
+  sock.push('s1', { type: 'permission.resolved', id: 'p1', optionId: 'yes', by: 'user' })
+  await expect(page.locator('.chat-permission')).toBeHidden()
+  sock.push('s1', { type: 'text.delta', turnId: 't1', messageId: 'reply', delta: ' Still streaming.' })
+  await expect(page.locator('.chat-msg-agent').first()).toContainText('Still streaming.')
+  await page.reload()
+  await expect(page.getByRole('button', { name: 'Show activity', exact: true })).toBeVisible()
+  await expect(page.locator('.chat-tool')).toBeHidden()
+  await expect(page.locator('.chat-permission')).toBeVisible()
+})
+
+test('omits legacy Muse reminder cards without removing messages or real tools', async ({ page }) => {
+  const events: ChatEvent[] = [
+    { type: 'turn.started', turnId: 't1', prompt: { text: 'Work on the code', attachments: [], mentions: [] } },
+    { type: 'tool.started', turnId: 't1', id: 'internal', kind: 'other', title: 'Reminder child session' },
+    { type: 'tool.finished', turnId: 't1', id: 'internal', status: 'completed' },
+    { type: 'tool.started', turnId: 't1', id: 'real', kind: 'other', title: 'Review subagent' },
+    { type: 'text.delta', turnId: 't1', messageId: 'reply', delta: 'Reminder child session is internal bookkeeping.' },
+  ]
+  await installRoutes(page, makeState([session({ agent: 'muse' })], { s1: events.map((event, i) => env('s1', i + 1, event)) }))
+  const sock = await installSocket(page)
+  await page.goto('/')
+  await sock.subscribed('s1')
+  await expect(page.locator('.chat-tool', { hasText: 'Reminder child session' })).toBeHidden()
+  await expect(page.locator('.chat-tool', { hasText: 'Review subagent' })).toBeVisible()
+  await expect(page.locator('.chat-msg-agent')).toContainText('Reminder child session is internal bookkeeping.')
+  await page.getByRole('button', { name: 'Hide activity', exact: true }).click()
+  await page.getByRole('button', { name: 'Show activity', exact: true }).click()
+  await expect(page.locator('.chat-tool', { hasText: 'Reminder child session' })).toBeHidden()
+})
+
+test('renders local Markdown links and opens safe text previews without navigating or launching work', async ({ page }, info) => {
+  const path = '/Users/example/dev/Poise/README.md#L2'
+  const events: ChatEvent[] = [
+    { type: 'turn.started', turnId: 't1', prompt: { text: 'Show the readme', attachments: [], mentions: [] } },
+    { type: 'text.delta', turnId: 't1', messageId: 'reply', delta: `[README.md](${path}) and [web](https://example.com).` },
+  ]
+  const state = makeState([session()], { s1: events.map((event, i) => env('s1', i + 1, event)) })
+  await installRoutes(page, state)
+  const requests: string[] = []
+  await page.route('**/api/chat/file?**', async route => {
+    const url = new URL(route.request().url())
+    expect(url.searchParams.get('session')).toBe('s1')
+    requests.push(url.searchParams.get('path')!)
+    await route.fulfill({ json: { path: path.split('#')[0], text: '# Readme\n<script>window.fileExecuted = true</script>\nSafe content', line: 2, endLine: 2, truncated: false } })
+  })
+  const sock = await installSocket(page)
+  await page.goto('/')
+  await sock.subscribed('s1')
+  const link = page.locator('.chat-msg-agent').getByRole('link', { name: 'README.md', exact: true })
+  await expect(link).toBeVisible()
+  expect(requests).toEqual([])
+  const before = page.url()
+  await link.click()
+  const preview = page.getByRole('dialog', { name: 'File preview' })
+  await expect(preview).toBeVisible()
+  await expect(preview.locator('.chat-file-line.selected')).toHaveText('<script>window.fileExecuted = true</script>')
+  expect(await page.evaluate(() => (window as any).fileExecuted)).toBeUndefined()
+  await page.screenshot({ path: info.outputPath('file-preview-light.png') })
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'dark' })
+  await page.screenshot({ path: info.outputPath('file-preview-dark.png') })
+  expect(page.url()).toBe(before)
+  expect(requests).toEqual([path])
+  expect(state.calls.filter(call => call.method === 'POST')).toHaveLength(0)
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  await page.keyboard.press('Escape')
+  await expect(preview).toBeHidden()
+  await expect(link).toBeFocused()
+  await expect(page.getByRole('link', { name: 'web', exact: true })).toHaveAttribute('href', 'https://example.com')
+})
+
+test('shows file-preview errors and ignores late responses after closing', async ({ page }) => {
+  const events: ChatEvent[] = [
+    { type: 'turn.started', turnId: 't1', prompt: { text: 'Read a file', attachments: [], mentions: [] } },
+    { type: 'text.delta', turnId: 't1', messageId: 'reply', delta: '[file](README.md)' },
+  ]
+  await installRoutes(page, makeState([session()], { s1: events.map((event, i) => env('s1', i + 1, event)) }))
+  await installSocket(page)
+  let release!: () => void
+  let delayed = false
+  await page.route('**/api/chat/file?**', async route => {
+    if (delayed) await new Promise<void>(resolve => { release = resolve })
+    await route.fulfill({ status: 403, json: { error: 'Private files cannot be previewed' } })
+  })
+  await page.goto('/')
+  await page.getByRole('link', { name: 'file', exact: true }).click()
+  const preview = page.getByRole('dialog', { name: 'File preview' })
+  await expect(preview).toContainText('Private files cannot be previewed')
+  await preview.getByRole('button', { name: 'Close file preview' }).click()
+  delayed = true
+  await page.getByRole('link', { name: 'file', exact: true }).click()
+  await expect(preview).toContainText('Loading file')
+  await expect.poll(() => !!release).toBe(true)
+  await page.keyboard.press('Escape')
+  release()
+  await expect(preview).toBeHidden()
+})
