@@ -46,7 +46,7 @@ export function newChangeId(): string {
  *  until the server has answered for it (accepted, refused, or seen in its
  *  status) or a definitive local outcome released it. A silently minted second
  *  id would be a second change. */
-export interface PendingChangeRequest { changeId: string, sessionId: string, request: string, createdAt: number }
+export interface PendingChangeRequest { changeId: string, sessionId: string, request: string, createdAt: number, contextKey?: string }
 
 export interface PendingChangeStore {
   getItem(key: string): string | null
@@ -76,12 +76,12 @@ function writePending(store: PendingChangeStore, list: PendingChangeRequest[]): 
 }
 
 /** The change id to send for this session+request: the one already pending, or a new one recorded now. */
-export function reserveChangeId(store: PendingChangeStore, sessionId: string, request: string, now = Date.now()): string {
+export function reserveChangeId(store: PendingChangeStore, sessionId: string, request: string, now = Date.now(), contextKey = ''): string {
   const list = readPendingChanges(store)
-  const found = list.find((p) => p.sessionId === sessionId && p.request === request)
+  const found = list.find((p) => p.sessionId === sessionId && p.request === request && (p.contextKey || '') === contextKey)
   if (found) return found.changeId
   const changeId = newChangeId()
-  writePending(store, [...list, { changeId, sessionId, request, createdAt: now }])
+  writePending(store, [...list, { changeId, sessionId, request, createdAt: now, ...(contextKey ? { contextKey } : {}) }])
   return changeId
 }
 

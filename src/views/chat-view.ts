@@ -21,6 +21,8 @@ import type {
 import { AGENT_LABELS } from '../../server/chat/protocol'
 import { chatClient, ChatCommandError, ChatHttpError, type AgentsResponse, type AgentInfo } from '../chat-client'
 import { escapeHtml } from '../markdown'
+import { recoverDraft } from '../chat-draft-recovery'
+import { reconcileSession } from '../chat-session-state'
 import { reserveQueuedMessage, releaseQueuedMessage } from '../chat-queue'
 import { createQueuePanel } from './chat-queue'
 import { createMemoriesPane } from './chat-memories'
@@ -38,9 +40,10 @@ import { createDeployCard, type DeployCard, type LocalPendingChange } from './ch
 import { recognisePoiseRequest } from '../poise-request-intent'
 import { parsePoiseCommand, reconcilePendingChanges, releaseChangeId, reserveChangeId, type PoiseCommand } from '../self-update-command'
 import { isTerminal, nextPollDelay, POLL_ACTIVE_MS, POLL_IDLE_MS, selectChangeForSession } from '../self-update-state'
-import { takeDraftSnapshot, type DraftSnapshot } from '../self-update-drafts'
+import { takeDraftSnapshot, buildDraftSnapshot, saveDraftSnapshot, type DraftSnapshot } from '../self-update-drafts'
 import { installSelfUpdateWatch, registerDraftProvider, registerReloadGuard } from '../self-update-watch'
 import { BUILD_SHA } from '../build-identity'
+import { RELOADED_RELEASE_KEY } from '../self-update-reload'
 import type { SelfChange, SelfUpdateStatus } from '../self-update-types'
 
 // The build watch is app-wide (it guards every view), but it has to start
@@ -222,7 +225,7 @@ function renderShell(): void {
             <div id="chat-transcript" class="chat-transcript"></div>
           </div>
           <div class="chat-dock"></div>
-          <div class="chat-new-dialog" role="dialog" aria-label="New session" hidden></div>
+          <div class="chat-new-dialog" role="dialog" aria-modal="true" aria-label="New session" tabindex="-1" hidden></div>
         </section>
       </div>
     </main>
@@ -235,8 +238,24 @@ function renderShell(): void {
   dockEl = viewEl.querySelector<HTMLElement>('.chat-dock')!
   dialogEl = viewEl.querySelector<HTMLElement>('.chat-new-dialog')!
   noticeEl = viewEl.querySelector<HTMLElement>('.chat-notice')!
+  dialogEl.addEventListener('keydown', event => {
+    if (event.isComposing || event.keyCode === 229) return
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeDialog(); return }
+    if (event.key === 'Tab') {
+      const controls = [...dialogEl.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]')]
+        .filter(control => control.getClientRects().length > 0 && !control.closest('[hidden], [inert]'))
+      const first = controls[0], last = controls[controls.length - 1]
+      if (!first) { event.preventDefault(); dialogEl.focus(); return }
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialogEl)) { event.preventDefault(); last?.focus() }
+      else if (!event.shiftKey && (document.activeElement === last || document.activeElement === dialogEl)) { event.preventDefault(); first.focus() }
+    }
+  })
 
-  viewEl.querySelector<HTMLButtonElement>('.chat-new-btn')!.addEventListener('click', () => { void openNewSessionDialog() })
+  viewEl.querySelector<HTMLButtonElement>('.chat-new-btn')!.addEventListener('click', event => {
+    // WebKit does not focus a button on pointer click. Remember the actual opener.
+    (event.currentTarget as HTMLButtonElement).focus({ preventScroll: true })
+    void openNewSessionDialog()
+  })
 
   filePreview = createFilePreview(viewEl, (sessionId, reference) => chatClient.filePreview(sessionId, reference))
   transcript = createTranscriptView(transcriptEl, {
@@ -290,15 +309,16 @@ function renderShell(): void {
     onRemove: (id, itemId) => { void changeQueueItem(id, itemId) },
   })
   dockEl.append(messageQueue.el, composer.el)
+  composer.el.addEventListener('input', () => persistDrafts())
   // After the transcript, inside the same scroll, outside the activity toggle.
   deployCard = createDeployCard(scrollEl, { onRevert: (changeId, releaseId) => { void revertChange(changeId, releaseId) } })
-  splitPane = attachChatSidebar(viewEl, () => { composer.layout(); queueRender() })
   const layoutObserver = new ResizeObserver(() => queueRender())
   layoutObserver.observe(mainEl)
   layoutObserver.observe(dockEl)
 
   memories = createMemoriesPane(viewEl, queueRender)
   viewEl.querySelector('.chat-layout')!.append(memories.el)
+  splitPane = attachChatSidebar(viewEl, () => { composer.layout(); queueRender() })
   memories.mount()
   attachSidebar()
   attachHeader()
@@ -326,16 +346,30 @@ function attachReloadGuards(): void {
     if (reverting.size || pendingQueueItems.size || queueMutations.size) blockers.push('command')
     return blockers
   })
-  registerDraftProvider(() => {
-    const drafts: [string, ComposerDraft | null][] = []
-    for (const [id, e] of sessions) drafts.push([id, id === activeId ? composer.getDraft() : e.draft])
-    return {
-      fromSha: BUILD_SHA,
-      activeSessionId: activeId,
-      fresh: { draft: activeId ? freshDraft : composer.getDraft(), modelIdentity: freshModelIdentity },
-      sessions: drafts,
-    }
-  })
+  registerDraftProvider(captureDrafts)
+  window.addEventListener('pagehide', () => persistDrafts(true))
+  window.addEventListener('beforeunload', () => persistDrafts(true))
+}
+
+function captureDrafts() {
+  const drafts: [string, ComposerDraft | null][] = []
+  for (const [id, e] of sessions) drafts.push([id, id === activeId ? composer.getDraft() : e.draft])
+  return {
+    fromSha: BUILD_SHA, activeSessionId: activeId,
+    fresh: { draft: activeId ? freshDraft : composer.getDraft(), modelIdentity: freshModelIdentity }, sessions: drafts,
+  }
+}
+
+let savedDraftFingerprint = ''
+/** Ordinary refresh and tab restoration deserve the same protection as an update. */
+function persistDrafts(force = false): void {
+  if (!composer || restoredSnapshot) return
+  const snapshot = buildDraftSnapshot(captureDrafts())
+  const fingerprint = JSON.stringify({ ...snapshot, savedAt: 0 })
+  if (!force && fingerprint === savedDraftFingerprint) return
+  try {
+    if (saveDraftSnapshot(sessionStorage, snapshot)) savedDraftFingerprint = fingerprint
+  } catch { /* private mode: the in-page drafts and update guards still work */ }
 }
 
 /** Put a consumed snapshot back where it came from, once the session list is known. */
@@ -370,9 +404,7 @@ function upsertRecord(record: SessionRecord, opts: { pending?: boolean } = {}): 
     sessions.set(record.id, e)
     order.push(record.id)
   } else {
-    // Historical replay and slow REST responses must not roll back a queue.
-    const queue = e.record.queue
-    e.record = queue && queue.revision > (record.queue?.revision ?? -1) ? { ...record, queue } : record
+    e.record = reconcileSession(e.record, record)
     if (opts.pending !== undefined) e.pending = opts.pending
   }
   sortOrder()
@@ -515,6 +547,7 @@ function startRename(item: HTMLElement): void {
     queueRender()
   }
   input.addEventListener('keydown', (ev) => {
+    if (ev.isComposing || ev.keyCode === 229) return
     if (ev.key === 'Enter') { ev.preventDefault(); void finish(true) }
     else if (ev.key === 'Escape') { ev.preventDefault(); void finish(false) }
   })
@@ -535,6 +568,7 @@ async function deleteSession(id: string): Promise<void> {
       activeId = null
       composerStateFor(null)
       transcript.clear()
+      composer.setDraft(freshDraft)
       if (order[0]) void selectSession(order[0])
       else { composer.setDraft(freshDraft); setNotice(null) }
     }
@@ -572,7 +606,7 @@ async function selectSession(id: string): Promise<void> {
   queueRender()
   if (switching) scheduleSelfPoll(0)
   if (!e.loaded && !e.loading && !e.pending) await loadHistory(e)
-  composer.focus()
+  if (activeId === id && !viewEl.hidden && !memories.el.contains(document.activeElement)) composer.focus()
 }
 
 async function loadHistory(e: SessionEntry): Promise<void> {
@@ -582,7 +616,7 @@ async function loadHistory(e: SessionEntry): Promise<void> {
     let after = chatClient.subscribedAfter(e.record.id) ?? 0
     for (let guard = 0; guard < 100; guard++) {
       const page = await chatClient.fetchSession(e.record.id, after)
-      e.record = page.session
+      e.record = reconcileSession(e.record, page.session)
       for (const env of page.events) {
         if (env.seq > after) { applyEvent(e.model, env); after = env.seq }
       }
@@ -607,7 +641,7 @@ function onEvent(env: ChatEnvelope): void {
   if (!e) return
   const ev = env.event
   if (ev.type === 'session.created' || ev.type === 'session.resumed' || ev.type === 'session.updated') {
-    upsertRecord(ev.session, { pending: false })
+    upsertRecord({ ...ev.session, lastSeq: env.seq }, { pending: false })
   } else if (ev.type === 'status.changed') {
     e.record = { ...e.record, status: ev.status, queuedBehind: ev.queuedBehind }
   } else if (ev.type === 'queue.updated') {
@@ -641,12 +675,17 @@ async function withSavedMemories(draft: ComposerDraft, dispatch: () => void | Pr
     await dispatch()
   } catch (error) {
     const target = origin ? sessions.get(origin) : null
-    const current = origin === activeId ? composer.getDraft() : target?.draft
-    const kept = current?.text ? { ...draft, text: `${draft.text}\n\n${current.text}`, attachments: [...draft.attachments, ...current.attachments], mentions: [...draft.mentions, ...current.mentions] } : draft
-    if (origin === activeId) { composer.setDraft(kept); setNotice(`Message not sent — ${(error as Error).message}`) }
-    else if (target) { target.draft = kept; target.error = `Message not sent — ${(error as Error).message}` }
-    else freshDraft = kept
+    restoreDraftTo(origin, draft)
+    if (origin === activeId) setNotice(`Message not sent — ${(error as Error).message}`)
+    else if (target) target.error = `Message not sent — ${(error as Error).message}`
   } finally { memorySubmissions--; queueRender() }
+}
+
+function restoreDraftTo(sessionId: string | null, draft: ComposerDraft): void {
+  const target = sessionId ? sessions.get(sessionId) : null
+  if (activeId === sessionId) composer.setDraft(recoverDraft(draft, composer.getDraft()))
+  else if (target) target.draft = recoverDraft(draft, target.draft)
+  else freshDraft = recoverDraft(draft, freshDraft)
 }
 
 function commandFailed(err: unknown, what: string): void {
@@ -781,10 +820,7 @@ function renderQueue(): void {
 
 /** Put a request that did not start back where the person can edit it. */
 function keepDraft(sessionId: string | null, draft: ComposerDraft): void {
-  if (!activeId || activeId === sessionId) { composer.setDraft(draft); return }
-  const e = sessionId ? sessions.get(sessionId) : null
-  if (e) e.draft = draft
-  else composer.setDraft(draft)
+  restoreDraftTo(sessionId, draft)
 }
 
 /** `/poise <request>`: one explicit command, one change id, one dedicated
@@ -818,17 +854,19 @@ async function startPoiseChange(cmd: PoiseCommand, draft: ComposerDraft): Promis
       freshDraft = null
     }
     const sessionId = source.record.id
-    changeId = reserveChangeId(pendingStore, sessionId, cmd.request)
+    const context = { attachments: draft.attachments, mentions: draft.mentions }
+    const contextKey = context.attachments.length || context.mentions.length ? JSON.stringify(context) : ''
+    changeId = reserveChangeId(pendingStore, sessionId, cmd.request, Date.now(), contextKey)
     localChanges.set(sessionId, { id: changeId, request: cmd.request, sessionId, startedAt: Date.now() })
     setNotice(null)
     queueRender()
-    const ack = await chatClient.startPoiseChange(sessionId, cmd.request, changeId)
+    const ack = await chatClient.startPoiseChange(sessionId, cmd.request, changeId, context)
     releaseChangeId(pendingStore, changeId)
     localChanges.delete(sessionId)
     rememberChange(ack.change, [sessionId, ack.session.id])
     mergeChange(ack.change)
     upsertRecord(ack.session, { pending: false })
-    await selectSession(ack.session.id)
+    if (activeId === sessionId) await selectSession(ack.session.id)
     scheduleSelfPoll(POLL_ACTIVE_MS)
   } catch (err) {
     if (source) localChanges.delete(source.record.id)
@@ -1004,14 +1042,24 @@ async function sendPrompt(draft: ComposerDraft): Promise<void> {
   if (poise) { await startPoiseChange(poise, draft); return }
   let e = entry()
   if (!e || e.pending) {
-    if (firstPromptPending) return
+    if (firstPromptPending) {
+      // Two Send actions can be released by one Memories save before the
+      // first session exists. Only the first may launch it; keep the other
+      // draft with that session instead of silently dropping its text.
+      const startup = quickSessionPromise
+      try {
+        const target = startup ? await startup : e
+        restoreDraftTo(target?.record.id ?? sourceId, draft)
+      } catch { restoreDraftTo(sourceId, draft) }
+      queueRender()
+      return
+    }
     firstPromptPending = true
     try {
       e = await ensureQuickSession(draft)
       freshDraft = null
     } catch (err) {
-      freshDraft = draft
-      if (!activeId) composer.setDraft(draft)
+      restoreDraftTo(null, draft)
       commandFailed(err, 'Start session')
       queueRender()
       return
@@ -1032,8 +1080,9 @@ async function sendPrompt(draft: ComposerDraft): Promise<void> {
   } catch (err) {
     dropOptimisticTurns(e.model)
     if (e.record.status === 'running' && !e.model.running) e.record = { ...e.record, status: 'idle' }
-    if (activeId === e.record.id) { commandFailed(err, 'Send'); composer.setDraft(draft) }
-    else { e.draft = draft; e.error = `Send failed — ${(err as Error).message}` }
+    restoreDraftTo(e.record.id, draft)
+    if (activeId === e.record.id) commandFailed(err, 'Send')
+    else e.error = `Send failed — ${(err as Error).message}`
     queueRender()
   }
 }
@@ -1044,7 +1093,10 @@ async function steer(text: string): Promise<void> {
   try {
     await chatClient.send({ type: 'steer', sessionId: e.record.id, text })
   } catch (err) {
-    commandFailed(err, 'Steer')
+    restoreDraftTo(e.record.id, { ...emptyDraft(), text })
+    if (activeId === e.record.id) commandFailed(err, 'Steer')
+    else e.error = `Steer failed — ${(err as Error).message}`
+    queueRender()
   }
 }
 
@@ -1143,7 +1195,7 @@ async function forkActive(): Promise<void> {
   try {
     const r = await chatClient.forkSession(e.record.id)
     upsertRecord(r.session)
-    await selectSession(r.session.id)
+    if (activeId === e.record.id) await selectSession(r.session.id)
   } catch (err) {
     setNotice(`Fork failed — ${(err as Error).message}`)
   }
@@ -1181,7 +1233,7 @@ async function handoff(agent: AgentId, model: string, effort?: string): Promise<
     await memories.editor.flush()
     const r = await chatClient.handoffSession(e.record.id, { agent, model, effort })
     upsertRecord(r.session)
-    await selectSession(r.session.id)
+    if (activeId === e.record.id) await selectSession(r.session.id)
   } catch (err) {
     setNotice(`Handoff failed — ${(err as Error).message}`)
   }
@@ -1234,7 +1286,7 @@ async function toggleAutoMerge(): Promise<void> {
   const hadFocus = !!document.activeElement?.closest('.chat-h-auto-merge')
   const update = (async (): Promise<boolean> => {
     try {
-      await memories.editor.flush()
+      if (enabled) await memories.editor.flush()
       const result = await chatClient.setAutoMerge(id, enabled)
       // Do not replace a newer update received from another tab with an old ack.
       if (result.session.lastSeq >= e.record.lastSeq) upsertRecord(result.session)
@@ -1273,7 +1325,9 @@ function headerHtml(): string {
   const between = !isRunning(s.status) && s.status !== 'starting' && s.status !== 'closed'
   const models = agent?.models.map((m) => m.identity) || []
   if (!models.includes(s.model)) models.unshift(s.model)
-  const efforts = s.efforts?.length ? s.efforts : (agent?.efforts || [])
+  const selectedModel = agent?.models.find(model => model.identity === s.model)
+  const variants = selectedModel ? agent!.models.filter(model => model.selector === selectedModel.selector).map(model => model.effort) : []
+  const efforts = variants.filter(effort => !s.efforts?.length || s.efforts.includes(effort))
   const ws = workspaceText(s)
   const modeSel = s.capabilities?.modes && s.modes?.length
     ? `<select class="chat-h-select chat-mode-select" aria-label="Mode"${between ? '' : ' disabled'}>${s.modes.map((m) => `<option value="${escapeHtml(m.id)}"${m.id === s.mode ? ' selected' : ''}>${escapeHtml(m.name)}</option>`).join('')}</select>`
@@ -1320,7 +1374,7 @@ function attachHeader(): void {
     const t = e.target as HTMLSelectElement
     const s = entry()?.record
     if (!s) return
-    if (t.classList.contains('chat-model-select')) void setModel(t.value, s.effort)
+    if (t.classList.contains('chat-model-select')) void setModel(t.value, agentFor(s.agent)?.models.find(model => model.identity === t.value)?.effort)
     else if (t.classList.contains('chat-effort-select')) void setModel(s.model, t.value)
     else if (t.classList.contains('chat-mode-select')) void setMode(t.value)
     else if (t.classList.contains('chat-ho-agent')) {
@@ -1363,6 +1417,9 @@ function attachHeader(): void {
 function attachKeys(): void {
   document.addEventListener('keydown', (e) => {
     if (!viewEl || viewEl.hidden) return
+    if (!e.isComposing && e.key === 'Escape' && !dialogEl.hidden) {
+      e.preventDefault(); closeDialog(); viewEl.querySelector<HTMLButtonElement>('.chat-new-btn')?.focus(); return
+    }
     const active = document.activeElement as HTMLElement | null
     const tag = active?.tagName
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || active?.isContentEditable) return
@@ -1465,18 +1522,26 @@ function render(): void {
   renderDeployCard()
   if (wasAtBottom || forceBottom) scrollEl.scrollTop = scrollEl.scrollHeight
   forceBottom = false
+  persistDrafts()
 }
 
 // ── New session dialog ─────────────────────────────────────────────────────
 
 export interface NewSessionPrefill { context?: SessionContext }
 
+let dialogGeneration = 0
+let dialogOpener: HTMLElement | null = null
+
 async function openNewSessionDialog(prefill: NewSessionPrefill = {}): Promise<void> {
+  const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
   closeDialog()
+  dialogOpener = opener
+  const generation = ++dialogGeneration
   dialogEl.hidden = false
-  dialogEl.innerHTML = '<div class="chat-dialog-body"><div class="chat-empty">Loading models…</div></div>'
+  dialogEl.innerHTML = '<div class="chat-dialog-body"><div class="chat-empty" role="status">Loading models…</div></div>'
+  dialogEl.focus({ preventScroll: true })
   const agents = await loadAgents(true)
-  if (dialogEl.hidden) return
+  if (dialogEl.hidden || generation !== dialogGeneration) return
   if (!agents) {
     dialogEl.innerHTML = '<div class="chat-dialog-body"><div class="st-help st-help-error">Could not load the model catalogue.</div><button type="button" class="st-clear chat-dialog-cancel">Close</button></div>'
     dialogEl.querySelector('.chat-dialog-cancel')!.addEventListener('click', closeDialog)
@@ -1487,8 +1552,11 @@ async function openNewSessionDialog(prefill: NewSessionPrefill = {}): Promise<vo
 
 function closeDialog(): void {
   if (!dialogEl) return
+  dialogGeneration++
+  if (dialogEl.contains(document.activeElement) && dialogOpener?.isConnected) dialogOpener.focus({ preventScroll: true })
   dialogEl.hidden = true
   dialogEl.innerHTML = ''
+  dialogOpener = null
 }
 
 async function createSessionEntry(req: NewSessionRequest, draft: ComposerDraft | null = null,
@@ -1581,9 +1649,14 @@ export async function initChatView(): Promise<void> {
   if (!initialized) {
     initialized = true
     renderShell()
-    // A snapshot exists only when the previous page reloaded itself onto a
-    // new build; it is consumed here exactly once.
-    try { restoredSnapshot = takeDraftSnapshot(localStorage) } catch { restoredSnapshot = null }
+    // Both ordinary and update snapshots belong to this tab. A different
+    // tab must never consume shared text left by an older release.
+    try { restoredSnapshot = takeDraftSnapshot(sessionStorage) } catch { restoredSnapshot = null }
+    if (!restoredSnapshot) {
+      // Upgrade compatibility: old builds wrote to localStorage and marked
+      // the initiating tab. Only that marked tab may consume the legacy file.
+      try { if (sessionStorage.getItem(RELOADED_RELEASE_KEY)) restoredSnapshot = takeDraftSnapshot(localStorage) } catch { /* optional recovery */ }
+    }
     // Events keep folding into the per-session models while the view is
     // hidden — that is what lets a running turn be re-joined on return
     // without a refetch — so these listeners live for the app's lifetime.

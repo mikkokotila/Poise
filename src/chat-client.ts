@@ -368,8 +368,8 @@ export class ChatClient {
    *  in the browser and kept for any retry, so the durable receipt answers a
    *  resend instead of preparing a second change. The ack carries the new
    *  dedicated session and the change record; anything else is an error. */
-  async startPoiseChange(sessionId: string, text: string, changeId: string): Promise<PoiseChangeAck> {
-    const result = await this.send({ type: 'poise.change', sessionId, text, changeId }) as { session?: unknown, change?: unknown } | null
+  async startPoiseChange(sessionId: string, text: string, changeId: string, context?: Pick<import('../server/chat/protocol').PromptInput, 'attachments' | 'mentions'>): Promise<PoiseChangeAck> {
+    const result = await this.send({ type: 'poise.change', sessionId, text, changeId, ...(context?.attachments.length || context?.mentions.length ? context : {}) }) as { session?: unknown, change?: unknown } | null
     const change = parseChange(result?.change)
     const session = result?.session && typeof result.session === 'object' ? result.session as SessionRecord : null
     if (!session || typeof session.id !== 'string' || !change) {

@@ -38,7 +38,7 @@ function emptyDraftInput(): DraftSnapshotInput {
 export function snapshotDrafts(): boolean {
   let input: DraftSnapshotInput
   try { input = draftProvider ? draftProvider() : emptyDraftInput() } catch { return false }
-  try { return saveDraftSnapshot(localStorage, buildDraftSnapshot({ ...input, fromSha: BUILD_SHA })) } catch { return false }
+  try { return saveDraftSnapshot(sessionStorage, buildDraftSnapshot({ ...input, fromSha: BUILD_SHA })) } catch { return false }
 }
 
 // ── Banner ───────────────────────────────────────────────────────────────

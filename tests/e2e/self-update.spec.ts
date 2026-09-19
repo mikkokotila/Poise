@@ -327,7 +327,8 @@ test('the /poise command is offered in the palette and locks into a chip that ru
   expect(sock.framesOf('poise.change')[0].command).toMatchObject({ sessionId: 's1', text: 'Tidy the menu' })
   expect(sock.framesOf('prompt')).toHaveLength(0)
   // Refused: the whole command comes back editable.
-  await expect(input(page)).toHaveValue('/poise Tidy the menu')
+  await expect(input(page)).toHaveValue('Tidy the menu')
+  await expect(page.locator('.chat-v-chip')).toHaveText('/poise')
 })
 
 test('restores every draft, the fresh model and the active session from the snapshot a safe reload left behind, once', async ({ page }) => {
@@ -337,7 +338,7 @@ test('restores every draft, the fresh model and the active session from the snap
   await page.addInitScript(() => {
     if (sessionStorage.getItem('snapshot-seeded')) return
     sessionStorage.setItem('snapshot-seeded', '1')
-    localStorage.setItem('poise-chat-draft-snapshot', JSON.stringify({
+    sessionStorage.setItem('poise-chat-draft-snapshot', JSON.stringify({
       version: 1, savedAt: Date.now(), fromSha: null, activeSessionId: 'older',
       fresh: { draft: { text: 'fresh thought', attachments: [], mentions: [], mode: null }, modelIdentity: 'gpt-6-astra-max' },
       sessions: {
@@ -357,11 +358,15 @@ test('restores every draft, the fresh model and the active session from the snap
   await expect(page.locator('.chat-session-item.active')).toContainText('Newer')
   await expect(input(page)).toHaveValue('other draft')
   await expect(page.locator('.chat-v-chip')).toHaveText('/review')
-  // A second load has nothing to restore.
+  // The old update snapshot is consumed once; ordinary refresh keeps the
+  // current tab draft, not the old contents of that snapshot.
+  await input(page).fill('A newer review draft')
   await page.reload()
   await sock.subscribed('newer')
   await expect(page.locator('.chat-session-item.active')).toContainText('Newer')
-  await expect(input(page)).toHaveValue('')
+  await expect(input(page)).toHaveValue('A newer review draft')
+  await expect(page.locator('.chat-v-chip')).toHaveText('/review')
+  expect(await page.evaluate(() => localStorage.getItem('poise-chat-draft-snapshot'))).toBeNull()
 })
 
 test('restores the fresh console draft and model choice without opening a session', async ({ page }) => {
@@ -371,7 +376,7 @@ test('restores the fresh console draft and model choice without opening a sessio
   await page.addInitScript(() => {
     if (sessionStorage.getItem('fresh-snapshot-seeded')) return
     sessionStorage.setItem('fresh-snapshot-seeded', '1')
-    localStorage.setItem('poise-chat-draft-snapshot', JSON.stringify({
+    sessionStorage.setItem('poise-chat-draft-snapshot', JSON.stringify({
       version: 1, savedAt: Date.now(), fromSha: null, activeSessionId: null,
       fresh: { draft: { text: 'fresh thought', attachments: [], mentions: [], mode: null }, modelIdentity: 'gpt-6-astra-max' },
       sessions: {},
@@ -383,10 +388,14 @@ test('restores the fresh console draft and model choice without opening a sessio
   await expect(page.locator('.chat-default-model')).toHaveText('GPT 6 Astra · Max')
   await expect(page.locator('.chat-session-item.active')).toHaveCount(0)
   expect(state.calls.filter((c) => c.method === 'POST')).toHaveLength(0)
-  // Expired snapshots are ignored, and one is never restored twice.
+  // A normal refresh preserves newer writing without selecting an unrelated
+  // existing session or replaying the already-consumed update snapshot.
+  await input(page).fill('A newer fresh thought')
   await page.reload()
-  await expect(page.locator('.chat-session-item.active')).toHaveCount(1)
-  await expect(input(page)).toHaveValue('')
+  await expect(page.locator('.chat-session-item.active')).toHaveCount(0)
+  await expect(input(page)).toHaveValue('A newer fresh thought')
+  await expect(page.locator('.chat-default-model')).toHaveText('GPT 6 Astra · Max')
+  expect(state.calls.filter(call => call.method === 'POST')).toHaveLength(0)
 })
 
 test('an older server that knows nothing about updates leaves the view exactly as it was', async ({ page }) => {
@@ -628,4 +637,22 @@ test('a change explicitly targeting another package stays in ordinary chat', asy
   await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
   expect(sock.framesOf('poise.change')).toHaveLength(0)
   await expect(card(page)).toHaveCount(0)
+})
+
+
+for (const form of ['chip', 'pasted']) test(`QC: ${form} Poise requests carry uploaded attachments through the release command`, async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page)
+  const attachment = { id: '11111111-1111-4111-8111-111111111111', name: 'requirements.txt', path: '.poise-chat/uploads/s1/requirements.txt', size: 16 }
+  await page.route('**/api/chat/attachments?**', route => route.fulfill({ json: { attachment } }))
+  await page.goto('/'); await sock.subscribed('s1')
+  await page.locator('.chat-v-composer input[type="file"]').setInputFiles({ name: 'requirements.txt', mimeType: 'text/plain', buffer: Buffer.from('The requirements') })
+  await expect(page.locator('.chat-attachment-chip')).toHaveCount(1)
+  if (form === 'chip') {
+    await input(page).fill('/poise'); await input(page).press('Space'); await input(page).fill('Implement the attached requirements')
+  } else await input(page).fill('/poise Implement the attached requirements')
+  await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('poise.change').length).toBe(1)
+  expect(sock.framesOf('poise.change')[0].command).toMatchObject({ text: 'Implement the attached requirements', attachments: [attachment], mentions: [] })
+  expect(sock.framesOf('prompt')).toHaveLength(0)
 })

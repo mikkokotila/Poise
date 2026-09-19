@@ -486,7 +486,7 @@ function renderList(turn: TurnModel): RenderItem[] {
   return out
 }
 
-interface UiState { expanded?: boolean, showAll?: boolean }
+interface UiState { expanded?: boolean, showAll?: boolean, answers?: Array<{ name: string, type: string, value: string, checked: boolean }> }
 
 export interface TranscriptView {
   render(model: TranscriptModel, ctx: RenderContext): void
@@ -500,6 +500,15 @@ export interface TranscriptView {
 export function createTranscriptView(container: HTMLElement, handlers: TranscriptHandlers): TranscriptView {
   const nodes = new Map<string, { el: HTMLElement, rev: number }>()
   const ui = new Map<string, UiState>()
+  const questionDraftKey = 'poise-chat-question-drafts'
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(questionDraftKey) || '[]')
+    if (Array.isArray(saved)) for (const row of saved) {
+      if (Array.isArray(row) && typeof row[0] === 'string' && Array.isArray(row[1])
+        && row[1].every((answer: any) => answer && typeof answer.name === 'string' && typeof answer.type === 'string'
+          && typeof answer.value === 'string' && typeof answer.checked === 'boolean')) ui.set(row[0], { answers: row[1] })
+    }
+  } catch { /* malformed or unavailable draft storage does not affect rendering */ }
   const texts = new Map<string, string>()
   let lastCtxKey = ''
 
@@ -720,6 +729,25 @@ export function createTranscriptView(container: HTMLElement, handlers: Transcrip
 
   // ── Render ───────────────────────────────────────────────────────────
 
+  function rememberQuestion(node: HTMLElement, key: string): void {
+    if (!node.classList.contains('chat-item-question') || !node.querySelector('.chat-question.pending')) return
+    const answers = [...node.querySelectorAll<HTMLInputElement>('input')].map(input =>
+      ({ name: input.name, type: input.type, value: input.value, checked: input.checked }))
+    ui.set(key, { ...ui.get(key), answers })
+  }
+
+  function restoreQuestion(node: HTMLElement, key: string): void {
+    if (!node.querySelector('.chat-question.pending')) return
+    const answers = ui.get(key)?.answers || []
+    for (const input of node.querySelectorAll<HTMLInputElement>('input')) {
+      const saved = answers.find(answer => answer.name === input.name && answer.type === input.type
+        && (input.type === 'text' || answer.value === input.value))
+      if (!saved) continue
+      if (input.type === 'text') input.value = saved.value
+      else input.checked = saved.checked
+    }
+  }
+
   function renderTurn(el: HTMLElement, turn: TurnModel, ctx: RenderContext, focused: PermissionItem | QuestionItem | null, isLast: boolean): void {
     let head = el.querySelector<HTMLElement>(':scope > .chat-turn-head')
     let items = el.querySelector<HTMLElement>(':scope > .chat-turn-items')
@@ -740,9 +768,9 @@ export function createTranscriptView(container: HTMLElement, handlers: Transcrip
       keep.add(item.key)
       const { el: node } = ensure(items, item.key, cursor, `chat-item chat-item-${item.kind}`)
       const focusedHere = focused !== null && (item.kind === 'permission' || item.kind === 'question') && item.id === focused.id
-      // Focus and expansion are view state, not model state, so they fold
-      // into the revision the node is compared against.
-      const uiRev = (ui.get(item.key)?.expanded ? 1 : 0) + (focusedHere ? 2 : 0)
+      // Expansion changes markup; request focus is only a CSS class.
+      // Rebuilding a form on focus changes would erase a partially typed answer.
+      const uiRev = (ui.get(item.key)?.expanded ? 1 : 0)
       const rev = item.rev * 4 + uiRev
       if (setRev(item.key, rev) || (item.kind === 'tool' && node.childElementCount === 0)) {
         switch (item.kind) {
@@ -752,11 +780,17 @@ export function createTranscriptView(container: HTMLElement, handlers: Transcrip
           case 'readgroup': node.innerHTML = readGroupHtml(item.key, item.tools); break
           case 'plan': node.innerHTML = planHtml(item); break
           case 'permission': node.innerHTML = permissionHtml(item, focusedHere); break
-          case 'question': node.innerHTML = questionHtml(item, focusedHere); break
+          case 'question':
+            rememberQuestion(node, item.key)
+            node.innerHTML = questionHtml(item, focusedHere)
+            restoreQuestion(node, item.key)
+            break
           case 'steer': node.innerHTML = `<div class="chat-msg chat-msg-user chat-msg-steer"><div class="chat-msg-body"><span class="chat-msg-mode-tag">steer</span>${escapeHtml(item.text)}</div></div>`; break
           case 'error': node.innerHTML = `<div class="chat-msg chat-msg-agent chat-msg-error"><div class="chat-msg-body">${escapeHtml(item.message)}</div></div>`; break
         }
       }
+      if (item.kind === 'question' && item.answered && ui.has(item.key)) delete ui.get(item.key)!.answers
+      if (item.kind === 'question' || item.kind === 'permission') node.firstElementChild?.classList.toggle('focused', focusedHere)
       // Hide rather than destroy detail: preserve tool expansion, forms and
       // live updates. Requests requiring a response and errors stay visible.
       const internalReminder = ctx.agent === 'muse' && item.kind === 'tool'
@@ -813,6 +847,7 @@ export function createTranscriptView(container: HTMLElement, handlers: Transcrip
   }
 
   function clear(): void {
+    for (const [key, node] of nodes) rememberQuestion(node.el, key)
     container.innerHTML = ''
     nodes.clear()
     texts.clear()
@@ -829,6 +864,15 @@ export function createTranscriptView(container: HTMLElement, handlers: Transcrip
     }
   }
 
+  function persistQuestionDrafts(): void {
+    for (const [key, node] of nodes) rememberQuestion(node.el, key)
+    const drafts = [...ui].filter(([, state]) => state.answers?.some(answer => answer.type === 'text' ? !!answer.value : answer.checked))
+      .map(([key, state]) => [key, state.answers])
+    try { sessionStorage.setItem(questionDraftKey, JSON.stringify(drafts)) } catch { /* in-page state is still retained */ }
+  }
+  window.addEventListener('beforeunload', persistQuestionDrafts)
+  window.addEventListener('pagehide', persistQuestionDrafts)
+
   // ── Interaction ──────────────────────────────────────────────────────
 
   container.addEventListener('click', (e) => {
@@ -836,6 +880,8 @@ export function createTranscriptView(container: HTMLElement, handlers: Transcrip
     const file = target.closest<HTMLAnchorElement>('a[data-chat-file]')
     if (file && handlers.onFile) {
       e.preventDefault()
+      // Native dialog restoration needs the clicked link focused in WebKit too.
+      file.focus({ preventScroll: true })
       handlers.onFile(file.dataset.chatFile!)
       return
     }
@@ -907,7 +953,7 @@ export function createTranscriptView(container: HTMLElement, handlers: Transcrip
       const picked = Array.from(q.querySelectorAll<HTMLInputElement>('input:checked')).map((i) => i.value)
       const free = q.querySelector<HTMLInputElement>('.chat-q-text')?.value.trim() || ''
       if (multi) answers[qid] = free ? [...picked, free] : picked
-      else answers[qid] = picked[0] ?? free
+      else answers[qid] = free || picked[0] || ''
     }
     return answers
   }

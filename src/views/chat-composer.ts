@@ -286,6 +286,8 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   let mentionSeq = 0
 
   function closePopover(): void {
+    mentionSeq++
+    if (mentionTimer) { clearTimeout(mentionTimer); mentionTimer = null }
     popKind = null
     popItems = []
     popover.hidden = true
@@ -420,7 +422,10 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     if (activeMode && ownCommands.some((c) => c.name === activeMode)) {
       const name = activeMode
       if (name !== 'fork' && !text) return
-      handlers.onCommand(name, text)
+      if (name === 'poise') {
+        handlers.onSend({ text: `/poise ${text}`.trim(), attachments: attachments.slice(), mentions: currentMentions(), mode: name })
+        attachments = []; mentions = []; renderChips()
+      } else handlers.onCommand(name, text)
       input.value = ''
       applyMode(null)
       autoResize()
@@ -457,7 +462,12 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     updatePalette()
     updateMentions()
   })
+  let composing = false
+  input.addEventListener('compositionstart', () => { composing = true })
+  input.addEventListener('compositionend', () => { composing = false })
   input.addEventListener('keydown', (e) => {
+    if (composing || e.isComposing || e.keyCode === 229) return
+    if (e.key === 'Escape') { closePopover(); return }
     if (popoverKey(e)) return
     if (tryEnterMode(e)) return
     if (tryExitMode(e)) return

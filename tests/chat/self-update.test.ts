@@ -532,3 +532,76 @@ it('includes current shared memories in native handoffs and Poise implementation
     expect(ofType(events, result.session.id, 'turn.started')[0].prompt.text).toBe('Add the requested control')
   } finally { save('') }
 }, 20_000)
+
+
+it('QC: a completed delegated queue does not strand later work in the original conversation', async () => {
+  const bridge = fakeBridge('poise-test:db')
+  const { runtime, controls, events } = makeRuntime({ bridge })
+  const source = await sourceSession(runtime, events)
+  await runtime.enqueue(source.id, randomUUID(), { text: 'First queued review', attachments: [], mentions: [] })
+  const changeId = randomUUID()
+  const { session: executor } = await runtime.startPoiseChange(source.id, 'Make the requested improvement', changeId)
+  await waitFor(() => bridge.changes.get(changeId)?.state === 'checking')
+  bridge.changes.get(changeId)!.state = 'live'
+  await waitFor(() => runtime.get(executor.id)?.queue?.items.length === 0)
+  await runtime.enqueue(source.id, randomUUID(), { text: 'Second batch follow-up', attachments: [], mentions: [] })
+  runtime.prompt(source.id, { text: 'New first task', attachments: [], mentions: [] })
+  await waitFor(() => controls.adapters.flatMap(a => a.inputs).some(i => i.text === 'Second batch follow-up'))
+  expect(ofType(events, source.id, 'turn.started').map(e => e.prompt.text)).toEqual(['New first task', 'Second batch follow-up'])
+}, 20_000)
+
+
+it('QC: Poise requests carry attachments and reject conflicting retry context', async () => {
+  const bridge = fakeBridge('poise-test:db')
+  const { runtime, controls, events } = makeRuntime({ bridge })
+  const source = await sourceSession(runtime, events)
+  const file = await runtime.saveAttachment(source.id, 'requirements.txt', Buffer.from('Required behavior from the uploaded file'))
+  const assets = { attachments: [file], mentions: [{ path: 'README.md' }] }
+  const changeId = randomUUID()
+  const { session } = await runtime.startPoiseChange(source.id, 'Implement the attached requirements', changeId, assets)
+  await waitFor(() => ofType(events, session.id, 'turn.finished').length === 1)
+  const prompt = controls.adapters.at(-1)!.inputs[0]
+  expect(prompt.attachments[0]?.text).toBe('Required behavior from the uploaded file')
+  expect(prompt.mentions).toEqual([{ path: 'README.md' }])
+  await expect(runtime.startPoiseChange(source.id, 'Implement the attached requirements', changeId, { attachments: [], mentions: [] })).rejects.toMatchObject({ statusCode: 409 })
+}, 20_000)
+
+it('QC: deleting a source conversation preserves attachments already delegated to a Poise queue', async () => {
+  const bridge = fakeBridge('poise-test:db')
+  const { runtime, controls, events } = makeRuntime({ bridge })
+  const source = await sourceSession(runtime, events)
+  const file = await runtime.saveAttachment(source.id, 'review.txt', Buffer.from('Review acceptance criteria'))
+  await runtime.enqueue(source.id, randomUUID(), { text: 'Review using the file', attachments: [file], mentions: [] })
+  const changeId = randomUUID()
+  const { session } = await runtime.startPoiseChange(source.id, 'Implement the first task', changeId)
+  await waitFor(() => bridge.changes.get(changeId)?.state === 'checking')
+  await runtime.delete(source.id)
+  bridge.changes.get(changeId)!.state = 'live'
+  await waitFor(() => ofType(events, session.id, 'turn.finished').length === 2)
+  const prompt = controls.adapters.at(-1)!.inputs.at(-1)!
+  expect(prompt.text).toBe('Review using the file')
+  expect(prompt.attachments[0]?.text).toBe('Review acceptance criteria')
+  expect(runtime.get(session.id)?.queue?.items).toEqual([])
+}, 20_000)
+
+
+it('QC: queue handback also preserves borrowed files when the former executor is deleted', async () => {
+  const bridge = fakeBridge('poise-test:db')
+  const { runtime, controls, events } = makeRuntime({ bridge })
+  const source = await sourceSession(runtime, events)
+  await runtime.enqueue(source.id, randomUUID(), { text: 'Initial review', attachments: [], mentions: [] })
+  const changeId = randomUUID()
+  const { session: executor } = await runtime.startPoiseChange(source.id, 'First improvement', changeId)
+  await waitFor(() => bridge.changes.get(changeId)?.state === 'checking')
+  bridge.changes.get(changeId)!.state = 'live'
+  await waitFor(() => runtime.get(executor.id)?.queue?.items.length === 0)
+  const attachment = await runtime.saveAttachment(executor.id, 'borrowed.txt', Buffer.from('Keep this after deleting the old executor'))
+  await runtime.enqueue(executor.id, randomUUID(), { text: 'Later review', attachments: [attachment], mentions: [] })
+  controls.adapters[0].auto = false
+  runtime.prompt(source.id, { text: 'Another first task', attachments: [], mentions: [] })
+  await waitFor(() => lastStatus(events, source.id) === 'running')
+  await runtime.delete(executor.id)
+  controls.adapters[0].auto = true; controls.adapters[0].finish()
+  await waitFor(() => ofType(events, source.id, 'turn.finished').length === 2)
+  expect(controls.adapters[0].inputs.at(-1)?.attachments[0]?.text).toBe('Keep this after deleting the old executor')
+}, 20_000)

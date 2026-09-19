@@ -10,6 +10,8 @@ Usage:
       prints `acquired <token>` (or `busy <owner_label>` and exits 3), holds
       the lease with heartbeats for hold-seconds, then releases and prints
       `released`.
+  lock-contender.py acquire <checkout> stdin
+      holds until a line or EOF on stdin (bounded by 60s), keeping heartbeats.
   lock-contender.py try <checkout>
       one attempt; prints `acquired <token>` (then releases at once) or
       `busy <reason> <owner_label>`.
@@ -18,6 +20,7 @@ import hashlib
 import json
 import os
 import secrets
+import select
 import sqlite3
 import sys
 import time
@@ -149,7 +152,8 @@ def main(argv):
         print(status, detail, flush=True)
         return 0 if status == "acquired" else 3
     if mode == "acquire":
-        hold = float(argv[3])
+        controlled = argv[3] == "stdin"
+        hold = 60.0 if controlled else float(argv[3])
         worker_pid = None
         if "--worker-pid" in argv:
             worker_pid = int(argv[argv.index("--worker-pid") + 1])
@@ -161,7 +165,13 @@ def main(argv):
         print("acquired", token, flush=True)
         deadline = time.time() + hold
         while time.time() < deadline:
-            time.sleep(min(0.2, max(0.0, deadline - time.time())))
+            interval = min(0.2, max(0.0, deadline - time.time()))
+            if controlled:
+                if select.select([sys.stdin], [], [], interval)[0]:
+                    sys.stdin.readline()
+                    break
+            else:
+                time.sleep(interval)
             now = now_ms()
             db.execute("BEGIN IMMEDIATE")
             renewed = db.execute("UPDATE lease SET heartbeat_at = ?, lease_until = ? WHERE id = 1 AND token = ?", (iso(now), now + LEASE_MS, token)).rowcount

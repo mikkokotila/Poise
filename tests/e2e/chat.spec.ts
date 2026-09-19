@@ -348,11 +348,12 @@ test('Enter sends, Shift+Enter breaks the line, Enter steers while running, and 
   await expect(page.locator('.chat-v-composer .chat-send')).toHaveAttribute('aria-label', 'Send')
 })
 
-test('streams text, sticks to the bottom only when there, and never runs agent HTML', async ({ page }) => {
+test('streams text, sticks to the bottom only when there, and never runs agent HTML', async ({ page, browserName }) => {
   const state = makeState([session({ status: 'running' })], { s1: [env('s1', 1, { type: 'turn.started', turnId: 't1', prompt: { text: 'go', attachments: [], mentions: [] } })] })
   await installRoutes(page, state)
   const sock = await installSocket(page)
-  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
+  // Firefox/WebKit use the trusted Copy click; Chromium exposes these grants.
+  if (browserName === 'chromium') await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
   await page.goto('/')
   await sock.subscribed('s1')
   sock.seq = 1
@@ -676,10 +677,10 @@ test('opens a Chat session from a Swarm chat row, and changes model, mode and ha
   await expect(page.locator('.chat-session-item[data-id="s1"]')).toHaveClass(/active/)
   await sock.ready()
   await page.locator('.chat-model-select').selectOption('opus-5-xhigh')
-  await expect.poll(() => sock.framesOf('set_model').map((f) => f.command)).toEqual([{ type: 'set_model', sessionId: 's1', model: 'opus-5-xhigh', effort: 'max' }])
+  await expect.poll(() => sock.framesOf('set_model').map((f) => f.command)).toEqual([{ type: 'set_model', sessionId: 's1', model: 'opus-5-xhigh', effort: 'xhigh' }])
   await page.locator('.chat-mode-select').selectOption('plan')
   await expect.poll(() => sock.framesOf('set_mode').map((f) => f.command)).toEqual([{ type: 'set_mode', sessionId: 's1', mode: 'plan' }])
-  sock.push('s1', { type: 'model.updated', model: 'opus-5-xhigh', modelId: 'claude-opus-5', effort: 'max' })
+  sock.push('s1', { type: 'model.updated', model: 'opus-5-xhigh', modelId: 'claude-opus-5', effort: 'xhigh' })
   await expect(page.locator('.chat-model-select')).toHaveValue('opus-5-xhigh')
   await page.locator('.chat-h-handoff').click()
   await page.getByLabel('Handoff agent').selectOption('codex')
@@ -1693,4 +1694,284 @@ test('Memories stay editable across sessions and streaming, fit small windows, a
   await expect.poll(async () => { const b = await memoryText(page).boundingBox(); return !!b && b.x >= 0 && b.x + b.width <= 600 && b.y + b.height <= 500 }).toBe(true)
   await memoryText(page).fill('')
   await expect.poll(() => saved.text).toBe('')
+})
+
+
+// QC: failures and overlapping interactions, not only the happy path.
+test('QC: composing text cannot submit a prompt or a queue item', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('入力中')
+  await input(page).evaluate(el => {
+    el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true }))
+  })
+  await expect(input(page)).toHaveValue('入力中')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  await input(page).evaluate(el => el.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })))
+  await input(page).fill('/queue 入力中')
+  await input(page).evaluate(el => el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true })))
+  expect(sock.framesOf('queue.add')).toHaveLength(0)
+  await expect(input(page)).toHaveValue('/queue 入力中')
+})
+
+test('QC: failed sends preserve the submitted message and the newer draft', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1'); sock.autoAck = false
+  await input(page).fill('The first request'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  await input(page).fill('A newer draft I am still writing')
+  sock.ack(sock.framesOf('prompt')[0], false, 'The server is updating', 'draining')
+  await expect(input(page)).toHaveValue(/The first request/)
+  await expect(input(page)).toHaveValue(/A newer draft I am still writing/)
+})
+
+test('QC: failed steering preserves unsent text without overwriting a newer draft', async ({ page }) => {
+  const s = session({ status: 'running' })
+  const state = makeState([s], { s1: [env('s1', 1, { type: 'turn.started', turnId: 'working', prompt: { text: 'Do the task', attachments: [], mentions: [] } })] })
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1'); sock.autoAck = false
+  await input(page).fill('Please keep the tests'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('steer').length).toBe(1)
+  await input(page).fill('And a new thought')
+  sock.ack(sock.framesOf('steer')[0], false, 'The turn has just ended', 'no_turn')
+  await expect(input(page)).toHaveValue(/Please keep the tests/)
+  await expect(input(page)).toHaveValue(/And a new thought/)
+})
+
+test('QC: the selected model effort is sent instead of the previous effort', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  await page.locator('.chat-model-select').selectOption('opus-5-high')
+  await expect.poll(() => sock.framesOf('set_model').length).toBe(1)
+  expect(sock.framesOf('set_model')[0].command).toMatchObject({ model: 'opus-5-high', effort: 'high' })
+})
+
+test('QC: draft answers survive another question taking transcript focus', async ({ page }) => {
+  const state = makeState([session({ status: 'running' })]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  sock.push('s1', { type: 'turn.started', turnId: 'questions', prompt: { text: 'Investigate', attachments: [], mentions: [] } })
+  sock.push('s1', { type: 'question.asked', turnId: 'questions', id: 'q1', questions: [{ id: 'a', question: 'First fact?', options: [{ label: 'Choice' }], multiSelect: false, freeText: true }] })
+  const first = page.locator('.chat-question[data-request="q1"]')
+  await first.locator('.chat-q-text').fill('My carefully written answer')
+  sock.push('s1', { type: 'question.asked', turnId: 'questions', id: 'q2', questions: [{ id: 'b', question: 'Second fact?', options: [], multiSelect: false, freeText: true }] })
+  await expect(page.locator('.chat-question[data-request="q2"]')).toBeVisible()
+  await expect(first.locator('.chat-q-text')).toHaveValue('My carefully written answer')
+})
+
+test('QC: a slow session list cannot roll back live Auto-merge state', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  const stale = structuredClone(state.sessions)
+  let release!: () => void; let requested = false
+  const held = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/chat/sessions', async route => {
+    requested = true; await held
+    await route.fulfill({ json: { sessions: stale, instance: 'poise-dev:test' } })
+  })
+  await page.getByRole('button', { name: 'Current', exact: true }).click()
+  await page.getByRole('button', { name: 'Chat', exact: true }).click()
+  await expect.poll(() => requested).toBe(true)
+  const updated = { ...session(), autoMerge: true, lastSeq: sock.seq + 1 }
+  sock.push('s1', { type: 'session.updated', session: updated })
+  const toggle = page.getByRole('button', { name: 'Auto-merge', exact: true })
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  release()
+  await expect(page.locator('.chat-session-item')).toHaveCount(1)
+  await page.waitForTimeout(100)
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+})
+
+
+test('QC: unfinished answers survive switching away and back to a session', async ({ page }) => {
+  const state = makeState([session(), session({ id: 's2', title: 'Another task' })]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  sock.push('s1', { type: 'turn.started', turnId: 'q-turn', prompt: { text: 'Investigate', attachments: [], mentions: [] } })
+  sock.push('s1', { type: 'question.asked', id: 'q-navigation', turnId: 'q-turn', questions: [{ id: 'q', question: 'Your preference?', options: [{ label: 'Default' }], multiSelect: false, freeText: true }] })
+  const question = page.locator('.chat-question[data-request="q-navigation"]')
+  await question.getByRole('radio').check()
+  await question.locator('.chat-q-text').fill('A specific alternative')
+  await page.locator('.chat-session-item[data-id="s2"]').click()
+  await expect(question).toHaveCount(0)
+  await page.locator('.chat-session-item[data-id="s1"]').click()
+  await expect(question.locator('.chat-q-text')).toHaveValue('A specific alternative')
+  await question.getByRole('button', { name: 'Submit', exact: true }).click()
+  await expect.poll(() => sock.framesOf('question.answer').length).toBe(1)
+  expect(sock.framesOf('question.answer')[0].command).toMatchObject({ answers: { q: 'A specific alternative' } })
+})
+
+test('QC: a dismissed delayed file suggestion never reopens itself', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state); await installSocket(page, state)
+  let release!: () => void; let requested = false
+  const hold = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/chat/files?**', async route => { requested = true; await hold; await route.fulfill({ json: { files: ['src/main.ts'] } }) })
+  await page.goto('/'); await input(page).fill('@src')
+  await expect.poll(() => requested).toBe(true)
+  await input(page).press('Escape'); release()
+  await page.waitForTimeout(250)
+  await expect(page.locator('.chat-popover')).toBeHidden()
+  await expect(input(page)).toHaveValue('@src')
+})
+
+test('QC: ordinary refresh restores all composer drafts and the selected session without sending them', async ({ page }) => {
+  const state = makeState([session(), session({ id: 's2', title: 'Second session' })]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('First session draft')
+  await page.locator('.chat-session-item[data-id="s2"]').click()
+  await expect(page.locator('.chat-session-item[data-id="s2"]')).toHaveClass(/active/)
+  await input(page).fill('/queue'); await input(page).press('Space'); await input(page).fill('Second session queued draft')
+  await page.reload()
+  await expect(page.locator('.chat-session-item[data-id="s2"]')).toHaveClass(/active/)
+  await expect(input(page)).toHaveValue('Second session queued draft')
+  await expect(page.locator('.chat-v-chip')).toHaveText('/queue')
+  await page.locator('.chat-session-item[data-id="s1"]').click()
+  await expect(input(page)).toHaveValue('First session draft')
+  expect(sock.framesOf('prompt')).toHaveLength(0); expect(sock.framesOf('queue.add')).toHaveLength(0)
+})
+
+test('QC: opening Memories with a wide session pane preserves a usable conversation', async ({ page }, info) => {
+  const state = makeState([session()]); await installRoutes(page, state); await installSocket(page, state)
+  await installMemoryRoutes(page)
+  await page.addInitScript(() => localStorage.setItem('poise-chat-sidebar-width', '480'))
+  await page.setViewportSize({ width: 1024, height: 700 }); await page.goto('/')
+  await page.getByRole('button', { name: 'Memories', exact: true }).click()
+  await expect.poll(async () => (await page.locator('.chat-memories-pane').boundingBox())!.width).toBeGreaterThanOrEqual(319.9)
+  await expect.poll(async () => (await page.locator('.chat-main').boundingBox())!.width).toBeGreaterThanOrEqual(319.9)
+  await expect(page.locator('.chat-v-composer .chat-send')).toBeInViewport()
+  await page.screenshot({ path: info.outputPath('qc-two-panes.png') })
+})
+
+
+test('QC: Auto-merge can always be turned off even when Memories cannot save', async ({ page }) => {
+  const state = makeState([session({ autoMerge: true })]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); const saved = await installMemoryRoutes(page)
+  await page.goto('/'); await sock.subscribed('s1')
+  await memoryToggle(page).click(); saved.fail = true
+  await memoryText(page).fill('Keep this unsaved memory')
+  const toggle = page.getByRole('button', { name: 'Auto-merge', exact: true })
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  expect(sock.framesOf('set_auto_merge')[0].command).toMatchObject({ enabled: false })
+  await expect(memoryText(page)).toHaveValue('Keep this unsaved memory')
+})
+
+test('QC: New session can be dismissed with Escape and returns focus to its opener', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state); await installSocket(page, state)
+  await page.goto('/')
+  await page.getByRole('button', { name: 'New session', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'New session', exact: true })
+  await expect(dialog).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(dialog).toBeHidden()
+  await expect(page.getByRole('button', { name: 'New session', exact: true })).toBeFocused()
+  expect(state.calls.filter(call => call.method === 'POST' && call.path === '/api/chat/sessions')).toHaveLength(0)
+})
+
+
+test('QC: mixed-agent queue, conversation and memories stay usable together in both themes', async ({ page }, info) => {
+  const state = makeState([session({ autoMerge: true })]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); const memory = await installMemoryRoutes(page)
+  memory.text = 'Keep changes small and test the actual user journey.\nPreserve drafts and attachments.'
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message))
+  await page.setViewportSize({ width: 1440, height: 900 }); await page.goto('/'); await sock.subscribed('s1')
+  sock.push('s1', { type: 'turn.started', turnId: 'quality-turn', prompt: { text: 'Polish the search interaction and preserve keyboard navigation.', attachments: [], mentions: [] } })
+  sock.push('s1', { type: 'text.delta', turnId: 'quality-turn', messageId: 'quality-answer', delta: '## Search is ready\n\nYour draft stays intact while the list changes.\n\n```ts\nconst matches = sessions.filter(matchesQuery)\n```\n\n[README.md](/tmp/app/README.md)' })
+  sock.push('s1', { type: 'turn.finished', turnId: 'quality-turn', stopReason: 'end_turn', durationMs: 1500 })
+  for (const message of ['Review keyboard behavior', 'Check the compact layout', 'Update the guide']) {
+    await input(page).fill(`/queue ${message}`); await input(page).press('Enter')
+  }
+  await expect(queuedRows(page)).toHaveCount(3)
+  await queuedRows(page).nth(1).locator('select').selectOption('gpt-6-astra-max')
+  await queuedRows(page).nth(2).locator('select').selectOption('muse-spark-1.3-contributor-max')
+  await memoryToggle(page).click()
+  await expect(memoryText(page)).toHaveValue(memory.text)
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate(value => { document.documentElement.dataset.theme = value }, theme)
+    await expect(page.locator('.chat-v-composer .chat-send')).toBeInViewport()
+    await expect(page.locator('.chat-h-auto-merge')).toBeInViewport()
+    await expect(memoryText(page)).toBeInViewport()
+    await expect(queuePanel(page)).toHaveAttribute('open', '')
+    await page.screenshot({ path: info.outputPath(`qc-journey-${theme}.png`), animations: 'disabled' })
+  }
+  expect(errors).toEqual([])
+})
+
+
+test('QC: refreshing restores a half-written answer without submitting it', async ({ page }) => {
+  const history = [env('s1', 1, { type: 'turn.started', turnId: 't', prompt: { text: 'Investigate', attachments: [], mentions: [] } }),
+    env('s1', 2, { type: 'question.asked', id: 'q-refresh', turnId: 't', questions: [{ id: 'q', question: 'A needed detail?', options: [], multiSelect: false, freeText: true }] })]
+  const state = makeState([session({ status: 'waiting' })], { s1: history })
+  await installRoutes(page, state); const sock = await installSocket(page, state); await page.goto('/')
+  await page.locator('.chat-q-text').fill('My unfinished answer')
+  await page.reload()
+  await expect(page.locator('.chat-q-text')).toHaveValue('My unfinished answer')
+  expect(sock.framesOf('question.answer')).toHaveLength(0)
+})
+
+
+test('QC: a new tab never consumes another tab\'s update draft', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state)
+  await page.addInitScript(() => {
+    localStorage.setItem('poise-chat-draft-snapshot', JSON.stringify({ version: 1, savedAt: Date.now(), fromSha: 'a'.repeat(40), activeSessionId: 's1',
+      fresh: { draft: null, modelIdentity: null }, sessions: { s1: { text: 'Draft belonging to another tab', attachments: [], mentions: [], mode: null } } }))
+  })
+  await page.goto('/'); await sock.subscribed('s1')
+  await expect(input(page)).toHaveValue('')
+  expect(await page.evaluate(() => localStorage.getItem('poise-chat-draft-snapshot'))).not.toBeNull()
+})
+
+test('QC: New session keeps keyboard focus inside while loading and after the models arrive', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state); await installSocket(page, state)
+  await page.goto('/'); await expect(page.locator('.chat-session-item.active')).toBeVisible()
+  let release!: () => void
+  const hold = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/chat/agents', async route => { await hold; await route.fulfill({ json: AGENTS }) })
+  await page.getByRole('button', { name: 'New session', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'New session', exact: true })
+  await expect(dialog).toBeVisible()
+  await page.keyboard.press('Tab')
+  expect(await dialog.evaluate(el => el.contains(document.activeElement))).toBe(true)
+  release()
+  await expect(dialog.getByRole('combobox', { name: 'Model', exact: true })).toBeFocused()
+  await page.keyboard.press('Shift+Tab')
+  await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(dialog.getByRole('combobox', { name: 'Model', exact: true })).toBeFocused()
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'New session', exact: true })).toBeFocused()
+})
+
+
+test('QC: rapid fresh messages during a Memories save never drop the second message', async ({ page }) => {
+  const state = makeState([]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); const saved = await installMemoryRoutes(page)
+  await page.goto('/'); await memoryToggle(page).click(); await expect(memoryText(page)).toBeEnabled()
+  let release!: () => void
+  const hold = new Promise<void>(resolve => { release = resolve }); saved.wait = () => hold
+  await memoryText(page).fill('Use the test suite')
+  // A shared autosave holds both Send actions before either can start a session.
+  await input(page).fill('First request'); await input(page).press('Enter')
+  await input(page).fill('Second request, do not lose this'); await input(page).press('Enter')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  release()
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ text: 'First request' })
+  await expect(input(page)).toHaveValue('Second request, do not lose this')
+  expect(state.calls.filter(call => call.path === '/api/chat/sessions' && call.method === 'POST')).toHaveLength(1)
+})
+
+
+test('QC: the tab that initiated an older release update can recover its legacy draft', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state)
+  await page.addInitScript(() => {
+    sessionStorage.setItem('poise-self-update-reloaded-release', 'legacy-upgrade')
+    localStorage.setItem('poise-chat-draft-snapshot', JSON.stringify({ version: 1, savedAt: Date.now(), fromSha: 'a'.repeat(40), activeSessionId: 's1',
+      fresh: { draft: null, modelIdentity: null }, sessions: { s1: { text: 'My pre-upgrade draft', attachments: [], mentions: [], mode: null } } }))
+  })
+  await page.goto('/'); await sock.subscribed('s1')
+  await expect(input(page)).toHaveValue('My pre-upgrade draft')
+  expect(await page.evaluate(() => localStorage.getItem('poise-chat-draft-snapshot'))).toBeNull()
+  expect(sock.framesOf('prompt')).toHaveLength(0)
 })

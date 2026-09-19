@@ -7,7 +7,7 @@
 // agent.
 
 import { db } from '../db'
-import { claimQueuedMessage, deleteMessageQueue, pauseQueue, settleQueuedTurn, queueOwner, readQueue } from './message-queue'
+import { claimQueuedMessage, delegateQueue, deleteMessageQueue, pauseQueue, settleQueuedTurn, queueOwner, readQueue } from './message-queue'
 import type { ChatEnvelope, ChatEvent, SessionRecord, SessionStatus, MessageQueue } from './protocol'
 import type { AttachmentRecord } from './attachments'
 
@@ -183,7 +183,16 @@ export const reserveQueueTurn = db.transaction((sessionId: string, turnId: strin
   if (getOpenTurn(sessionId)) throw new Error('A turn is already recorded for this session')
   const owner = queueOwner(sessionId)
   if (itemId) claimQueuedMessage(owner, itemId, turnId)
-  else pauseQueue(owner)
+  else {
+    const queue = readQueue(owner)
+    // A new manual activity can take the idle queue back from a completed
+    // delegated change. Never take it away from an executing queued turn.
+    if (queue.executorSessionId && queue.executorSessionId !== sessionId
+      && !getOpenTurn(queue.executorSessionId) && !queue.items.some(item => item.state === 'running')) {
+      delegateQueue(owner, sessionId)
+    }
+    pauseQueue(owner)
+  }
   setOpenTurn(sessionId, turnId, null)
 })
 

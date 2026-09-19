@@ -76,3 +76,16 @@ describe('memory editor autosaving', () => {
     expect(editor.state).toMatchObject({ text: '', dirty: false })
   })
 })
+
+
+it('keeps a conflicting memory draft dirty even when the user types the old saved value again', async () => {
+  const w = world('old text'); const editor = w.make(); await editor.load()
+  w.change('saved by another tab'); editor.edit('my edit')
+  await expect(editor.flush()).rejects.toThrow('another tab')
+  editor.edit('old text')
+  expect(editor.state).toMatchObject({ conflict: true, dirty: true, text: 'old text' })
+  await expect(editor.flush()).rejects.toThrow('another tab')
+  expect(w.store.getItem(MEMORIES_DRAFT_KEY)).not.toBeNull()
+  await editor.retry()
+  expect(editor.state).toMatchObject({ conflict: false, dirty: false, text: 'old text' })
+})

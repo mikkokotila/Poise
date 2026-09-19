@@ -24,7 +24,9 @@ export function attachChatSidebar(view: HTMLElement, onLayout: () => void): { ca
   let drag: { id: number, x: number, width: number } | null = null
   let collapsed = stored(STATE_KEY) === 'collapsed'
   const bounds = () => {
-    const max = Math.max(160, Math.min(MAX_WIDTH, layout.clientWidth - 320))
+    const memories = view.querySelector<HTMLElement>('.chat-memories-pane')
+    const occupied = memories && getComputedStyle(memories).position !== 'absolute' ? memories.getBoundingClientRect().width : 0
+    const max = Math.max(160, Math.min(MAX_WIDTH, layout.clientWidth - occupied - 320))
     return { min: Math.min(MIN_WIDTH, max), max }
   }
   function resize(next = preferred): void {
@@ -100,6 +102,8 @@ export function attachChatSidebar(view: HTMLElement, onLayout: () => void): { ca
   // pane without replacing its saved preferred width. Returning restores it.
   const observer = new ResizeObserver(() => { resize(); onLayout() })
   observer.observe(layout)
+  const memories = view.querySelector<HTMLElement>('.chat-memories-pane')
+  if (memories) observer.observe(memories)
   resize()
   setCollapsed(collapsed)
   return { cancelResize }

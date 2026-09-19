@@ -23,7 +23,10 @@ const input: PromptInput = { text: 'fixture task', attachments: [], mentions: []
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 function git(...args: string[]) { return execFileSync('git', args, { cwd: checkout, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim() }
 async function until(check: () => boolean) {
-  for (let n = 0; n < 100; n++) { if (check()) return; await pause(20) }
+  // Fixture startup runs git and SQLite alongside the rest of the suite;
+  // this is a readiness deadline, not the separate streaming-latency budget.
+  const deadline = Date.now() + 8_000
+  while (Date.now() < deadline) { if (check()) return; await pause(20) }
   throw new Error('fixture state deadline')
 }
 

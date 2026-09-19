@@ -3,7 +3,7 @@
 // composer's input mode. Attachments are the server's records (ids and paths);
 // a File still uploading cannot be serialised and blocks the reload instead.
 //
-// The snapshot lives in localStorage only, is read exactly once by the next
+// The snapshot lives in this tab's sessionStorage, is read once by the next
 // page, and expires: a snapshot nobody consumed is not restored an hour later
 // over whatever the person has typed since.
 
