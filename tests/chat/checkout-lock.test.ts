@@ -140,18 +140,29 @@ describe('checkout lease', () => {
     a.release()
 
     // Python holds; TypeScript sees the label and waits until it releases.
-    const holder = spawn('python3', [CONTENDER, 'acquire', checkout, '1.5'], { env: { ...process.env } })
+    const holder = spawn('python3', [CONTENDER, 'acquire', checkout, 'stdin'], { env: { ...process.env } })
     let out = ''
     holder.stdout.on('data', (chunk) => { out += chunk })
-    await waitFor(() => out.includes('acquired'))
+    const closed = new Promise<number | null>(resolve => holder.once('close', resolve))
     const b = lease('b')
-    const attempt = b.tryAcquire()
-    expect(attempt).toMatchObject({ acquired: false, reason: 'live_host' })
-    if (!attempt.acquired) expect(attempt.holder.owner_label).toBe('fix-failing-ci test (python)')
-    const acquired = await b.acquire()
-    expect(acquired.acquired).toBe(true)
-    expect(out).toContain('released')
-    b.release()
+    try {
+      await waitFor(() => out.includes('acquired'))
+      const attempt = b.tryAcquire()
+      expect(attempt).toMatchObject({ acquired: false, reason: 'live_host' })
+      if (!attempt.acquired) expect(attempt.holder.owner_label).toBe('fix-failing-ci test (python)')
+      const waiting = b.acquire()
+      holder.stdin.end('release\n')
+      const acquired = await waiting
+      expect(acquired.acquired).toBe(true)
+      // The SQLite release commits before Python's log reaches Node. `close`
+      // proves stdout is drained; acquiring the lease alone does not.
+      expect(await closed).toBe(0)
+      expect(out).toContain('released')
+    } finally {
+      b.release()
+      if (holder.exitCode === null && holder.signalCode === null) holder.kill('SIGTERM')
+      await closed
+    }
   })
 
   it('refuses takeover from a dead Python holder whose worker pid is alive', async () => {

@@ -42,12 +42,15 @@ The wide-sidebar case waits for the pane animation before checking usable
 conversation width. The real queue journey runs through ACP process I/O,
 SQLite, WebSockets and reloads instead of having the browser simulate dispatch.
 
-Two fixture-readiness assumptions were corrected: git/SQLite fixture startup
+Fixture-readiness assumptions were corrected: git/SQLite fixture startup
 has a bounded eight-second readiness deadline under concurrent suite load;
-and the real queue browser test explicitly selects its existing fixture
+a six-task queue checks readiness per task rather than giving all six real
+lifecycles one startup budget. Python lease interoperation uses an explicit release handshake, waits for drained
+stdout after the database release and cleans up even on assertion failure.
+The real queue browser test explicitly selects its existing fixture
 conversation before typing, rather than confusing a writable fresh console
 with a fully loaded session. The separate one-second rendering-latency
-assertion is unchanged.
+assertion and native worker/lease safety assertions are unchanged.
 
 The PR records exact-head verification results. Scripted native protocol
 coverage is not a claim that every live provider/account was exercised.

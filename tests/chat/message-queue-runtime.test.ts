@@ -99,7 +99,10 @@ describe('deferred message execution', () => {
     expect(w.runtime.get(w.s.id)?.queue?.ready).toBe(false)
     expect(w.runtime.events(w.s.id, 0).events.some(e => e.event.type === 'turn.started')).toBe(false)
     w.runtime.prompt(w.s.id, input('Do this first'))
-    await until(() => w.turns().length === 6 && w.runtime.get(w.s.id)?.status === 'idle')
+    // Six real git/SQLite lifecycles are six readiness steps, not one
+    // eight-second performance budget for the entire batch under suite load.
+    for (let completed = 1; completed <= 6; completed++) await until(() => w.turns().length >= completed)
+    await until(() => w.runtime.get(w.s.id)?.status === 'idle')
     expect(w.c.calls.map(call => call.input.text)).toEqual(['Do this first', 'Queue 1', 'Queue 2', 'Queue 3', 'Queue 4', 'Queue 5'])
     expect(w.c.maximum).toBe(1); expect(w.runtime.get(w.s.id)?.queue?.items).toEqual([])
     await w.add('A later idle task'); await pause(100)
