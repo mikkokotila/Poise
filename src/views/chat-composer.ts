@@ -10,6 +10,7 @@
 
 import type { Attachment, CommandOption, Mention } from '../../server/chat/protocol'
 import { escapeHtml } from '../markdown'
+import { parseQueueMessage } from '../chat-queue'
 import type { AgentInfo } from '../chat-client'
 import { attachModelPicker } from './chat-model-picker'
 
@@ -37,6 +38,7 @@ export interface ComposerState {
 
 export interface ComposerHandlers {
   onSend(draft: ComposerDraft): void
+  onQueue(draft: ComposerDraft): void
   loadModels(): Promise<AgentInfo[]>
   onModelSelect(identity: string): void
   onSteer(text: string): void
@@ -83,6 +85,7 @@ const OWN_COMMANDS: CommandOption[] = [
   { name: 'model', description: 'Switch model', hint: '<identity>' },
   { name: 'mode', description: 'Switch mode', hint: '<mode>' },
   { name: 'fork', description: 'Fork this session' },
+  { name: 'queue', description: 'Queue a message after the current or next task', hint: '<message>' },
   { name: 'poise', description: 'Implement and release a Poise change', hint: '<request>' },
 ]
 
@@ -175,6 +178,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
       chip.textContent = ''
       wrap.classList.remove('mode-locked')
       input.style.paddingLeft = ''
+      applyState()
       return
     }
     chip.textContent = `/${mode}`
@@ -185,6 +189,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     const width = chip.getBoundingClientRect().width
     const base = parseFloat(getComputedStyle(input).paddingRight) || 12
     input.style.paddingLeft = `${Math.ceil(base + width + 6)}px`
+    applyState()
   }
 
   // Space at end-of-input with the value exactly `/<command>` locks the chip.
@@ -388,6 +393,19 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   function submit(): void {
     if (state.disabled || uploading) return
     const text = input.value.trim()
+    const queued = parseQueueMessage(text, activeMode)
+    if (queued !== null) {
+      if (!queued && !attachments.length) return
+      handlers.onQueue({ text: queued, attachments: attachments.slice(), mentions: currentMentions(), mode: 'queue' })
+      input.value = ''
+      attachments = []
+      mentions = []
+      renderChips()
+      applyMode(null)
+      autoResize()
+      closePopover()
+      return
+    }
     if (state.running) {
       if (!text) return
       handlers.onSteer(text)
@@ -430,10 +448,11 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   el.addEventListener('submit', (e) => {
     e.preventDefault()
     if (state.disabled) return
-    if (state.running) handlers.onStop()
+    if (state.running && parseQueueMessage(input.value, activeMode) === null) handlers.onStop()
     else submit()
   })
   input.addEventListener('input', () => {
+    applyState()
     autoResize()
     updatePalette()
     updateMentions()
@@ -499,13 +518,14 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   function applyState(): void {
     input.disabled = state.disabled
     attachBtn.disabled = state.disabled || uploading > 0
-    input.placeholder = state.disabled ? (state.placeholder || 'Unavailable') : (state.running ? 'Steer the agent… (Enter)' : (state.placeholder || DEFAULT_PLACEHOLDER))
-    sendBtn.disabled = state.disabled || (uploading > 0 && !state.running)
+    const queuing = parseQueueMessage(input.value, activeMode) !== null
+    input.placeholder = state.disabled ? (state.placeholder || 'Unavailable') : queuing ? 'Queue a follow-up…' : (state.running ? 'Steer the agent… (Enter)' : (state.placeholder || DEFAULT_PLACEHOLDER))
+    sendBtn.disabled = state.disabled || (uploading > 0 && (queuing || !state.running))
     modelPicker.setState({ identity: state.modelIdentity || '', label: state.modelLabel || '', visible: !!state.modelLabel, disabled: state.disabled || uploading > 0 })
-    sendBtn.innerHTML = state.running ? ICON_STOP : ICON_SEND
-    sendBtn.setAttribute('aria-label', state.running ? 'Stop' : 'Send')
-    sendBtn.title = state.running ? 'Stop (⌘.)' : 'Send (Enter)'
-    sendBtn.classList.toggle('is-stop', state.running)
+    sendBtn.innerHTML = state.running && !queuing ? ICON_STOP : ICON_SEND
+    sendBtn.setAttribute('aria-label', queuing ? 'Queue message' : state.running ? 'Stop' : 'Send')
+    sendBtn.title = queuing ? 'Add to queue (Enter)' : state.running ? 'Stop (⌘.)' : 'Send (Enter)'
+    sendBtn.classList.toggle('is-stop', state.running && !queuing)
     resumeBtn.hidden = !state.resume
     if (state.disabled) closePopover()
   }
@@ -525,7 +545,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     el,
     setCommands(list, own) {
       agentCommands = list
-      ownCommands = OWN_COMMANDS.filter((c) => (c.name === 'model' && own.model !== false) || (c.name === 'mode' && own.modes) || (c.name === 'fork' && own.fork) || (c.name === 'poise' && own.poise !== false))
+      ownCommands = OWN_COMMANDS.filter((c) => c.name === 'queue' || (c.name === 'model' && own.model !== false) || (c.name === 'mode' && own.modes) || (c.name === 'fork' && own.fork) || (c.name === 'poise' && own.poise !== false))
     },
     setState(next) {
       // The view calls this on every render, including each streamed delta;

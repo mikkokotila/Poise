@@ -10,6 +10,8 @@
 
 import type {
   ChatEnvelope,
+  MessageQueue,
+  QueuedMessage,
   NewSessionRequest,
   SessionContext,
   SessionRecord,
@@ -19,6 +21,8 @@ import type {
 import { AGENT_LABELS } from '../../server/chat/protocol'
 import { chatClient, ChatCommandError, ChatHttpError, type AgentsResponse, type AgentInfo } from '../chat-client'
 import { escapeHtml } from '../markdown'
+import { reserveQueuedMessage, releaseQueuedMessage } from '../chat-queue'
+import { createQueuePanel } from './chat-queue'
 import { renderNewSessionDialog } from './chat-new-session'
 import {
   createModel, applyEvent, addOptimisticTurn, dropOptimisticTurns, focusedPending, createTranscriptView, pickQuestionOption,
@@ -68,6 +72,10 @@ let noticeEl: HTMLElement
 let transcript: TranscriptView
 let composer: Composer
 let filePreview: ReturnType<typeof createFilePreview>
+let messageQueue: ReturnType<typeof createQueuePanel>
+let queueAddChain: Promise<void> = Promise.resolve()
+const pendingQueueItems = new Map<string, { sessionId: string | null, item: QueuedMessage }>()
+const queueMutations = new Set<string>()
 
 const sessions = new Map<string, SessionEntry>()
 let order: string[] = []
@@ -239,6 +247,7 @@ function renderShell(): void {
 
   composer = createComposer({
     onSend: (draft) => { void sendPrompt(draft) },
+    onQueue: (draft) => { queueDraft(draft) },
     loadModels: async () => {
       const catalogue = await loadAgents(true)
       if (!catalogue) throw new Error('Could not load the model catalogue')
@@ -273,7 +282,11 @@ function renderShell(): void {
       return Array.isArray(r.files) ? r.files : []
     },
   })
-  dockEl.appendChild(composer.el)
+  messageQueue = createQueuePanel({
+    onModel: (id, itemId, model) => { void changeQueueItem(id, itemId, model) },
+    onRemove: (id, itemId) => { void changeQueueItem(id, itemId) },
+  })
+  dockEl.append(messageQueue.el, composer.el)
   // After the transcript, inside the same scroll, outside the activity toggle.
   deployCard = createDeployCard(scrollEl, { onRevert: (changeId, releaseId) => { void revertChange(changeId, releaseId) } })
   splitPane = attachChatSidebar(viewEl, () => { composer.layout(); queueRender() })
@@ -302,7 +315,7 @@ function attachReloadGuards(): void {
     const active = entry()
     if (active && (focusedPending(active.model) || (active.record.pendingRequests?.length || 0) > 0)) blockers.push('pending-request')
     if (poiseInFlight || localChanges.size) blockers.push('poise-change')
-    if (reverting.size) blockers.push('command')
+    if (reverting.size || pendingQueueItems.size || queueMutations.size) blockers.push('command')
     return blockers
   })
   registerDraftProvider(() => {
@@ -349,7 +362,9 @@ function upsertRecord(record: SessionRecord, opts: { pending?: boolean } = {}): 
     sessions.set(record.id, e)
     order.push(record.id)
   } else {
-    e.record = record
+    // Historical replay and slow REST responses must not roll back a queue.
+    const queue = e.record.queue
+    e.record = queue && queue.revision > (record.queue?.revision ?? -1) ? { ...record, queue } : record
     if (opts.pending !== undefined) e.pending = opts.pending
   }
   sortOrder()
@@ -587,6 +602,8 @@ function onEvent(env: ChatEnvelope): void {
     upsertRecord(ev.session, { pending: false })
   } else if (ev.type === 'status.changed') {
     e.record = { ...e.record, status: ev.status, queuedBehind: ev.queuedBehind }
+  } else if (ev.type === 'queue.updated') {
+    acceptQueue(e, ev.queue)
   } else if (ev.type === 'commands.updated') {
     e.record = { ...e.record, commands: ev.commands }
   } else if (ev.type === 'mode.updated') {
@@ -612,12 +629,12 @@ function commandFailed(err: unknown, what: string): void {
 }
 
 /** One user action creates one session; neither focus nor typing launches an agent. */
-function ensureQuickSession(firstPrompt?: ComposerDraft, title?: string): Promise<SessionEntry> {
+function ensureQuickSession(firstPrompt?: ComposerDraft, title?: string, deferStart = false): Promise<SessionEntry> {
   if (quickSessionPromise) return quickSessionPromise
   const current = entry()
   if (current && !current.pending) return Promise.resolve(current)
   if (current) return Promise.reject(new Error('The session is still being created.'))
-  const draft = firstPrompt ? null : composer.getDraft()
+  const draft = firstPrompt || deferStart ? null : composer.getDraft()
   const selectedModel = freshModelIdentity
   const selectedAutoMerge = freshAutoMerge
   quickSessionPromise = (async () => {
@@ -625,6 +642,7 @@ function ensureQuickSession(firstPrompt?: ComposerDraft, title?: string): Promis
     if (!catalogue) throw new Error('Could not load the model catalogue. Your message has not been sent.')
     const request = quickSessionRequest(catalogue.agents, selectedModel)
     if (selectedAutoMerge) request.autoMerge = true
+    if (deferStart) request.deferStart = true
     if (firstPrompt?.text) request.title = firstPrompt.text.slice(0, 200)
     else if (title) request.title = title.slice(0, 200)
     const created = await createSessionEntry(request, draft, firstPrompt, null)
@@ -634,6 +652,102 @@ function ensureQuickSession(firstPrompt?: ComposerDraft, title?: string): Promis
   })().finally(() => { quickSessionPromise = null; queueRender() })
   queueRender()
   return quickSessionPromise
+}
+
+// ── Deferred messages ─────────────────────────────────────────────────────
+
+function acceptQueue(e: SessionEntry, queue: MessageQueue): void {
+  if (queue.revision >= (e.record.queue?.revision ?? -1)) e.record = { ...e.record, queue }
+}
+
+function queueDraft(draft: ComposerDraft): void {
+  const source = entry()
+  const id = crypto.randomUUID()
+  const pending = { sessionId: source?.record.id ?? null, item: {
+    id, prompt: { text: draft.text, attachments: draft.attachments, mentions: draft.mentions },
+    agent: source?.record.agent || 'claude', model: source?.record.model || freshModelIdentity,
+    effort: source?.record.effort || '', state: 'waiting', createdAt: new Date().toISOString(),
+  } as QueuedMessage }
+  pendingQueueItems.set(id, pending)
+  // Create idle session storage for a fresh queue, but do not start a native
+  // agent or send any prompt. Every queued submission shares that creation.
+  const target = source && !source.pending ? Promise.resolve(source) : ensureQuickSession(undefined, undefined, true)
+  // Install a handler immediately so a failed creation cannot be unhandled
+  // while an earlier queue acknowledgement is still outstanding.
+  const captured = target.then(value => ({ value }), error => ({ error }))
+  queueAddChain = queueAddChain.then(async () => {
+    const result = await captured
+    if ('error' in result) throw result.error
+    const e = result.value
+    pending.sessionId = e.record.id
+    const prompt = pending.item.prompt
+    const receipt = reserveQueuedMessage(pendingStore, e.record.id, prompt, pending.item.model, pending.item.effort, id)
+    if (receipt.id !== id) { pendingQueueItems.delete(id); pending.item.id = receipt.id; pendingQueueItems.set(receipt.id, pending) }
+    pending.item.agent = e.record.agent
+    queueRender()
+    try {
+      const queue = await chatClient.queueCommand({ type: 'queue.add', sessionId: e.record.id, itemId: receipt.id,
+        ...receipt.prompt, model: receipt.model, ...(receipt.effort ? { effort: receipt.effort } : {}) })
+      acceptQueue(e, queue)
+      releaseQueuedMessage(pendingStore, receipt.id)
+      if (activeId === e.record.id) setNotice(null)
+    } catch (error) {
+      if (error instanceof ChatCommandError && error.code !== 'command_in_doubt') releaseQueuedMessage(pendingStore, receipt.id)
+      throw error
+    } finally {
+      pendingQueueItems.delete(receipt.id)
+    }
+  }).catch(error => {
+    pendingQueueItems.delete(id)
+    const origin = pending.sessionId ? sessions.get(pending.sessionId) : null
+    const message = `Queue failed — ${(error as Error).message}`
+    if (activeId === pending.sessionId || (!activeId && !source)) setNotice(message)
+    else if (origin) origin.error = message
+    const current = activeId === pending.sessionId || (!activeId && !source) ? composer.getDraft() : origin?.draft
+    if (!current?.text && !current?.attachments.length) {
+      if (activeId === pending.sessionId || (!activeId && !source)) composer.setDraft(draft)
+      else if (origin) origin.draft = draft
+      else freshDraft = draft
+    } else {
+      // A newer draft must not be overwritten. Keep the unsent text visibly
+      // in the queue panel until the user removes it or copies it for retry.
+      pending.item = { ...pending.item, state: 'failed', error: message }
+      pendingQueueItems.set(pending.item.id, pending)
+    }
+  }).finally(() => queueRender())
+  queueRender()
+}
+
+async function changeQueueItem(sessionId: string, itemId: string, model?: string): Promise<void> {
+  const e = sessions.get(sessionId)
+  if (!e || queueMutations.has(itemId)) return
+  const local = pendingQueueItems.get(itemId)
+  if (local?.item.state === 'failed' && !model) { pendingQueueItems.delete(itemId); queueRender(); return }
+  queueMutations.add(itemId)
+  queueRender()
+  try {
+    const command = model
+      ? { type: 'queue.update' as const, sessionId, itemId, model }
+      : { type: 'queue.remove' as const, sessionId, itemId }
+    acceptQueue(e, await chatClient.queueCommand(command))
+    if (activeId === sessionId) setNotice(null)
+  } catch (error) {
+    if (activeId === sessionId) commandFailed(error, 'Queue update')
+    else e.error = `Queue update failed — ${(error as Error).message}`
+  } finally { queueMutations.delete(itemId); queueRender() }
+}
+
+function renderQueue(): void {
+  const e = entry()
+  const queue = e?.record.queue || { revision: 0, ready: false, items: [] }
+  const items = queue.items.slice()
+  const pendingIds = new Set(queueMutations)
+  for (const [id, pending] of pendingQueueItems) {
+    if (pending.sessionId !== activeId && !(pending.sessionId === null && (!e || e.pending))) continue
+    if (!items.some(item => item.id === id)) items.push(pending.item)
+    if (pending.item.state !== 'failed') pendingIds.add(id)
+  }
+  messageQueue.render(activeId, { ...queue, items }, agentsInfo?.agents || [], !!e && (isRunning(e.record.status) || !!e.model.running), pendingIds)
 }
 
 // ── Poise self-change ──────────────────────────────────────────────────────
@@ -839,6 +953,11 @@ function renderDeployCard(): void {
 }
 
 async function sendPrompt(draft: ComposerDraft): Promise<void> {
+  const beforeQueue = activeId
+  if (pendingQueueItems.size) {
+    await queueAddChain
+    if (beforeQueue && activeId !== beforeQueue) { keepDraft(beforeQueue, draft); return }
+  }
   const sourceId = activeId
   const modeUpdate = sourceId ? autoMergeUpdates.get(sourceId) : null
   if (modeUpdate) {
@@ -1273,6 +1392,7 @@ function render(): void {
   renderHeader()
   const e = entry()
   composerStateFor(e)
+  renderQueue()
   // A deploy card is content too: the console must not lift over it.
   const hasCard = !!e && (!!activeChange() || localChanges.has(e.record.id))
   const empty = !e || (!e.model.blocks.length && !e.loading && !hasCard)

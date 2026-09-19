@@ -220,3 +220,18 @@ it('records the Auto-merge mutation once across reconnect and rejects conflictin
   expect((await conflict).ok).toBe(false)
   expect(setAutoMerge).toHaveBeenCalledTimes(1)
 })
+
+
+it('deduplicates queue commands on reconnect and never turns an enqueue into a prompt or steering', async () => {
+  const enqueue = vi.fn(async () => ({ revision: 1, ready: false, items: [] }))
+  const prompt = vi.fn(); const steer = vi.fn()
+  const connect = await serve(vi.fn(), { enqueue, prompt, steer })
+  const packet = JSON.stringify({ id: 'queue-reconnect', command: { type: 'queue.add', sessionId: 'one', itemId: '11111111-1111-4111-8111-111111111111', text: 'Later', model: 'grok-4.6-high', attachments: [], mentions: [] } })
+  const first = await connect(); const firstAck = ack(first, 'queue-reconnect'); first.send(packet)
+  expect((await firstAck).ok).toBe(true); first.terminate()
+  const second = await connect(); const secondAck = ack(second, 'queue-reconnect'); second.send(packet)
+  expect((await secondAck).ok).toBe(true)
+  expect(enqueue).toHaveBeenCalledTimes(1)
+  expect(enqueue).toHaveBeenCalledWith('one', '11111111-1111-4111-8111-111111111111', { text: 'Later', attachments: [], mentions: [] }, 'grok-4.6-high', undefined)
+  expect(prompt).not.toHaveBeenCalled(); expect(steer).not.toHaveBeenCalled()
+})

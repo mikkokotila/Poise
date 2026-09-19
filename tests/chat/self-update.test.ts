@@ -489,3 +489,27 @@ describe('drain and readiness', () => {
     runtime.endDrain()
   }, 40_000)
 })
+
+
+it('carries an idle queue into the isolated Poise task and waits for release ownership before dispatching follow-ups', async () => {
+  const bridge = fakeBridge('poise-test:db')
+  const { runtime, controls, events } = makeRuntime({ bridge })
+  const source = await sourceSession(runtime, events)
+  const attachment = await runtime.saveAttachment(source.id, 'follow-up.txt', Buffer.from('Queued evidence'))
+  await runtime.enqueue(source.id, randomUUID(), { text: 'Review what changed', attachments: [attachment], mentions: [] })
+  await runtime.enqueue(source.id, randomUUID(), { text: 'Summarize the review', attachments: [], mentions: [] })
+  const changeId = randomUUID()
+  const { session } = await runtime.startPoiseChange(source.id, 'Make the first Poise improvement', changeId)
+  expect(session.queue?.items).toHaveLength(2)
+  expect(session.queue?.executorSessionId).toBe(session.id)
+  await waitFor(() => bridge.changes.get(changeId)?.state === 'checking')
+  await waitFor(() => runtime.get(session.id)?.queue?.waitingForRelease === true)
+  expect(controls.adapters.flatMap(adapter => adapter.inputs)).toHaveLength(1)
+  expect(runtime.get(source.id)?.queue?.items).toHaveLength(2)
+  bridge.changes.get(changeId)!.state = 'live'
+  await waitFor(() => runtime.get(session.id)?.queue?.items.length === 0)
+  expect(controls.adapters.flatMap(adapter => adapter.inputs).slice(1).map(prompt => prompt.text)).toEqual(['Review what changed', 'Summarize the review'])
+  expect(controls.adapters.flatMap(adapter => adapter.inputs)[1].attachments[0].text).toBe('Queued evidence')
+  expect(ofType(events, source.id, 'turn.started')).toHaveLength(0)
+  expect(ofType(events, session.id, 'turn.started')).toHaveLength(3)
+}, 20_000)

@@ -233,6 +233,15 @@ export class ChatSocketServer {
           attachments: validAttachments(command.attachments),
           mentions: Array.isArray(command.mentions) ? command.mentions.filter((m) => m && typeof m.path === 'string').slice(0, 50) : [],
         })
+      case 'queue.add':
+        return { queue: await runtime.enqueue(String(command.sessionId || ''), String(command.itemId || ''), {
+          text: String(command.text || ''), attachments: validAttachments(command.attachments),
+          mentions: Array.isArray(command.mentions) ? command.mentions.filter(m => m && typeof m.path === 'string').slice(0, 50) : [],
+        }, command.model, command.effort) }
+      case 'queue.update':
+        return { queue: await runtime.updateQueue(String(command.sessionId || ''), String(command.itemId || ''), String(command.model || ''), command.effort) }
+      case 'queue.remove':
+        return { queue: runtime.removeQueue(String(command.sessionId || ''), String(command.itemId || '')) }
       case 'steer':
         await runtime.steer(String(command.sessionId || ''), String(command.text || ''))
         return {}
@@ -449,6 +458,7 @@ function localSessionRequest(body: any): import('./protocol').NewSessionRequest 
     effort: body.effort ? String(body.effort) : undefined,
     title: typeof body.title === 'string' ? body.title : undefined,
     context: body.context && typeof body.context === 'object' ? sanitizeContext(body.context) : undefined,
+    deferStart: body.deferStart,
     fallbackModel: typeof body.fallbackModel === 'string' ? body.fallbackModel : undefined,
     ...(body.autoMerge !== undefined ? { autoMerge: body.autoMerge } : {}),
   }
