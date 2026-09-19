@@ -41,6 +41,9 @@ test('executes an idle five-item queue after the first task through real ACP, SQ
     await page.goto(origin)
     const input = page.locator('.chat-v-composer .chat-input')
     await expect(input).toBeEnabled()
+    // The writable fresh console can appear before history has loaded. This
+    // journey deliberately targets the existing Grok fixture conversation.
+    await expect(page.locator('.chat-session-item.active')).toContainText('Queue integration')
     for (let n = 1; n <= 5; n++) {
       await input.fill(`/queue Item ${n}`); await input.press('Enter')
       await expect(page.locator('.chat-queue-item')).toHaveCount(n)

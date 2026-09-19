@@ -25,7 +25,7 @@ import { readMemories } from './memories'
 import { appendMemories } from './memory-content'
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { enqueueMessage, readQueue, updateQueuedModel, removeQueuedMessage, pauseQueue, QueueError, queueOwner, delegateQueue } from './message-queue'
+import { enqueueMessage, transferQueuedContext, readQueue, updateQueuedModel, removeQueuedMessage, pauseQueue, QueueError, queueOwner, delegateQueue } from './message-queue'
 import type { MessageQueue, QueuedMessage } from './protocol'
 import { autoMergeInstructions, withAutoMergeInstructions } from './auto-merge'
 import type { AutoMergeAck } from './protocol'
@@ -129,6 +129,8 @@ interface RunningTurn {
 interface LiveSession {
   record: SessionRecord
   adapter: Adapter | null
+  /** Cancellation of native startup is independent of a running turn. */
+  startup: AbortController | null
   worker: WorkerHandle | null
   lease: CheckoutLease | null
   turn: RunningTurn | null
@@ -202,7 +204,7 @@ export class ChatRuntime extends EventEmitter {
   private readonly hostPid: number
   private readonly availability = new Map<AgentId, { at: number, result: { ok: boolean, reason?: string } }>()
   private readonly selfUpdate: SelfUpdateBridge | null
-  private readonly changeStarts = new Map<string, { sourceId: string, request: string, promise: Promise<PoiseChangeResult> }>()
+  private readonly changeStarts = new Map<string, { sourceId: string, request: string, contextKey: string, promise: Promise<PoiseChangeResult> }>()
   private readonly queuePumps = new Set<string>()
   private readonly queueTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly queueReleaseWait = new Set<string>()
@@ -544,7 +546,7 @@ export class ChatRuntime extends EventEmitter {
     if (!live) {
       // The staged document rides on the record: the live object and the
       // persisted one are the same reference, so saving the record saves it.
-      live = { record, adapter: null, worker: null, lease: null, turn: null, pending: new Map(), grants: new Map(), idleTimer: null, lifecycle: new AbortController(), services: 0, draining: false, staged: record.staged ?? null, chain: Promise.resolve(), steering: Promise.resolve(), pendingOps: 0 }
+      live = { record, adapter: null, startup: null, worker: null, lease: null, turn: null, pending: new Map(), grants: new Map(), idleTimer: null, lifecycle: new AbortController(), services: 0, draining: false, staged: record.staged ?? null, chain: Promise.resolve(), steering: Promise.resolve(), pendingOps: 0 }
       this.live.set(id, live)
     }
     return live
@@ -615,11 +617,15 @@ export class ChatRuntime extends EventEmitter {
   private async startSession(session: LiveSession, options: { fresh?: boolean, forkFrom?: SessionRecord } = {}): Promise<void> {
     if (session.adapter?.alive) return
     const record = session.record
+    const startup = new AbortController()
+    session.startup = startup
+    const signal = AbortSignal.any([session.lifecycle.signal, startup.signal, ...(session.turn ? [session.turn.abort.signal] : [])])
     this.setStatus(session, 'starting')
     const lease = this.leaseFor(session)
     let freed = true
     try {
-      await lease.acquire({ signal: session.lifecycle.signal, onBusy: (busy) => this.reportBusy(session, busy) })
+      await lease.acquire({ signal, onBusy: (busy) => this.reportBusy(session, busy) })
+      signal.throwIfAborted()
       session.lease = lease
       const fresh = options.fresh || (!record.nativeSessionId && record.branch.provisional && !record.branch.baseSha)
       if (fresh) await this.prepareBranch(session, lease)
@@ -631,6 +637,7 @@ export class ChatRuntime extends EventEmitter {
         record.staged = session.staged
         this.saveRecord(session)
       }
+      signal.throwIfAborted()
       const host = this.hostFor(session)
       const adapter = this.adapters[record.agent](host)
       session.adapter = adapter
@@ -643,6 +650,7 @@ export class ChatRuntime extends EventEmitter {
           : record.nativeSessionId ? { resume: record.nativeSessionId } : {}),
       }
       const started = await adapter.start(startOptions)
+      signal.throwIfAborted()
       record.nativeSessionId = started.nativeSessionId
       record.capabilities = started.capabilities
       record.modelId = started.modelId || record.modelId
@@ -660,8 +668,10 @@ export class ChatRuntime extends EventEmitter {
       if (this.drainState && !session.turn) await this.closeForDrain(session).catch(() => undefined) // an orphan stays counted
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      try { this.emit_(record.id, { type: 'error', message, recoverable: true }) } catch { /* mirror */ }
-      this.setStatus(session, 'error', message)
+      if (!signal.aborted) {
+        try { this.emit_(record.id, { type: 'error', message, recoverable: true }) } catch { /* mirror */ }
+        this.setStatus(session, 'error', message)
+      } else if (!session.turn) this.setStatus(session, 'idle')
       try { await this.stopProcess(session) } catch { freed = false }
       throw error
     } finally {
@@ -672,6 +682,7 @@ export class ChatRuntime extends EventEmitter {
         else this.emit('log', `[chat ${record.id.slice(0, 8)}] checkout lease kept: worker not settled`)
       }
       if (session.lease === lease && !lease.held) session.lease = null
+      if (session.startup === startup) session.startup = null
     }
   }
 
@@ -728,6 +739,7 @@ export class ChatRuntime extends EventEmitter {
       if (session.turn || session.worker?.alive) throw new ChatError(409, 'the agent could not be stopped; the session was not deleted', 'agent_error')
       const record = session.record
       if (session.staged) { await unstageDocument(record.checkout, record.id); session.staged = null; record.staged = undefined }
+      await this.preserveBorrowedQueueContext(id)
       await this.removeAttachments(session)
       if (record.branch.origin === 'new' && record.branch.provisional && record.branch.baseSha) {
         // A branch Poise created whose tip never moved goes with the session.
@@ -861,9 +873,12 @@ export class ChatRuntime extends EventEmitter {
    *  reserve its one implementing turn (runbook + the exact request) before
    *  answering — so no browser prompt can slip in first and a resend of the
    *  same `changeId` finds the session instead of making a second one. */
-  async startPoiseChange(sourceId: string, text: string, changeId: string): Promise<PoiseChangeResult> {
+  async startPoiseChange(sourceId: string, text: string, changeId: string, context: Pick<PromptInput, 'attachments' | 'mentions'> = { attachments: [], mentions: [] }): Promise<PoiseChangeResult> {
     this.assertAcceptingWork()
     const request = String(text || '').trim()
+    const input = this.validatePrompt(sourceId, { text: request, ...context })
+    const contextKey = input.attachments.length || input.mentions.length
+      ? sha256Of(Buffer.from(canonicalJson({ attachments: input.attachments, mentions: input.mentions }))) : ''
     // Two arrivals of one change id (a resend under a new request id while
     // the first is still preparing) share the one start — but only for the
     // same request from the same session; a second prepare and bind would
@@ -872,15 +887,15 @@ export class ChatRuntime extends EventEmitter {
     const key = String(changeId).toLowerCase()
     const running = this.changeStarts.get(key)
     if (running) {
-      if (running.sourceId !== sourceId || running.request !== request) throw changeIdConflict()
+      if (running.sourceId !== sourceId || running.request !== request || running.contextKey !== contextKey) throw changeIdConflict()
       return running.promise
     }
-    const promise = this.track(() => this.startChange(sourceId, request, changeId)).finally(() => this.changeStarts.delete(key))
-    this.changeStarts.set(key, { sourceId, request, promise })
+    const promise = this.track(() => this.startChange(sourceId, request, changeId, input, contextKey)).finally(() => this.changeStarts.delete(key))
+    this.changeStarts.set(key, { sourceId, request, contextKey, promise })
     return promise
   }
 
-  private async startChange(sourceId: string, request: string, changeId: string): Promise<PoiseChangeResult> {
+  private async startChange(sourceId: string, request: string, changeId: string, input: PromptInput, contextKey: string): Promise<PoiseChangeResult> {
     if (this.stopped) throw new ChatError(503, 'the chat runtime is stopping', 'agent_error')
     const bridge = this.selfUpdate
     if (!bridge?.configured) {
@@ -898,7 +913,7 @@ export class ChatRuntime extends EventEmitter {
     // preparing a second checkout. Anything else under that id is refused.
     const existing = storage.listSessions(this.instance).find((record) => record.selfChangeId === id)
     if (existing) {
-      if (existing.context?.kind !== 'poise-change' || existing.context.fromSession !== source.id || existing.context.body !== request) throw changeIdConflict()
+      if (existing.context?.kind !== 'poise-change' || existing.context.fromSession !== source.id || existing.context.body !== request || (existing.selfChangeContextKey || '') !== contextKey) throw changeIdConflict()
       const status = await this.bridgeCall(() => bridge.status())
       const change = status.changes.find((c) => String(c.id).toLowerCase() === id)
       if (!change || change.instance !== this.instance) throw new ChatError(409, 'this change is no longer known to the release controller', 'self_update_unavailable')
@@ -940,6 +955,7 @@ export class ChatRuntime extends EventEmitter {
       checkout,
       workspaceKind: 'poise-change',
       selfChangeId: id,
+      ...(contextKey ? { selfChangeContextKey: contextKey } : {}),
       autoMerge: source.autoMerge,
       branch: { name: prepared.branch, origin: 'existing', provisional: false, baseSha: prepared.baseSha },
       title: `Poise: ${title}`.slice(0, CHAT_LIMITS.titleChars),
@@ -965,6 +981,16 @@ export class ChatRuntime extends EventEmitter {
       await this.abandonChange(bridge, id, `the runtime session could not be bound: ${message}`, record.id)
       throw error
     }
+    let transferred: PromptInput
+    try {
+      transferred = await this.copyPromptContext(source.id, record.id, input)
+      await this.copyQueuedContext(source.id, record.id)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.setStatus(live, 'error', message)
+      await this.abandonChange(bridge, id, `Could not transfer the request context: ${message}`, record.id)
+      throw error
+    }
     delegateQueue(source.id, record.id)
     this.publishQueue(live)
     // Reserved synchronously: the ack goes out with the turn already taken.
@@ -972,10 +998,59 @@ export class ChatRuntime extends EventEmitter {
     // the request as the person typed it.
     const turn = this.reserveTurn(live)
     turn.implementsChange = true
-    turn.shown = { text: request, attachments: [], mentions: [] }
-    const prompt: PromptInput = { text: poiseChangePrompt({ request, branch: prepared.branch, baseSha: prepared.baseSha, workspace: checkout }), attachments: [], mentions: [] }
+    turn.shown = transferred
+    const prompt: PromptInput = { ...transferred, text: poiseChangePrompt({ request, branch: prepared.branch, baseSha: prepared.baseSha, workspace: checkout }) }
     void this.serialized(live, () => this.runTurn(live, turn, prompt)).catch(() => undefined)
     return { session: this.withLive(live.record), change: bound }
+  }
+
+  /** Uploaded evidence must outlive the source conversation. Reissue it under
+   *  the target session, verifying bytes rather than trusting browser text. */
+  private async copyPromptContext(sourceId: string, targetId: string, input: PromptInput): Promise<PromptInput> {
+    const attachments: Attachment[] = []
+    const source = this.get(sourceId)
+    if (!source) throw new ChatError(404, 'The attachment source conversation no longer exists', 'unknown_session')
+    for (const attachment of input.attachments) {
+      const record = storage.getAttachment(attachment.id)
+      if (!record || record.sessionId !== sourceId || record.path !== attachment.path || record.size !== attachment.size) {
+        throw new ChatError(400, 'The attachment does not belong to the source conversation', 'invalid')
+      }
+      const { bytes } = await readCheckoutBytes(source.checkout, record.path, CHAT_LIMITS.attachmentBytes)
+      if (bytes.byteLength !== record.size || sha256Of(bytes) !== record.sha256) throw new Error(`Attachment ${record.name} changed since upload`)
+      attachments.push(await this.saveAttachment(targetId, record.name, bytes))
+    }
+    return { ...input, attachments }
+  }
+
+  private async copyQueuedContext(sourceId: string, targetId: string): Promise<void> {
+    const source = this.requireLive(sourceId)
+    await this.control(source, async () => {
+      const owner = queueOwner(sourceId)
+      for (const item of readQueue(owner).items) {
+        if (item.state !== 'waiting' || !item.prompt.attachments.length) continue
+        const prompt = await this.copyPromptContext(item.sourceSessionId || sourceId, targetId, item.prompt)
+        this.mutateQueue(source, () => transferQueuedContext(owner, item.id, targetId, prompt))
+      }
+    })
+  }
+
+  /** Legacy/delegated queues can still borrow a conversation's uploaded files.
+   *  Preserve waiting work under its surviving executor before deleting its source. */
+  private async preserveBorrowedQueueContext(deletingId: string): Promise<void> {
+    const seen = new Set<string>()
+    for (const record of storage.listSessions(this.instance)) {
+      const owner = queueOwner(record.id)
+      if (seen.has(owner)) continue
+      seen.add(owner)
+      const queue = readQueue(owner)
+      const targetId = queue.executorSessionId && queue.executorSessionId !== deletingId ? queue.executorSessionId : owner
+      if (targetId === deletingId || !this.ownsSession(targetId)) continue
+      for (const item of queue.items) {
+        if (item.state !== 'waiting' || item.sourceSessionId !== deletingId || !item.prompt.attachments.length) continue
+        const prompt = await this.copyPromptContext(deletingId, targetId, item.prompt)
+        this.mutateQueue(this.requireLive(targetId), () => transferQueuedContext(owner, item.id, targetId, prompt))
+      }
+    }
   }
 
   /** The controller's own refusals are shown as they are; an unreachable
@@ -1586,8 +1661,13 @@ export class ChatRuntime extends EventEmitter {
       if (timer) { clearTimeout(timer); this.queueTimers.delete(id) }
       this.queueReleaseWait.delete(id)
       this.publishQueue(session)
+      session.startup?.abort()
       const turn = session.turn
-      if (!turn) return { settled: true }
+      if (!turn) {
+        const deadline = Date.now() + STOP_SETTLE_MS
+        while (session.startup && Date.now() < deadline) await delay(25)
+        return { settled: !session.startup }
+      }
       turn.stopping = true
       this.settlePending(session, 'cancelled')
       turn.abort.abort()
@@ -1691,16 +1771,21 @@ export class ChatRuntime extends EventEmitter {
     const session = this.requireLive(id)
     return this.serialized(session, async () => {
       if (session.turn) throw new ChatError(409, 'change the model between turns', 'turn_in_progress')
-      const { agent, model, effort } = await this.resolveModel(identity, effortOverride, session.record.efforts)
+      const { agent, model, effort } = await this.resolveModel(identity, effortOverride)
+      if (model.selector === session.record.modelId && session.record.efforts?.length && !session.record.efforts.includes(effort)) {
+        throw new ChatError(400, `${model.selector} offers native efforts ${session.record.efforts.join(', ')}`, 'invalid')
+      }
       if (agent !== session.record.agent) throw new ChatError(400, `${identity} is a ${AGENT_LABEL[agent]} model; hand the conversation off instead`, 'invalid')
+      const changedFamily = model.selector !== session.record.modelId
       if (session.adapter?.alive) {
         const applied = await session.adapter.setModel(model.selector, effort)
         session.record.modelId = applied.modelId || model.selector
         session.record.effort = applied.effort || effort
-        if (applied.efforts) session.record.efforts = applied.efforts
+        if (applied.efforts || changedFamily) session.record.efforts = applied.efforts
       } else {
         session.record.modelId = model.selector
         session.record.effort = effort
+        if (changedFamily) session.record.efforts = undefined
       }
       session.record.model = model.identity
       this.saveRecord(session)
@@ -1887,6 +1972,7 @@ export class ChatRuntime extends EventEmitter {
   }
 
   private async spawnAgent(session: LiveSession, command: string, args: readonly string[], env?: NodeJS.ProcessEnv): Promise<ChildProcess> {
+    if (session.lifecycle.signal.aborted || session.startup?.signal.aborted || session.turn?.abort.signal.aborted) throw new Error('agent startup was cancelled')
     if (session.worker?.alive) throw new Error('the session already has a worker')
     const record = session.record
     const lease = session.lease

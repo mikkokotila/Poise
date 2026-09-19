@@ -110,6 +110,8 @@ export interface SessionRecord {
   /** The self-update change this session implements (`workspaceKind` is
    *  `poise-change`). Its first turn's settlement is reported to the controller. */
   selfChangeId?: string
+  /** Immutable attachment/mention identity for retry conflict detection. */
+  selfChangeContextKey?: string
   /** User-enabled, session-scoped delegation to finish and merge the requested PRs in any repository. Missing means off. */
   autoMerge?: boolean
   branch: BranchBinding
@@ -350,7 +352,7 @@ export type ChatCommand =
    *  browser for a typed `/poise …` message; `changeId` is minted once per
    *  request so a resend after an in-doubt answer never starts a second
    *  change. The ack is a `PoiseChangeAck`. */
-  | { type: 'poise.change', sessionId: string, text: string, changeId: string }
+  | { type: 'poise.change', sessionId: string, text: string, changeId: string, attachments?: Attachment[], mentions?: Mention[] }
 
 export interface AutoMergeAck { session: SessionRecord, applies: 'current_turn' | 'next_turn', warning?: string }
 

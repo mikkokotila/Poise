@@ -32,7 +32,7 @@ export function queueOwner(sessionId: string): string {
 export function delegateQueue(sourceId: string, executorId: string): void {
   const owner = queueOwner(sourceId)
   if (!readQueue(owner).items.length) return
-  db.prepare('UPDATE chat_message_queue_state SET executor_session_id = ?, ready = 0, revision = revision + 1 WHERE session_id = ?').run(executorId, owner)
+  db.prepare('UPDATE chat_message_queue_state SET executor_session_id = ?, ready = 0, revision = revision + 1 WHERE session_id = ?').run(executorId === owner ? null : executorId, owner)
 }
 
 interface Row { id: string, session_id: string, request: string, record: string, state: string, turn_id: string | null, error: string | null }
@@ -78,6 +78,16 @@ export const updateQueuedModel = db.transaction((sessionId: string, id: string, 
   bump(sessionId)
   return readQueue(sessionId)
 })
+/** Preserve the original add receipt while moving uploaded context to its executor. */
+export const transferQueuedContext = db.transaction((sessionId: string, id: string, sourceSessionId: string, prompt: QueuedMessage['prompt']): MessageQueue => {
+  const row = rowFor(id)
+  if (!row || row.session_id !== sessionId || row.state !== 'waiting') return readQueue(sessionId)
+  db.prepare('UPDATE chat_message_queue SET record = ? WHERE id = ?')
+    .run(JSON.stringify({ ...JSON.parse(row.record), sourceSessionId, prompt }), id)
+  bump(sessionId)
+  return readQueue(sessionId)
+})
+
 export const removeQueuedMessage = db.transaction((sessionId: string, id: string): MessageQueue => {
   const row = rowFor(id)
   if (!row || row.session_id !== sessionId) throw new QueueError('Unknown queue item.')

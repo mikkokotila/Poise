@@ -298,3 +298,12 @@ after attachments and other injected context. This includes queued tasks,
 steering, handoffs and Poise implementation messages. Closing the pane leaves
 memories active; clearing the text removes the appendix from future messages.
 See [Memories](docs/Memories.md) for persistence and recovery details.
+
+## Chat reliability
+
+Unsent composer drafts and partial question answers survive ordinary tab
+refreshes when browser storage is available. Failed submissions preserve
+newer writing, and queued/Poise-change attachments follow their receiving
+session rather than depending on an old conversation remaining open.
+See [quality control](docs/Quality-Control.md) for the combined interaction,
+recovery, native-protocol and release verification coverage.

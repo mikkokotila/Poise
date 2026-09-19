@@ -291,3 +291,30 @@ it('uses the latest shared memories at dispatch for normal messages, queued task
     expect(w.c.calls[2].input.memories).toBe('')
   } finally { save('') }
 }, 15_000)
+
+
+it('QC: Stop cancels a first turn waiting for another checkout owner without later launching its agent', async () => {
+  const w = await world({ auto: false })
+  w.runtime.prompt(w.s.id, input('Keep working'))
+  await until(() => w.c.calls.length === 1)
+  const second = await w.runtime.create({ agent: 'grok', model: 'grok-4.6-high', repo: 'test/queue', branch: { new: randomUUID() }, deferStart: true })
+  w.runtime.prompt(second.id, input('Do not start this after Stop'))
+  await until(() => w.runtime.get(second.id)?.status === 'queued')
+  const result = await w.runtime.cancel(second.id)
+  expect(result.settled).toBe(true)
+  expect(storage.getOpenTurn(second.id)).toBeNull()
+  expect(w.c.adapters).toHaveLength(1)
+  w.c.auto = true; w.finish(); await pause(120)
+  expect(w.c.calls).toHaveLength(1)
+}, 15_000)
+
+it('QC: native effort limits from one model do not reject another model family', async () => {
+  const w = await world()
+  const s = await w.runtime.create({ agent: 'claude', model: 'opus-5-max', repo: 'test/queue', branch: { existing: w.s.branch.name } })
+  await until(() => w.runtime.get(s.id)?.status === 'idle')
+  // Previous model advertised a narrower effort list. New family must ask its own adapter.
+  const live = (w.runtime as any).live.get(s.id)
+  live.record.efforts = ['high']
+  const updated = await w.runtime.setModel(s.id, 'fable-5.1-max')
+  expect(updated).toMatchObject({ model: 'fable-5.1-max', effort: 'max' })
+})

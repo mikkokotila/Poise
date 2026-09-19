@@ -21,6 +21,8 @@ import type {
 import { AGENT_LABELS } from '../../server/chat/protocol'
 import { chatClient, ChatCommandError, ChatHttpError, type AgentsResponse, type AgentInfo } from '../chat-client'
 import { escapeHtml } from '../markdown'
+import { recoverDraft } from '../chat-draft-recovery'
+import { reconcileSession } from '../chat-session-state'
 import { reserveQueuedMessage, releaseQueuedMessage } from '../chat-queue'
 import { createQueuePanel } from './chat-queue'
 import { createMemoriesPane } from './chat-memories'
@@ -38,7 +40,7 @@ import { createDeployCard, type DeployCard, type LocalPendingChange } from './ch
 import { recognisePoiseRequest } from '../poise-request-intent'
 import { parsePoiseCommand, reconcilePendingChanges, releaseChangeId, reserveChangeId, type PoiseCommand } from '../self-update-command'
 import { isTerminal, nextPollDelay, POLL_ACTIVE_MS, POLL_IDLE_MS, selectChangeForSession } from '../self-update-state'
-import { takeDraftSnapshot, type DraftSnapshot } from '../self-update-drafts'
+import { takeDraftSnapshot, buildDraftSnapshot, saveDraftSnapshot, type DraftSnapshot } from '../self-update-drafts'
 import { installSelfUpdateWatch, registerDraftProvider, registerReloadGuard } from '../self-update-watch'
 import { BUILD_SHA } from '../build-identity'
 import type { SelfChange, SelfUpdateStatus } from '../self-update-types'
@@ -235,6 +237,10 @@ function renderShell(): void {
   dockEl = viewEl.querySelector<HTMLElement>('.chat-dock')!
   dialogEl = viewEl.querySelector<HTMLElement>('.chat-new-dialog')!
   noticeEl = viewEl.querySelector<HTMLElement>('.chat-notice')!
+  dialogEl.addEventListener('keydown', event => {
+    if (event.isComposing || event.keyCode === 229) return
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeDialog(); viewEl.querySelector<HTMLButtonElement>('.chat-new-btn')?.focus() }
+  })
 
   viewEl.querySelector<HTMLButtonElement>('.chat-new-btn')!.addEventListener('click', () => { void openNewSessionDialog() })
 
@@ -290,15 +296,16 @@ function renderShell(): void {
     onRemove: (id, itemId) => { void changeQueueItem(id, itemId) },
   })
   dockEl.append(messageQueue.el, composer.el)
+  composer.el.addEventListener('input', () => persistDrafts())
   // After the transcript, inside the same scroll, outside the activity toggle.
   deployCard = createDeployCard(scrollEl, { onRevert: (changeId, releaseId) => { void revertChange(changeId, releaseId) } })
-  splitPane = attachChatSidebar(viewEl, () => { composer.layout(); queueRender() })
   const layoutObserver = new ResizeObserver(() => queueRender())
   layoutObserver.observe(mainEl)
   layoutObserver.observe(dockEl)
 
   memories = createMemoriesPane(viewEl, queueRender)
   viewEl.querySelector('.chat-layout')!.append(memories.el)
+  splitPane = attachChatSidebar(viewEl, () => { composer.layout(); queueRender() })
   memories.mount()
   attachSidebar()
   attachHeader()
@@ -326,16 +333,30 @@ function attachReloadGuards(): void {
     if (reverting.size || pendingQueueItems.size || queueMutations.size) blockers.push('command')
     return blockers
   })
-  registerDraftProvider(() => {
-    const drafts: [string, ComposerDraft | null][] = []
-    for (const [id, e] of sessions) drafts.push([id, id === activeId ? composer.getDraft() : e.draft])
-    return {
-      fromSha: BUILD_SHA,
-      activeSessionId: activeId,
-      fresh: { draft: activeId ? freshDraft : composer.getDraft(), modelIdentity: freshModelIdentity },
-      sessions: drafts,
-    }
-  })
+  registerDraftProvider(captureDrafts)
+  window.addEventListener('pagehide', () => persistDrafts(true))
+  window.addEventListener('beforeunload', () => persistDrafts(true))
+}
+
+function captureDrafts() {
+  const drafts: [string, ComposerDraft | null][] = []
+  for (const [id, e] of sessions) drafts.push([id, id === activeId ? composer.getDraft() : e.draft])
+  return {
+    fromSha: BUILD_SHA, activeSessionId: activeId,
+    fresh: { draft: activeId ? freshDraft : composer.getDraft(), modelIdentity: freshModelIdentity }, sessions: drafts,
+  }
+}
+
+let savedDraftFingerprint = ''
+/** Ordinary refresh and tab restoration deserve the same protection as an update. */
+function persistDrafts(force = false): void {
+  if (!composer || restoredSnapshot) return
+  const snapshot = buildDraftSnapshot(captureDrafts())
+  const fingerprint = JSON.stringify({ ...snapshot, savedAt: 0 })
+  if (!force && fingerprint === savedDraftFingerprint) return
+  try {
+    if (saveDraftSnapshot(sessionStorage, snapshot)) savedDraftFingerprint = fingerprint
+  } catch { /* private mode: the in-page drafts and update guards still work */ }
 }
 
 /** Put a consumed snapshot back where it came from, once the session list is known. */
@@ -370,9 +391,7 @@ function upsertRecord(record: SessionRecord, opts: { pending?: boolean } = {}): 
     sessions.set(record.id, e)
     order.push(record.id)
   } else {
-    // Historical replay and slow REST responses must not roll back a queue.
-    const queue = e.record.queue
-    e.record = queue && queue.revision > (record.queue?.revision ?? -1) ? { ...record, queue } : record
+    e.record = reconcileSession(e.record, record)
     if (opts.pending !== undefined) e.pending = opts.pending
   }
   sortOrder()
@@ -515,6 +534,7 @@ function startRename(item: HTMLElement): void {
     queueRender()
   }
   input.addEventListener('keydown', (ev) => {
+    if (ev.isComposing || ev.keyCode === 229) return
     if (ev.key === 'Enter') { ev.preventDefault(); void finish(true) }
     else if (ev.key === 'Escape') { ev.preventDefault(); void finish(false) }
   })
@@ -535,6 +555,7 @@ async function deleteSession(id: string): Promise<void> {
       activeId = null
       composerStateFor(null)
       transcript.clear()
+      composer.setDraft(freshDraft)
       if (order[0]) void selectSession(order[0])
       else { composer.setDraft(freshDraft); setNotice(null) }
     }
@@ -572,7 +593,7 @@ async function selectSession(id: string): Promise<void> {
   queueRender()
   if (switching) scheduleSelfPoll(0)
   if (!e.loaded && !e.loading && !e.pending) await loadHistory(e)
-  composer.focus()
+  if (activeId === id && !viewEl.hidden && !memories.el.contains(document.activeElement)) composer.focus()
 }
 
 async function loadHistory(e: SessionEntry): Promise<void> {
@@ -582,7 +603,7 @@ async function loadHistory(e: SessionEntry): Promise<void> {
     let after = chatClient.subscribedAfter(e.record.id) ?? 0
     for (let guard = 0; guard < 100; guard++) {
       const page = await chatClient.fetchSession(e.record.id, after)
-      e.record = page.session
+      e.record = reconcileSession(e.record, page.session)
       for (const env of page.events) {
         if (env.seq > after) { applyEvent(e.model, env); after = env.seq }
       }
@@ -607,7 +628,7 @@ function onEvent(env: ChatEnvelope): void {
   if (!e) return
   const ev = env.event
   if (ev.type === 'session.created' || ev.type === 'session.resumed' || ev.type === 'session.updated') {
-    upsertRecord(ev.session, { pending: false })
+    upsertRecord({ ...ev.session, lastSeq: env.seq }, { pending: false })
   } else if (ev.type === 'status.changed') {
     e.record = { ...e.record, status: ev.status, queuedBehind: ev.queuedBehind }
   } else if (ev.type === 'queue.updated') {
@@ -641,12 +662,17 @@ async function withSavedMemories(draft: ComposerDraft, dispatch: () => void | Pr
     await dispatch()
   } catch (error) {
     const target = origin ? sessions.get(origin) : null
-    const current = origin === activeId ? composer.getDraft() : target?.draft
-    const kept = current?.text ? { ...draft, text: `${draft.text}\n\n${current.text}`, attachments: [...draft.attachments, ...current.attachments], mentions: [...draft.mentions, ...current.mentions] } : draft
-    if (origin === activeId) { composer.setDraft(kept); setNotice(`Message not sent — ${(error as Error).message}`) }
-    else if (target) { target.draft = kept; target.error = `Message not sent — ${(error as Error).message}` }
-    else freshDraft = kept
+    restoreDraftTo(origin, draft)
+    if (origin === activeId) setNotice(`Message not sent — ${(error as Error).message}`)
+    else if (target) target.error = `Message not sent — ${(error as Error).message}`
   } finally { memorySubmissions--; queueRender() }
+}
+
+function restoreDraftTo(sessionId: string | null, draft: ComposerDraft): void {
+  const target = sessionId ? sessions.get(sessionId) : null
+  if (activeId === sessionId) composer.setDraft(recoverDraft(draft, composer.getDraft()))
+  else if (target) target.draft = recoverDraft(draft, target.draft)
+  else freshDraft = recoverDraft(draft, freshDraft)
 }
 
 function commandFailed(err: unknown, what: string): void {
@@ -781,10 +807,7 @@ function renderQueue(): void {
 
 /** Put a request that did not start back where the person can edit it. */
 function keepDraft(sessionId: string | null, draft: ComposerDraft): void {
-  if (!activeId || activeId === sessionId) { composer.setDraft(draft); return }
-  const e = sessionId ? sessions.get(sessionId) : null
-  if (e) e.draft = draft
-  else composer.setDraft(draft)
+  restoreDraftTo(sessionId, draft)
 }
 
 /** `/poise <request>`: one explicit command, one change id, one dedicated
@@ -818,17 +841,19 @@ async function startPoiseChange(cmd: PoiseCommand, draft: ComposerDraft): Promis
       freshDraft = null
     }
     const sessionId = source.record.id
-    changeId = reserveChangeId(pendingStore, sessionId, cmd.request)
+    const context = { attachments: draft.attachments, mentions: draft.mentions }
+    const contextKey = context.attachments.length || context.mentions.length ? JSON.stringify(context) : ''
+    changeId = reserveChangeId(pendingStore, sessionId, cmd.request, Date.now(), contextKey)
     localChanges.set(sessionId, { id: changeId, request: cmd.request, sessionId, startedAt: Date.now() })
     setNotice(null)
     queueRender()
-    const ack = await chatClient.startPoiseChange(sessionId, cmd.request, changeId)
+    const ack = await chatClient.startPoiseChange(sessionId, cmd.request, changeId, context)
     releaseChangeId(pendingStore, changeId)
     localChanges.delete(sessionId)
     rememberChange(ack.change, [sessionId, ack.session.id])
     mergeChange(ack.change)
     upsertRecord(ack.session, { pending: false })
-    await selectSession(ack.session.id)
+    if (activeId === sessionId) await selectSession(ack.session.id)
     scheduleSelfPoll(POLL_ACTIVE_MS)
   } catch (err) {
     if (source) localChanges.delete(source.record.id)
@@ -1032,8 +1057,9 @@ async function sendPrompt(draft: ComposerDraft): Promise<void> {
   } catch (err) {
     dropOptimisticTurns(e.model)
     if (e.record.status === 'running' && !e.model.running) e.record = { ...e.record, status: 'idle' }
-    if (activeId === e.record.id) { commandFailed(err, 'Send'); composer.setDraft(draft) }
-    else { e.draft = draft; e.error = `Send failed — ${(err as Error).message}` }
+    restoreDraftTo(e.record.id, draft)
+    if (activeId === e.record.id) commandFailed(err, 'Send')
+    else e.error = `Send failed — ${(err as Error).message}`
     queueRender()
   }
 }
@@ -1044,7 +1070,10 @@ async function steer(text: string): Promise<void> {
   try {
     await chatClient.send({ type: 'steer', sessionId: e.record.id, text })
   } catch (err) {
-    commandFailed(err, 'Steer')
+    restoreDraftTo(e.record.id, { ...emptyDraft(), text })
+    if (activeId === e.record.id) commandFailed(err, 'Steer')
+    else e.error = `Steer failed — ${(err as Error).message}`
+    queueRender()
   }
 }
 
@@ -1143,7 +1172,7 @@ async function forkActive(): Promise<void> {
   try {
     const r = await chatClient.forkSession(e.record.id)
     upsertRecord(r.session)
-    await selectSession(r.session.id)
+    if (activeId === e.record.id) await selectSession(r.session.id)
   } catch (err) {
     setNotice(`Fork failed — ${(err as Error).message}`)
   }
@@ -1181,7 +1210,7 @@ async function handoff(agent: AgentId, model: string, effort?: string): Promise<
     await memories.editor.flush()
     const r = await chatClient.handoffSession(e.record.id, { agent, model, effort })
     upsertRecord(r.session)
-    await selectSession(r.session.id)
+    if (activeId === e.record.id) await selectSession(r.session.id)
   } catch (err) {
     setNotice(`Handoff failed — ${(err as Error).message}`)
   }
@@ -1234,7 +1263,7 @@ async function toggleAutoMerge(): Promise<void> {
   const hadFocus = !!document.activeElement?.closest('.chat-h-auto-merge')
   const update = (async (): Promise<boolean> => {
     try {
-      await memories.editor.flush()
+      if (enabled) await memories.editor.flush()
       const result = await chatClient.setAutoMerge(id, enabled)
       // Do not replace a newer update received from another tab with an old ack.
       if (result.session.lastSeq >= e.record.lastSeq) upsertRecord(result.session)
@@ -1273,7 +1302,9 @@ function headerHtml(): string {
   const between = !isRunning(s.status) && s.status !== 'starting' && s.status !== 'closed'
   const models = agent?.models.map((m) => m.identity) || []
   if (!models.includes(s.model)) models.unshift(s.model)
-  const efforts = s.efforts?.length ? s.efforts : (agent?.efforts || [])
+  const selectedModel = agent?.models.find(model => model.identity === s.model)
+  const variants = selectedModel ? agent!.models.filter(model => model.selector === selectedModel.selector).map(model => model.effort) : []
+  const efforts = variants.filter(effort => !s.efforts?.length || s.efforts.includes(effort))
   const ws = workspaceText(s)
   const modeSel = s.capabilities?.modes && s.modes?.length
     ? `<select class="chat-h-select chat-mode-select" aria-label="Mode"${between ? '' : ' disabled'}>${s.modes.map((m) => `<option value="${escapeHtml(m.id)}"${m.id === s.mode ? ' selected' : ''}>${escapeHtml(m.name)}</option>`).join('')}</select>`
@@ -1320,7 +1351,7 @@ function attachHeader(): void {
     const t = e.target as HTMLSelectElement
     const s = entry()?.record
     if (!s) return
-    if (t.classList.contains('chat-model-select')) void setModel(t.value, s.effort)
+    if (t.classList.contains('chat-model-select')) void setModel(t.value, agentFor(s.agent)?.models.find(model => model.identity === t.value)?.effort)
     else if (t.classList.contains('chat-effort-select')) void setModel(s.model, t.value)
     else if (t.classList.contains('chat-mode-select')) void setMode(t.value)
     else if (t.classList.contains('chat-ho-agent')) {
@@ -1363,6 +1394,9 @@ function attachHeader(): void {
 function attachKeys(): void {
   document.addEventListener('keydown', (e) => {
     if (!viewEl || viewEl.hidden) return
+    if (!e.isComposing && e.key === 'Escape' && !dialogEl.hidden) {
+      e.preventDefault(); closeDialog(); viewEl.querySelector<HTMLButtonElement>('.chat-new-btn')?.focus(); return
+    }
     const active = document.activeElement as HTMLElement | null
     const tag = active?.tagName
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || active?.isContentEditable) return
@@ -1465,6 +1499,7 @@ function render(): void {
   renderDeployCard()
   if (wasAtBottom || forceBottom) scrollEl.scrollTop = scrollEl.scrollHeight
   forceBottom = false
+  persistDrafts()
 }
 
 // ── New session dialog ─────────────────────────────────────────────────────
@@ -1581,9 +1616,9 @@ export async function initChatView(): Promise<void> {
   if (!initialized) {
     initialized = true
     renderShell()
-    // A snapshot exists only when the previous page reloaded itself onto a
-    // new build; it is consumed here exactly once.
-    try { restoredSnapshot = takeDraftSnapshot(localStorage) } catch { restoredSnapshot = null }
+    // An update snapshot takes precedence over this tab's ordinary reload
+    // draft. Both are consumed once; neither can execute a prompt.
+    try { restoredSnapshot = takeDraftSnapshot(localStorage) || takeDraftSnapshot(sessionStorage) } catch { restoredSnapshot = null }
     // Events keep folding into the per-session models while the view is
     // hidden — that is what lets a running turn be re-joined on return
     // without a refetch — so these listeners live for the app's lifetime.

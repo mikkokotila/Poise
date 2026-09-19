@@ -269,7 +269,10 @@ export class ChatSocketServer {
         // repository, branch or path for a change — the controller does.
         const changeId = String(command.changeId || '')
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(changeId)) throw new ChatError(400, 'changeId must be a UUID', 'invalid')
-        const result: import('./protocol').PoiseChangeAck = await runtime.startPoiseChange(String(command.sessionId || ''), String(command.text || ''), changeId)
+        const result: import('./protocol').PoiseChangeAck = await runtime.startPoiseChange(String(command.sessionId || ''), String(command.text || ''), changeId, {
+          attachments: validAttachments(command.attachments),
+          mentions: Array.isArray(command.mentions) ? command.mentions.filter(m => m && typeof m.path === 'string').slice(0, 50) : [],
+        })
         return result
       }
       default:
