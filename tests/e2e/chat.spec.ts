@@ -1574,6 +1574,7 @@ test('an enqueue error preserves a newer composer draft and leaves the unsent it
 })
 
 test('the expanded queue leaves the console usable in a small window', async ({ page }, info) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
   await page.setViewportSize({ width: 600, height: 500 })
   const state = makeState([session()]); await installRoutes(page, state); await installSocket(page, state)
   await page.goto('/')
@@ -1583,9 +1584,11 @@ test('the expanded queue leaves the console usable in a small window', async ({ 
     await expect(queuedRows(page).last().locator('select')).toBeEnabled()
   }
   await expect(input(page)).toBeVisible()
-  const box = await input(page).boundingBox()
+  const box = await page.locator('.chat-v-composer').boundingBox()
   expect(box!.y).toBeGreaterThanOrEqual(0); expect(box!.y + box!.height).toBeLessThanOrEqual(500)
   const panel = await queuePanel(page).boundingBox()
+  const header = await page.locator('.chat-session-header').boundingBox()
+  expect(panel!.y).toBeGreaterThanOrEqual(header!.y + header!.height - 1)
   expect(panel!.x).toBeGreaterThanOrEqual(0); expect(panel!.x + panel!.width).toBeLessThanOrEqual(600)
   await page.screenshot({ path: info.outputPath('queue-small.png'), animations: 'disabled' })
 })

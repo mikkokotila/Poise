@@ -1400,7 +1400,20 @@ function render(): void {
   // The fresh console sits slightly above centre. Its own height participates
   // in the calculation, so a taller draft never pushes it off-screen.
   if (lastEmpty !== empty) { lastEmpty = empty; composer.layout() }
-  mainEl.style.setProperty('--chat-dock-lift', `${Math.max(0, Math.round(mainEl.clientHeight * 0.58 - dockEl.offsetHeight / 2))}px`)
+  const contentHeight = Math.max(0, mainEl.clientHeight - headerEl.offsetHeight - noticeEl.offsetHeight)
+  if (!messageQueue.el.hidden) {
+    const dockStyle = getComputedStyle(dockEl)
+    const padding = parseFloat(dockStyle.paddingTop) + parseFloat(dockStyle.paddingBottom)
+    const summaryHeight = messageQueue.el.querySelector('summary')!.offsetHeight
+    // Keep the entire console (including Send) on screen; only queue rows
+    // scroll when the window is short. Leave room for the scroll's padding.
+    const room = Math.max(0, contentHeight - composer.el.offsetHeight - padding - summaryHeight - 36)
+    mainEl.style.setProperty('--chat-queue-available', `${Math.floor(room)}px`)
+  }
+  const dockHeight = dockEl.offsetHeight
+  const desiredLift = contentHeight * 0.58 - dockHeight / 2
+  const lift = Math.max(0, Math.min(desiredLift, contentHeight - dockHeight))
+  mainEl.style.setProperty('--chat-dock-lift', `${Math.round(lift)}px`)
   viewEl.querySelector<HTMLElement>('.chat-transcript-loading')!.hidden = !(e && e.loading && !e.model.blocks.length)
   // Scrolling sticks to the bottom only for someone already reading there.
   const distance = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
