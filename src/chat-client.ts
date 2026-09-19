@@ -13,6 +13,7 @@
 
 import type {
   Attachment,
+  MessageQueue,
   ChatCommand,
   ChatEnvelope,
   ClientFrame,
@@ -24,6 +25,7 @@ import type {
   AutoMergeAck,
 } from '../server/chat/protocol'
 import type { SelfChange, SelfUpdateStatus } from './self-update-types'
+import { parseMessageQueue } from './chat-queue'
 import { parseChange, parseSelfUpdateStatus } from './self-update-state'
 
 export type ConnectionState = 'connecting' | 'open' | 'closed'
@@ -374,6 +376,13 @@ export class ChatClient {
       throw new ChatCommandError('the server accepted the change but did not describe it; check the session list before repeating it', 'command_in_doubt')
     }
     return { session, change }
+  }
+
+  async queueCommand(command: Extract<ChatCommand, { type: 'queue.add' | 'queue.update' | 'queue.remove' }>): Promise<MessageQueue> {
+    const answer = await this.send(command) as { queue?: unknown } | null
+    const queue = parseMessageQueue(answer?.queue)
+    if (!queue) throw new ChatCommandError('The queue was not acknowledged. Your message has been kept; retrying uses the same item ID.', 'command_in_doubt')
+    return queue
   }
 
   /** Whether a session is subscribed, and from which seq. */

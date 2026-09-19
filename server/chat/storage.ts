@@ -7,7 +7,8 @@
 // agent.
 
 import { db } from '../db'
-import type { ChatEnvelope, ChatEvent, SessionRecord, SessionStatus } from './protocol'
+import { claimQueuedMessage, deleteMessageQueue, pauseQueue, settleQueuedTurn, queueOwner, readQueue } from './message-queue'
+import type { ChatEnvelope, ChatEvent, SessionRecord, SessionStatus, MessageQueue } from './protocol'
 import type { AttachmentRecord } from './attachments'
 
 db.exec(`
@@ -88,7 +89,7 @@ export function insertSession(record: SessionRecord): void {
     VALUES (@id, @record, @agent, @repo, @checkout, @branch, @status, @title, @native, @instance, @created, @updated, 0)
   `).run({
     id: record.id,
-    record: JSON.stringify(record),
+    record: JSON.stringify({ ...record, queue: undefined }),
     agent: record.agent,
     repo: record.repo,
     checkout: record.checkout,
@@ -110,7 +111,7 @@ export function saveSession(record: SessionRecord): void {
     WHERE id = @id
   `).run({
     id: record.id,
-    record: JSON.stringify(record),
+    record: JSON.stringify({ ...record, queue: undefined }),
     agent: record.agent,
     repo: record.repo,
     checkout: record.checkout,
@@ -149,6 +150,7 @@ export function listSessions(instance: string): SessionRecord[] {
 
 export function deleteSession(id: string): void {
   db.transaction(() => {
+    deleteMessageQueue(id)
     db.prepare('DELETE FROM chat_events WHERE session_id = ?').run(id)
     db.prepare('DELETE FROM chat_pending WHERE session_id = ?').run(id)
     db.prepare('DELETE FROM chat_workers WHERE session_id = ?').run(id)
@@ -169,6 +171,21 @@ export function getOpenTurn(id: string): { turnId: string, callId: string | null
   const row = db.prepare('SELECT open_turn_id, open_call_id FROM chat_sessions WHERE id = ?').get(id) as { open_turn_id: string | null, open_call_id: string | null } | undefined
   return row?.open_turn_id ? { turnId: row.open_turn_id, callId: row.open_call_id } : null
 }
+
+/** A queue mutation and its transcript receipt either both persist or neither does. */
+export const commitQueueMutation = db.transaction((sessionId: string, mutate: () => MessageQueue): ChatEnvelope => {
+  const queue = mutate()
+  return appendEvent(sessionId, { type: 'queue.updated', queue })
+})
+
+/** Queue claim and open-turn reservation cannot be separated by a crash. */
+export const reserveQueueTurn = db.transaction((sessionId: string, turnId: string, itemId?: string): void => {
+  if (getOpenTurn(sessionId)) throw new Error('A turn is already recorded for this session')
+  const owner = queueOwner(sessionId)
+  if (itemId) claimQueuedMessage(owner, itemId, turnId)
+  else pauseQueue(owner)
+  setOpenTurn(sessionId, turnId, null)
+})
 
 /** Sessions of this instance that had a turn open — a crash cut them. */
 export function listOpenTurns(instance: string): Array<{ sessionId: string, turnId: string, callId: string | null }> {
@@ -322,6 +339,7 @@ export const finalizeTurn = db.transaction((
   sessionId: string,
   event: Extract<ChatEvent, { type: 'turn.finished' }>,
   ledger?: { callId: string, instance: string },
+  canAdvanceQueue = true,
 ): ChatEnvelope => {
   const previous = findEvent(sessionId, candidate => candidate.type === 'turn.finished' && candidate.turnId === event.turnId)
   const envelope = previous ?? appendEvent(sessionId, event)
@@ -332,6 +350,9 @@ export const finalizeTurn = db.transaction((
     queueFinish({ callId: ledger.callId, instance: ledger.instance, sessionId, status,
       error: terminal.stopReason === 'interrupted' ? 'Interrupted by Poise restart' : terminal.error ?? null })
   }
+  const owner = queueOwner(sessionId)
+  const executor = readQueue(owner).executorSessionId
+  if (!previous && (!executor || executor === sessionId)) settleQueuedTurn(owner, terminal.turnId, canAdvanceQueue && terminal.stopReason === 'end_turn', terminal.error || (terminal.stopReason === 'cancelled' ? 'Stopped. This message was not retried.' : undefined))
   // Never clear another turn reserved after this one; callers publish the
   // completion only after this transaction is durable.
   db.prepare('UPDATE chat_sessions SET open_turn_id = NULL, open_call_id = NULL WHERE id = ? AND open_turn_id = ?')

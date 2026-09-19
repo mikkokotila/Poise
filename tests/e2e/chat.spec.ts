@@ -68,9 +68,9 @@ async function installRoutes(page: Page, state: ServerState): Promise<void> {
     if (path === '/api/chat/sessions' && method === 'GET') { await route.fulfill({ json: { sessions: state.sessions, instance: 'poise-dev:test' } }); return }
     if (path === '/api/chat/sessions' && method === 'POST') {
       if (state.createDelay) await state.createDelay()
-      const req2 = body as { agent: SessionRecord['agent'], model: string, effort: string, autoMerge?: boolean }
+      const req2 = body as { agent: SessionRecord['agent'], model: string, effort: string, autoMerge?: boolean, deferStart?: boolean }
       const created = session({ id: `new-${state.sessions.length + 1}`, agent: req2.agent, model: req2.model, effort: req2.effort, autoMerge: req2.autoMerge,
-        repo: '', checkout: '/poise/.poise-chat/workspace', workspaceKind: 'poise-local', title: '', status: 'starting', createdAt: new Date().toISOString(),
+        repo: '', checkout: '/poise/.poise-chat/workspace', workspaceKind: 'poise-local', title: '', status: req2.deferStart ? 'idle' : 'starting', createdAt: new Date().toISOString(),
         branch: { name: 'chat/generated', origin: 'new', provisional: true } })
       state.sessions.unshift(created)
       state.history[created.id] = []
@@ -138,7 +138,25 @@ async function installSocket(page: Page, state?: ServerState): Promise<Socket> {
     ws.onMessage((message) => {
       const frame = JSON.parse(String(message)) as ClientFrame
       sock.frames.push(frame)
-      if (sock.autoAck && frame.command.type === 'set_auto_merge' && state) {
+      if (sock.autoAck && ['queue.add', 'queue.update', 'queue.remove'].includes(frame.command.type) && state) {
+        const cmd = frame.command
+        if (cmd.type !== 'queue.add' && cmd.type !== 'queue.update' && cmd.type !== 'queue.remove') throw new Error('Unexpected queue command')
+        const s = state.sessions.find(s => s.id === cmd.sessionId)!
+        const queue = structuredClone(s.queue || { revision: 0, ready: false, items: [] })
+        if (cmd.type === 'queue.remove') queue.items = queue.items.filter(item => item.id !== cmd.itemId)
+        else {
+          const model = cmd.model || s.model
+          const agent = (AGENTS.agents as Array<{ id: SessionRecord['agent'], models: Array<{ identity: string, effort: string }> }>).find(agent => agent.models.some(m => m.identity === model))!
+          const effort = cmd.effort || agent.models.find(m => m.identity === model)!.effort
+          if (cmd.type === 'queue.add') queue.items.push({ id: cmd.itemId, prompt: { text: cmd.text, attachments: cmd.attachments || [], mentions: cmd.mentions || [] },
+            agent: agent.id, model, effort, state: 'waiting', createdAt: NOW })
+          else queue.items = queue.items.map(item => item.id === cmd.itemId ? { ...item, agent: agent.id, model, effort } : item)
+        }
+        queue.revision++
+        s.queue = queue
+        sock.push(s.id, { type: 'queue.updated', queue })
+        sock.ack(frame, true, '', undefined, { queue })
+      } else if (sock.autoAck && frame.command.type === 'set_auto_merge' && state) {
         const command = frame.command
         const s = state.sessions.find(s => s.id === command.sessionId)!
         s.autoMerge = command.enabled
@@ -1423,4 +1441,154 @@ test('Auto-merge keeps a late acknowledgement bound to the original session', as
   await expect(page.locator('.chat-session-item.active')).toContainText('Second')
   await page.locator('.chat-session-item[data-id="s1"]').click()
   await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+})
+
+
+const queuedRows = (page: Page) => page.locator('.chat-queue-item')
+const queuePanel = (page: Page) => page.locator('.chat-message-queue')
+
+test('queues five idle messages before the first task, with an expanded collapsible panel above the console', async ({ page }, info) => {
+  const state = makeState([]); await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/')
+  await expect(queuePanel(page)).toBeHidden()
+  for (let i = 1; i <= 5; i++) {
+    await input(page).fill(`/queue Follow-up ${i}`); await input(page).press('Enter')
+    await expect(queuedRows(page)).toHaveCount(i)
+    await expect(queuedRows(page).last().locator('select')).toBeEnabled()
+  }
+  expect(sock.framesOf('prompt')).toHaveLength(0); expect(sock.framesOf('steer')).toHaveLength(0)
+  expect(state.calls.filter(c => c.path === '/api/chat/sessions' && c.method === 'POST').map(c => c.body)).toEqual([{ agent: 'claude', model: 'opus-5-high', effort: 'high', deferStart: true }])
+  await expect(queuePanel(page)).toHaveAttribute('open', '')
+  expect((await queuePanel(page).boundingBox())!.y + (await queuePanel(page).boundingBox())!.height).toBeLessThanOrEqual((await page.locator('.chat-v-composer').boundingBox())!.y)
+  await input(page).fill('The first real task')
+  await queuePanel(page).locator('summary').click()
+  await expect(queuePanel(page)).not.toHaveAttribute('open', '')
+  await expect(input(page)).toHaveValue('The first real task')
+  await queuePanel(page).locator('summary').click()
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate(t => { document.documentElement.dataset.theme = t }, theme)
+    await page.screenshot({ path: info.outputPath(`queue-${theme}.png`), animations: 'disabled' })
+  }
+  await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ text: 'The first real task' })
+  expect(sock.framesOf('queue.add')).toHaveLength(5)
+})
+
+test('the /queue chip and pasted switch queue rather than steer or stop an active turn', async ({ page }) => {
+  const state = makeState([session({ status: 'running' })]); await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('/queue'); await input(page).press('Space')
+  await expect(page.locator('.chat-v-chip')).toHaveText('/queue')
+  await input(page).fill('Do this later')
+  await expect(page.getByRole('button', { name: 'Queue message', exact: true })).toBeVisible()
+  await input(page).press('Enter')
+  await expect(queuedRows(page)).toHaveCount(1)
+  await input(page).fill('/queue Another follow-up')
+  await page.getByRole('button', { name: 'Queue message', exact: true }).click()
+  await expect(queuedRows(page)).toHaveCount(2)
+  expect(sock.framesOf('steer')).toHaveLength(0); expect(sock.framesOf('cancel')).toHaveLength(0); expect(sock.framesOf('prompt')).toHaveLength(0)
+  await expect(page.locator('.chat-v-chip')).toBeHidden()
+  await input(page).fill('Regular steering still works'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('steer').length).toBe(1)
+})
+
+test('each queued row selects its agent, model and effort without changing the current agent', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('/queue Review with a different agent'); await input(page).press('Enter')
+  const select = queuedRows(page).first().locator('select')
+  await expect(select).toBeEnabled()
+  await expect(select.locator('optgroup')).toHaveCount(5)
+  await select.selectOption('gpt-6-astra-max')
+  await expect(select).toHaveValue('gpt-6-astra-max')
+  await expect(select.locator('option:checked')).toContainText('Codex')
+  await expect(page.locator('.chat-h-agent')).toHaveText('Claude Code')
+  await expect(select.locator('option[value="gemini-3.8-flash-high"]')).toBeDisabled()
+  await page.reload(); await expect(queuedRows(page)).toHaveCount(1)
+  await expect(queuedRows(page).first().locator('select')).toHaveValue('gpt-6-astra-max')
+  await expect(queuePanel(page)).toHaveAttribute('open', '')
+  await queuedRows(page).first().getByRole('button', { name: 'Remove queued message 1' }).click()
+  await expect(queuePanel(page)).toBeHidden()
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('queue disclosure and agent selection survive streaming; completed rows disappear without browser dispatch', async ({ page }) => {
+  const state = makeState([session({ status: 'running' })]); await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('/queue One'); await input(page).press('Enter'); await expect(queuedRows(page)).toHaveCount(1)
+  await input(page).fill('/queue Two'); await input(page).press('Enter'); await expect(queuedRows(page)).toHaveCount(2)
+  await expect(queuedRows(page).last().locator('select')).toBeEnabled()
+  await queuePanel(page).locator('summary').click()
+  sock.push('s1', { type: 'text.delta', turnId: 'current', messageId: 'm', delta: 'Working on the original task' })
+  await expect(queuePanel(page)).not.toHaveAttribute('open', '')
+  const q = state.sessions[0].queue!
+  sock.push('s1', { type: 'queue.updated', queue: { ...q, revision: q.revision + 1, items: q.items.slice(1) } })
+  await queuePanel(page).locator('summary').click(); await expect(queuedRows(page)).toHaveCount(1)
+  await expect(queuedRows(page).first()).toContainText('Two')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('a failed queue acknowledgement restores the draft without sending it to an agent', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1'); sock.autoAck = false
+  await input(page).fill('/queue Keep this message'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('queue.add').length).toBe(1)
+  await expect(queuedRows(page)).toHaveCount(1)
+  sock.ack(sock.framesOf('queue.add')[0], false, 'Temporary storage failure', 'unavailable')
+  await expect(input(page)).toHaveValue('Keep this message'); await expect(page.locator('.chat-v-chip')).toHaveText('/queue')
+  await expect(page.locator('.chat-notice')).toContainText('Temporary storage failure')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('late queue acknowledgements and removal stay bound to their original session', async ({ page }) => {
+  const state = makeState([session({ id: 's2', title: 'Other', createdAt: '2026-09-17T10:00:00Z' }), session()])
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1'); sock.autoAck = false
+  await input(page).fill('/queue Bound to the first'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('queue.add').length).toBe(1)
+  await page.locator('.chat-session-item[data-id="s2"]').click()
+  await expect(page.locator('.chat-session-item.active')).toContainText('Other')
+  const cmd = sock.framesOf('queue.add')[0].command
+  if (cmd.type !== 'queue.add') throw new Error('missing queue add')
+  sock.ack(sock.framesOf('queue.add')[0], true, '', undefined, { queue: { revision: 1, ready: false, items: [{ id: cmd.itemId, prompt: { text: cmd.text, attachments: [], mentions: [] }, agent: 'claude', model: 'opus-5-max', effort: 'max', state: 'waiting', createdAt: NOW }] } })
+  await expect(queuePanel(page)).toBeHidden()
+  await expect(page.locator('.chat-session-item.active')).toContainText('Other')
+  expect(cmd.sessionId).toBe('s1')
+})
+
+
+test('an enqueue error preserves a newer composer draft and leaves the unsent item visible', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1'); sock.autoAck = false
+  await input(page).fill('/queue Keep the unsent task'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('queue.add').length).toBe(1)
+  await input(page).fill('A newer draft')
+  sock.ack(sock.framesOf('queue.add')[0], false, 'The disk could not save the task', 'unavailable')
+  await expect(input(page)).toHaveValue('A newer draft')
+  await expect(queuedRows(page).first()).toContainText('Keep the unsent task')
+  await expect(queuedRows(page).first()).toContainText('The disk could not save the task')
+  await queuedRows(page).first().getByRole('button', { name: 'Remove queued message 1' }).click()
+  await expect(queuePanel(page)).toBeHidden()
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('the expanded queue leaves the console usable in a small window', async ({ page }, info) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await page.setViewportSize({ width: 600, height: 500 })
+  const state = makeState([session()]); await installRoutes(page, state); await installSocket(page, state)
+  await page.goto('/')
+  for (let i = 1; i <= 5; i++) {
+    await input(page).fill(`/queue Small window follow-up ${i}`); await input(page).press('Enter')
+    await expect(queuedRows(page)).toHaveCount(i)
+    await expect(queuedRows(page).last().locator('select')).toBeEnabled()
+  }
+  await expect(input(page)).toBeVisible()
+  const box = await page.locator('.chat-v-composer').boundingBox()
+  expect(box!.y).toBeGreaterThanOrEqual(0); expect(box!.y + box!.height).toBeLessThanOrEqual(500)
+  const panel = await queuePanel(page).boundingBox()
+  const header = await page.locator('.chat-session-header').boundingBox()
+  expect(panel!.y).toBeGreaterThanOrEqual(header!.y + header!.height - 1)
+  expect(panel!.x).toBeGreaterThanOrEqual(0); expect(panel!.x + panel!.width).toBeLessThanOrEqual(600)
+  await page.screenshot({ path: info.outputPath('queue-small.png'), animations: 'disabled' })
 })

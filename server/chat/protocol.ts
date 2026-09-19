@@ -65,7 +65,33 @@ export interface BranchBinding {
   baseSha?: string
 }
 
+/** A queued task is not a native prompt until a preceding turn completes. */
+export interface QueuedMessage {
+  /** Validated attachment/mention provenance across an isolated Poise handoff. */
+  sourceSessionId?: string
+  id: string
+  prompt: PromptInput
+  agent: AgentId
+  model: string
+  effort: string
+  createdAt: string
+  state: 'waiting' | 'running' | 'failed'
+  turnId?: string
+  error?: string
+}
+export interface MessageQueue {
+  executorSessionId?: string
+  waitingForRelease?: boolean
+  revision: number
+  ready: boolean
+  items: QueuedMessage[]
+}
+
 export interface SessionRecord {
+  /** Server-owned pending tasks; never copied when a session is forked. */
+  queue?: MessageQueue
+  /** A queued cross-agent handoff survives a startup failure or restart. */
+  queuedHandoff?: string
   id: string
   agent: AgentId
   /** Catalog identity, e.g. `opus-5-max`. */
@@ -242,9 +268,10 @@ export type ChatEvent =
   | { type: 'session.created', session: SessionRecord }
   | { type: 'session.resumed', session: SessionRecord }
   | { type: 'session.updated', session: SessionRecord }
+  | { type: 'queue.updated', queue: MessageQueue }
   | { type: 'session.closed', reason: string }
   | { type: 'status.changed', status: SessionStatus, queuedBehind?: string, detail?: string }
-  | { type: 'turn.started', turnId: string, prompt: PromptInput, callId?: string }
+  | { type: 'turn.started', turnId: string, prompt: PromptInput, callId?: string, queueItemId?: string, agent?: AgentId, model?: string }
   | { type: 'steer.sent', turnId: string, text: string }
   | { type: 'turn.finished', turnId: string, stopReason: StopReason, error?: string, usage?: TurnUsage, durationMs?: number }
   | { type: 'text.delta', turnId: string, messageId: string, delta: string }
@@ -290,6 +317,8 @@ export interface NewSessionRequest {
   context?: SessionContext
   /** Explicit fallback choice when the default provider is not signed in. */
   fallbackModel?: string
+  /** Save queue storage without starting a native session or a turn. */
+  deferStart?: boolean
   autoMerge?: boolean
 }
 
@@ -304,6 +333,9 @@ export type ChatCommand =
   | { type: 'session.delete', id: string }
   | { type: 'session.rename', id: string, title: string }
   | { type: 'prompt', sessionId: string, text: string, attachments?: Attachment[], mentions?: Mention[] }
+  | { type: 'queue.add', sessionId: string, itemId: string, text: string, attachments?: Attachment[], mentions?: Mention[], model?: string, effort?: string }
+  | { type: 'queue.update', sessionId: string, itemId: string, model: string, effort?: string }
+  | { type: 'queue.remove', sessionId: string, itemId: string }
   | { type: 'steer', sessionId: string, text: string }
   | { type: 'cancel', sessionId: string }
   | { type: 'permission.respond', sessionId: string, id: string, optionId: string }

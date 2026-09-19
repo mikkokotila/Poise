@@ -132,3 +132,16 @@ and disabling stops automatic tool approvals. Shared instructions require
 normal repository checks/protections and verified merges; those are not
 replaced by a new general-purpose server merge gate. The Poise-only release
 controller and its credential scope remain unchanged.
+
+## Deferred Chat messages
+
+Queue commands keep the existing session ownership and request replay checks.
+Enqueue and its transcript receipt commit together; claiming an item and
+reserving its open turn are also atomic. Only a recorded, successful turn with
+settled worker/file operations can advance the tail. Crash recovery never
+re-executes a claimed uncertain task. Browser reloads do not dispatch tasks.
+Queued attachments use validated server records and checked content hashes;
+cross-agent handoffs retain the workspace boundary. An isolated Poise change
+keeps its checkout exclusive to the release controller until that release
+settles, then allows queued follow-ups. Queueing neither broadens credentials
+nor changes the session's explicit Auto-merge delegation.

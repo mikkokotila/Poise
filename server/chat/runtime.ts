@@ -23,6 +23,8 @@
 
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
+import { enqueueMessage, readQueue, updateQueuedModel, removeQueuedMessage, pauseQueue, QueueError, queueOwner, delegateQueue } from './message-queue'
+import type { MessageQueue, QueuedMessage } from './protocol'
 import { autoMergeInstructions, withAutoMergeInstructions } from './auto-merge'
 import type { AutoMergeAck } from './protocol'
 import type { ChildProcess } from 'node:child_process'
@@ -118,6 +120,8 @@ interface RunningTurn {
   shown?: PromptInput
   /** True only once the native prompt was invoked, not while queued/startup. */
   agentInvoked?: boolean
+  queueItem?: QueuedMessage
+  queueContext?: string
 }
 
 interface LiveSession {
@@ -197,6 +201,9 @@ export class ChatRuntime extends EventEmitter {
   private readonly availability = new Map<AgentId, { at: number, result: { ok: boolean, reason?: string } }>()
   private readonly selfUpdate: SelfUpdateBridge | null
   private readonly changeStarts = new Map<string, { sourceId: string, request: string, promise: Promise<PoiseChangeResult> }>()
+  private readonly queuePumps = new Set<string>()
+  private readonly queueTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private readonly queueReleaseWait = new Set<string>()
   private stopped = false
   private drainState: DrainState | null = null
   /** Public operations in flight that are not (yet) a turn or a chain entry. */
@@ -236,6 +243,7 @@ export class ChatRuntime extends EventEmitter {
     } finally {
       this.recovering = false
     }
+    for (const record of storage.listSessions(this.instance)) this.scheduleQueue(this.requireLive(record.id))
   }
 
   private async recoverState(): Promise<void> {
@@ -358,6 +366,8 @@ export class ChatRuntime extends EventEmitter {
 
   async stop(): Promise<void> {
     this.stopped = true
+    for (const timer of this.queueTimers.values()) clearTimeout(timer)
+    this.queueTimers.clear()
     await Promise.all([...this.live.values()].map(async (session) => {
       session.lifecycle.abort()
       await this.forceStop(session, 'server stopping')
@@ -419,6 +429,7 @@ export class ChatRuntime extends EventEmitter {
 
   endDrain(): void {
     this.drainState = null
+    for (const session of this.live.values()) this.scheduleQueue(session)
   }
 
   /** Inside the session's chain: close an idle agent process for the
@@ -519,9 +530,9 @@ export class ChatRuntime extends EventEmitter {
 
   private withLive(record: SessionRecord): SessionRecord {
     const live = this.live.get(record.id)
-    if (!live) return record
-    live.record.pendingRequests = [...live.pending.keys()]
-    return live.record
+    if (live) { live.record.pendingRequests = [...live.pending.keys()]; record = live.record }
+    const queue = this.messageQueue(record.id)
+    return queue.revision ? { ...record, queue } : record
   }
 
   private requireLive(id: string): LiveSession {
@@ -552,6 +563,7 @@ export class ChatRuntime extends EventEmitter {
 
   private async createSession(request: NewSessionRequest): Promise<SessionRecord> {
     if (this.stopped) throw new ChatError(503, 'the chat runtime is stopping', 'agent_error')
+    if (request.deferStart !== undefined && typeof request.deferStart !== 'boolean') throw new ChatError(400, 'deferStart must be a boolean', 'invalid')
     if (request.autoMerge !== undefined && typeof request.autoMerge !== 'boolean') throw new ChatError(400, 'autoMerge must be a boolean', 'invalid')
     if (!AGENT_IDS.includes(request.agent)) throw new ChatError(400, `unknown agent ${String(request.agent)}`, 'invalid')
     const { agent, model, effort } = await this.resolveModel(request.model, request.effort)
@@ -560,7 +572,7 @@ export class ChatRuntime extends EventEmitter {
     const id = randomUUID()
     if (!local && !/^[^/\s]+\/[^/\s]+$/.test(request.repo!)) throw new ChatError(400, 'repo must be owner/name', 'invalid')
     const branch = normalizeBranchRequest(request.branch ?? { new: `chat/${id}` }, this.branchPrefix())
-    if (agent === 'claude') await this.requireClaudeReady()
+    if (agent === 'claude' && !request.deferStart) await this.requireClaudeReady()
     const checkout = local
       ? await ensureLocalWorkspace(this.options.localWorkspaceRoot ?? LOCAL_CHAT_ROOT, this.instance)
       : canonicalCheckout(await this.resolveCheckout(request.repo!))
@@ -579,7 +591,7 @@ export class ChatRuntime extends EventEmitter {
       title,
       createdAt: now,
       updatedAt: now,
-      status: 'starting',
+      status: request.deferStart ? 'idle' : 'starting',
       capabilities: emptyCapabilities(),
       lastSeq: 0,
       pendingRequests: [],
@@ -590,7 +602,7 @@ export class ChatRuntime extends EventEmitter {
     storage.insertSession(record)
     const live = this.requireLive(record.id)
     this.emit_(record.id, { type: 'session.created', session: record })
-    void this.serialized(live, () => this.startSession(live, { fresh: true })).catch(() => undefined)
+    if (!request.deferStart) void this.serialized(live, () => this.startSession(live, { fresh: true })).catch(() => undefined)
     return live.record
   }
 
@@ -607,9 +619,10 @@ export class ChatRuntime extends EventEmitter {
     try {
       await lease.acquire({ signal: session.lifecycle.signal, onBusy: (busy) => this.reportBusy(session, busy) })
       session.lease = lease
-      if (options.fresh) await this.prepareBranch(session, lease)
+      const fresh = options.fresh || (!record.nativeSessionId && record.branch.provisional && !record.branch.baseSha)
+      if (fresh) await this.prepareBranch(session, lease)
       await this.prepareCheckout(session, lease)
-      if ((options.fresh || options.forkFrom) && record.context?.kind === 'document' && record.context.slug) {
+      if ((fresh || options.forkFrom) && record.context?.kind === 'document' && record.context.slug) {
         session.staged = options.forkFrom
           ? await forkStagedDocument(record.checkout, record.id, record.context.slug, { sessionId: options.forkFrom.id, staged: options.forkFrom.staged })
           : await stageDocument(record.checkout, record.id, record.context.slug)
@@ -685,6 +698,8 @@ export class ChatRuntime extends EventEmitter {
   close(id: string): Promise<SessionRecord> {
     return this.track(async () => {
       const session = this.requireLive(id)
+      pauseQueue(queueOwner(id))
+      this.publishQueue(session)
       session.lifecycle.abort()
       await this.forceStop(session, 'session closed')
       await this.serialized(session, async () => {
@@ -757,6 +772,8 @@ export class ChatRuntime extends EventEmitter {
         interruptedTurnId: undefined,
         orphanNotice: undefined,
         workspace: undefined,
+        queue: undefined,
+        queuedHandoff: undefined,
         staged: undefined, // the fork stages its own copy on start
         branch: { ...source.record.branch, provisional: false },
       }
@@ -946,6 +963,8 @@ export class ChatRuntime extends EventEmitter {
       await this.abandonChange(bridge, id, `the runtime session could not be bound: ${message}`, record.id)
       throw error
     }
+    delegateQueue(source.id, record.id)
+    this.publishQueue(live)
     // Reserved synchronously: the ack goes out with the turn already taken.
     // The agent gets the runbook around the request; the transcript shows
     // the request as the person typed it.
@@ -954,7 +973,7 @@ export class ChatRuntime extends EventEmitter {
     turn.shown = { text: request, attachments: [], mentions: [] }
     const prompt: PromptInput = { text: poiseChangePrompt({ request, branch: prepared.branch, baseSha: prepared.baseSha, workspace: checkout }), attachments: [], mentions: [] }
     void this.serialized(live, () => this.runTurn(live, turn, prompt)).catch(() => undefined)
-    return { session: live.record, change: bound }
+    return { session: this.withLive(live.record), change: bound }
   }
 
   /** The controller's own refusals are shown as they are; an unreachable
@@ -1008,13 +1027,14 @@ export class ChatRuntime extends EventEmitter {
 
   /** Reserve the turn synchronously — before any await — so a second prompt
    *  in the same tick is refused, and persist it before acknowledging. */
-  private reserveTurn(session: LiveSession): RunningTurn {
+  private reserveTurn(session: LiveSession, queueItem?: QueuedMessage): RunningTurn {
     if (session.turn) throw new ChatError(409, 'a turn is already running; Enter steers it', 'turn_in_progress')
     if (session.record.status === 'closed') throw new ChatError(409, 'the session is closed; resume it first', 'no_turn')
     if (session.lifecycle.signal.aborted) throw new ChatError(409, 'the session is closing', 'no_turn')
     const turn: RunningTurn = { id: randomUUID(), callId: null, startedAt: Date.now(), abort: new AbortController(), stopping: false }
+    storage.reserveQueueTurn(session.record.id, turn.id, queueItem?.id)
+    if (queueItem) turn.queueItem = queueItem
     session.turn = turn
-    storage.setOpenTurn(session.record.id, turn.id, null)
     if (session.idleTimer) { clearTimeout(session.idleTimer); session.idleTimer = null }
     return turn
   }
@@ -1022,6 +1042,13 @@ export class ChatRuntime extends EventEmitter {
   prompt(id: string, input: PromptInput): { turnId: string } {
     this.assertAcceptingWork()
     const session = this.requireLive(id)
+    const prompt = this.validatePrompt(id, input)
+    const turn = this.reserveTurn(session)
+    void this.serialized(session, () => this.runTurn(session, turn, prompt)).catch(() => undefined)
+    return { turnId: turn.id }
+  }
+
+  private validatePrompt(id: string, input: PromptInput): PromptInput {
     const text = String(input.text || '').trim()
     if (!text && !input.attachments?.length) throw new ChatError(400, 'prompt is required', 'invalid')
     if (Buffer.byteLength(text, 'utf8') > CHAT_LIMITS.promptBytes) throw new ChatError(413, `prompt exceeds ${CHAT_LIMITS.promptBytes} bytes`, 'invalid')
@@ -1036,10 +1063,152 @@ export class ChatRuntime extends EventEmitter {
       attachments.push({ id: record.id, name: record.name, path: record.path, size: record.size })
     }
     const mentions = (input.mentions ?? []).filter((m) => m && typeof m.path === 'string').slice(0, 50).map((m) => ({ path: m.path }))
-    const turn = this.reserveTurn(session)
-    const prompt = { text, attachments, mentions }
-    void this.serialized(session, () => this.runTurn(session, turn, prompt)).catch(() => undefined)
-    return { turnId: turn.id }
+    return { text, attachments, mentions }
+  }
+
+  // ── Deferred messages ───────────────────────────────────────────────────
+
+  async enqueue(id: string, itemId: string, input: PromptInput, model?: string, effort?: string): Promise<MessageQueue> {
+    this.assertAcceptingWork()
+    const session = this.requireLive(id)
+    if (!UUID_PATTERN.test(itemId)) throw new ChatError(400, 'itemId must be a UUID', 'invalid')
+    return this.control(session, async () => {
+      const prompt = this.validatePrompt(id, input)
+      const target = await this.resolveModel(model || session.record.model, effort)
+      if (!this.ownsSession(id)) throw new ChatError(404, 'unknown session', 'unknown_session')
+      return this.mutateQueue(session, () => enqueueMessage(queueOwner(id), { id: itemId, sourceSessionId: id, prompt, agent: target.agent, model: target.model.identity,
+        effort: target.effort, createdAt: new Date().toISOString(), state: 'waiting' }))
+    })
+  }
+
+  async updateQueue(id: string, itemId: string, model: string, effort?: string): Promise<MessageQueue> {
+    this.assertAcceptingWork()
+    const session = this.requireLive(id)
+    return this.control(session, async () => {
+      const target = await this.resolveModel(model, effort)
+      return this.mutateQueue(session, () => updateQueuedModel(queueOwner(id), itemId, { agent: target.agent, model: target.model.identity, effort: target.effort }))
+    })
+  }
+
+  removeQueue(id: string, itemId: string): MessageQueue {
+    const session = this.requireLive(id)
+    return this.mutateQueue(session, () => removeQueuedMessage(queueOwner(id), itemId))
+  }
+
+  private queueOperation<T>(operation: () => T): T {
+    try { return operation() } catch (error) {
+      if (error instanceof QueueError) throw new ChatError(409, error.message, error.code)
+      throw error
+    }
+  }
+
+  private mutateQueue(session: LiveSession, operation: () => MessageQueue): MessageQueue {
+    const envelope = storage.commitQueueMutation(session.record.id, () => this.queueOperation(operation))
+    session.record.lastSeq = envelope.seq
+    // The durable receipt is authoritative even if a browser disconnected.
+    try { this.emit('event', envelope) } catch { /* reconnect reads the mirror */ }
+    const queue = this.messageQueue(session.record.id)
+    for (const id of [queueOwner(session.record.id), queue.executorSessionId]) {
+      if (id && id !== session.record.id && this.ownsSession(id)) {
+        try { this.emit_(id, { type: 'queue.updated', queue }) } catch { /* REST also includes the committed queue */ }
+      }
+    }
+    return queue
+  }
+
+  private messageQueue(id: string): MessageQueue {
+    const queue = readQueue(queueOwner(id))
+    return this.queueReleaseWait.has(queue.executorSessionId || id) ? { ...queue, waitingForRelease: true } : queue
+  }
+
+  private publishQueue(session: LiveSession): MessageQueue {
+    const owner = queueOwner(session.record.id)
+    const queue = this.messageQueue(session.record.id)
+    if (queue.revision) {
+      this.emit_(session.record.id, { type: 'queue.updated', queue })
+      for (const id of [owner, queue.executorSessionId]) {
+        if (id && id !== session.record.id && this.ownsSession(id)) this.emit_(id, { type: 'queue.updated', queue })
+      }
+    }
+    return queue
+  }
+
+  /** Never called by enqueue. A known completed turn arms the persistent
+   *  queue; execution waits for its lifecycle/lease cleanup to finish. */
+  private scheduleQueue(session: LiveSession): void {
+    const id = session.record.id
+    if (this.stopped || this.recovering || this.drainState || session.lifecycle.signal.aborted || session.record.status === 'closed'
+      || session.record.orphanNotice || session.turn || this.queuePumps.has(id) || this.queueTimers.has(id) || !this.messageQueue(id).ready) return
+    const executor = this.messageQueue(id).executorSessionId
+    if (executor && executor !== id) return
+    this.queuePumps.add(id)
+    let ran = false
+    void this.serialized(session, async () => {
+      if (this.stopped || this.drainState || session.lifecycle.signal.aborted || session.turn || storage.getOpenTurn(id)) return
+      // An isolated implementation hands its checkout to the release
+      // controller after its turn. Never let a follow-up edit that checkout
+      // while checks/build/deployment still own it. This is a wait, not an
+      // extra confirmation; the durable queue continues after deployment.
+      if (session.record.selfChangeId && this.selfUpdate?.configured) {
+        let done = false
+        try {
+          const status = await this.selfUpdate.status()
+          const change = status.changes.find(change => change.id === session.record.selfChangeId)
+          done = !!change && ['live', 'failed', 'blocked', 'reverted', 'superseded'].includes(change.state)
+        } catch { /* retry after the controller is reachable */ }
+        if (!done) {
+          if (!this.queueReleaseWait.has(id)) { this.queueReleaseWait.add(id); this.publishQueue(session) }
+          const timer = setTimeout(() => { this.queueTimers.delete(id); this.scheduleQueue(session) }, 1_000)
+          timer.unref(); this.queueTimers.set(id, timer)
+          return
+        }
+        this.queueReleaseWait.delete(id)
+      }
+      const queue = this.messageQueue(id)
+      const item = queue.ready && queue.items.find(candidate => candidate.state === 'waiting')
+      if (!item || this.stopped || this.drainState || session.turn || session.lifecycle.signal.aborted) return
+      const turn = this.reserveTurn(session, item)
+      ran = true
+      await this.runTurn(session, turn, item.prompt)
+    }).catch(error => {
+      this.emit('log', `[chat queue ${id}] ${error instanceof Error ? error.message : String(error)}`)
+    }).finally(() => {
+      this.queuePumps.delete(id)
+      // runTurn's completion armed the following item while this pump was held.
+      if (ran && !session.turn && !storage.getOpenTurn(id)) this.scheduleQueue(session)
+    })
+  }
+
+  /** A different queued agent is a real native handoff, not a renamed
+   *  model. Keep the Poise conversation, workspace and draft; start a new
+   *  native context with a labelled summary of the actual preceding turns. */
+  private async prepareQueuedAgent(session: LiveSession, turn: RunningTurn): Promise<void> {
+    const item = turn.queueItem!
+    const target = await this.resolveModel(item.model, item.effort)
+    if (target.agent !== item.agent) throw new ChatError(409, 'The queued model now belongs to a different agent.', 'invalid')
+    const record = session.record
+    if (target.agent === 'claude') await this.requireClaudeReady()
+    if (record.agent !== target.agent) {
+      turn.queueContext = this.handoffSummary(record)
+      record.queuedHandoff = turn.queueContext
+      await this.stopProcess(session)
+      record.agent = target.agent
+      record.nativeSessionId = undefined
+      record.capabilities = emptyCapabilities()
+      record.mode = undefined
+      record.modes = undefined
+      record.commands = undefined
+      record.efforts = undefined
+      session.grants.clear()
+    } else if (session.adapter?.alive && (record.model !== item.model || record.effort !== item.effort)) {
+      const result = await session.adapter.setModel(target.model.selector, target.effort)
+      if (result.efforts) record.efforts = result.efforts
+    }
+    record.model = target.model.identity
+    record.modelId = target.model.selector
+    record.effort = target.effort
+    this.saveRecord(session)
+    this.emit_(record.id, { type: 'session.updated', session: record })
   }
 
   /** Stage an uploaded file inside the session's checkout, under the lease.
@@ -1118,16 +1287,24 @@ export class ChatRuntime extends EventEmitter {
    *  from its record (bounded, regular files only, content verified against
    *  the recorded hash) and check every @mention names a real file inside
    *  the checkout. A claim that does not hold fails the turn readably. */
-  private async resolveInput(session: LiveSession, input: PromptInput): Promise<PromptInput> {
+  private async resolveInput(session: LiveSession, input: PromptInput, sourceSessionId = session.record.id): Promise<PromptInput> {
     const checkout = session.record.checkout
     const attachments: Attachment[] = []
     for (const attachment of input.attachments) {
       const record = storage.getAttachment(attachment.id)
-      if (!record || record.sessionId !== session.record.id) throw new Error(`attachment ${attachment.name} is not one of this session's`)
+      if (!record || record.sessionId !== sourceSessionId) throw new Error(`attachment ${attachment.name} is not one of this session's`)
+      const source = sourceSessionId === session.record.id ? session.record : this.get(sourceSessionId)
+      if (!source) throw new Error('The queued attachment source session no longer exists')
       let text: string | undefined
       try {
-        const { bytes } = await readCheckoutBytes(checkout, record.path, CHAT_LIMITS.attachmentBytes)
+        const { bytes } = await readCheckoutBytes(source.checkout, record.path, CHAT_LIMITS.attachmentBytes)
         if (bytes.byteLength !== record.size || sha256Of(bytes) !== record.sha256) throw new Error(`attachment ${record.name} changed on disk since it was uploaded`)
+        if (source.checkout !== checkout) {
+          const target = await resolveInsideCheckout(checkout, record.path)
+          await mkdir(dirname(target.absolute), { recursive: true, mode: 0o700 })
+          await ensureExcluded(checkout)
+          await writeFile(target.absolute, bytes, { mode: 0o600 })
+        }
         text = inlineText(bytes)
       } catch (error) {
         if (error instanceof PathError) throw new Error(`attachment ${record.name} is no longer readable in the checkout (${error.message})`)
@@ -1161,7 +1338,8 @@ export class ChatRuntime extends EventEmitter {
     session.draining = false
     try {
       if (turn.abort.signal.aborted) throw new Error(turn.failure || 'cancelled before it started')
-      if (!session.adapter?.alive) await this.startSession(session)
+      if (turn.queueItem) { this.publishQueue(session); await this.prepareQueuedAgent(session, turn) }
+      if (!session.adapter?.alive) await this.startSession(session, { fresh: !record.nativeSessionId && !record.branch.baseSha && record.branch.provisional })
       const adapter = session.adapter!
       const isFirst = !storage.findEvent(record.id, (e) => e.type === 'turn.started')
       // A change session is titled by its request, not by the runbook's first line.
@@ -1176,7 +1354,7 @@ export class ChatRuntime extends EventEmitter {
         storage.setOpenTurn(record.id, turn.id, turn.callId)
       }
       const nativeInput = await this.composePrompt(session, input, isFirst)
-      this.emit_(record.id, { type: 'turn.started', turnId: turn.id, prompt: turn.shown ?? nativeInput, callId: turn.callId ?? undefined })
+      this.emit_(record.id, { type: 'turn.started', turnId: turn.id, prompt: turn.shown ?? nativeInput, callId: turn.callId ?? undefined, ...(turn.queueItem ? { queueItemId: turn.queueItem.id, agent: record.agent, model: record.model } : {}) })
       started = true
       this.setStatus(session, 'queued')
       // Created after the title settled: the label names what is queued behind.
@@ -1194,7 +1372,7 @@ export class ChatRuntime extends EventEmitter {
         if (!lease.registerWorker({ pid: session.worker.pid, pgid: session.worker.pgid, ident: session.worker.ident })) throw new Error('the checkout lease was lost before the turn started')
         storage.setWorkerLeaseToken(record.id, lease.currentToken)
       }
-      const adapterInput = await this.resolveInput(session, nativeInput)
+      const adapterInput = await this.resolveInput(session, nativeInput, turn.queueItem?.sourceSessionId)
       if (session.staged) {
         const report = await refreshDocument(record.checkout, session.staged)
         if (report.kind === 'refreshed' || report.kind === 'staged') this.saveRecord(session)
@@ -1207,9 +1385,11 @@ export class ChatRuntime extends EventEmitter {
       this.setStatus(session, 'running')
       agentInvoked = true
       turn.agentInvoked = true
+      if (record.queuedHandoff) adapterInput.text = `${record.queuedHandoff}\n\n[Queued task]\n${adapterInput.text}`
       const result = await adapter.prompt(turn.id, withAutoMergeInstructions(adapterInput, record.autoMerge, turn.implementsChange), turn.abort.signal)
       agentSettled = true
-      stopReason = result.stopReason
+      if (record.queuedHandoff && result.stopReason === 'end_turn') { record.queuedHandoff = undefined; this.saveRecord(session) }
+      stopReason = turn.stopping || turn.abort.signal.aborted ? 'cancelled' : result.stopReason
       error = result.error
       usage = result.usage
       terminate = result.terminate === true
@@ -1263,7 +1443,8 @@ export class ChatRuntime extends EventEmitter {
       try {
         const envelope = storage.finalizeTurn(record.id,
           { type: 'turn.finished', turnId: turn.id, stopReason, error, usage, durationMs: Date.now() - turn.startedAt },
-          turn.callId ? { callId: turn.callId, instance: this.instance } : undefined)
+          turn.callId ? { callId: turn.callId, instance: this.instance } : undefined,
+          freed && !turn.stopping && !this.stopped && !session.lifecycle.signal.aborted)
         terminalRecorded = true
         record.lastSeq = envelope.seq
         this.emit('event', envelope)
@@ -1309,7 +1490,9 @@ export class ChatRuntime extends EventEmitter {
         try { await this.settleChange(session, { stopReason, error, freed, terminalRecorded }) }
         catch (failure) { this.emit('log', `[chat ${record.id.slice(0, 8)}] change settlement failed: ${failure instanceof Error ? failure.message : String(failure)}`) }
       }
+      if (terminalRecorded) this.publishQueue(session)
       if (this.drainState) await this.closeForDrain(session).catch(() => undefined)
+      else if (terminalRecorded && freed) this.scheduleQueue(session)
     }
   }
 
@@ -1396,6 +1579,11 @@ export class ChatRuntime extends EventEmitter {
   cancel(id: string): Promise<{ settled: boolean }> {
     return this.track(async () => {
       const session = this.requireLive(id)
+      pauseQueue(queueOwner(id))
+      const timer = this.queueTimers.get(id)
+      if (timer) { clearTimeout(timer); this.queueTimers.delete(id) }
+      this.queueReleaseWait.delete(id)
+      this.publishQueue(session)
       const turn = session.turn
       if (!turn) return { settled: true }
       turn.stopping = true
@@ -1839,6 +2027,9 @@ export class ChatRuntime extends EventEmitter {
   /** Append to the mirror, then broadcast. Throws when the mirror cannot be
    *  written; callers that run on the agent's behalf turn that into a stop. */
   private emit_(sessionId: string, event: ChatEvent): ChatEnvelope {
+    if (event.type === 'session.created' || event.type === 'session.resumed' || event.type === 'session.updated') {
+      event = { ...event, session: this.withLive(event.session) }
+    }
     const envelope = storage.appendEvent(sessionId, event)
     const live = this.live.get(sessionId)
     if (live) live.record.lastSeq = envelope.seq

@@ -252,6 +252,15 @@ open read-only previews, and internal Muse reminder cards are not displayed.
 See [Chat v1](docs/Chat-v1.md) for architecture, recovery, release integration
 and the distinction between automated coverage and live-agent verification.
 
+## Queue follow-ups
+
+Use `/queue <message>` to add a task to the collapsible Queue section above
+the console. Each row chooses its own agent, model and effort. During a turn,
+items wait for its completion; while idle, they wait for the next task you
+send normally, then run one by one. Queueing alone never starts a turn.
+Saved items survive reloads, and Stop preserves the waiting tail.
+See [Queued Chat messages](docs/Queue.md).
+
 ## Improve Poise from Poise
 
 After the one-time release-controller installation, a Poise implementation

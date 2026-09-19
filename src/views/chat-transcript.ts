@@ -12,6 +12,7 @@
 
 import type {
   ChatEnvelope,
+  AgentId,
   ContentBlock,
   PermissionOption,
   PlanEntry,
@@ -23,6 +24,8 @@ import type {
   ToolStatus,
   TurnUsage,
 } from '../../server/chat/protocol'
+import { AGENT_LABELS } from '../../server/chat/protocol'
+import { consoleModelLabel } from '../chat-catalog'
 import { renderMarkdown, escapeHtml } from '../markdown'
 
 // ── Model ──────────────────────────────────────────────────────────────────
@@ -83,6 +86,9 @@ export type TurnItem = TextItem | ThoughtItem | ToolItem | PlanItem | Permission
 export interface TurnModel extends Keyed {
   turnId: string
   prompt: PromptInput
+  queueItemId?: string
+  agent?: AgentId
+  model?: string
   startedAt: string
   items: TurnItem[]
   /** Set locally the moment a prompt is sent, cleared when turn.started lands. */
@@ -181,9 +187,12 @@ export function applyEvent(model: TranscriptModel, env: ChatEnvelope): void {
     case 'turn.started': {
       // The optimistic turn for this prompt becomes the real one.
       dropOptimisticTurns(model)
-      const turn: TurnModel = { key: `turn:${e.turnId}`, rev: 0, turnId: e.turnId, prompt: e.prompt, startedAt: at, items: [] }
+      const turn: TurnModel = { key: `turn:${e.turnId}`, rev: 0, turnId: e.turnId, prompt: e.prompt, startedAt: at, items: [], queueItemId: e.queueItemId, agent: e.agent, model: e.model }
       const existing = model.turns.get(e.turnId)
       if (existing) {
+        existing.queueItemId = e.queueItemId
+        existing.agent = e.agent
+        existing.model = e.model
         existing.prompt = e.prompt
         existing.startedAt = at
         model.running = existing
@@ -538,7 +547,8 @@ export function createTranscriptView(container: HTMLElement, handlers: Transcrip
     for (const a of p.attachments || []) extras.push(`<span class="chat-turn-extra" title="${escapeHtml(a.path)}">${escapeHtml(a.name)}</span>`)
     for (const m of p.mentions || []) extras.push(`<span class="chat-turn-extra chat-turn-mention">@${escapeHtml(m.path)}</span>`)
     const extrasHtml = extras.length ? `<div class="chat-turn-extras">${extras.join('')}</div>` : ''
-    return `<div class="chat-msg chat-msg-user"><div class="chat-msg-body">${escapeHtml(p.text)}${extrasHtml}</div></div>`
+    const queued = turn.queueItemId ? `<div class="chat-turn-queued">From queue${turn.agent ? ` · ${escapeHtml(AGENT_LABELS[turn.agent])}` : ''}${turn.model ? ` · ${escapeHtml(consoleModelLabel(turn.model))}` : ''}</div>` : ''
+    return `${queued}<div class="chat-msg chat-msg-user"><div class="chat-msg-body">${escapeHtml(p.text)}${extrasHtml}</div></div>`
   }
 
   function textHtml(item: TextItem): string {
@@ -791,7 +801,7 @@ export function createTranscriptView(container: HTMLElement, handlers: Transcrip
         // and the turn holding the request; both sit in the item revisions,
         // so a turn renders when its rev moved or the context did.
         const isLast = b.key === lastTurnKey
-        if (setRev(b.key, b.turn.rev) || ctxChanged || isLast) renderTurn(el, b.turn, ctx, focused, isLast)
+        if (setRev(b.key, b.turn.rev) || ctxChanged || isLast) renderTurn(el, b.turn, b.turn.agent ? { ...ctx, agent: b.turn.agent } : ctx, focused, isLast)
       } else if (setRev(b.key, b.rev)) {
         el.innerHTML = b.kind === 'error'
           ? `<div class="chat-msg chat-msg-agent chat-msg-error"><div class="chat-msg-body">${escapeHtml(b.message)}</div></div>`
