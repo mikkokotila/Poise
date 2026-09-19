@@ -21,6 +21,7 @@ import type {
   SessionRecord,
   AgentId,
   PoiseChangeAck,
+  AutoMergeAck,
 } from '../server/chat/protocol'
 import type { SelfChange, SelfUpdateStatus } from './self-update-types'
 import { parseChange, parseSelfUpdateStatus } from './self-update-state'
@@ -425,6 +426,12 @@ export class ChatClient {
 
   fetchSession(id: string, after: number): Promise<{ session: SessionRecord, events: ChatEnvelope[], truncated?: boolean }> {
     return jsonFetch(`/api/chat/sessions/${encodeURIComponent(id)}?after=${after}`)
+  }
+
+  async setAutoMerge(sessionId: string, enabled: boolean): Promise<AutoMergeAck> {
+    const result = await this.send({ type: 'set_auto_merge', sessionId, enabled }) as AutoMergeAck | undefined
+    if (result?.session?.id !== sessionId || typeof result.session.autoMerge !== 'boolean') throw new Error('The server did not confirm the Auto-merge setting')
+    return result
   }
 
   renameSession(id: string, title: string): Promise<{ session: SessionRecord }> {

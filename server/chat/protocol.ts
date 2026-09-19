@@ -84,6 +84,8 @@ export interface SessionRecord {
   /** The self-update change this session implements (`workspaceKind` is
    *  `poise-change`). Its first turn's settlement is reported to the controller. */
   selfChangeId?: string
+  /** User-enabled, session-scoped delegation to finish and merge the requested PRs in any repository. Missing means off. */
+  autoMerge?: boolean
   branch: BranchBinding
   title: string
   createdAt: string
@@ -254,7 +256,7 @@ export type ChatEvent =
   | { type: 'diff.reverted', diffId: string, path: string, ok: boolean, error?: string }
   | { type: 'plan.updated', turnId: string, entries: PlanEntry[], explanation?: string }
   | { type: 'permission.requested', id: string, turnId: string, toolId?: string, title: string, description?: string, input?: unknown, options: PermissionOption[] }
-  | { type: 'permission.resolved', id: string, optionId: string, by: 'user' | 'session' | 'cancelled' }
+  | { type: 'permission.resolved', id: string, optionId: string, by: 'user' | 'session' | 'auto_merge' | 'cancelled' }
   | { type: 'question.asked', id: string, turnId: string, toolId?: string, questions: Question[] }
   | { type: 'question.answered', id: string, answers: Record<string, string | string[]>, by: 'user' | 'cancelled' }
   | { type: 'commands.updated', commands: CommandOption[] }
@@ -288,6 +290,7 @@ export interface NewSessionRequest {
   context?: SessionContext
   /** Explicit fallback choice when the default provider is not signed in. */
   fallbackModel?: string
+  autoMerge?: boolean
 }
 
 export type ChatCommand =
@@ -307,12 +310,15 @@ export type ChatCommand =
   | { type: 'question.answer', sessionId: string, id: string, answers: Record<string, string | string[]> }
   | { type: 'set_model', sessionId: string, model: string, effort?: string }
   | { type: 'set_mode', sessionId: string, mode: string }
+  | { type: 'set_auto_merge', sessionId: string, enabled: boolean }
   | { type: 'revert', sessionId: string, diffId: string }
   /** Implement and auto-release one Poise change. Only ever sent by the
    *  browser for a typed `/poise …` message; `changeId` is minted once per
    *  request so a resend after an in-doubt answer never starts a second
    *  change. The ack is a `PoiseChangeAck`. */
   | { type: 'poise.change', sessionId: string, text: string, changeId: string }
+
+export interface AutoMergeAck { session: SessionRecord, applies: 'current_turn' | 'next_turn', warning?: string }
 
 export type ChatCommandType = ChatCommand['type']
 

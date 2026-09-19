@@ -68,8 +68,8 @@ async function installRoutes(page: Page, state: ServerState): Promise<void> {
     if (path === '/api/chat/sessions' && method === 'GET') { await route.fulfill({ json: { sessions: state.sessions, instance: 'poise-dev:test' } }); return }
     if (path === '/api/chat/sessions' && method === 'POST') {
       if (state.createDelay) await state.createDelay()
-      const req2 = body as { agent: SessionRecord['agent'], model: string, effort: string }
-      const created = session({ id: `new-${state.sessions.length + 1}`, agent: req2.agent, model: req2.model, effort: req2.effort,
+      const req2 = body as { agent: SessionRecord['agent'], model: string, effort: string, autoMerge?: boolean }
+      const created = session({ id: `new-${state.sessions.length + 1}`, agent: req2.agent, model: req2.model, effort: req2.effort, autoMerge: req2.autoMerge,
         repo: '', checkout: '/poise/.poise-chat/workspace', workspaceKind: 'poise-local', title: '', status: 'starting', createdAt: new Date().toISOString(),
         branch: { name: 'chat/generated', origin: 'new', provisional: true } })
       state.sessions.unshift(created)
@@ -107,7 +107,7 @@ interface Socket {
   held: ClientFrame[]
   seq: number
   push(sessionId: string, event: ChatEvent): ChatEnvelope
-  ack(frame: ClientFrame, ok?: boolean, error?: string, code?: string): void
+  ack(frame: ClientFrame, ok?: boolean, error?: string, code?: string, result?: unknown): void
   ready(): Promise<void>
   /** Resolves once the page has subscribed to the session, so pushed
    *  events are not dropped as belonging to nobody. */
@@ -115,7 +115,7 @@ interface Socket {
   framesOf(type: string): ClientFrame[]
 }
 
-async function installSocket(page: Page): Promise<Socket> {
+async function installSocket(page: Page, state?: ServerState): Promise<Socket> {
   const sock: Socket = {
     frames: [], ws: null, autoAck: true, held: [], seq: 0,
     push(sessionId, event) {
@@ -123,8 +123,8 @@ async function installSocket(page: Page): Promise<Socket> {
       sock.ws!.send(JSON.stringify({ kind: 'event', envelope }))
       return envelope
     },
-    ack(frame, ok = true, error = 'failed', code) {
-      sock.ws!.send(JSON.stringify(ok ? { kind: 'ack', id: frame.id, ok: true } : { kind: 'ack', id: frame.id, ok: false, error, code }))
+    ack(frame, ok = true, error = 'failed', code, result) {
+      sock.ws!.send(JSON.stringify(ok ? { kind: 'ack', id: frame.id, ok: true, result } : { kind: 'ack', id: frame.id, ok: false, error, code }))
     },
     async ready() { await expect.poll(() => sock.ws !== null).toBe(true) },
     async subscribed(sessionId) {
@@ -138,7 +138,14 @@ async function installSocket(page: Page): Promise<Socket> {
     ws.onMessage((message) => {
       const frame = JSON.parse(String(message)) as ClientFrame
       sock.frames.push(frame)
-      if (sock.autoAck) sock.ack(frame)
+      if (sock.autoAck && frame.command.type === 'set_auto_merge' && state) {
+        const command = frame.command
+        const s = state.sessions.find(s => s.id === command.sessionId)!
+        s.autoMerge = command.enabled
+        s.lastSeq = sock.seq + 1
+        sock.push(s.id, { type: 'session.updated', session: { ...s } })
+        sock.ack(frame, true, '', undefined, { session: { ...s }, applies: 'current_turn' })
+      } else if (sock.autoAck) sock.ack(frame)
       else sock.held.push(frame)
     })
   })
@@ -1317,4 +1324,103 @@ test('shows file-preview errors and ignores late responses after closing', async
   await page.keyboard.press('Escape')
   release()
   await expect(preview).toBeHidden()
+})
+
+test('Auto-merge is the rightmost icon, follows the selected session, and persists through reload without sending a prompt', async ({ page }) => {
+  const state = makeState([session(), session({ id: 's2', title: 'Other repository', repo: 'acme/tools' })])
+  await installRoutes(page, state)
+  const sock = await installSocket(page, state)
+  await page.goto('/')
+  await sock.subscribed('s1')
+  const toggle = page.getByRole('button', { name: 'Auto-merge', exact: true })
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  await expect(toggle.locator('svg')).toHaveCount(1)
+  expect(await toggle.textContent()).toBe('')
+  expect(await toggle.evaluate(el => el.parentElement?.lastElementChild === el)).toBe(true)
+  await input(page).fill('Keep this draft')
+  await toggle.focus()
+  await toggle.press('Space')
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  await expect(toggle).toBeFocused()
+  expect(sock.framesOf('set_auto_merge')[0].command).toEqual({ type: 'set_auto_merge', sessionId: 's1', enabled: true })
+  await expect(input(page)).toHaveValue('Keep this draft')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  await page.locator('.chat-session-item[data-id="s2"]').click()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  await page.locator('.chat-session-item[data-id="s1"]').click()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  await page.reload()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  state.sessions[0].status = 'running'
+  sock.push('s1', { type: 'status.changed', status: 'running' })
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('Auto-merge can be chosen in the fresh console before sending a Poise batch, without routing it to the single-change controller', async ({ page }) => {
+  const state = makeState([])
+  await installRoutes(page, state)
+  const sock = await installSocket(page, state)
+  await page.goto('/')
+  const toggle = page.getByRole('button', { name: 'Auto-merge', exact: true })
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  expect(state.calls.filter(c => c.method === 'POST')).toHaveLength(0)
+  await page.reload()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  const text = 'Add a search box to the session list in Poise. Complete and merge all the slices.'
+  await input(page).fill(text)
+  await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(state.calls.find(c => c.method === 'POST' && c.path === '/api/chat/sessions')?.body).toMatchObject({ autoMerge: true, agent: 'claude', model: 'opus-5-high' })
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ text, sessionId: 'new-1' })
+  expect(sock.framesOf('poise.change')).toHaveLength(0)
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  expect(await page.evaluate(() => sessionStorage.getItem('poise-chat-fresh-auto-merge'))).toBeNull()
+  await page.screenshot({ path: test.info().outputPath('auto-merge-light.png') })
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'dark' })
+  await page.screenshot({ path: test.info().outputPath('auto-merge-dark.png') })
+})
+
+test('Auto-merge waits for its acknowledgement and preserves a message when the setting fails', async ({ page }) => {
+  const state = makeState([session()])
+  await installRoutes(page, state)
+  const sock = await installSocket(page, state)
+  await page.goto('/')
+  await sock.subscribed('s1')
+  sock.autoAck = false
+  await input(page).fill('Complete the next PRs')
+  const toggle = page.getByRole('button', { name: 'Auto-merge', exact: true })
+  await toggle.click()
+  await expect(toggle).toBeDisabled()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  await input(page).press('Enter')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  sock.ack(sock.framesOf('set_auto_merge')[0], false, 'Connection refused', 'unavailable')
+  await expect(toggle).toBeEnabled()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  await expect(page.locator('.chat-notice')).toContainText('Auto-merge failed')
+  await expect(input(page)).toHaveValue('Complete the next PRs')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('Auto-merge keeps a late acknowledgement bound to the original session', async ({ page }) => {
+  const state = makeState([session(), session({ id: 's2', title: 'Second' })])
+  await installRoutes(page, state)
+  const sock = await installSocket(page, state)
+  await page.goto('/')
+  await sock.subscribed('s1')
+  sock.autoAck = false
+  const toggle = page.getByRole('button', { name: 'Auto-merge', exact: true })
+  await toggle.click()
+  await page.locator('.chat-session-item[data-id="s2"]').click()
+  await expect(page.locator('.chat-session-item.active')).toContainText('Second')
+  const updated = { ...state.sessions[0], autoMerge: true, lastSeq: 1 }
+  sock.ack(sock.framesOf('set_auto_merge')[0], true, '', undefined, { session: updated, applies: 'next_turn' })
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+  await expect(page.locator('.chat-session-item.active')).toContainText('Second')
+  await page.locator('.chat-session-item[data-id="s1"]').click()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
 })
