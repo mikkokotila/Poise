@@ -10,7 +10,7 @@ export interface PoiseCommand {
   /** The implementation request, trimmed. Empty when only the prefix was typed. */
   request: string
   /** Which spelling was used, for the notice text. */
-  form: 'slash' | 'prefix'
+  form: 'slash' | 'prefix' | 'natural'
 }
 
 const SLASH = /^\/poise(?=\s|$)([\s\S]*)$/i

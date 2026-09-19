@@ -30,6 +30,7 @@ import { attachChatSidebar } from './chat-sidebar'
 import { createFilePreview } from './chat-file-preview'
 import { ICON_FORK, ICON_HANDOFF, ICON_ACTIVITY } from './chat-icons'
 import { createDeployCard, type DeployCard, type LocalPendingChange } from './chat-deploy-card'
+import { recognisePoiseRequest } from '../poise-request-intent'
 import { parsePoiseCommand, reconcilePendingChanges, releaseChangeId, reserveChangeId, type PoiseCommand } from '../self-update-command'
 import { isTerminal, nextPollDelay, POLL_ACTIVE_MS, POLL_IDLE_MS, selectChangeForSession } from '../self-update-state'
 import { takeDraftSnapshot, type DraftSnapshot } from '../self-update-drafts'
@@ -823,7 +824,13 @@ function renderDeployCard(): void {
 }
 
 async function sendPrompt(draft: ComposerDraft): Promise<void> {
-  const poise = parsePoiseCommand(draft.text)
+  const current = entry()?.record
+  const explicit = parsePoiseCommand(draft.text)
+  const natural = explicit ? null : recognisePoiseRequest(draft.text, { poiseChangeSession: current?.workspaceKind === 'poise-change' })
+  // Vocabulary alone must not reinterpret work on another repository as a
+  // Poise request. An explicit Poise target still means what the user wrote.
+  const otherRepository = !!current?.repo && current.repo.toLowerCase() !== 'mikkokotila/poise'
+  const poise = explicit || (natural && (!otherRepository || natural.cue === 'explicit') ? natural : null)
   if (poise) { await startPoiseChange(poise, draft); return }
   let e = entry()
   if (!e || e.pending) {
@@ -850,8 +857,7 @@ async function sendPrompt(draft: ComposerDraft): Promise<void> {
   queueRender()
   try {
     await chatClient.send({ type: 'prompt', sessionId: e.record.id, ...prompt })
-    // A natural-language request can become a change server-side without the
-    // shortcut; ask for its status soon rather than at the next idle interval.
+    // Keep status current for a session linked to an existing Poise change.
     if (activeId === e.record.id) scheduleSelfPoll(POLL_ACTIVE_MS)
   } catch (err) {
     dropOptimisticTurns(e.model)
