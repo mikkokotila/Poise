@@ -1,3 +1,4 @@
+import { memorySuffix } from '../memory-content'
 // Codex adapter: one `codex app-server --listen stdio://` process per session,
 // speaking the v2 app-server JSON-RPC protocol (codex-cli 0.154.0, types under
 // server/chat/generated/codex — regenerate with `codex app-server generate-ts`).
@@ -843,6 +844,8 @@ export function createCodexAdapter(host: AdapterHost): Adapter {
       if (path) parts.push({ type: 'mention', name: basename(path), path })
       else host.log(`${LABEL}: dropping mention outside the checkout: ${mention.path}`)
     }
+    const suffix = memorySuffix(input.memories)
+    if (suffix) parts.push({ type: 'text', text: suffix, text_elements: [] })
     return parts
   }
 

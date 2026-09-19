@@ -257,6 +257,8 @@ export interface Mention {
 }
 
 export interface PromptInput {
+  /** Runtime-only appendix; browsers cannot set it. Serialized last by every adapter. */
+  memories?: string
   text: string
   attachments: Attachment[]
   mentions: Mention[]

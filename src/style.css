@@ -5962,3 +5962,40 @@ body:has(#view-chat:not([hidden])) #app { padding-bottom: 0; }
   .chat-empty-session:has(.chat-message-queue:not([hidden])) .chat-v-composer .chat-input { min-height: 64px; }
 }
 @media (prefers-reduced-motion: reduce) { .chat-queue-chevron { transition: none; } }
+
+/* Memories: a quiet, persistent right-hand writing pane. */
+.chat-layout { position: relative; }
+.chat-h-memories { flex: 0 0 28px; }
+.chat-h-fresh .chat-h-memories { pointer-events: auto; }
+.chat-h-memories:focus-visible { outline: 1px solid var(--text-secondary); outline-offset: 2px; }
+.chat-h-memories.has-error { color: var(--a4); }
+.chat-memories-pane {
+  flex: 0 0 auto; width: 0; min-width: 0; overflow: hidden;
+  opacity: 0; visibility: hidden; background: var(--bg);
+  transition: width .32s cubic-bezier(.2,0,0,1), opacity .22s ease, visibility .32s;
+}
+.chat-memories-open .chat-memories-pane { width: 320px; opacity: 1; visibility: visible; }
+.chat-memories-inner {
+  display: flex; flex-direction: column; gap: var(--sp-3); height: 100%;
+  width: 320px; padding: var(--sp-4); border-left: var(--b-hair);
+}
+.chat-memories-heading { display: flex; align-items: center; justify-content: space-between; color: var(--text-secondary); font-size: .8125rem; font-weight: 600; }
+.chat-memories-help { margin: 0; font-size: .6875rem; line-height: 1.5; color: var(--text-tertiary); }
+.chat-memories-text {
+  flex: 1 1 auto; min-height: 100px; width: 100%; padding: var(--sp-3); resize: none;
+  font: inherit; font-size: .8125rem; line-height: 1.65; color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--hairline) 45%, transparent);
+  border-radius: var(--r-sm); background: transparent; outline: none;
+}
+.chat-memories-text:focus { border-color: var(--hairline); }
+.chat-memories-text::placeholder { color: var(--text-tertiary); }
+.chat-memories-footer { display: flex; align-items: center; gap: var(--sp-2); }
+.chat-memories-status { flex: 1; font-size: .6875rem; line-height: 1.5; color: var(--text-tertiary); }
+.chat-memories-status.error { color: var(--a4); }
+.chat-memories-retry[hidden] { display: none; }
+@media (max-width: 1000px) {
+  .chat-memories-pane { position: absolute; right: 0; top: 0; bottom: 0; z-index: 40; }
+  .chat-memories-open .chat-memories-pane { width: min(360px, calc(100% - 24px)); }
+  .chat-memories-inner { width: min(360px, calc(100vw - 24px)); }
+}
+@media (prefers-reduced-motion: reduce) { .chat-memories-pane { transition: none; } }

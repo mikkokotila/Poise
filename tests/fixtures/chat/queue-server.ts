@@ -25,6 +25,7 @@ git('config', 'core.hooksPath', '/dev/null')
 await writeFile(join(checkout, 'README.md'), '# Isolated latency fixture\n')
 git('add', 'README.md'); git('commit', '-q', '-m', 'fixture')
 const nativeFrames: Array<{ at: number, text: string }> = []
+const nativeInputs: unknown[] = []
 let spawnCount = 0
 const runtime = new ChatRuntime({
   instance: 'latency-fixture', instanceLabel: 'test', callerTurns: null,
@@ -50,6 +51,17 @@ const runtime = new ChatRuntime({
         } catch { /* partial/non-protocol diagnostic */ }
       }
     })
+    // Test-only capture of the serialized human message, after all adapters.
+    const write = child.stdin!.write.bind(child.stdin!)
+    let outgoing = ''
+    child.stdin!.write = ((chunk: any, ...rest: any[]) => {
+      outgoing += String(chunk)
+      const lines = outgoing.split('\n'); outgoing = lines.pop() || ''
+      for (const line of lines) {
+        try { const frame = JSON.parse(line); if (frame.method === 'session/prompt') nativeInputs.push(frame.params.prompt) } catch { /* partial frame */ }
+      }
+      return (write as any)(chunk, ...rest)
+    }) as typeof write
     return child
   } }) },
 })
@@ -65,7 +77,7 @@ const server = createServer((req, res) => {
   void (async () => {
     enforceApiRequest(req)
     const path = (req.url || '/').split('?')[0]
-    if (path === '/__test__/timings') return json(res, { nativeFrames, spawnCount, live, sessionId: record.id, session: runtime.get(record.id), events: runtime.events(record.id, 0).events })
+    if (path === '/__test__/timings') return json(res, { nativeFrames, nativeInputs, spawnCount, live, sessionId: record.id, session: runtime.get(record.id), events: runtime.events(record.id, 0).events })
     if (path === '/api/settings') return json(res, { org: 'fixture', me: 'test', timezone: 'UTC', models: {}, chat: { branchPrefix: 'chat/', idleTimeoutMinutes: 0 } })
     if (path === '/api/claude-auth') return json(res, { status: 'authenticated', reason: null, loginInProgress: false })
     if (path === '/api/models') return json(res, { catalog: CATALOG, places: [], fixed: [], refresh: null })

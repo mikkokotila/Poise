@@ -145,3 +145,18 @@ cross-agent handoffs retain the workspace boundary. An isolated Poise change
 keeps its checkout exclusive to the release controller until that release
 settles, then allows queued follow-ups. Queueing neither broadens credentials
 nor changes the session's explicit Auto-merge delegation.
+
+## Shared Chat memories
+
+Memories are user-authored context stored in Poise's private SQLite metadata,
+not a repository file or an agent-managed native memory store. The same-origin
+GET/PUT endpoint uses transactional revision checks to prevent silent stale-tab
+overwrites. Text is preserved verbatim with a 64 KiB UTF-8 limit. Browser drafts
+are retained on save failures; message dispatch waits for outstanding edits.
+
+Only the runtime supplies the memory appendix, after parsing the original
+request and validating attachments. Memories do not toggle Auto-merge, select
+repositories, or independently authorize a self-release. All four native
+adapters place them after other human-message content. As prompt content they
+are sent to the selected provider and may remain in its native conversation;
+clearing memories affects future messages, not historical provider context.

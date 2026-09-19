@@ -23,6 +23,7 @@ import { chatClient, ChatCommandError, ChatHttpError, type AgentsResponse, type 
 import { escapeHtml } from '../markdown'
 import { reserveQueuedMessage, releaseQueuedMessage } from '../chat-queue'
 import { createQueuePanel } from './chat-queue'
+import { createMemoriesPane } from './chat-memories'
 import { renderNewSessionDialog } from './chat-new-session'
 import {
   createModel, applyEvent, addOptimisticTurn, dropOptimisticTurns, focusedPending, createTranscriptView, pickQuestionOption,
@@ -32,7 +33,7 @@ import { createComposer, emptyDraft, type Composer, type ComposerDraft } from '.
 import { quickSessionRequest, QUICK_SESSION_MODEL, consoleModelLabel } from '../chat-catalog'
 import { attachChatSidebar } from './chat-sidebar'
 import { createFilePreview } from './chat-file-preview'
-import { ICON_FORK, ICON_HANDOFF, ICON_ACTIVITY, ICON_AUTO_MERGE } from './chat-icons'
+import { ICON_FORK, ICON_HANDOFF, ICON_ACTIVITY, ICON_AUTO_MERGE, ICON_MEMORIES } from './chat-icons'
 import { createDeployCard, type DeployCard, type LocalPendingChange } from './chat-deploy-card'
 import { recognisePoiseRequest } from '../poise-request-intent'
 import { parsePoiseCommand, reconcilePendingChanges, releaseChangeId, reserveChangeId, type PoiseCommand } from '../self-update-command'
@@ -72,6 +73,8 @@ let noticeEl: HTMLElement
 let transcript: TranscriptView
 let composer: Composer
 let filePreview: ReturnType<typeof createFilePreview>
+let memories: ReturnType<typeof createMemoriesPane>
+let memorySubmissions = 0
 let messageQueue: ReturnType<typeof createQueuePanel>
 let queueAddChain: Promise<void> = Promise.resolve()
 const pendingQueueItems = new Map<string, { sessionId: string | null, item: QueuedMessage }>()
@@ -246,8 +249,8 @@ function renderShell(): void {
   transcriptEl.addEventListener('chat:rerender', () => queueRender())
 
   composer = createComposer({
-    onSend: (draft) => { void sendPrompt(draft) },
-    onQueue: (draft) => { queueDraft(draft) },
+    onSend: (draft) => { void withSavedMemories(draft, () => sendPrompt(draft)) },
+    onQueue: (draft) => { void withSavedMemories(draft, () => queueDraft(draft)) },
     loadModels: async () => {
       const catalogue = await loadAgents(true)
       if (!catalogue) throw new Error('Could not load the model catalogue')
@@ -259,10 +262,10 @@ function renderShell(): void {
       setNotice(null)
       composerStateFor(null)
     },
-    onSteer: (text) => { void steer(text) },
+    onSteer: (text) => { void withSavedMemories({ ...emptyDraft(), text }, () => steer(text)) },
     onStop: () => { void cancelTurn() },
     onResume: () => { void resumeActive() },
-    onCommand: (name, arg) => { void runOwnCommand(name, arg) },
+    onCommand: (name, arg) => { void withSavedMemories({ ...emptyDraft(), text: arg, mode: name }, () => runOwnCommand(name, arg)) },
     prepareUpload: async () => (await ensureQuickSession()).record.id,
     upload: async (file, sessionId) => {
       const attachment = await chatClient.uploadAttachment(sessionId, file)
@@ -294,6 +297,9 @@ function renderShell(): void {
   layoutObserver.observe(mainEl)
   layoutObserver.observe(dockEl)
 
+  memories = createMemoriesPane(viewEl, queueRender)
+  viewEl.querySelector('.chat-layout')!.append(memories.el)
+  memories.mount()
   attachSidebar()
   attachHeader()
   attachKeys()
@@ -308,6 +314,8 @@ function renderShell(): void {
 function attachReloadGuards(): void {
   registerReloadGuard(() => {
     const blockers: string[] = []
+    if (memories.editor.state.dirty) blockers.push('unsaved:memories')
+    if (memories.editor.state.saving || memorySubmissions) blockers.push('saving:memories')
     if (chatClient.pendingCount() > 0) blockers.push('command')
     if (composer.isUploading()) blockers.push('upload')
     if (quickSessionPromise || firstPromptPending) blockers.push('session-create')
@@ -621,6 +629,25 @@ function onEvent(env: ChatEnvelope): void {
 }
 
 // ── Commands ───────────────────────────────────────────────────────────────
+
+/** Flush memories before dispatch; a failure preserves the submitted draft. */
+async function withSavedMemories(draft: ComposerDraft, dispatch: () => void | Promise<void>): Promise<void> {
+  if (!memories.editor.state.dirty && !memories.editor.state.saving) { await dispatch(); return }
+  const origin = activeId
+  memorySubmissions++
+  try {
+    await memories.editor.flush()
+    if (origin !== activeId) throw new Error('The selected session changed while memories were saving.')
+    await dispatch()
+  } catch (error) {
+    const target = origin ? sessions.get(origin) : null
+    const current = origin === activeId ? composer.getDraft() : target?.draft
+    const kept = current?.text ? { ...draft, text: `${draft.text}\n\n${current.text}`, attachments: [...draft.attachments, ...current.attachments], mentions: [...draft.mentions, ...current.mentions] } : draft
+    if (origin === activeId) { composer.setDraft(kept); setNotice(`Message not sent — ${(error as Error).message}`) }
+    else if (target) { target.draft = kept; target.error = `Message not sent — ${(error as Error).message}` }
+    else freshDraft = kept
+  } finally { memorySubmissions--; queueRender() }
+}
 
 function commandFailed(err: unknown, what: string): void {
   const code = err instanceof ChatCommandError ? err.code : undefined
@@ -1151,6 +1178,7 @@ async function handoff(agent: AgentId, model: string, effort?: string): Promise<
   const e = entry()
   if (!e) return
   try {
+    await memories.editor.flush()
     const r = await chatClient.handoffSession(e.record.id, { agent, model, effort })
     upsertRecord(r.session)
     await selectSession(r.session.id)
@@ -1179,7 +1207,9 @@ function renderHeader(): void {
   if (html === lastHeaderHtml) return
   lastHeaderHtml = html
   headerEl.hidden = !html
+  const focusMemories = !!document.activeElement?.closest('.chat-h-memories')
   headerEl.innerHTML = html
+  if (focusMemories) headerEl.querySelector<HTMLButtonElement>('.chat-h-memories')?.focus()
 }
 
 function autoMergeButton(enabled: boolean, pending = false): string {
@@ -1204,6 +1234,7 @@ async function toggleAutoMerge(): Promise<void> {
   const hadFocus = !!document.activeElement?.closest('.chat-h-auto-merge')
   const update = (async (): Promise<boolean> => {
     try {
+      await memories.editor.flush()
       const result = await chatClient.setAutoMerge(id, enabled)
       // Do not replace a newer update received from another tab with an old ack.
       if (result.session.lastSeq >= e.record.lastSeq) upsertRecord(result.session)
@@ -1228,9 +1259,15 @@ async function toggleAutoMerge(): Promise<void> {
   await update
 }
 
+function memoriesButton(): string {
+  const open = memories?.open ?? false
+  const error = memories?.editor.state.error
+  return `<button type="button" class="chat-icon-btn chat-h-memories${error ? ' has-error' : ''}" aria-label="Memories" aria-controls="chat-memories-pane" aria-expanded="${open}" aria-pressed="${open}" title="${error ? 'Memories have unsaved changes' : 'Edit memories included last in every Chat message'}">${ICON_MEMORIES}</button>`
+}
+
 function headerHtml(): string {
   const e = entry()
-  if (!e) return `<div class="chat-h-row chat-h-fresh"><span class="chat-controls-spacer"></span>${autoMergeButton(freshAutoMerge, !!quickSessionPromise || firstPromptPending)}</div>`
+  if (!e) return `<div class="chat-h-row chat-h-fresh"><span class="chat-controls-spacer"></span>${autoMergeButton(freshAutoMerge, !!quickSessionPromise || firstPromptPending)}${memoriesButton()}</div>`
   const s = e.record
   const agent = agentFor(s.agent)
   const between = !isRunning(s.status) && s.status !== 'starting' && s.status !== 'closed'
@@ -1258,6 +1295,7 @@ function headerHtml(): string {
       <button type="button" class="chat-icon-btn chat-h-activity" aria-label="${showActivity ? 'Hide activity' : 'Show activity'}" title="${showActivity ? 'Hide' : 'Show'} thinking and tool activity" aria-pressed="${showActivity}" aria-controls="chat-transcript">${ICON_ACTIVITY}</button>
       ${others.length ? `<span class="chat-h-handoff-wrap"><button type="button" class="chat-icon-btn chat-h-handoff" title="Hand off to another agent" aria-label="Hand off…" aria-haspopup="true" aria-expanded="${handoffOpen}">${ICON_HANDOFF}</button>${handoffOpen ? handoffMenu(others) : ''}</span>` : ''}
       ${autoMergeButton(s.autoMerge === true, e.pending || autoMergeUpdates.has(s.id))}
+      ${memoriesButton()}
     </div>
     ${s.orphanNotice ? `<div class="st-help st-help-error">${escapeHtml(s.orphanNotice)}</div>` : ''}
   `
@@ -1294,6 +1332,7 @@ function attachHeader(): void {
   headerEl.addEventListener('click', (e) => {
     const t = e.target as HTMLElement
     if (t.closest('.chat-h-stop')) { void cancelTurn(); return }
+    if (t.closest('.chat-h-memories')) { memories.toggle(); renderHeader(); return }
     if (t.closest('.chat-h-auto-merge')) { void toggleAutoMerge(); return }
     if (t.closest('.chat-h-activity')) {
       showActivity = !showActivity

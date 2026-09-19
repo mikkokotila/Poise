@@ -1,3 +1,4 @@
+import { appendMemories } from '../memory-content'
 // Muse adapter: one `muse serve` process per session, speaking the Muse
 // Session Protocol (MSP v1, Muse 1.3.0; types in server/chat/generated/muse/
 // msp.d.ts — regenerate with `muse schema generate-ts`).
@@ -964,7 +965,7 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
       else host.log(`${LABEL}: dropping mention outside the checkout: ${mention.path}`)
     }
     if (references.length) text += `\n\nReferenced files:\n${references.map((path) => `- ${path}`).join('\n')}`
-    return [{ type: 'text', text }]
+    return [{ type: 'text', text: appendMemories(text, input.memories) }]
   }
 
   async function interrupt(turn: ActiveTurn): Promise<void> {

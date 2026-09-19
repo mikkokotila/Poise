@@ -87,6 +87,10 @@ export function installDomGuards(doc: Document = document): void {
     if (!baseline.has(el)) baseline.set(el, '')
     edited.add(el)
   }, true)
+  window.addEventListener('poise:memories-saved', () => {
+    const pane = doc.getElementById('chat-memories-pane')
+    if (pane) resetBaselines(pane)
+  })
   // Settings saved: what is in its fields is now the saved value.
   window.addEventListener('poise:synced', () => {
     const panel = doc.getElementById('settings-panel')

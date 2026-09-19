@@ -513,3 +513,22 @@ it('carries an idle queue into the isolated Poise task and waits for release own
   expect(ofType(events, source.id, 'turn.started')).toHaveLength(0)
   expect(ofType(events, session.id, 'turn.started')).toHaveLength(3)
 }, 20_000)
+
+it('includes current shared memories in native handoffs and Poise implementation runbooks without rewriting the request', async () => {
+  const memories = await import('../../server/chat/memories')
+  const save = (text: string) => memories.saveMemories({ text, revision: memories.readMemories().revision })
+  const bridge = fakeBridge('poise-test:db')
+  const { runtime, controls, events } = makeRuntime({ bridge })
+  try {
+    save('Remember the project conventions.')
+    const source = await sourceSession(runtime, events)
+    const handed = await runtime.handoff(source.id, { agent: 'grok', model: 'grok-4.6-high' })
+    await waitFor(() => ofType(events, handed.id, 'turn.finished').length === 1)
+    expect(controls.adapters.at(-1)!.inputs[0].memories).toBe('Remember the project conventions.')
+    save('Use the updated conventions.')
+    const result = await runtime.startPoiseChange(source.id, 'Add the requested control', randomUUID())
+    await waitFor(() => ofType(events, result.session.id, 'turn.finished').length === 1)
+    expect(controls.adapters.at(-1)!.inputs[0].memories).toBe('Use the updated conventions.')
+    expect(ofType(events, result.session.id, 'turn.started')[0].prompt.text).toBe('Add the requested control')
+  } finally { save('') }
+}, 20_000)
