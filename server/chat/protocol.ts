@@ -280,7 +280,7 @@ export type ChatEvent =
   | { type: 'session.closed', reason: string }
   | { type: 'status.changed', status: SessionStatus, queuedBehind?: string, detail?: string }
   | { type: 'turn.started', turnId: string, prompt: PromptInput, callId?: string, queueItemId?: string, agent?: AgentId, model?: string }
-  | { type: 'steer.sent', turnId: string, text: string }
+  | { type: 'steer.sent', turnId: string, text: string, attachments?: Attachment[], mentions?: Mention[] }
   | { type: 'turn.finished', turnId: string, stopReason: StopReason, error?: string, usage?: TurnUsage, durationMs?: number }
   | { type: 'text.delta', turnId: string, messageId: string, delta: string }
   | { type: 'thought.delta', turnId: string, messageId: string, delta: string }
@@ -345,7 +345,7 @@ export type ChatCommand =
   | { type: 'queue.add', sessionId: string, itemId: string, text: string, attachments?: Attachment[], mentions?: Mention[], model?: string, effort?: string }
   | { type: 'queue.update', sessionId: string, itemId: string, model: string, effort?: string }
   | { type: 'queue.remove', sessionId: string, itemId: string }
-  | { type: 'steer', sessionId: string, text: string }
+  | { type: 'steer', sessionId: string, text: string, attachments?: Attachment[], mentions?: Mention[] }
   | { type: 'cancel', sessionId: string }
   | { type: 'permission.respond', sessionId: string, id: string, optionId: string }
   | { type: 'question.answer', sessionId: string, id: string, answers: Record<string, string | string[]> }

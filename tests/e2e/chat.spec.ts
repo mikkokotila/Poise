@@ -747,6 +747,8 @@ test('shows all five catalogue providers and keeps efforts specific to each mode
   await page.getByRole('button', { name: 'New session' }).click()
   const dialog = page.getByRole('dialog', { name: 'New session' })
   const model = dialog.getByLabel('Model'), effort = dialog.getByLabel('Effort')
+  // The dialog opens before its asynchronous catalogue request completes.
+  await expect(model.locator('optgroup')).toHaveCount(5)
   expect(await model.locator('optgroup').evaluateAll(groups => groups.map(group => group.getAttribute('label'))))
     .toEqual(['Claude Code', 'Codex', 'Grok Build', 'Antigravity (Google)', 'Muse'])
   await model.selectOption('gemini-3.8-flash-high')
@@ -2474,4 +2476,122 @@ test('command models: the next message waits for a model-only selection and is p
   await expect(input(page)).toHaveValue(/Use the model I selected/)
   await expect(page.locator('.chat-notice')).toContainText('Model not available')
   expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+for (const queued of [false, true]) test(`QC2: a header model change holds the following ${queued ? 'queue item' : 'message'} until acknowledged`, async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  sock.autoAck = false
+  await page.locator('.chat-model-select').selectOption('opus-5-high')
+  await expect.poll(() => sock.framesOf('set_model').length).toBe(1)
+  await input(page).fill(queued ? '/queue Preserve the selected model' : 'Preserve the selected model')
+  await input(page).press('Enter')
+  await page.waitForTimeout(80)
+  expect(sock.framesOf(queued ? 'queue.add' : 'prompt')).toHaveLength(0)
+  const updated = { ...state.sessions[0], model: 'opus-5-high', effort: 'high', lastSeq: sock.seq + 1 }
+  state.sessions[0] = updated
+  sock.autoAck = true
+  sock.push('s1', { type: 'session.updated', session: updated })
+  sock.ack(sock.framesOf('set_model')[0], true, '', undefined, { session: updated })
+  await expect.poll(() => sock.framesOf(queued ? 'queue.add' : 'prompt').length).toBe(1)
+  const command = sock.framesOf(queued ? 'queue.add' : 'prompt')[0].command
+  expect(command).toMatchObject({ sessionId: 's1', text: 'Preserve the selected model' })
+  if (queued) expect(command).toMatchObject({ model: 'opus-5-high', effort: 'high' })
+})
+
+for (const fails of [false, true]) test(`QC2: steering ${fails ? 'failure preserves' : 'sends'} attached context`, async ({ page }) => {
+  const state = makeState([session({ status: 'running' })], { s1: [env('s1', 1, { type: 'turn.started', turnId: 'active', prompt: { text: 'Work', attachments: [], mentions: [] } })] })
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  const attachment = { id: 'steering-file', name: 'context.txt', path: '.poise-chat/attachments/s1/context.txt', size: 7 }
+  await page.route('**/api/chat/attachments?**', route => route.fulfill({ json: { attachment } }))
+  await page.goto('/'); await sock.subscribed('s1'); sock.autoAck = false
+  await page.locator('.chat-file-input').setInputFiles({ name: 'context.txt', mimeType: 'text/plain', buffer: Buffer.from('context') })
+  await expect(page.locator('.chat-attachment-chip')).toContainText('context.txt')
+  await input(page).fill('Use this too'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('steer').length).toBe(1)
+  expect(sock.framesOf('steer')[0].command).toMatchObject({ text: 'Use this too', attachments: [attachment] })
+  await expect(page.locator('.chat-attachment-chip')).toHaveCount(0)
+  if (fails) {
+    await input(page).fill('My next draft')
+    sock.ack(sock.framesOf('steer')[0], false, 'Turn ended', 'no_turn')
+    await expect(input(page)).toHaveValue('Use this too\n\nMy next draft')
+    await expect(page.locator('.chat-attachment-chip')).toContainText('context.txt')
+  } else sock.ack(sock.framesOf('steer')[0])
+  expect(sock.framesOf('prompt')).toHaveLength(0); expect(sock.framesOf('queue.add')).toHaveLength(0)
+})
+
+test('QC2: a work-mode selection is acknowledged before a following task starts', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  sock.autoAck = false
+  await page.locator('.chat-mode-select').selectOption('plan')
+  await expect.poll(() => sock.framesOf('set_mode').length).toBe(1)
+  await input(page).fill('Investigate without making edits'); await input(page).press('Enter')
+  await page.waitForTimeout(80); expect(sock.framesOf('prompt')).toHaveLength(0)
+  sock.ack(sock.framesOf('set_mode')[0])
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ text: 'Investigate without making edits' })
+})
+
+test('QC2: a failed queued model change preserves the message and does not queue under the old model', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  sock.autoAck = false; await page.locator('.chat-model-select').selectOption('opus-5-high')
+  await expect.poll(() => sock.framesOf('set_model').length).toBe(1)
+  await input(page).fill('/queue Follow-up using the selected model'); await input(page).press('Enter')
+  sock.ack(sock.framesOf('set_model')[0], false, 'Model unavailable', 'unavailable')
+  await expect(input(page)).toHaveValue('Follow-up using the selected model')
+  await expect(page.locator('.chat-v-chip')).toHaveText('/queue')
+  expect(sock.framesOf('queue.add')).toHaveLength(0); expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('QC2: attaching context alone during a turn sends that context once', async ({ page }) => {
+  const state = makeState([session({ status: 'running' })]); await installRoutes(page, state)
+  const sock = await installSocket(page, state)
+  const attachment = { id: 'context-only', name: 'context.txt', path: '.poise-chat/attachments/s1/context.txt', size: 7 }
+  await page.route('**/api/chat/attachments?**', route => route.fulfill({ json: { attachment } }))
+  await page.goto('/'); await sock.subscribed('s1')
+  await page.locator('.chat-file-input').setInputFiles({ name: 'context.txt', mimeType: 'text/plain', buffer: Buffer.from('context') })
+  await expect(page.locator('.chat-attachment-chip')).toContainText('context.txt')
+  await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('steer').length).toBe(1)
+  expect(sock.framesOf('steer')[0].command).toMatchObject({ text: '', attachments: [attachment] })
+  await expect(page.locator('.chat-attachment-chip')).toHaveCount(0)
+})
+
+for (const steering of [false, true]) test(`QC2: long ${steering ? 'steered' : 'message'} file labels remain inside compact conversations`, async ({ page }, info) => {
+  const file = { id: 'long-file', name: 'a-very-long-attachment-name-'.repeat(5) + '.txt', path: '.poise-chat/attachments/s1/file.txt', size: 4 }
+  const events: ChatEnvelope[] = [env('s1', 1, { type: 'turn.started', turnId: 't1', prompt: { text: 'Read this context', attachments: steering ? [] : [file], mentions: [] } })]
+  if (steering) events.push(env('s1', 2, { type: 'steer.sent', turnId: 't1', text: 'Additional context', attachments: [file] }))
+  events.push(env('s1', 3, { type: 'turn.finished', turnId: 't1', stopReason: 'end_turn' }))
+  const state = makeState([session()], { s1: events }); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.setViewportSize({ width: 600, height: 500 })
+  await page.goto('/'); await sock.subscribed('s1')
+  const badge = page.locator('.chat-turn-extra')
+  await expect(badge).toHaveText(file.name); await expect(badge).toHaveAttribute('title', file.path)
+  await expect.poll(async () => {
+    const box = await badge.boundingBox(); const bounds = await page.locator('.chat-transcript-scroll').boundingBox()
+    return !!box && !!bounds && box.x >= bounds.x && box.x + box.width <= bounds.x + bounds.width
+  }).toBe(true)
+  expect(await badge.evaluate(el => ({ clipped: el.scrollWidth > el.clientWidth, ellipsis: getComputedStyle(el).textOverflow })))
+    .toEqual({ clipped: true, ellipsis: 'ellipsis' })
+  await page.screenshot({ path: info.outputPath('qc-compact-file-label.png'), animations: 'disabled' })
+})
+
+for (const outcome of ['no matches', 'failed catalogue']) test(`QC2: the model picker does not trap Tab with ${outcome}`, async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1')
+  if (outcome === 'failed catalogue') {
+    await page.route('**/api/chat/agents', route => route.fulfill({ status: 503, json: { error: 'Catalogue temporarily unavailable' } }))
+  }
+  const text = outcome === 'no matches' ? '/model nonexistent-model-xyz' : '/model'
+  await input(page).fill(text)
+  await expect(commandModels(page).getByRole('status')).toHaveText(outcome === 'no matches' ? 'No matching models.' : 'Could not load the catalogue.')
+  await input(page).press('Tab')
+  await expect(commandModels(page)).toBeHidden()
+  await expect(input(page)).not.toBeFocused()
+  await expect(input(page)).toHaveValue(text)
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  expect(sock.framesOf('set_model')).toHaveLength(0)
 })

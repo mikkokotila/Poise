@@ -28,6 +28,7 @@ import { EventEmitter } from 'node:events'
 import { enqueueMessage, transferQueuedContext, readQueue, updateQueuedModel, removeQueuedMessage, pauseQueue, QueueError, queueOwner, delegateQueue } from './message-queue'
 import type { MessageQueue, QueuedMessage } from './protocol'
 import { autoMergeInstructions, withAutoMergeInstructions } from './auto-merge'
+import { steeringContext } from './steering-context'
 import { parseChatCommandChain, commandBody } from './commands'
 import { latestReviewTarget, prepareReview, type ReviewTarget } from './review'
 import type { AutoMergeAck, SafeModeAck } from './protocol'
@@ -124,6 +125,9 @@ interface RunningTurn {
   shown?: PromptInput
   /** True only once the native prompt was invoked, not while queued/startup. */
   agentInvoked?: boolean
+  /** Settles at native prompt invocation, cancellation, or failed startup. */
+  promptReady: Promise<void>
+  releasePrompt(): void
   queueItem?: QueuedMessage
   queueContext?: string
   commandModel?: string
@@ -140,7 +144,7 @@ interface LiveSession {
   lease: CheckoutLease | null
   turn: RunningTurn | null
   pending: Map<string, PendingRequest>
-  grants: Map<string, string>
+  grants: Map<string, Pick<PermissionOption, 'id' | 'kind'>>
   idleTimer: ReturnType<typeof setTimeout> | null
   /** Aborted by close/delete/stop: wakes lease waits and startup. */
   lifecycle: AbortController
@@ -406,7 +410,23 @@ export class ChatRuntime extends EventEmitter {
     if (session.idleTimer) clearTimeout(session.idleTimer)
     if (session.turn) return // still running after forceStop: leave it, the lease stays
     await this.stopProcess(session)
+    this.releaseSettledLease(session)
     if (session.record.status !== 'closed' && session.record.status !== 'error') this.setStatus(session, 'idle')
+  }
+
+  /** A failed worker stop deliberately retains the lease. Once a later close
+   * or resume verifies termination, release that same token, not a new lease. */
+  private releaseSettledLease(session: LiveSession): void {
+    const lease = session.lease
+    if (!lease?.held) return
+    if (session.startup || session.services || session.turn?.agentInvoked || session.worker?.alive || session.adapter?.alive) {
+      throw new ChatError(409, 'the checkout still has active work; its lease remains held', 'checkout_busy')
+    }
+    lease.clearWorker()
+    lease.release()
+    session.lease = null
+    session.record.orphanNotice = undefined
+    this.saveRecord(session)
   }
 
   // ── Drain and readiness ────────────────────────────────────────────────
@@ -621,17 +641,22 @@ export class ChatRuntime extends EventEmitter {
    *  branch (fresh sessions), switch the checkout to it, register the gate,
    *  then create/resume/fork the native session. Failures become a readable
    *  error event and the `error` status; nothing is retried on its own. */
-  private async startSession(session: LiveSession, options: { fresh?: boolean, forkFrom?: SessionRecord } = {}): Promise<void> {
+  private async startSession(session: LiveSession, options: { fresh?: boolean, forkFrom?: SessionRecord, lease?: CheckoutLease } = {}): Promise<void> {
     if (session.adapter?.alive) return
+    if (!options.lease && session.lease?.held) {
+      await this.stopProcess(session)
+      this.releaseSettledLease(session)
+    }
     const record = session.record
     const startup = new AbortController()
     session.startup = startup
     const signal = AbortSignal.any([session.lifecycle.signal, startup.signal, ...(session.turn ? [session.turn.abort.signal] : [])])
     this.setStatus(session, 'starting')
-    const lease = this.leaseFor(session)
+    const lease = options.lease ?? this.leaseFor(session)
     let freed = true
     try {
-      await lease.acquire({ signal, onBusy: (busy) => this.reportBusy(session, busy) })
+      if (!options.lease) await lease.acquire({ signal, onBusy: (busy) => this.reportBusy(session, busy) })
+      else if (!lease.held) throw new Error('the checkout lease was lost before native startup')
       signal.throwIfAborted()
       session.lease = lease
       const fresh = options.fresh || (!record.nativeSessionId && record.branch.provisional && !record.branch.baseSha)
@@ -653,6 +678,7 @@ export class ChatRuntime extends EventEmitter {
         modelId: record.modelId,
         effort: record.effort,
         safeMode: record.safeMode === true,
+        ...(record.mode ? { mode: record.mode } : {}),
         ...(options.forkFrom
           ? (record.agent === 'claude' ? { forkFrom: options.forkFrom.nativeSessionId } : { resume: record.nativeSessionId })
           : record.nativeSessionId ? { resume: record.nativeSessionId } : {}),
@@ -687,7 +713,8 @@ export class ChatRuntime extends EventEmitter {
     } finally {
       // The idle agent holds no lease; the next turn takes one. Release only
       // when nothing of this start can still write (a stopped orphan keeps it).
-      if (lease.held) {
+      // A turn-owned lease remains registered and held through its own cleanup.
+      if (!options.lease && lease.held) {
         if (freed) { lease.clearWorker(); lease.release() }
         else this.emit('log', `[chat ${record.id.slice(0, 8)}] checkout lease kept: worker not settled`)
       }
@@ -1120,7 +1147,10 @@ export class ChatRuntime extends EventEmitter {
     if (session.turn) throw new ChatError(409, 'a turn is already running; Enter steers it', 'turn_in_progress')
     if (session.record.status === 'closed') throw new ChatError(409, 'the session is closed; resume it first', 'no_turn')
     if (session.lifecycle.signal.aborted) throw new ChatError(409, 'the session is closing', 'no_turn')
-    const turn: RunningTurn = { id: randomUUID(), callId: null, startedAt: Date.now(), abort: new AbortController(), stopping: false }
+    let releasePrompt!: () => void
+    const promptReady = new Promise<void>(resolve => { releasePrompt = resolve })
+    const turn: RunningTurn = { id: randomUUID(), callId: null, startedAt: Date.now(), abort: new AbortController(), stopping: false, promptReady, releasePrompt }
+    turn.abort.signal.addEventListener('abort', releasePrompt, { once: true })
     storage.reserveQueueTurn(session.record.id, turn.id, queueItem?.id)
     if (queueItem) turn.queueItem = queueItem
     session.turn = turn
@@ -1466,7 +1496,7 @@ export class ChatRuntime extends EventEmitter {
         this.publishQueue(session); await this.prepareQueuedAgent(session, turn)
       } else if (turn.commandModel) await this.selectSessionModel(session, turn.commandModel)
       if (!session.adapter?.alive) await this.startSession(session, { fresh: !record.nativeSessionId && !record.branch.baseSha && record.branch.provisional })
-      const adapter = session.adapter!
+      let adapter = session.adapter!
       const isFirst = !storage.findEvent(record.id, (e) => e.type === 'turn.started')
       // A change session is titled by its request, not by the runbook's first line.
       if ((record.title === 'New session' || isFirst) && !record.selfChangeId) {
@@ -1508,12 +1538,31 @@ export class ChatRuntime extends EventEmitter {
       // Capture before the native prompt can write, not in an asynchronous
       // item/started notification that races the tool's filesystem effects.
       checkoutBefore = await captureCheckoutSnapshot(record.checkout, session.staged ? [session.staged.path] : [])
+      // Settings may change during the handshake or a checkout wait. No native
+      // user prompt has started yet, so use the newest acknowledged policy now.
+      await session.steering
+      while (record.safeModePending) {
+        turn.abort.signal.throwIfAborted()
+        try {
+          await this.stopProcess(session)
+          await this.startSession(session, { lease })
+        } catch (failure) {
+          // A failed replacement may still own a live worker even though the
+          // prompt was never invoked. Final cleanup must verify its exit too.
+          terminate = true
+          throw failure
+        }
+        await session.steering
+      }
+      adapter = session.adapter!
       if (turn.abort.signal.aborted) throw new Error(turn.failure || 'cancelled before the agent prompt')
       this.setStatus(session, 'running')
       agentInvoked = true
       turn.agentInvoked = true
       if (record.queuedHandoff) adapterInput.text = `${record.queuedHandoff}\n\n[Current task]\n${adapterInput.text}`
-      const result = await adapter.prompt(turn.id, withAutoMergeInstructions({ ...adapterInput, memories: readMemories().text }, record.autoMerge, turn.implementsChange), turn.abort.signal)
+      const response = adapter.prompt(turn.id, withAutoMergeInstructions({ ...adapterInput, memories: readMemories().text }, record.autoMerge, turn.implementsChange), turn.abort.signal)
+      turn.releasePrompt()
+      const result = await response
       agentSettled = true
       if (record.queuedHandoff && result.stopReason === 'end_turn') { record.queuedHandoff = undefined; this.saveRecord(session) }
       stopReason = turn.stopping || turn.abort.signal.aborted ? 'cancelled' : result.stopReason
@@ -1532,6 +1581,8 @@ export class ChatRuntime extends EventEmitter {
         if (!cancelled) this.emit_(record.id, { type: 'error', message: error || 'turn failed', recoverable: true })
       } catch { /* mirror */ }
     } finally {
+      turn.releasePrompt()
+      turn.abort.signal.removeEventListener('abort', turn.releasePrompt)
       this.settlePending(session, 'cancelled')
       // The lease is released only once nothing of this turn can still write:
       // the agent reported the turn finished (or its process is verifiably
@@ -1542,7 +1593,7 @@ export class ChatRuntime extends EventEmitter {
       // An agent that ended its own process (Claude does after a stop) has
       // its worker group verified gone, or is terminated when it asked for
       // that, before the lease can go.
-      if (agentInvoked && session.adapter && (!agentSettled || terminate || !session.adapter.alive)) {
+      if (terminate || (agentInvoked && session.adapter && (!agentSettled || !session.adapter.alive))) {
         try { await this.stopProcess(session) } catch { freed = false }
       }
       session.draining = true
@@ -1566,6 +1617,9 @@ export class ChatRuntime extends EventEmitter {
         if (report.kind !== 'unchanged' && report.kind !== 'missing') this.saveRecord(session) // revision/version moved
         if (isBridgeProblem(report)) { try { this.emit_(record.id, { type: 'error', message: report.message, recoverable: true }) } catch { /* mirror */ } }
       }
+      // A storage/protocol failure uses cancellation to stop native work,
+      // but it is not a user Stop. Keep its cause visible in Chat and Caller.
+      if (turn.failure && !turn.stopping) { stopReason = 'error'; error = turn.failure }
       let terminalRecorded = false
       try {
         const envelope = storage.finalizeTurn(record.id,
@@ -1718,19 +1772,26 @@ export class ChatRuntime extends EventEmitter {
     })
   }
 
-  async steer(id: string, text: string): Promise<void> {
+  async steer(id: string, text: string, context: Pick<PromptInput, 'attachments' | 'mentions'> = { attachments: [], mentions: [] }): Promise<void> {
     this.assertAcceptingWork()
     const session = this.requireLive(id)
     const turn = session.turn
     if (!turn || turn.stopping) throw new ChatError(409, 'no turn is running', 'no_turn')
-    if (!session.record.capabilities.steer) throw new ChatError(409, `${AGENT_LABEL[session.record.agent]} does not support steering`, 'unsupported')
-    const trimmed = String(text || '').trim()
-    if (!trimmed) throw new ChatError(400, 'text is required', 'invalid')
+    const shown = this.validatePrompt(id, { text, attachments: context.attachments, mentions: context.mentions })
+    // Do not put this wait on the control chain: startup drains that chain
+    // before invoking the prompt. Early interjections belong after that boundary.
+    if (!turn.agentInvoked) await this.track(() => turn.promptReady)
     await this.control(session, async () => {
-      if (session.turn !== turn || turn.stopping || turn.abort.signal.aborted) throw new ChatError(409, 'the turn has ended', 'no_turn')
-      const input = withAutoMergeInstructions({ text: trimmed, attachments: [], mentions: [] }, session.record.autoMerge, turn.implementsChange)
-      await session.adapter!.steer(appendMemories(input.text, readMemories().text))
-      this.emit_(id, { type: 'steer.sent', turnId: turn.id, text: trimmed })
+      if (session.turn !== turn || !turn.agentInvoked || turn.stopping || turn.abort.signal.aborted) throw new ChatError(409, 'the turn has ended', 'no_turn')
+      if (!session.record.capabilities.steer) throw new ChatError(409, `${AGENT_LABEL[session.record.agent]} does not support steering`, 'unsupported')
+      await this.serve(session, async () => {
+        const resolved = await this.resolveInput(session, shown)
+        if (session.turn !== turn || session.draining || turn.stopping || turn.abort.signal.aborted) throw new ChatError(409, 'the turn has ended', 'no_turn')
+        const input = withAutoMergeInstructions({ ...resolved, text: steeringContext(resolved) }, session.record.autoMerge, turn.implementsChange)
+        await session.adapter!.steer(appendMemories(input.text, readMemories().text))
+        this.emit_(id, { type: 'steer.sent', turnId: turn.id, text: shown.text,
+          ...(shown.attachments.length ? { attachments: shown.attachments } : {}), ...(shown.mentions.length ? { mentions: shown.mentions } : {}) })
+      })
     })
   }
 
@@ -1802,13 +1863,14 @@ export class ChatRuntime extends EventEmitter {
     }
     const option = pending.options!.find((o) => o.id === optionId)
     if (!option) throw new ChatError(400, 'unknown option', 'invalid')
-    session.pending.delete(requestId)
+    // Keep the native waiter reachable until its decision is durable.
     this.emit_(id, { type: 'permission.resolved', id: requestId, optionId, by })
+    session.pending.delete(requestId)
     // "Always" means this session, in Poise's memory — never the agent's own
     // persistence, which outlives the session. The agent is told "once".
     let onWire = optionId
     if (option.kind === 'allow_always' || option.kind === 'reject_always') {
-      if (pending.grantKey) session.grants.set(pending.grantKey, optionId)
+      if (pending.grantKey) session.grants.set(pending.grantKey, { id: optionId, kind: option.kind })
       const once = pending.options!.find((o) => o.kind === (option.kind === 'allow_always' ? 'allow_once' : 'reject_once'))
       if (once) onWire = once.id
     }
@@ -1826,8 +1888,8 @@ export class ChatRuntime extends EventEmitter {
       throw new ChatError(409, 'this question is no longer pending', 'no_turn')
     }
     const validated = validateAnswers(pending.questions ?? [], answers)
-    session.pending.delete(requestId)
     this.emit_(id, { type: 'question.answered', id: requestId, answers: validated, by: 'user' })
+    session.pending.delete(requestId)
     pending.resolve(validated)
     this.afterRequestAnswered(session)
   }
@@ -1867,8 +1929,8 @@ export class ChatRuntime extends EventEmitter {
     const session = this.requireLive(id)
     await this.serialized(session, async () => {
       if (session.turn) throw new ChatError(409, 'change the mode between turns', 'turn_in_progress')
-      if (!session.record.capabilities.modes) throw new ChatError(409, `${AGENT_LABEL[session.record.agent]} sessions have no modes`, 'unsupported')
       if (!session.adapter?.alive) await this.startSession(session)
+      if (!session.record.capabilities.modes) throw new ChatError(409, `${AGENT_LABEL[session.record.agent]} sessions have no modes`, 'unsupported')
       await session.adapter!.setMode(mode)
       session.record.mode = mode
       this.saveRecord(session)
@@ -2026,12 +2088,14 @@ export class ChatRuntime extends EventEmitter {
    *  checkout lease on the session's branch; anything else is refused. */
   private async serve<T>(session: LiveSession, operation: () => Promise<T>): Promise<T> {
     const turn = session.turn
-    if (!turn || turn.stopping || turn.abort.signal.aborted) throw new Error('no turn is running; file services are closed')
+    if (!turn || turn.stopping || turn.abort.signal.aborted || session.draining) throw new Error('no turn is running; file services are closed')
     if (!session.lease?.held) throw new Error('the checkout lease is not held; file services are closed')
-    const head = await runFile('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: session.record.checkout, timeoutMs: 10_000 }).then((r) => r.stdout.trim()).catch(() => '')
-    if (head !== session.record.branch.name) throw new Error(`the checkout is on ${head || 'a detached HEAD'}, not ${session.record.branch.name}; file services are closed`)
+    // Admission, including its branch check, is part of the service lifetime.
     session.services += 1
     try {
+      const head = await runFile('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: session.record.checkout, timeoutMs: 10_000 }).then((r) => r.stdout.trim()).catch(() => '')
+      if (head !== session.record.branch.name) throw new Error(`the checkout is on ${head || 'a detached HEAD'}, not ${session.record.branch.name}; file services are closed`)
+      if (session.turn !== turn || turn.stopping || turn.abort.signal.aborted || session.draining || !session.lease?.held) throw new Error('the turn is settling; file services are closed')
       return await operation()
     } finally {
       session.services -= 1
@@ -2112,6 +2176,24 @@ export class ChatRuntime extends EventEmitter {
     storage.forgetWorker(session.record.id)
   }
 
+  /** Publishing a native request is part of its admission. If it cannot be
+   * recorded, stop only that turn; leave the entry for normal cancellation
+   * cleanup so a partially recorded request also receives its terminal event. */
+  private publishPendingRequest(session: LiveSession, turn: RunningTurn, requestId: string,
+    event: Extract<ChatEvent, { type: 'permission.requested' | 'question.asked' }>): void {
+    try {
+      this.emit_(session.record.id, event)
+      this.setStatus(session, 'waiting')
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error))
+      session.pending.get(requestId)?.reject(failure)
+      if (session.turn !== turn) return
+      turn.failure ??= `the agent request could not be recorded: ${failure.message}`
+      turn.abort.abort()
+      void session.adapter?.cancel().catch(reason => this.emit('log', `[chat] cancellation failed: ${String(reason)}`))
+    }
+  }
+
   private async askPermission(session: LiveSession, request: PermissionRequest): Promise<string> {
     const turn = session.turn
     if (!turn || turn.stopping) throw new Error('no turn is running')
@@ -2119,13 +2201,14 @@ export class ChatRuntime extends EventEmitter {
     const grantKey = `${request.title}\0${canonicalJson(request.input)}`
     const granted = session.grants.get(grantKey)
     const requestId = randomUUID()
-    if (granted) {
-      const remembered = request.options.find((o) => o.id === granted)
-      const onWire = request.options.find((o) => o.kind === (remembered?.kind === 'reject_always' ? 'reject_once' : 'allow_once'))
+    const remembered = granted ? request.options.find(option => option.id === granted.id && option.kind === granted.kind) : undefined
+    if (granted && remembered && (remembered.kind === 'allow_always' || remembered.kind === 'reject_always')) {
+      const onWire = request.options.find((o) => o.kind === (remembered.kind === 'reject_always' ? 'reject_once' : 'allow_once'))
       this.emit_(session.record.id, { type: 'permission.requested', id: requestId, turnId: turn.id, toolId: request.toolId, title: request.title, description: request.description, input: request.input, options: request.options })
-      this.emit_(session.record.id, { type: 'permission.resolved', id: requestId, optionId: granted, by: 'session' })
-      return onWire?.id ?? granted
+      this.emit_(session.record.id, { type: 'permission.resolved', id: requestId, optionId: granted.id, by: 'session' })
+      return onWire?.id ?? granted.id
     }
+    if (granted) session.grants.delete(grantKey) // Native choices changed: never reinterpret an old decision.
     const once = session.record.safeMode !== true && request.options.find(option => option.kind === 'allow_once')
     if (once) {
       this.emit_(session.record.id, { type: 'permission.requested', id: requestId, turnId: turn.id, toolId: request.toolId, title: request.title, description: request.description, input: request.input, options: request.options })
@@ -2137,15 +2220,27 @@ export class ChatRuntime extends EventEmitter {
       const superseded = () => {
         if (!session.pending.delete(requestId)) return
         cleanup()
-        this.emit_(session.record.id, { type: 'permission.resolved', id: requestId, optionId: '', by: 'cancelled' })
+        // The native request is already obsolete. Always release its waiter,
+        // even if its cancellation cannot be recorded; never throw from an
+        // AbortSignal listener and crash the server with an unanswered promise.
         reject(new Error('permission is no longer pending'))
-        this.afterRequestAnswered(session)
+        try {
+          this.emit_(session.record.id, { type: 'permission.resolved', id: requestId, optionId: '', by: 'cancelled' })
+          this.afterRequestAnswered(session)
+        } catch (error) {
+          const message = `the withdrawn permission could not be recorded: ${error instanceof Error ? error.message : String(error)}`
+          this.emit('log', `[chat ${session.record.id.slice(0, 8)}] ${message}`)
+          if (session.turn === turn) {
+            turn.failure ??= message
+            turn.abort.abort()
+            void session.adapter?.cancel().catch(failure => this.emit('log', `[chat] cancellation failed: ${String(failure)}`))
+          }
+        }
       }
       session.pending.set(requestId, { kind: 'permission', turnId: turn.id, options: request.options, grantKey,
         resolve: value => { cleanup(); resolve(value) }, reject: error => { cleanup(); reject(error) } })
       request.signal?.addEventListener('abort', superseded, { once: true })
-      this.emit_(session.record.id, { type: 'permission.requested', id: requestId, turnId: turn.id, toolId: request.toolId, title: request.title, description: request.description, input: request.input, options: request.options })
-      this.setStatus(session, 'waiting')
+      this.publishPendingRequest(session, turn, requestId, { type: 'permission.requested', id: requestId, turnId: turn.id, toolId: request.toolId, title: request.title, description: request.description, input: request.input, options: request.options })
     })
   }
 
@@ -2155,8 +2250,7 @@ export class ChatRuntime extends EventEmitter {
     const requestId = randomUUID()
     return new Promise<QuestionAnswers>((resolve, reject) => {
       session.pending.set(requestId, { kind: 'question', turnId: turn.id, questions: request.questions, resolve, reject })
-      this.emit_(session.record.id, { type: 'question.asked', id: requestId, turnId: turn.id, toolId: request.toolId, questions: request.questions })
-      this.setStatus(session, 'waiting')
+      this.publishPendingRequest(session, turn, requestId, { type: 'question.asked', id: requestId, turnId: turn.id, toolId: request.toolId, questions: request.questions })
     })
   }
 

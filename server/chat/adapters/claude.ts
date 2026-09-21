@@ -506,6 +506,7 @@ export function createClaudeAdapter(host: AdapterHost, options: { exitGraceMs?: 
 
   async function launch(options: AdapterStartOptions): Promise<void> {
     safeMode = options.safeMode === true
+    mode = options.mode === 'plan' ? 'plan' : 'default'
     const env = {
       ...scrubbedChildEnvironment('claude-subscription.mjs', claudeSubscriptionEnvironment()),
     }
@@ -517,7 +518,7 @@ export function createClaudeAdapter(host: AdapterHost, options: { exitGraceMs?: 
       cwd: host.checkout,
       model: options.modelId || undefined,
       effort: EFFORTS.includes(options.effort) ? options.effort as Options['effort'] : undefined,
-      permissionMode: safeMode ? 'auto' : 'bypassPermissions',
+      permissionMode: mode === 'plan' ? 'plan' : safeMode ? 'auto' : 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       sandbox: { enabled: false },
       canUseTool,

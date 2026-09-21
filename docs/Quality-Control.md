@@ -75,3 +75,11 @@ Content, focus, scroll and injection-safety assertions are unchanged. These
 are browser-engine checks, not a claim to have tested every browser/device.
 The queue-recovery test additionally proves that a failed reconciliation
 cannot start an armed queue; retrying successful recovery starts it once.
+
+## Follow-up integration QC
+
+The later pass through PR #82 adds fault-injection and cross-feature regressions
+for decision durability, startup/work-mode ordering, queued model choices,
+steering file context, late native replies, checkout admission and updates from
+an unopened Chat view. See [Chat integration QC](Quality-Control-Integration.md)
+for the findings, test scope and reproduction commands.

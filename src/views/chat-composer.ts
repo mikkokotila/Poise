@@ -49,7 +49,7 @@ export interface ComposerHandlers {
   onQueue(draft: ComposerDraft): void
   loadModels(): Promise<AgentInfo[]>
   onModelSelect(identity: string): void
-  onSteer(text: string): void
+  onSteer(draft: ComposerDraft): void
   onStop(): void
   onResume(): void
   /** `/model x`, `/mode y`, `/fork` — Poise's own commands. */
@@ -475,9 +475,10 @@ export function createComposer(handlers: ComposerHandlers): Composer {
       if (!chain.text && !chain.review && !attachments.length) return
       handlers.onQueue({ ...draft, text: commandBody(chain), mode: 'queue', ...(chain.model ? { model: chain.model } : {}) })
     } else if (state.running) {
-      if (!draft.text) return
-      handlers.onSteer(draft.text)
-      input.value = ''
+      if (!draft.text && !draft.attachments.length) return
+      handlers.onSteer(draft)
+      input.value = ''; attachments = []; mentions = []; selectedModel = undefined
+      renderChips(); renderSelectedModel(); changed()
       applyMode(null); autoResize(); closePopover()
       steerHint.textContent = 'steering'; steerHint.hidden = false
       if (steerTimer) clearTimeout(steerTimer)

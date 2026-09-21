@@ -1,11 +1,11 @@
 // The Grok adapter against recorded live ACP traces (grok 1.0.34), replayed
 // by fake-grok.mjs: the frames are the real binary's, the process is not.
 
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { join } from 'node:path'
 import { createGrokAdapter, GROK_ARGS } from '../../server/chat/adapters/grok'
 import { assertRequiredCapabilities, type Adapter } from '../../server/chat/adapters/types'
-import { FIXTURES, createFakeHost, prompt, type FakeHost } from './adapter-harness'
+import { FIXTURES, createFakeHost, prompt, until, sleep, type FakeHost } from './adapter-harness'
 
 const MODEL = { modelId: 'grok-4.6', effort: 'high' }
 
@@ -97,4 +97,33 @@ describe('Grok adapter (recorded traces)', () => {
     expect(again.modelId).toBe('grok-4.6')
     expect(host.spawns).toHaveLength(2)
   })
+})
+
+it.each([false, true])('QC2: Grok orders early steering behind file preparation and releases it on Stop (stop=%s)', async stopping => {
+  const host = createFakeHost('queue-agent.mjs')
+  const adapter = createGrokAdapter(host)
+  const files = await import('../../server/chat/client-fs')
+  let release!: () => void; let readStarted = false
+  const read = new Promise<string>(resolve => { release = () => resolve('Mention context') })
+  const spy = vi.spyOn(files, 'readCheckoutTextFile').mockImplementation(async () => { readStarted = true; return read })
+  try {
+    await adapter.start(MODEL)
+    const response = adapter.prompt('early-steer', { ...prompt('QC steering task'), mentions: [{ path: 'README.md' }] }, new AbortController().signal)
+    void response.catch(() => undefined)
+    await until(() => readStarted)
+    let delivered = false
+    const steer = adapter.steer('Use the additional context').then(() => { delivered = true })
+    void steer.catch(() => undefined)
+    await sleep(40); expect(delivered).toBe(false)
+    if (stopping) {
+      await adapter.cancel()
+      await expect(steer).rejects.toThrow(/turn ended/)
+      expect(delivered).toBe(false)
+      release()
+      await expect(response).resolves.toMatchObject({ stopReason: 'cancelled' })
+    } else {
+      release(); await steer
+      await expect(response).resolves.toMatchObject({ stopReason: 'end_turn' })
+    }
+  } finally { release(); spy.mockRestore(); await adapter.close(); host.dispose() }
 })

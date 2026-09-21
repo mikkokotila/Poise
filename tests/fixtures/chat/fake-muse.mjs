@@ -111,6 +111,7 @@ function scripted() {
           turn.decided.push(params)
           return { commandId: params.commandId, status: 'accepted', approvalId: params.approvalId, terminal: true }
         case 'userInput/answer':
+          if (process.argv.includes('--late-answer-error')) { await sleep(350); throw { code: -32056, message: 'old question already settled' } }
           if (!turn) throw { code: -32000, message: 'no turn' }
           if (turn.answered.some((entry) => entry.userInputId === params.userInputId)) throw { code: -32056, message: `user input ${params.userInputId} is already settled`, data: { kind: 'userInputAlreadySettled' } }
           turn.answered.push(params)

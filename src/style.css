@@ -5291,6 +5291,10 @@ body:has(#view-chat:not([hidden])) #app { padding-bottom: 0; }
 .chat-turn-extras { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .chat-turn-extra {
   display: inline-block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   padding: 0 6px;
   border-radius: var(--r-pill);
   border: 1px solid var(--border);

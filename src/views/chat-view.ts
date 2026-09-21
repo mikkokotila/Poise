@@ -309,7 +309,7 @@ function renderShell(): void {
       setNotice(null)
       composerStateFor(null)
     },
-    onSteer: (text) => { void withSavedMemories({ ...emptyDraft(), text }, () => steer(text)) },
+    onSteer: (draft) => { void withSavedMemories(draft, () => steer(draft)) },
     onStop: () => { void cancelTurn() },
     onResume: () => { void resumeActive() },
     onCommand: (name, arg) => { void withSavedMemories({ ...emptyDraft(), text: arg, mode: name }, () => runOwnCommand(name, arg)) },
@@ -763,7 +763,20 @@ function acceptQueue(e: SessionEntry, queue: MessageQueue): void {
   if (queue.revision >= (e.record.queue?.revision ?? -1)) e.record = { ...e.record, queue }
 }
 
-function queueDraft(draft: ComposerDraft): void {
+async function queueDraft(draft: ComposerDraft): Promise<void> {
+  const origin = activeId
+  const setting = modelUpdates.get(origin)
+  try {
+    if (setting) await setting
+    for (const update of origin ? [safeModeUpdates.get(origin), autoMergeUpdates.get(origin)] : []) {
+      if (update && !await update) throw new Error('The session setting was not saved')
+    }
+    if (activeId !== origin) { restoreDraftTo(origin, draft); return }
+  } catch (error) {
+    restoreDraftTo(origin, draft)
+    if (activeId === origin) commandFailed(error, 'Queue setting')
+    queueRender(); return
+  }
   const source = entry()
   const chain = parseChatCommandChain(draft.text)
   const model = draft.model || chain.model || source?.record.model || freshModelIdentity
@@ -1058,14 +1071,19 @@ function renderDeployCard(): void {
   })
 }
 
-function applyCommandModel(identity: string, origin: string | null): Promise<void> {
-  const update = applyCommandModelNow(identity, origin)
+function applyCommandModel(identity: string, origin: string | null, effort?: string): Promise<void> {
+  return trackSettingUpdate(origin, () => applyCommandModelNow(identity, origin, effort))
+}
+
+function trackSettingUpdate(origin: string | null, operation: () => Promise<void>): Promise<void> {
+  const previous = modelUpdates.get(origin)
+  const update = previous ? previous.then(operation, operation) : operation()
   modelUpdates.set(origin, update)
   void update.finally(() => { if (modelUpdates.get(origin) === update) modelUpdates.delete(origin); queueRender() }).catch(() => undefined)
   return update
 }
 
-async function applyCommandModelNow(identity: string, origin: string | null): Promise<void> {
+async function applyCommandModelNow(identity: string, origin: string | null, effort?: string): Promise<void> {
   if (!origin) {
     const catalogue = await loadAgents(true)
     if (!catalogue) throw new Error('Could not load the model catalogue')
@@ -1074,7 +1092,7 @@ async function applyCommandModelNow(identity: string, origin: string | null): Pr
     freshModelIdentity = identity; composerStateFor(null); queueRender()
     return
   }
-  const result = await chatClient.send({ type: 'set_model', sessionId: origin, model: identity }) as { session?: SessionRecord } | undefined
+  const result = await chatClient.send({ type: 'set_model', sessionId: origin, model: identity, ...(effort ? { effort } : {}) }) as { session?: SessionRecord } | undefined
   if (result?.session?.id !== origin) throw new Error('The server did not confirm the selected model')
   const current = sessions.get(origin)
   if (current && result.session.lastSeq >= current.record.lastSeq) upsertRecord(result.session)
@@ -1102,7 +1120,7 @@ async function sendPrompt(draft: ComposerDraft): Promise<void> {
       if (activeId !== origin) { restoreDraftTo(origin, draft); return }
       if (own) {
         if (!origin) throw new Error('Start a conversation before using this command')
-        if (own[1] === 'mode') await chatClient.send({ type: 'set_mode', sessionId: origin, mode: own[2]?.trim() || '' })
+        if (own[1] === 'mode') await trackSettingUpdate(origin, async () => { await chatClient.send({ type: 'set_mode', sessionId: origin, mode: own[2]?.trim() || '' }) })
         else {
           const result = await chatClient.forkSession(origin)
           upsertRecord(result.session)
@@ -1194,13 +1212,14 @@ async function sendPrompt(draft: ComposerDraft): Promise<void> {
   }
 }
 
-async function steer(text: string): Promise<void> {
+async function steer(draft: ComposerDraft): Promise<void> {
   const e = entry()
   if (!e) return
   try {
-    await chatClient.send({ type: 'steer', sessionId: e.record.id, text })
+    await chatClient.send({ type: 'steer', sessionId: e.record.id, text: draft.text,
+      ...(draft.attachments.length ? { attachments: draft.attachments } : {}), ...(draft.mentions.length ? { mentions: draft.mentions } : {}) })
   } catch (err) {
-    restoreDraftTo(e.record.id, { ...emptyDraft(), text })
+    restoreDraftTo(e.record.id, draft)
     if (activeId === e.record.id) commandFailed(err, 'Steer')
     else e.error = `Steer failed — ${(err as Error).message}`
     queueRender()
@@ -1278,7 +1297,7 @@ async function setModel(model: string, effort?: string): Promise<void> {
   const e = entry()
   if (!e) return
   try {
-    await chatClient.send({ type: 'set_model', sessionId: e.record.id, model, effort })
+    await applyCommandModel(model, e.record.id, effort)
   } catch (err) {
     commandFailed(err, 'Model change')
     queueRender()
@@ -1289,7 +1308,7 @@ async function setMode(mode: string): Promise<void> {
   const e = entry()
   if (!e) return
   try {
-    await chatClient.send({ type: 'set_mode', sessionId: e.record.id, mode })
+    await trackSettingUpdate(e.record.id, async () => { await chatClient.send({ type: 'set_mode', sessionId: e.record.id, mode }) })
   } catch (err) {
     commandFailed(err, 'Mode change')
     queueRender()

@@ -18,14 +18,14 @@ export function recentMessages(model: TranscriptModel, context?: SessionContext)
     const turn = block.turn
     for (let j = turn.items.length - 1; j >= 0 && recent.length < MESSAGE_HISTORY_LIMIT; j--) {
       const item = turn.items[j]
-      if (item.kind === 'steer' && item.text.trim()) {
-        recent.push({ id: item.key, draft: { text: item.text, mode: null, attachments: [], mentions: [] } })
+      if (item.kind === 'steer' && (item.text.trim() || item.attachments?.length)) {
+        recent.push({ id: item.key, draft: { text: item.text, mode: null, attachments: (item.attachments || []).map(file => ({ ...file })), mentions: (item.mentions || []).map(mention => ({ ...mention })) } })
       }
     }
     if (recent.length >= MESSAGE_HISTORY_LIMIT || block === firstTurn) continue
     const prompt = turn.prompt
     if (!prompt.text.trim() && !prompt.attachments.length) continue
-    recent.push({ id: turn.key, draft: { text: prompt.text, mode: turn.queueItemId ? 'queue' : null,
+    recent.push({ id: turn.key, draft: { text: prompt.text, mode: turn.queueItemId ? 'queue' : null, ...(turn.queueItemId && turn.model ? { model: turn.model } : {}),
       attachments: prompt.attachments.map(file => ({ ...file })), mentions: prompt.mentions.map(mention => ({ ...mention })) } })
   }
   return recent.reverse()

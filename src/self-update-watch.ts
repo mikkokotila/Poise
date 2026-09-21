@@ -1,7 +1,7 @@
 // The tab-wide watch that moves a browser onto a newly promoted Poise build.
 // It polls `/api/health` for the served build's SHA, compares it with the SHA
 // this bundle was compiled from, and — only when the app reports nothing in
-// flight and nothing unsaved — writes the Chat drafts to local storage and
+// flight and nothing unsaved — writes the Chat drafts to tab-local storage and
 // reloads. Anything less certain shows a banner with an explicit Refresh.
 //
 // The decision rules are in self-update-reload (pure, unit-tested) and the
@@ -9,7 +9,7 @@
 // banner and the reload itself. The Chat view provides the drafts.
 
 import { BUILD_SHA } from './build-identity'
-import { buildDraftSnapshot, saveDraftSnapshot, type DraftSnapshotInput } from './self-update-drafts'
+import { buildDraftSnapshot, saveDraftSnapshot, parseDraftSnapshot, DRAFT_SNAPSHOT_KEY, type DraftSnapshotInput } from './self-update-drafts'
 import { collectBlockers, describeBlocker, installDomGuards } from './self-update-guards'
 import { ReloadController, guardClass, type HealthObservation, type ReloadPlan } from './self-update-reload'
 import { parseBuildIdentity, shortSha } from './self-update-state'
@@ -37,7 +37,15 @@ function emptyDraftInput(): DraftSnapshotInput {
 /** Write every draft the app knows about; `false` means the reload must wait. */
 export function snapshotDrafts(): boolean {
   let input: DraftSnapshotInput
-  try { input = draftProvider ? draftProvider() : emptyDraftInput() } catch { return false }
+  try {
+    if (!draftProvider) {
+      // Chat may not have mounted in this tab yet. Its saved drafts still
+      // belong to it; an update from Current/Editor must not replace them with emptiness.
+      const saved = parseDraftSnapshot(sessionStorage.getItem(DRAFT_SNAPSHOT_KEY))
+      if (saved) return saveDraftSnapshot(sessionStorage, { ...saved, fromSha: BUILD_SHA, savedAt: Date.now() })
+    }
+    input = draftProvider ? draftProvider() : emptyDraftInput()
+  } catch { return false }
   try { return saveDraftSnapshot(sessionStorage, buildDraftSnapshot({ ...input, fromSha: BUILD_SHA })) } catch { return false }
 }
 

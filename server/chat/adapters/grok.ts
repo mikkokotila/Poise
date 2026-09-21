@@ -104,6 +104,7 @@ export function createGrokAdapter(host: AdapterHost): Adapter {
   let effort = ''
   let efforts: string[] | undefined
   let commands: CommandOption[] = []
+  let promptAdmission: { ready: Promise<void>, release(): void } | null = null
   let alive = false
   const exitListeners: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = []
   const loggedMethods = new Set<string>()
@@ -419,6 +420,9 @@ export function createGrokAdapter(host: AdapterHost): Adapter {
       messageCounter = 0
       newMessageIds()
       cancelRequested = false
+      let release!: () => void
+      const admission = { ready: new Promise<void>(resolve => { release = resolve }), release: () => release() }
+      promptAdmission = admission
       const blocks: any[] = [{ type: 'text', text: input.text }]
       for (const mention of input.mentions) {
         try {
@@ -442,7 +446,10 @@ export function createGrokAdapter(host: AdapterHost): Adapter {
       const onAbort = () => { void adapter.cancel() }
       signal.addEventListener('abort', onAbort, { once: true })
       try {
-        const result = await link.request<any>('session/prompt', { sessionId, prompt: blocks }, { timeoutMs: 0 })
+        if (signal.aborted || cancelRequested) return { stopReason: 'cancelled' }
+        const response = link.request<any>('session/prompt', { sessionId, prompt: blocks }, { timeoutMs: 0 })
+        admission.release()
+        const result = await response
         const meta = result?._meta || {}
         const usage = meta.usage || {}
         return {
@@ -457,6 +464,8 @@ export function createGrokAdapter(host: AdapterHost): Adapter {
         if (signal.aborted || cancelRequested) return { stopReason: 'cancelled' }
         return { stopReason: 'error', error: `Grok Build: ${error instanceof Error ? error.message : String(error)}` }
       } finally {
+        admission.release()
+        if (promptAdmission === admission) promptAdmission = null
         signal.removeEventListener('abort', onAbort)
         for (const [toolId, open] of openTools) {
           host.emit({ type: 'tool.finished', turnId: id, id: toolId, status: 'cancelled', durationMs: Date.now() - open.startedAt })
@@ -467,11 +476,16 @@ export function createGrokAdapter(host: AdapterHost): Adapter {
     },
 
     async steer(text: string): Promise<void> {
+      const admission = promptAdmission
+      if (!admission) throw new AdapterError('grok', 'Grok Build has no running turn to steer', 'protocol')
+      await admission.ready
+      if (promptAdmission !== admission || cancelRequested) throw new AdapterError('grok', 'Grok Build turn ended before steering', 'protocol')
       await requireRpc().request('_x.ai/interject', { sessionId, text }, { timeoutMs: 30_000 })
     },
 
     async cancel(): Promise<void> {
       cancelRequested = true
+      promptAdmission?.release()
       if (rpc && !rpc.isClosed) rpc.notify('session/cancel', { sessionId })
     },
 
@@ -498,6 +512,8 @@ export function createGrokAdapter(host: AdapterHost): Adapter {
     },
 
     async close(): Promise<void> {
+      cancelRequested = true
+      promptAdmission?.release()
       if (rpc && !rpc.isClosed && sessionId) {
         try { await rpc.request('session/close', { sessionId }, { timeoutMs: 10_000 }) } catch { /* best effort */ }
         rpc.end()

@@ -279,3 +279,113 @@ it('retrieves the full immutable diff by session and ID, independently of its bo
   expect(storage.getDiffEvent('another-session', original.diffId)).toBeNull()
   expect(storage.getDiffEvent(id, 'missing')).toBeNull()
 })
+
+// A failed durable receipt must leave the live question/approval answerable.
+it.each(['permission', 'question'] as const)('QC2: retains a %s when recording its answer fails', async kind => {
+  const id = await session(true); runtime.prompt(id, input); await until(() => promptCount === 1)
+  const events: ChatEnvelope[] = []; runtime.on('event', event => events.push(event))
+  const waiting = kind === 'permission'
+    ? host.requestPermission({ title: 'Approve fixture', options: [{ id: 'yes', name: 'Allow', kind: 'allow_once' }] })
+    : host.askQuestion({ questions: [{ id: 'q', question: 'Which fixture?', options: [], multiSelect: false, freeText: true }] })
+  void waiting.catch(() => undefined)
+  await until(() => (runtime.get(id)?.pendingRequests?.length ?? 0) === 1)
+  const requestId = runtime.get(id)!.pendingRequests[0]
+  const answer = () => kind === 'permission' ? runtime.respondPermission(id, requestId, 'yes') : runtime.answerQuestion(id, requestId, { q: 'fixture' })
+  const type = kind === 'permission' ? 'permission.resolved' : 'question.answered'
+  const { db } = await import('../server/db')
+  db.exec(`CREATE TRIGGER qc_decision_failure BEFORE INSERT ON chat_events WHEN json_extract(NEW.event, '$.type') = '${type}' BEGIN SELECT RAISE(ABORT, 'receipt unavailable'); END`)
+  try {
+    expect(answer).toThrow('receipt unavailable')
+    expect(runtime.get(id)?.pendingRequests).toEqual([requestId])
+    expect(events.filter(e => e.event.type === type)).toHaveLength(0)
+  } finally { db.exec('DROP TRIGGER qc_decision_failure') }
+  answer()
+  await expect(waiting).resolves.toEqual(kind === 'permission' ? 'yes' : { q: 'fixture' })
+  expect(runtime.get(id)?.pendingRequests).toEqual([])
+  expect(events.filter(e => e.event.type === type)).toHaveLength(1)
+})
+
+it.each([false, true])('QC2: a remembered refusal cannot become approval when native choices change (reused ID=%s)', async reused => {
+  const id = await session(true); runtime.prompt(id, input); await until(() => promptCount === 1)
+  const first = host.requestPermission({ title: 'Same operation', input: { command: 'fixture' }, options: [
+    { id: 'deny_session', name: 'Never', kind: 'reject_always' }, { id: 'deny_once', name: 'No', kind: 'reject_once' },
+  ] })
+  await until(() => runtime.get(id)!.pendingRequests.length === 1)
+  runtime.respondPermission(id, runtime.get(id)!.pendingRequests[0], 'deny_session')
+  await expect(first).resolves.toBe('deny_once')
+  let settled = false
+  const next = host.requestPermission({ title: 'Same operation', input: { command: 'fixture' }, options: [
+    ...(reused ? [{ id: 'deny_session', name: 'Now means allow', kind: 'allow_always' as const }] : []),
+    { id: 'allow_v2', name: 'Allow', kind: 'allow_once' }, { id: 'deny_v2', name: 'Reject', kind: 'reject_once' },
+  ] }).then(value => { settled = true; return value })
+  void next.catch(() => undefined)
+  await pause(40)
+  expect(settled).toBe(false)
+  expect(runtime.get(id)!.pendingRequests).toHaveLength(1)
+  runtime.respondPermission(id, runtime.get(id)!.pendingRequests[0], 'deny_v2')
+  await expect(next).resolves.toBe('deny_v2')
+})
+
+it('QC2: counts filesystem admission while its branch check is still in flight', async () => {
+  const id = await session(); runtime.prompt(id, input); await until(() => promptCount === 1)
+  const processModule = await import('../server/process')
+  const original = processModule.runFile
+  let release!: () => void; let entered = false
+  const held = new Promise<void>(resolve => { release = resolve })
+  const spy = vi.spyOn(processModule, 'runFile').mockImplementation(async (command, args, options) => {
+    const result = await original(command, args, options)
+    if (command === 'git' && args.includes('symbolic-ref')) { entered = true; await held }
+    return result
+  })
+  const events: ChatEnvelope[] = []; runtime.on('event', event => events.push(event))
+  const writing = host.writeTextFile('must-not-run-late.txt', 'late write')
+  void writing.catch(() => undefined)
+  try {
+    await until(() => entered)
+    currentFinish?.({ stopReason: 'end_turn' })
+    await pause(80)
+    expect(events.some(e => e.event.type === 'turn.finished')).toBe(false)
+    expect(runtime.busy()).toBeGreaterThan(0)
+  } finally { release(); spy.mockRestore() }
+  await expect(writing).rejects.toThrow(/turn|closed|settling/)
+  await until(() => runtime.get(id)?.status === 'idle')
+  await expect((await import('node:fs/promises')).readFile(join(checkout, 'must-not-run-late.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+it('QC2: withdrawing an obsolete approval still settles its waiter when its receipt cannot be written', async () => {
+  const id = await session(true); runtime.prompt(id, input); await until(() => promptCount === 1)
+  const controller = new AbortController()
+  const waiting = host.requestPermission({ signal: controller.signal, title: 'Obsolete approval',
+    options: [{ id: 'yes', name: 'Allow', kind: 'allow_once' }] })
+  void waiting.catch(() => undefined)
+  await until(() => runtime.get(id)!.pendingRequests.length === 1)
+  const { db } = await import('../server/db')
+  db.exec("CREATE TRIGGER qc_withdraw_failure BEFORE INSERT ON chat_events WHEN json_extract(NEW.event, '$.type') = 'permission.resolved' BEGIN SELECT RAISE(ABORT, 'withdrawal receipt unavailable'); END")
+  try {
+    controller.abort()
+    await expect(waiting).rejects.toThrow(/no longer pending/)
+    expect(runtime.get(id)!.pendingRequests).toEqual([])
+  } finally { db.exec('DROP TRIGGER qc_withdraw_failure') }
+  await until(() => runtime.get(id)?.status === 'idle')
+})
+
+it.each((['permission', 'question'] as const).flatMap(kind => ['request', 'waiting'].map(phase => ({ kind, phase }))))('QC2: failed $kind admission ($phase receipt) cannot leave a phantom native waiter', async ({ kind, phase }) => {
+  const id = await session(true); runtime.prompt(id, input); await until(() => promptCount === 1)
+  const { db } = await import('../server/db')
+  const storage = await import('../server/chat/storage')
+  const events: ChatEnvelope[] = []; runtime.on('event', event => events.push(event))
+  const type = kind === 'permission' ? 'permission.requested' : 'question.asked'
+  const condition = phase === 'request' ? `json_extract(NEW.event, '$.type') = '${type}'` : "json_extract(NEW.event, '$.type') = 'status.changed' AND json_extract(NEW.event, '$.status') = 'waiting'"
+  db.exec(`CREATE TRIGGER qc_request_admission_failure BEFORE INSERT ON chat_events WHEN ${condition} BEGIN SELECT RAISE(ABORT, 'request receipt unavailable'); END`)
+  try {
+    const request = kind === 'permission'
+      ? host.requestPermission({ title: 'Permission not recorded', options: [{ id: 'yes', name: 'Allow', kind: 'allow_once' }] })
+      : host.askQuestion({ questions: [{ id: 'q', question: 'Question not recorded?', options: [], freeText: true, multiSelect: false }] })
+    await expect(request).rejects.toThrow('request receipt unavailable')
+  } finally { db.exec('DROP TRIGGER qc_request_admission_failure') }
+  await until(() => runtime.get(id)?.status === 'idle')
+  expect(runtime.get(id)!.pendingRequests).toEqual([])
+  expect(storage.listPendingRequests(id)).toEqual([])
+  const terminal = events.find(event => event.event.type === 'turn.finished')?.event
+  expect(terminal).toMatchObject({ stopReason: 'error', error: expect.stringContaining('request receipt unavailable') })
+})

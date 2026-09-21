@@ -1,0 +1,172 @@
+# Chat integration QC — 2026-09-21
+
+## Scope and method
+
+Reviewed the recent Chat work through merged PR #82, starting from `c79547b`:
+local sessions and the catalogue, native adapters and permissions, Auto-merge,
+queued messages, Memories, message history, command chains and reply review,
+file context, browser restoration, and the self-update/rollback boundary.
+The existing full baseline passed: 1,072 unit/integration tests and 129 Chromium
+browser tests. Passing that baseline did not establish coverage of the races
+below. New regressions deliberately hold acknowledgements, native startup,
+filesystem admission, and native responses, and inject SQLite receipt failures.
+
+All fixes belong to one follow-up PR. No production session or release is changed
+by the QC runs. The existing permission defaults, explicit merge authority,
+release checks, queue scheduling, and no-replay guarantees remain unchanged.
+
+## Findings and fixes
+
+### Decisions remain answerable after a recording failure
+
+Permission/question responses used to remove their native waiter before writing
+the durable decision. A failed write left neither a delivered answer nor a live
+request to answer again. The record now commits before the waiter is removed.
+Tests fail the receipt insert, verify the request remains pending, restore the
+database, and answer that same request once. Remembered permissions also retain
+their decision kind: a missing or reused native option ID cannot turn a remembered
+refusal into an approval. These cases were reproduced against the baseline.
+
+An externally withdrawn approval also settles its waiter when its cancellation
+receipt cannot be written. That error previously escaped an AbortSignal listener
+and could crash the server; it now stops only the affected turn and records the
+failure when storage permits. The regression injects a real SQLite insert failure
+while withdrawing a live permission request.
+
+### Startup and work modes use the acknowledged choice
+
+A permission toggle during the native handshake could be saved yet miss the
+first task. Before dispatch, the runtime settles pending control updates and,
+when necessary, replaces the old-policy process while retaining its checkout
+lease. Real gated-worker tests also keep a second writer blocked when worker
+termination cannot be verified. No extra user prompt is created. The existing mid-turn deferred-mode
+notice still applies after native work has actually begun.
+
+Changing providers cleared capability metadata, which incorrectly prevented an
+immediate `/mode plan` even when the new provider supported it. Capabilities are
+now read from the initialized adapter. An explicitly saved Claude Plan mode is
+also supplied on native resume, rather than silently returning to Build.
+
+### Settings and queued work cannot overtake one another
+
+Header model/effort changes now share the acknowledgement ordering used by
+`/model`. Work-mode changes use that ordering too. A following message or queue
+item waits for the selection to succeed; on failure, its draft remains unsent.
+A recalled queued review retains its original reviewer/model/effort instead of
+inheriting whichever agent happens to be selected now.
+
+### Filesystem admission is part of the protected operation
+
+The asynchronous branch check used to run before the service was counted.
+A native turn could end and release its checkout while that check was pending,
+after which the file operation could still execute. Admission is counted before
+its first await, and its turn/lease state is rechecked before file access.
+The regression holds that check, ends the native turn, and verifies that the
+checkout remains busy and no late file is written.
+
+### Steering carries the context that the composer shows
+
+Sending a message during a turn previously discarded attached files and file
+mentions before reaching the native adapter. Steering now validates the same
+server-owned attachment references as ordinary messages, reads them while the
+checkout is held, and supplies text/path context before the final Memories
+appendix. Attachment-only steering also works. Failed sends restore the complete
+draft alongside newer text; successful sends clear the submitted chips.
+The transcript and recalled history retain independently copied file references.
+Long file labels now truncate within compact conversations rather than spilling
+out of the message; the complete name remains in the accessible text.
+
+### Steering cannot overtake startup
+
+The broader WebKit journey exposed a real ordering race: the optimistic running
+indicator allowed an interjection while the native prompt was still preparing.
+Its durable receipt preceded the native prompt, which could discard that context.
+The runtime now waits for prompt invocation outside the control chain (so startup
+and permission changes cannot deadlock), and Grok separately waits for its native
+prompt frame after file-context preparation. Stop settles the wait without replay.
+Held-handshake and delayed-file regressions exercise both paths. The browser
+readiness assertion and its timeout are unchanged.
+
+### Verified recovery releases the retained checkout
+
+A deliberately failed worker termination correctly kept the checkout locked,
+but a later successful Close or Resume forgot to release the retained lease.
+The same fault-injection test now proves both halves: another session cannot
+start during uncertain termination, and it can start after termination is
+verified. Startup and shutdown release only the existing, owned token, and
+never release a checkout while a native turn or filesystem service is active.
+
+### A late Muse answer cannot stop another turn
+
+A delayed question-answer failure used the then-current turn when reporting its
+error. Cancelling the original turn and starting another could therefore stop
+the new work. Question delivery and failures are now tied to their originating
+native turn. A scripted protocol regression reproduces that sequence.
+
+### An update preserves Chat even before the view opens
+
+Refreshing from Current/Editor before Chat mounted replaced the saved Chat draft
+snapshot with an empty one. The update watch now preserves the existing valid,
+tab-local snapshot until Chat consumes it. A real release-bundle browser test
+refreshes from another view, then opens Chat and verifies the message, command
+chip and selected model remain intact without submitting anything.
+
+### Failed request admission ends the affected turn
+
+The initial permission/question receipt can fail too, before any usable card
+reaches the browser. The native promise used to reject while its live waiter
+remained registered and the turn kept running. Fault-injection tests now fail
+those initial inserts and verify a visible terminal error, no outstanding native
+or persisted request, and no false successful result. The same cancellation path
+also closes a request whose event was recorded before its waiting-status save
+failed. No answer is fabricated and no task is automatically replayed.
+
+### Keyboard navigation and multiline command restoration
+
+A model picker with no matching options or an unavailable catalogue used to
+consume Tab without choosing anything or moving focus. Tab now returns to normal
+navigation in those states (including loading), while a ready choice still uses
+Tab to select. The text and model stay untouched, and dismissal cannot send work.
+
+Restoring a submitted command with a newline or tab after a model or switch could
+repeat that prefix. Draft normalization now uses the same whitespace boundaries
+as command parsing, preserving body line breaks without stripping similarly named
+commands or model identities. The new tests reproduced both faults before fixing
+them. An existing catalogue test also now waits for its asynchronous options to
+arrive before asserting all five groups; its expected providers remain unchanged.
+
+### Development dependency audit
+
+The existing CI audit gate passed at its unchanged high-severity threshold,
+but its output still reported the moderate redirect-mock file-read advisory
+[GHSA-82fw-gwwq-j7x9](https://github.com/advisories/GHSA-82fw-gwwq-j7x9)
+in the test dependency Vitest 4.1.10 and its mocker package. Updated that existing
+dev dependency to the upstream patched 4.1.11 release and regenerated the lockfile.
+This is a development-server advisory, not evidence of a production compromise.
+The complete audit and all verification suites are rerun after the patch; no
+new package, runtime permission, workflow threshold or release gate is introduced.
+
+## Reproducing verification
+
+Use the supported Node version matching the checkout's native dependencies.
+The local Mac checkout uses Node 22. Run `npm run verify` for lint, unit and
+integration tests, all TypeScript checks, production builds and Chromium tests.
+The exact pushed revision and final results are recorded in the PR description.
+
+For the supplemental browser pass:
+
+```sh
+for browser in firefox webkit; do
+  POISE_BROWSER_QC=1 npx playwright test \
+    tests/e2e/chat.spec.ts tests/e2e/chat-queue.spec.ts \
+    tests/e2e/chat-latency.spec.ts tests/e2e/self-update.spec.ts \
+    --project="$browser"
+done
+```
+
+The real process/SQLite/WebSocket browser journey now exercises a five-item
+queue, model-selected critical review, attached steering, Memories-last ordering,
+and reload without duplicate work. Provider processes are scripted: this is not
+a claim of fresh live-provider acceptance or production deployment. Existing
+release tests continue to exercise health-verified promotion, failed-start
+restoration, offline rollback and source reconciliation.
