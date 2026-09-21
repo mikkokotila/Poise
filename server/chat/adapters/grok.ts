@@ -29,7 +29,10 @@ import { readCheckoutTextFile } from '../client-fs'
 import { AdapterError, assertRequiredCapabilities, type Adapter, type AdapterHost, type AdapterStartOptions, type AdapterStartResult, type TurnResult } from './types'
 
 export const GROK_COMMAND = 'grok'
-export const GROK_ARGS = ['--permission-mode', 'default', 'agent', 'stdio'] as const
+export const GROK_ARGS = ['--sandbox', 'off', '--permission-mode', 'bypassPermissions', 'agent', 'stdio'] as const
+export function grokArgs(safeMode = false): readonly string[] {
+  return safeMode ? ['--sandbox', 'off', '--permission-mode', 'auto', 'agent', 'stdio'] : GROK_ARGS
+}
 export const GROK_ACP_VERSION = 1
 
 const CAPABILITIES: Capabilities = {
@@ -281,8 +284,8 @@ export function createGrokAdapter(host: AdapterHost): Adapter {
     applyConfigOptions(result?.configOptions)
   }
 
-  async function launch(): Promise<void> {
-    child = await host.spawn(GROK_COMMAND, GROK_ARGS)
+  async function launch(safeMode: boolean): Promise<void> {
+    child = await host.spawn(GROK_COMMAND, grokArgs(safeMode))
     alive = true
     rpc = new StdioRpc(child, { label: 'Grok Build', onStderr: () => {} })
     rpc.on('unhandled-notification', (method: string) => logOnce(String(method), 'ignored notification'))
@@ -380,7 +383,7 @@ export function createGrokAdapter(host: AdapterHost): Adapter {
 
     async start(options: AdapterStartOptions): Promise<AdapterStartResult> {
       try {
-        await launch()
+        await launch(options.safeMode === true)
       } catch (error) {
         throw new AdapterError('grok', `Grok Build could not start: ${error instanceof Error ? error.message : String(error)}`, 'start_failed')
       }
@@ -476,6 +479,11 @@ export function createGrokAdapter(host: AdapterHost): Adapter {
       if (nextModel && nextModel !== modelId) await setConfigOption('model', nextModel)
       if (nextEffort && nextEffort !== effort) await setConfigOption('reasoning_effort', nextEffort)
       return { modelId, effort, efforts }
+    },
+
+    async setSafeMode() {
+      // permission_mode is not an ACP config option in Grok 1.0.34.
+      return 'next_turn'
     },
 
     async setMode(): Promise<void> {

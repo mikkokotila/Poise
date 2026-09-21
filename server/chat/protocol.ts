@@ -114,6 +114,10 @@ export interface SessionRecord {
   selfChangeContextKey?: string
   /** User-enabled, session-scoped delegation to finish and merge the requested PRs in any repository. Missing means off. */
   autoMerge?: boolean
+  /** Off/missing: unrestricted tools. On: native risk-based approvals, still unsandboxed. */
+  safeMode?: boolean
+  /** The native process cannot apply the saved choice until its next turn. */
+  safeModePending?: boolean
   branch: BranchBinding
   title: string
   createdAt: string
@@ -287,7 +291,7 @@ export type ChatEvent =
   | { type: 'diff.reverted', diffId: string, path: string, ok: boolean, error?: string }
   | { type: 'plan.updated', turnId: string, entries: PlanEntry[], explanation?: string }
   | { type: 'permission.requested', id: string, turnId: string, toolId?: string, title: string, description?: string, input?: unknown, options: PermissionOption[] }
-  | { type: 'permission.resolved', id: string, optionId: string, by: 'user' | 'session' | 'auto_merge' | 'cancelled' }
+  | { type: 'permission.resolved', id: string, optionId: string, by: 'user' | 'session' | 'auto_merge' | 'unrestricted' | 'cancelled' }
   | { type: 'question.asked', id: string, turnId: string, toolId?: string, questions: Question[] }
   | { type: 'question.answered', id: string, answers: Record<string, string | string[]>, by: 'user' | 'cancelled' }
   | { type: 'commands.updated', commands: CommandOption[] }
@@ -324,6 +328,7 @@ export interface NewSessionRequest {
   /** Save queue storage without starting a native session or a turn. */
   deferStart?: boolean
   autoMerge?: boolean
+  safeMode?: boolean
 }
 
 export type ChatCommand =
@@ -347,12 +352,15 @@ export type ChatCommand =
   | { type: 'set_model', sessionId: string, model: string, effort?: string }
   | { type: 'set_mode', sessionId: string, mode: string }
   | { type: 'set_auto_merge', sessionId: string, enabled: boolean }
+  | { type: 'set_safe_mode', sessionId: string, enabled: boolean }
   | { type: 'revert', sessionId: string, diffId: string }
   /** Implement and auto-release one Poise change. Only ever sent by the
    *  browser for a typed `/poise …` message; `changeId` is minted once per
    *  request so a resend after an in-doubt answer never starts a second
    *  change. The ack is a `PoiseChangeAck`. */
   | { type: 'poise.change', sessionId: string, text: string, changeId: string, attachments?: Attachment[], mentions?: Mention[] }
+
+export interface SafeModeAck { session: SessionRecord, applies: 'current_turn' | 'next_turn', warning?: string }
 
 export interface AutoMergeAck { session: SessionRecord, applies: 'current_turn' | 'next_turn', warning?: string }
 

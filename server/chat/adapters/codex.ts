@@ -299,6 +299,7 @@ async function exitMessage(process: ChildProcess, link: StdioRpc, fallback: Erro
 export function createCodexAdapter(host: AdapterHost): Adapter {
   let child: ChildProcess | null = null
   let rpc: StdioRpc | null = null
+  let safeMode = false
   let threadId: string | undefined
   let modelId = ''
   let effort = ''
@@ -873,6 +874,7 @@ export function createCodexAdapter(host: AdapterHost): Adapter {
     onExit(listener) { exitListeners.push(listener) },
 
     async start(options: AdapterStartOptions): Promise<AdapterStartResult> {
+      safeMode = options.safeMode === true
       if (child) throw new AdapterError(AGENT, `${LABEL} adapter already started`, 'protocol')
       try {
         await launch()
@@ -892,16 +894,16 @@ export function createCodexAdapter(host: AdapterHost): Adapter {
 
         let thread: v2.Thread
         if (options.resume) {
-          const response = await call<'thread/resume', v2.ThreadResumeResponse>('thread/resume', { threadId: options.resume, excludeTurns: true }, { timeoutMs: 60_000 })
+          const response = await call<'thread/resume', v2.ThreadResumeResponse>('thread/resume', { threadId: options.resume, excludeTurns: true, approvalPolicy: safeMode ? 'on-request' : 'never', sandbox: 'danger-full-access' }, { timeoutMs: 60_000 })
           thread = response.thread
         } else if (options.forkFrom) {
-          const response = await call<'thread/fork', v2.ThreadForkResponse>('thread/fork', { threadId: options.forkFrom, excludeTurns: true }, { timeoutMs: 60_000 })
+          const response = await call<'thread/fork', v2.ThreadForkResponse>('thread/fork', { threadId: options.forkFrom, excludeTurns: true, approvalPolicy: safeMode ? 'on-request' : 'never', sandbox: 'danger-full-access' }, { timeoutMs: 60_000 })
           thread = response.thread
         } else {
           const response = await call<'thread/start', v2.ThreadStartResponse>('thread/start', {
             cwd: host.checkout,
-            approvalPolicy: 'on-request',
-            sandbox: 'workspace-write',
+            approvalPolicy: safeMode ? 'on-request' : 'never',
+            sandbox: 'danger-full-access',
             model: modelId,
             ephemeral: false,
           }, { timeoutMs: 60_000 })
@@ -941,6 +943,8 @@ export function createCodexAdapter(host: AdapterHost): Adapter {
         const response = await call<'turn/start', v2.TurnStartResponse>('turn/start', {
           threadId,
           input: userInput(input),
+          approvalPolicy: safeMode ? 'on-request' : 'never',
+          sandboxPolicy: { type: 'dangerFullAccess' },
           model: modelId,
           effort,
         }, { timeoutMs: 60_000 })
@@ -982,6 +986,13 @@ export function createCodexAdapter(host: AdapterHost): Adapter {
       effort = chooseEffort(model, nextEffort)
       efforts = model.supportedReasoningEfforts.map((option) => option.reasoningEffort)
       return { modelId, effort, efforts }
+    },
+
+    async setSafeMode(enabled) {
+      // Policy belongs to turn/start. Never inject an empty turn to change it.
+      if (active && !active.done) return 'next_turn'
+      safeMode = enabled
+      return 'current_turn'
     },
 
     async setMode() {

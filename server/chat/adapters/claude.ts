@@ -50,11 +50,9 @@ const CAPABILITIES: Capabilities = {
   images: false,
 }
 
-/** The permission modes Chat offers: the prompting ones. bypassPermissions,
- *  dontAsk and auto would silence the prompts v1 requires. */
+/** Work mode is separate from the session's Safe mode permission toggle. */
 const MODES: ModeOption[] = [
-  { id: 'default', name: 'Default', description: 'Prompts for dangerous operations' },
-  { id: 'acceptEdits', name: 'Accept edits', description: 'File edits run without a prompt' },
+  { id: 'default', name: 'Build', description: 'Execute with this session’s permission setting' },
   { id: 'plan', name: 'Plan', description: 'Read-only planning, no execution' },
 ]
 
@@ -104,6 +102,7 @@ export function createClaudeAdapter(host: AdapterHost, options: { exitGraceMs?: 
   let sessionId: string | undefined
   let modelId = ''
   let effort = ''
+  let safeMode = false
   let mode = 'default'
   let commands: CommandOption[] = []
   let efforts: string[] = EFFORTS
@@ -321,7 +320,7 @@ export function createClaudeAdapter(host: AdapterHost, options: { exitGraceMs?: 
         if (message.subtype === 'init') {
           sessionId = message.session_id
           modelId = message.model || modelId
-          mode = message.permissionMode || mode
+          mode = message.permissionMode === 'plan' ? 'plan' : 'default'
           if (typeof (message as any).effort === 'string') effort = (message as any).effort
           commands = (message.slash_commands || []).map((name) => ({ name: name.startsWith('/') ? name.slice(1) : name }))
           host.emit({ type: 'commands.updated', commands })
@@ -506,6 +505,7 @@ export function createClaudeAdapter(host: AdapterHost, options: { exitGraceMs?: 
   }
 
   async function launch(options: AdapterStartOptions): Promise<void> {
+    safeMode = options.safeMode === true
     const env = {
       ...scrubbedChildEnvironment('claude-subscription.mjs', claudeSubscriptionEnvironment()),
     }
@@ -517,7 +517,9 @@ export function createClaudeAdapter(host: AdapterHost, options: { exitGraceMs?: 
       cwd: host.checkout,
       model: options.modelId || undefined,
       effort: EFFORTS.includes(options.effort) ? options.effort as Options['effort'] : undefined,
-      permissionMode: 'default',
+      permissionMode: safeMode ? 'auto' : 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
+      sandbox: { enabled: false },
       canUseTool,
       hooks: { PreToolUse: [{ matcher: 'Write|Edit|MultiEdit', hooks: [preToolUse] }] },
       includePartialMessages: true,
@@ -654,10 +656,17 @@ export function createClaudeAdapter(host: AdapterHost, options: { exitGraceMs?: 
       return { modelId, effort, efforts }
     },
 
+    async setSafeMode(enabled) {
+      if (!active) throw new AdapterError('claude', 'Claude Code is not running', 'exited')
+      await active.setPermissionMode(mode === 'plan' ? 'plan' : enabled ? 'auto' : 'bypassPermissions')
+      safeMode = enabled
+      return 'current_turn'
+    },
+
     async setMode(next: string): Promise<void> {
       if (!active) throw new AdapterError('claude', 'Claude Code is not running', 'exited')
       if (!MODES.some((m) => m.id === next)) throw new AdapterError('claude', `unknown mode ${next}`, 'unsupported')
-      await active.setPermissionMode(next as 'default' | 'acceptEdits' | 'plan')
+      await active.setPermissionMode(next === 'plan' ? 'plan' : safeMode ? 'auto' : 'bypassPermissions')
       mode = next
       host.emit({ type: 'mode.updated', mode, modes: MODES })
     },

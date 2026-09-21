@@ -70,7 +70,7 @@ export interface PermissionItem extends Keyed {
   description?: string
   input?: unknown
   options: PermissionOption[]
-  resolved?: { optionId: string, by: 'user' | 'session' | 'auto_merge' | 'cancelled' }
+  resolved?: { optionId: string, by: 'user' | 'session' | 'auto_merge' | 'unrestricted' | 'cancelled' }
 }
 export interface QuestionItem extends Keyed {
   kind: 'question'
@@ -682,7 +682,7 @@ export function createTranscriptView(container: HTMLElement, handlers: Transcrip
         + `<span class="chat-card-key">${i + 1}</span>${escapeHtml(o.name)}</button>`).join('')}</div>`
     } else {
       const chosen = item.options.find((o) => o.id === item.resolved!.optionId)
-      const label = item.resolved.by === 'cancelled' ? 'Cancelled' : `${chosen ? chosen.name : item.resolved.optionId}${item.resolved.by === 'session' ? ' (remembered)' : item.resolved.by === 'auto_merge' ? ' (auto-merge)' : ''}`
+      const label = item.resolved.by === 'cancelled' ? 'Cancelled' : `${chosen ? chosen.name : item.resolved.optionId}${item.resolved.by === 'session' ? ' (remembered)' : item.resolved.by === 'auto_merge' ? ' (auto-merge)' : item.resolved.by === 'unrestricted' ? ' (unrestricted)' : ''}`
       const cls = chosen && chosen.kind.startsWith('allow') ? 'chat-edit-card-badge-applied' : 'chat-edit-card-badge-declined'
       actions = `<div class="chat-card-actions"><span class="chat-edit-card-badge ${cls}">${escapeHtml(label)}</span></div>`
     }
