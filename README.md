@@ -307,3 +307,10 @@ newer writing, and queued/Poise-change attachments follow their receiving
 session rather than depending on an old conversation remaining open.
 See [quality control](docs/Quality-Control.md) for the combined interaction,
 recovery, native-protocol and release verification coverage.
+
+## Recall recent Chat messages
+
+Press Up in an empty Chat console to browse the last ten messages in that
+conversation. Up/Down selects a single-line row above the input; Enter or a
+click restores its full text for editing, never sends it. Escape dismisses.
+See [Console message history](docs/Message-history.md).

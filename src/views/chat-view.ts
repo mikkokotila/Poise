@@ -22,6 +22,7 @@ import { AGENT_LABELS } from '../../server/chat/protocol'
 import { chatClient, ChatCommandError, ChatHttpError, type AgentsResponse, type AgentInfo } from '../chat-client'
 import { escapeHtml } from '../markdown'
 import { recoverDraft } from '../chat-draft-recovery'
+import { recentMessages } from '../chat-message-history'
 import { reconcileSession } from '../chat-session-state'
 import { reserveQueuedMessage, releaseQueuedMessage } from '../chat-queue'
 import { createQueuePanel } from './chat-queue'
@@ -268,6 +269,10 @@ function renderShell(): void {
   transcriptEl.addEventListener('chat:rerender', () => queueRender())
 
   composer = createComposer({
+    history: () => {
+      const e = entry()
+      return { entries: e ? recentMessages(e.model, e.record.context) : [], loading: !!e?.loading, error: e?.error }
+    },
     onSend: (draft) => { void withSavedMemories(draft, () => sendPrompt(draft)) },
     onQueue: (draft) => { void withSavedMemories(draft, () => queueDraft(draft)) },
     loadModels: async () => {
@@ -308,7 +313,8 @@ function renderShell(): void {
     onModel: (id, itemId, model) => { void changeQueueItem(id, itemId, model) },
     onRemove: (id, itemId) => { void changeQueueItem(id, itemId) },
   })
-  dockEl.append(messageQueue.el, composer.el)
+  dockEl.append(messageQueue.el, composer.history.el, composer.el)
+  composer.el.addEventListener('chat:composer-change', queueRender)
   composer.el.addEventListener('input', () => persistDrafts())
   // After the transcript, inside the same scroll, outside the activity toggle.
   deployCard = createDeployCard(scrollEl, { onRevert: (changeId, releaseId) => { void revertChange(changeId, releaseId) } })
@@ -1497,7 +1503,19 @@ function render(): void {
   // in the calculation, so a taller draft never pushes it off-screen.
   if (lastEmpty !== empty) { lastEmpty = empty; composer.layout() }
   const contentHeight = Math.max(0, mainEl.clientHeight - headerEl.offsetHeight - noticeEl.offsetHeight)
-  if (!messageQueue.el.hidden) {
+  const history = composer.history
+  if (history.open) {
+    const dockStyle = getComputedStyle(dockEl)
+    const padding = parseFloat(dockStyle.paddingTop) + parseFloat(dockStyle.paddingBottom)
+    const queueFixed = messageQueue.el.hidden ? 0 : messageQueue.el.querySelector('summary')!.offsetHeight + 10
+    const available = Math.max(0, contentHeight - composer.el.offsetHeight - padding - history.fixedHeight - queueFixed - 28)
+    // Share the extension space; the history is closest to the input and
+    // gets priority, while a visible queue keeps its summary and some rows.
+    const historyRoom = messageQueue.el.hidden ? available : available * .65
+    const historyHeight = Math.min(320, history.rowsHeight, historyRoom)
+    history.setAvailableHeight(historyHeight)
+    mainEl.style.setProperty('--chat-queue-available', `${Math.floor(Math.max(0, available - historyHeight))}px`)
+  } else if (!messageQueue.el.hidden) {
     const dockStyle = getComputedStyle(dockEl)
     const padding = parseFloat(dockStyle.paddingTop) + parseFloat(dockStyle.paddingBottom)
     const summaryHeight = messageQueue.el.querySelector('summary')!.offsetHeight
@@ -1699,6 +1717,7 @@ export async function initChatView(): Promise<void> {
 // and its subscriptions stay so a running turn keeps being mirrored and the
 // sidebar is current when the view comes back.
 export function stopChatRefresh(): void {
+  composer?.history.close()
   filePreview?.close()
   splitPane?.cancelResize()
   if (tickTimer) { clearInterval(tickTimer); tickTimer = null }
