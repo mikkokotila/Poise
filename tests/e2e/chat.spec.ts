@@ -2374,7 +2374,8 @@ test('command models: filtering and keyboard selection never submit through key 
   await expect(page.locator('.chat-command-model-chip')).toContainText('Max')
   await page.getByRole('button', { name: 'Clear model', exact: true }).click()
   await input(page).fill('/model'); await expect(commandModels(page).locator('[data-identity="grok-4.6-xhigh"]')).toBeDisabled()
-  await commandModels(page).locator('[data-identity="grok-4.6-xhigh"]').click({ force: true })
+  // Exercise the disabled-row handler without bypassing layout stability via a forced pointer click.
+  await commandModels(page).locator('[data-identity="grok-4.6-xhigh"]').dispatchEvent('click')
   await expect(commandModels(page)).toBeVisible(); await expect(page.locator('.chat-command-chips')).toBeHidden()
 })
 
