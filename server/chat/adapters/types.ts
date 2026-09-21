@@ -30,6 +30,8 @@ export type SpawnAgent = (command: string, args: readonly string[], options?: {
 }) => Promise<ChildProcess>
 
 export interface PermissionRequest {
+  /** Native request superseded or resolved elsewhere; closes its old UI card. */
+  signal?: AbortSignal
   toolId?: string
   title: string
   description?: string

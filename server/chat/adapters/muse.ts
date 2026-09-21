@@ -393,6 +393,7 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
   const loggedOnce = new Set<string>()
   /** Approvals and questions already being answered, by their id. */
   const pendingApprovals = new Set<string>()
+  const approvalControllers = new Map<string, AbortController>()
   const decidedApprovalStages = new Set<string>()
   const approvalRequests = new Map<string, ApprovalRequestParams>()
   const resolvedApprovals = new Set<string>()
@@ -762,7 +763,10 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
       const previous = approvalRequests.get(params.approvalId)
       if (previous) receiveApproval({ ...previous, ...params })
     })
-    on('approval/resolved', params => { resolvedApprovals.add(params.approvalId) })
+    on('approval/resolved', params => {
+      resolvedApprovals.add(params.approvalId)
+      for (const [key, controller] of approvalControllers) if (key.startsWith(`${params.approvalId}:`)) controller.abort()
+    })
     on('userInput/requested', (params) => { void handleUserInput(params) })
 
     on('session/modelChanged', (params) => {
@@ -816,15 +820,18 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
   function receiveApproval(params: ApprovalRequestParams): void {
     const previous = approvalRequests.get(params.approvalId)
     if (previous && previous.currentRequirementId.sourceIndex > params.currentRequirementId.sourceIndex) return
+    if (previous && previous.currentRequirementId.sourceIndex < params.currentRequirementId.sourceIndex) {
+      approvalControllers.get(`${params.approvalId}:${previous.currentRequirementId.sourceIndex}`)?.abort()
+    }
     approvalRequests.set(params.approvalId, params)
     void handleApproval(params).catch(error => interactionFailed('approval', error))
   }
 
-  function interactionFailed(kind: string, error: unknown): void {
+  function interactionFailed(kind: string, error: unknown, origin: ActiveTurn | null = active): void {
     const message = `${LABEL}: ${kind} delivery failed: ${error instanceof Error ? error.message : String(error)}. The turn has stopped; its work was not replayed.`
     host.log(message)
-    if (!active || active.done || closing || active.interruptRequested) return
-    host.emit({ type: 'error', turnId: active.id, message, recoverable: true })
+    if (!active || active !== origin || active.done || closing || active.interruptRequested) return
+    host.emit({ type: 'error', message, recoverable: true })
     rpc?.fail(new AdapterError(AGENT, message, 'protocol'))
   }
 
@@ -834,6 +841,9 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
     const key = `${params.approvalId}:${params.currentRequirementId.sourceIndex}`
     if (resolvedApprovals.has(params.approvalId) || pendingApprovals.has(key) || decidedApprovalStages.has(key)) return
     pendingApprovals.add(key)
+    const origin = active
+    const controller = new AbortController()
+    approvalControllers.set(key, controller)
     const options: PermissionOption[] = params.availableChoices.map((choice) => ({ id: choice.choiceId, name: choice.label, kind: choiceKind(choice) }))
     // An edit that waits for this decision has not touched its files yet:
     // the pre-images read now (before the decision goes out) are exact.
@@ -852,6 +862,7 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
     try {
       const optionId = await host.requestPermission({
         toolId: params.itemId,
+        signal: controller.signal,
         title: approvalTitle(params),
         ...(params.subject.kind ? { description: `${params.toolName} (${params.subject.kind})` } : {}),
         input: { tool: params.toolName, args: approvedArgs, subject: params.subject, protectedWrite: params.protectedWrite },
@@ -861,7 +872,11 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
     } catch {
       choice = rejectChoice(params)
     }
+    if (controller.signal.aborted || resolvedApprovals.has(params.approvalId) || active !== origin) {
+      pendingApprovals.delete(key); approvalControllers.delete(key); return
+    }
     if (!choice) {
+      interactionFailed('approval', new Error('No usable permission choice was offered'), origin)
       host.log(`${LABEL}: approval ${params.approvalId} offers no usable choice (${params.availableChoices.map((entry) => entry.choiceId).join(', ')})`)
       pendingApprovals.delete(key)
       return
@@ -888,9 +903,13 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
         for (const next of pending.approvals) receiveApproval(next)
       }
     } catch (error) {
-      interactionFailed('approval', error)
+      // A competing decision may advance a stage while our answer is in flight.
+      // Never apply that earlier consent to the new requirement.
+      const latest = approvalRequests.get(params.approvalId)
+      if (!resolvedApprovals.has(params.approvalId) && (!latest || latest.currentRequirementId.sourceIndex <= params.currentRequirementId.sourceIndex)) interactionFailed('approval', error, origin)
     } finally {
       pendingApprovals.delete(key)
+      approvalControllers.delete(key)
     }
   }
 

@@ -283,7 +283,7 @@ MIT — see [LICENSE](LICENSE).
 
 ## Auto-merge batches
 
-The rightmost Chat header icon enables **Auto-merge** for the selected session.
+The Auto-merge header icon enables **Auto-merge** for the selected session.
 The agent carries all requested slices and PRs across repositories through
 checks, fixes and verified merges, deferring non-blocking questions until the
 end. It is off by default, retained per session, and available before the
@@ -314,3 +314,9 @@ Press Up in an empty Chat console to browse the last ten messages in that
 conversation. Up/Down selects a single-line row above the input; Enter or a
 click restores its full text for editing, never sends it. Escape dismisses.
 See [Console message history](docs/Message-history.md).
+
+## Chat controls
+
+Safe mode is off by default; turn it on for native risk approvals without a sandbox.
+Reasoning is a separate, default-off display toggle. Icon tooltips appear after
+one second and use short labels. See [Chat controls](docs/Chat-controls.md).

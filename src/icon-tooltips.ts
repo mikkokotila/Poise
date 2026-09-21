@@ -20,7 +20,11 @@ export function installIconTooltips(root: HTMLElement = document.body): () => vo
   }
   function hide(): void {
     clearTimeout(timer)
-    if (target?.getAttribute('aria-describedby') === tip.id) target.removeAttribute('aria-describedby')
+    if (target) {
+      const descriptions = (target.getAttribute('aria-describedby') || '').split(/\s+/).filter(id => id && id !== tip.id)
+      if (descriptions.length) target.setAttribute('aria-describedby', descriptions.join(' '))
+      else target.removeAttribute('aria-describedby')
+    }
     target = null
     tip.hidden = true
   }
@@ -30,6 +34,7 @@ export function installIconTooltips(root: HTMLElement = document.body): () => vo
     const text = label(button)
     if (!text) return
     // Prevent the browser's separate, long native title tooltip.
+    button.dataset.tooltip = text
     button.removeAttribute('title')
     target = button
     timer = setTimeout(() => {
@@ -41,7 +46,7 @@ export function installIconTooltips(root: HTMLElement = document.body): () => vo
       const height = tip.offsetHeight
       tip.style.left = `${Math.max(8, Math.min(box.x + box.width / 2 - width / 2, innerWidth - width - 8))}px`
       tip.style.top = `${box.bottom + height + 8 <= innerHeight ? box.bottom + 6 : Math.max(8, box.top - height - 6)}px`
-      button.setAttribute('aria-describedby', tip.id)
+      button.setAttribute('aria-describedby', [button.getAttribute('aria-describedby'), tip.id].filter(Boolean).join(' '))
     }, 1000)
   }
   const over = (event: Event) => { const button = icon(event.target); if (button) show(button) }

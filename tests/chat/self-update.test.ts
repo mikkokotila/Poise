@@ -189,8 +189,8 @@ afterAll(async () => {
   await rm(root, { recursive: true, force: true })
 })
 
-async function sourceSession(runtime: import('../../server/chat/runtime').ChatRuntime, events: ChatEnvelope[]) {
-  const source = await runtime.create({ agent: 'grok', model: 'grok-4.6-xhigh', repo: 'acme/repo', branch: { existing: 'main' } })
+async function sourceSession(runtime: import('../../server/chat/runtime').ChatRuntime, events: ChatEnvelope[], safeMode = false) {
+  const source = await runtime.create({ agent: 'grok', model: 'grok-4.6-xhigh', safeMode, repo: 'acme/repo', branch: { existing: 'main' } })
   await waitFor(() => lastStatus(events, source.id) === 'idle')
   return source
 }
@@ -397,7 +397,7 @@ describe('drain and readiness', () => {
   it('refuses new work atomically, closes idle agents gracefully, lets running turns finish, and reaches ready', async () => {
     const bridge = fakeBridge('poise-test:db')
     const { runtime, controls, events } = makeRuntime({ bridge })
-    const session = await sourceSession(runtime, events)
+    const session = await sourceSession(runtime, events, true)
     const idle = await sourceSession(runtime, events)
     // Idle sessions still hold live agent processes: not quiescent yet.
     expect(runtime.busy()).toBe(2)

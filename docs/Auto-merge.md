@@ -1,6 +1,6 @@
 # Auto-merge mode
 
-The rightmost icon beside Fork, Activity and Hand off toggles Auto-merge for
+The Auto-merge icon in the Chat header toggles Auto-merge for
 that Chat session. It is off by default. It is also available in the fresh
 console before the first message or attachment, without opening a session.
 
@@ -32,12 +32,12 @@ Stop remains available for cancelling current work.
 
 ## Tool permissions and scope
 
-With Auto-merge on, native tool approval requests that offer an allow-once
-option are answered once on the user's delegation, including pending tool
-cards. The transcript records these as **auto-merge**, not as a manual click.
-Existing remembered refusals still apply. No persistent native grant is
-created; disabling restores ordinary permission handling. Actual questions
-remain answerable and are not filled with fabricated answers.
+Tool permissions are controlled independently by **Safe mode**, not by
+Auto-merge. Safe mode is off by default: ordinary native approvals run without
+prompting. Enabling Safe mode retains native risk approvals even while
+Auto-merge is on. Changing Auto-merge never silently changes that choice.
+Actual questions remain answerable and are not filled with fabricated answers.
+See [Chat controls](Chat-controls.md).
 
 This is an agent workflow, not a separate GitHub merger or a promise that
 any model will complete every possible task. Normal credentials, native

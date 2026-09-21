@@ -1629,7 +1629,7 @@ export class ChatRuntime extends EventEmitter {
       let warning: string | undefined
       if (session.adapter?.alive && !session.startup && !session.turn?.stopping && session.nativeSafeMode !== enabled) {
         try {
-          applies = await session.adapter.setSafeMode?.(enabled) ?? 'current_turn'
+          applies = await session.adapter.setSafeMode?.(enabled) ?? 'next_turn'
           if (applies === 'current_turn') session.nativeSafeMode = enabled
         } catch (error) {
           warning = `Safe mode ${enabled ? 'on' : 'off'} is saved, but the native agent could not switch yet: ${error instanceof Error ? error.message : String(error)}. It will apply on the next turn; Stop remains available.`
@@ -2092,6 +2092,7 @@ export class ChatRuntime extends EventEmitter {
   private async askPermission(session: LiveSession, request: PermissionRequest): Promise<string> {
     const turn = session.turn
     if (!turn || turn.stopping) throw new Error('no turn is running')
+    if (request.signal?.aborted) throw new Error('permission is no longer pending')
     const grantKey = `${request.title}\0${canonicalJson(request.input)}`
     const granted = session.grants.get(grantKey)
     const requestId = randomUUID()
@@ -2109,7 +2110,17 @@ export class ChatRuntime extends EventEmitter {
       return once.id
     }
     return new Promise<string>((resolve, reject) => {
-      session.pending.set(requestId, { kind: 'permission', turnId: turn.id, options: request.options, grantKey, resolve, reject })
+      const cleanup = () => request.signal?.removeEventListener('abort', superseded)
+      const superseded = () => {
+        if (!session.pending.delete(requestId)) return
+        cleanup()
+        this.emit_(session.record.id, { type: 'permission.resolved', id: requestId, optionId: '', by: 'cancelled' })
+        reject(new Error('permission is no longer pending'))
+        this.afterRequestAnswered(session)
+      }
+      session.pending.set(requestId, { kind: 'permission', turnId: turn.id, options: request.options, grantKey,
+        resolve: value => { cleanup(); resolve(value) }, reject: error => { cleanup(); reject(error) } })
+      request.signal?.addEventListener('abort', superseded, { once: true })
       this.emit_(session.record.id, { type: 'permission.requested', id: requestId, turnId: turn.id, toolId: request.toolId, title: request.title, description: request.description, input: request.input, options: request.options })
       this.setStatus(session, 'waiting')
     })

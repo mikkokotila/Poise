@@ -39,7 +39,7 @@ describe('Muse adapter', () => {
   it('launches muse serve, announces dialog support and advertises its capabilities', async () => {
     const { host, adapter } = setup(['--require-dialogs'])
     const result = await adapter.start(MODEL)
-    expect(host.spawns).toEqual([{ command: 'muse', args: ['serve'] }])
+    expect(host.spawns).toEqual([{ command: 'muse', args: ['serve', '--disable-sandbox', '--trust-workspace'] }])
     expect(adapter.capabilities).toEqual({ steer: true, fork: true, thought: true, plan: false, commands: false, modes: false, permissions: true, questions: true, resume: true, images: false })
     expect(() => assertRequiredCapabilities('muse', adapter.capabilities)).not.toThrow()
     expect(result.nativeSessionId).toMatch(/^session-/)

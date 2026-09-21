@@ -74,8 +74,8 @@ function fakeAdapter(h: AdapterHost): Adapter {
     onExit() { /* no real native process */ },
   }
 }
-async function session() {
-  const record = await runtime.create({ agent: 'grok', model: 'grok-4.6-high', repo: 'fixture/repo', branch: { existing: 'topic' } })
+async function session(safeMode = false) {
+  const record = await runtime.create({ agent: 'grok', model: 'grok-4.6-high', safeMode, repo: 'fixture/repo', branch: { existing: 'topic' } })
   await until(() => runtime.get(record.id)?.status === 'idle')
   return record.id
 }
@@ -112,7 +112,7 @@ describe('Chat runtime lifecycle regression cases', () => {
   })
 
   it('does not reuse an always-grant for different nested command inputs', async () => {
-    const id = await session()
+    const id = await session(true)
     await runtime.prompt(id, input)
     await until(() => promptCount === 1)
     const events: ChatEnvelope[] = []
