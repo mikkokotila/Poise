@@ -11,7 +11,7 @@ export function installIconTooltips(root: HTMLElement = document.body): () => vo
   function icon(node: EventTarget | null): HTMLElement | null {
     const button = node instanceof Element ? node.closest<HTMLElement>('button, [role="button"]') : null
     if (!button || !root.contains(button)) return null
-    return button.matches('.chat-icon-btn, .chat-attachment-remove, .chat-session-delete, [data-tooltip]')
+    return button.matches('.chat-icon-btn, .chat-copy-btn, .chat-attachment-remove, .chat-session-delete, [data-tooltip]')
       || (!!button.querySelector('svg') && !button.textContent?.trim()) ? button : null
   }
   function label(button: HTMLElement): string {
@@ -34,12 +34,12 @@ export function installIconTooltips(root: HTMLElement = document.body): () => vo
     const text = label(button)
     if (!text) return
     // Prevent the browser's separate, long native title tooltip.
-    button.dataset.tooltip = text
+    if (!button.dataset.tooltip && !button.getAttribute('aria-label')) button.dataset.tooltip = text
     button.removeAttribute('title')
     target = button
     timer = setTimeout(() => {
       if (target !== button || !button.isConnected || button.closest('[hidden], [inert]')) return hide()
-      tip.textContent = text
+      tip.textContent = label(button)
       tip.hidden = false
       const box = button.getBoundingClientRect()
       const width = tip.offsetWidth

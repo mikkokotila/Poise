@@ -111,7 +111,9 @@ describe('snippet process integrity', () => {
       await Promise.all(workers.map((worker) => worker.ready))
       await new Promise((resolve) => setTimeout(resolve, 150))
     } finally {
-      if (blocker.inTransaction) blocker.exec('COMMIT')
+      // This empty transaction only holds the gate. Rolling it back releases
+      // the reservation without a zero-timeout exclusive commit racing readers.
+      if (blocker.inTransaction) blocker.exec('ROLLBACK')
       blocker.close()
     }
 
