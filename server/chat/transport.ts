@@ -244,7 +244,10 @@ export class ChatSocketServer {
       case 'queue.remove':
         return { queue: runtime.removeQueue(String(command.sessionId || ''), String(command.itemId || '')) }
       case 'steer':
-        await runtime.steer(String(command.sessionId || ''), String(command.text || ''))
+        await runtime.steer(String(command.sessionId || ''), String(command.text || ''), {
+          attachments: validAttachments(command.attachments),
+          mentions: Array.isArray(command.mentions) ? command.mentions.filter(m => m && typeof m.path === 'string').slice(0, 50) : [],
+        })
         return {}
       case 'cancel':
         return await runtime.cancel(String(command.sessionId || ''))

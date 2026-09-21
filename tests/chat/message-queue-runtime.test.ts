@@ -33,7 +33,8 @@ class Fake implements Adapter {
   finish?: (result: TurnResult) => void
   steered: string[] = []
   modelChanges: string[] = []
-  constructor(readonly agent: AgentId, readonly host: AdapterHost, readonly c: Controls) { c.adapters.push(this) }
+  modeChanges: string[] = []
+  constructor(readonly agent: AgentId, readonly host: AdapterHost, readonly c: Controls) { this.capabilities.modes = agent === 'claude'; c.adapters.push(this) }
   async start(options: AdapterStartOptions) {
     if (this.c.failAgent === this.agent) throw new Error(`${this.agent} is unavailable`)
     this.options = options; this.nativeSessionId = options.resume || randomUUID(); this.alive = true
@@ -55,7 +56,7 @@ class Fake implements Adapter {
   async cancel() { this.finish?.({ stopReason: 'cancelled' }) }
   async close() { this.alive = false; this.finish?.({ stopReason: 'cancelled' }) }
   async setModel(modelId: string, effort: string) { this.modelChanges.push(modelId); return { modelId, effort } }
-  async setMode() {}
+  async setMode(mode: string) { this.modeChanges.push(mode) }
   async fork() { return randomUUID() }
   onExit() {}
 }
@@ -438,4 +439,20 @@ it('keeps a provider-resolved model alias when applying a catalogue effort', asy
   await w.runtime.setModel(w.s.id, 'grok-4.6-xhigh')
   expect(w.runtime.get(w.s.id)).toMatchObject({ model: 'grok-4.6-xhigh', modelId: 'grok-4.6-resolved-revision', effort: 'xhigh' })
   expect(w.c.calls).toEqual([])
+})
+
+it('QC2: can select a work mode immediately after changing to an agent that supports it', async () => {
+  const w = await world({ deferStart: true })
+  await w.runtime.setModel(w.s.id, 'opus-5-max')
+  expect(w.c.calls).toHaveLength(0)
+  await expect(w.runtime.setMode(w.s.id, 'plan')).resolves.toBeUndefined()
+  expect(w.runtime.get(w.s.id)?.mode).toBe('plan')
+  expect(w.c.adapters.at(-1)?.modeChanges).toEqual(['plan'])
+  expect(w.c.calls).toHaveLength(0)
+  await w.runtime.stop()
+  const revived = w.make(); await revived.recover()
+  await revived.resume(w.s.id)
+  expect(w.c.adapters.at(-1)?.options).toMatchObject({ mode: 'plan' })
+  expect(revived.get(w.s.id)?.mode).toBe('plan')
+  expect(w.c.calls).toHaveLength(0)
 })

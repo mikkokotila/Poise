@@ -473,6 +473,33 @@ test.describe('on a release build', () => {
     await expect(page.locator('#settings-panel')).toHaveClass(/open/)
   }
 
+  test('QC2: updating from another view preserves Chat drafts before Chat has mounted', async ({ page }) => {
+    const state = makeState([session()]); state.health = NEW_BUILD
+    await installRoutes(page, state); const sock = await installSocket(page)
+    await page.addInitScript(() => {
+      if (sessionStorage.getItem('qc-cold-chat')) return
+      sessionStorage.setItem('qc-cold-chat', '1')
+      sessionStorage.setItem('self-update-fixture-initialized', '1')
+      localStorage.setItem('poise-view', 'current')
+      sessionStorage.setItem('poise-chat-draft-snapshot', JSON.stringify({ version: 1, savedAt: Date.now(), fromSha: null,
+        activeSessionId: 's1', fresh: { draft: null, modelIdentity: null }, sessions: {
+          s1: { text: 'Keep this unsent review', mode: 'review', model: 'gpt-6-astra-max', attachments: [], mentions: [] },
+        } }))
+    })
+    let loads = 0; page.on('load', () => { loads++ })
+    await page.goto(release.baseURL)
+    const banner = page.locator('.self-update-banner'); await expect(banner).toBeVisible()
+    expect(state.calls.some(call => call.path === '/api/chat/sessions')).toBe(false)
+    await banner.getByRole('button', { name: 'Refresh', exact: true }).click()
+    await expect.poll(() => loads).toBe(2)
+    const saved = await page.evaluate(() => JSON.parse(sessionStorage.getItem('poise-chat-draft-snapshot') || '{}'))
+    expect(saved.sessions?.s1).toMatchObject({ text: 'Keep this unsent review', mode: 'review', model: 'gpt-6-astra-max' })
+    await page.evaluate(() => localStorage.setItem('poise-view', 'chat')); await page.reload()
+    await sock.subscribed('s1'); await expect(input(page)).toHaveValue('Keep this unsent review')
+    await expect(page.locator('.chat-v-chip')).toHaveText('/review')
+    expect(sock.framesOf('prompt')).toHaveLength(0)
+  })
+
   test('reloads itself once onto the new build when idle — closed panels do not hold it — restores the draft, and never loops', async ({ page }) => {
     const state = makeState([session()])
     state.health = NEW_BUILD

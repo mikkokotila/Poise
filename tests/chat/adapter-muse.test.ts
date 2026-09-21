@@ -414,3 +414,23 @@ describe('Muse adapter', () => {
     expect(JSON.stringify(host.events)).not.toContain('Reminder child session')
   })
 })
+
+it('QC2: a delayed answer failure from a cancelled turn cannot stop the following turn', async () => {
+  const host = createFakeHost(FAKE, ['--late-answer-error'])
+  const adapter = createMuseAdapter(host)
+  try {
+    await adapter.start(MODEL)
+    const first = adapter.prompt('old-turn', prompt('hello'), new AbortController().signal)
+    await until(() => host.questions.length === 1)
+    await adapter.cancel(); await first
+    let settled = false
+    const second = adapter.prompt('new-turn', prompt('slow'), new AbortController().signal).then(result => { settled = true; return result })
+    await until(() => host.ofType('text.delta').some(event => event.turnId === 'new-turn'))
+    await sleep(500)
+    expect(settled).toBe(false)
+    expect(host.ofType('error')).toEqual([])
+    expect(adapter.alive).toBe(true)
+    await adapter.cancel()
+    await expect(second).resolves.toMatchObject({ stopReason: 'cancelled' })
+  } finally { await adapter.close(); host.dispose() }
+})

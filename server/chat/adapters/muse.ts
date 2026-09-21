@@ -914,7 +914,8 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
   }
 
   async function handleUserInput(params: UserInputRequestParams): Promise<void> {
-    if (pendingUserInputs.has(params.userInputId)) return
+    const origin = turnFor(params.turnId)
+    if (!origin || pendingUserInputs.has(params.userInputId)) return
     pendingUserInputs.add(params.userInputId)
     const questions: Question[] = params.questions.map((question) => ({
       id: question.id,
@@ -942,13 +943,14 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
       answers = null
     }
     try {
+      if (active !== origin || origin.done) return
       if (answers) {
         await call('userInput/answer', { commandId: uuidv7(), sessionId: session(), userInputId: params.userInputId, answers }, { timeoutMs: 30_000 })
       } else {
         await call('userInput/cancel', { commandId: uuidv7(), sessionId: session(), userInputId: params.userInputId, reason: 'turn cancelled' }, { timeoutMs: 30_000 })
       }
     } catch (error) {
-      interactionFailed(`userInput/${answers ? 'answer' : 'cancel'}`, error)
+      interactionFailed(`userInput/${answers ? 'answer' : 'cancel'}`, error, origin)
     } finally {
       pendingUserInputs.delete(params.userInputId)
     }

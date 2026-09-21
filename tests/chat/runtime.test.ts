@@ -28,6 +28,8 @@ interface FakeControls {
   adapters: FakeAdapter[]
   startCount: number
   failStart?: string
+  startWait?: Promise<void>
+  spawnDuringStart?: boolean
 }
 class FakeAdapter implements Adapter {
   agent: AgentId = 'grok'
@@ -39,6 +41,8 @@ class FakeAdapter implements Adapter {
   starts: AdapterStartOptions[] = []
   safeChanges: boolean[] = []
   deferSafeMode = false
+  effectiveSafeMode = false
+  promptPolicies: boolean[] = []
   cancelled = 0
   closed = 0
   auto = true
@@ -48,6 +52,9 @@ class FakeAdapter implements Adapter {
   async start(options: AdapterStartOptions) {
     this.controls.startCount += 1
     this.starts.push(options)
+    if (this.controls.spawnDuringStart) await this.host.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'])
+    if (this.controls.startWait) await this.controls.startWait
+    this.effectiveSafeMode = options.safeMode === true
     if (this.controls.failStart) throw new Error(this.controls.failStart)
     this.alive = true
     this.nativeSessionId = options.resume || options.forkFrom || `native-${this.controls.startCount}`
@@ -55,6 +62,7 @@ class FakeAdapter implements Adapter {
   }
   async prompt(turnId: string, input: PromptInput, signal: AbortSignal) {
     this.inputs.push(input)
+    this.promptPolicies.push(this.effectiveSafeMode)
     this.host.emit({ type: 'text.delta', turnId, messageId: `${turnId}:m1`, delta: `echo: ${input.text}` })
     if (this.auto) return { stopReason: 'end_turn' as const, usage: { totalTokens: 3 } }
     return new Promise<{ stopReason: 'end_turn' | 'cancelled' }>((resolve) => {
@@ -67,7 +75,7 @@ class FakeAdapter implements Adapter {
   async cancel() { this.cancelled += 1; this.finishTurn?.('cancelled') }
   async setModel(modelId: string, effort: string) { return { modelId, effort, efforts: ['high', 'xhigh'] } }
   async setMode() { throw new Error('unsupported') }
-  async setSafeMode(enabled: boolean): Promise<'current_turn' | 'next_turn'> { this.safeChanges.push(enabled); return this.deferSafeMode ? 'next_turn' : 'current_turn' }
+  async setSafeMode(enabled: boolean): Promise<'current_turn' | 'next_turn'> { this.safeChanges.push(enabled); if (!this.deferSafeMode) this.effectiveSafeMode = enabled; return this.deferSafeMode ? 'next_turn' : 'current_turn' }
   async fork() { return `${this.nativeSessionId}-fork` }
   async close() { this.closed += 1; this.alive = false; for (const l of this.exitListeners) l(0, null) }
   onExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void) { this.exitListeners.push(listener) }
@@ -735,3 +743,72 @@ describe('Safe mode permission ownership', () => {
     adapter.finish()
   })
 })
+
+it.each([false, true])('QC2: honors a permission change made during native startup (deferred=%s)', async deferred => {
+  const { runtime, controls, events } = makeRuntime()
+  let release!: () => void
+  controls.startWait = new Promise<void>(resolve => { release = resolve })
+  controls.spawnDuringStart = true
+  const s = await runtime.create({ agent: 'grok', model: 'grok-4.6-high', deferStart: true, repo: 'fixture/repo', branch: { existing: 'main' } })
+  runtime.prompt(s.id, { text: 'First task', attachments: [], mentions: [] })
+  await waitFor(() => controls.startCount === 1 && storage.listWorkers().some(row => row.sessionId === s.id))
+  controls.adapters[0].deferSafeMode = deferred
+  try {
+    await runtime.setSafeMode(s.id, true)
+  } finally { controls.startWait = undefined; release() }
+  await waitFor(() => ofType(events, s.id, 'turn.finished').length === 1)
+  expect(controls.adapters.flatMap(adapter => adapter.promptPolicies)).toEqual([true])
+  expect(runtime.get(s.id)).toMatchObject({ safeMode: true, safeModePending: false })
+  expect(ofType(events, s.id, 'turn.started')).toHaveLength(1)
+  await runtime.stop()
+  expect(storage.listWorkers().filter(row => row.sessionId === s.id)).toEqual([])
+})
+
+it.each(['claude', 'codex', 'grok', 'muse'] as const)('QC2: %s steering carries validated attachments and mentions before the latest Memories', async agent => {
+  const { runtime, controls, events } = makeRuntime({ agent })
+  const model = CATALOG.models.find(row => row.provider === agent)!.identity
+  const s = await runtime.create({ agent, model, repo: 'fixture/repo', branch: { existing: 'main' } })
+  await waitFor(() => runtime.get(s.id)?.status === 'idle')
+  const file = await runtime.saveAttachment(s.id, 'steer.txt', Buffer.from('Context for the running task'))
+  controls.adapters[0].auto = false
+  runtime.prompt(s.id, { text: 'Keep working', attachments: [], mentions: [] })
+  await waitFor(() => controls.adapters[0].inputs.length === 1)
+  const memories = await import('../../server/chat/memories')
+  const before = memories.readMemories()
+  memories.saveMemories({ text: 'Memory remains last.', revision: before.revision })
+  try {
+    await runtime.steer(s.id, 'Use this too', { attachments: [file], mentions: [{ path: 'README.md' }] })
+    const text = controls.adapters[0].steered.at(-1)!
+    expect(text).toContain('Context for the running task')
+    expect(text).toContain(file.path); expect(text).toContain('README.md')
+    expect(text.endsWith('[Memories]\nMemory remains last.')).toBe(true)
+    expect(ofType(events, s.id, 'steer.sent').at(-1)).toMatchObject({ text: 'Use this too', attachments: [file], mentions: [{ path: 'README.md' }] })
+  } finally { memories.saveMemories({ text: before.text, revision: memories.readMemories().revision }); controls.adapters[0].finish() }
+})
+
+it('QC2: a failed pre-prompt worker replacement keeps the checkout locked until termination is verified', async () => {
+  const { runtime, controls, events } = makeRuntime()
+  let release!: () => void; let refuseTermination = true
+  controls.startWait = new Promise<void>(resolve => { release = resolve }); controls.spawnDuringStart = true
+  const actualSpawn = worker.spawnWorker
+  const spy = vi.spyOn(worker, 'spawnWorker').mockImplementation((command, args, options) => {
+    const handle = actualSpawn(command, args, options); const terminate = handle.terminate.bind(handle)
+    handle.terminate = async grace => { if (refuseTermination) throw new Error('fixture worker termination is not verified'); await terminate(grace) }
+    return handle
+  })
+  try {
+    const s = await runtime.create({ agent: 'grok', model: 'grok-4.6-high', deferStart: true, repo: 'fixture/repo', branch: { existing: 'main' } })
+    runtime.prompt(s.id, { text: 'Must not start under an old policy', attachments: [], mentions: [] })
+    await waitFor(() => storage.listWorkers().some(row => row.sessionId === s.id))
+    await runtime.setSafeMode(s.id, true); controls.startWait = undefined; release()
+    await waitFor(() => ofType(events, s.id, 'turn.finished').length === 1)
+    expect(controls.adapters.flatMap(adapter => adapter.inputs)).toEqual([])
+    const other = makeRuntime({ instance: 'qc-waiting-writer' })
+    const waiting = await other.runtime.create({ agent: 'grok', model: 'grok-4.6-high', repo: 'fixture/repo', branch: { existing: 'main' } })
+    await waitFor(() => other.runtime.get(waiting.id)?.status === 'queued')
+    expect(other.controls.startCount).toBe(0)
+    await waitFor(() => runtime.get(s.id)?.status === 'error')
+    expect(runtime.get(s.id)?.status).toBe('error')
+    await other.runtime.stop()
+  } finally { refuseTermination = false; controls.startWait = undefined; release(); spy.mockRestore(); await runtime.stop() }
+}, 30_000)

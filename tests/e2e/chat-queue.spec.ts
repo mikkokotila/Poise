@@ -97,6 +97,29 @@ test('executes an idle five-item queue after the first task through real ACP, SQ
     await page.reload()
     await expect(page.locator('.chat-msg-user')).toHaveCount(7)
     await expect(page.locator('.chat-msg-user').last()).toContainText('/model grok-4.6-high /review')
+    // Exercise an attachment-bearing steer through the actual runtime/stdio,
+    // then replay its file badge from SQLite after a browser reload.
+    await expect(page.locator('.chat-h-status')).toHaveText('idle')
+    await input.fill('QC steering task'); await input.press('Enter')
+    await expect(page.locator('.chat-h-status')).toHaveText('running')
+    await page.locator('.chat-file-input').setInputFiles({ name: 'steering-notes.txt', mimeType: 'text/plain', buffer: Buffer.from('Additional context: äö.') })
+    await expect(page.locator('.chat-attachment-chip')).toContainText('steering-notes.txt')
+    await input.fill('Use these notes too'); await input.press('Enter')
+    await expect(page.locator('.chat-msg-steer')).toContainText('steering-notes.txt')
+    await expect(page.locator('.chat-h-status')).toHaveText('idle')
+    const steered = await (await page.request.get(`${origin}/__test__/timings`)).json()
+    expect(steered.nativeSteers).toHaveLength(1)
+    expect(steered.nativeSteers[0]).toContain('Additional context: äö.')
+    expect(steered.nativeSteers[0]).toContain('steering-notes.txt')
+    expect(steered.nativeSteers[0].endsWith('[Memories]\nRemember this on every queued task: äö.')).toBe(true)
+    expect(steered.events.filter((row: any) => row.event.type === 'turn.started')).toHaveLength(8)
+    await page.reload()
+    await expect(page.locator('.chat-msg-steer')).toContainText('Use these notes too')
+    await expect(page.locator('.chat-msg-steer')).toContainText('steering-notes.txt')
+    for (const theme of ['light', 'dark']) {
+      await page.evaluate(value => { document.documentElement.dataset.theme = value }, theme)
+      await page.screenshot({ path: info.outputPath(`qc-steering-${theme}.png`), animations: 'disabled' })
+    }
   } finally {
     await stop(child)
   }

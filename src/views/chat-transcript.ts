@@ -78,7 +78,7 @@ export interface QuestionItem extends Keyed {
   questions: Question[]
   answered?: { answers: Record<string, string | string[]>, by: 'user' | 'cancelled' }
 }
-export interface SteerItem extends Keyed { kind: 'steer', text: string }
+export interface SteerItem extends Keyed { kind: 'steer', text: string, attachments?: PromptInput['attachments'], mentions?: PromptInput['mentions'] }
 export interface ErrorItem extends Keyed { kind: 'error', message: string }
 
 export type TurnItem = TextItem | ThoughtItem | ToolItem | PlanItem | PermissionItem | QuestionItem | SteerItem | ErrorItem
@@ -222,7 +222,7 @@ export function applyEvent(model: TranscriptModel, env: ChatEnvelope): void {
     }
     case 'steer.sent': {
       const turn = ensureTurn(model, e.turnId, at)
-      const item: SteerItem = { kind: 'steer', key: `steer:${env.seq}`, rev: 0, text: e.text }
+      const item: SteerItem = { kind: 'steer', key: `steer:${env.seq}`, rev: 0, text: e.text, ...(e.attachments ? { attachments: e.attachments } : {}), ...(e.mentions ? { mentions: e.mentions } : {}) }
       turn.items.push(item)
       bump(model, item, turn)
       return
@@ -551,12 +551,16 @@ export function createTranscriptView(container: HTMLElement, handlers: Transcrip
 
   // ── Item markup ──────────────────────────────────────────────────────
 
-  function userPill(turn: TurnModel): string {
-    const p = turn.prompt
+  function contextExtras(p: Partial<Pick<PromptInput, 'attachments' | 'mentions'>>): string {
     const extras: string[] = []
     for (const a of p.attachments || []) extras.push(`<span class="chat-turn-extra" title="${escapeHtml(a.path)}">${escapeHtml(a.name)}</span>`)
     for (const m of p.mentions || []) extras.push(`<span class="chat-turn-extra chat-turn-mention">@${escapeHtml(m.path)}</span>`)
-    const extrasHtml = extras.length ? `<div class="chat-turn-extras">${extras.join('')}</div>` : ''
+    return extras.length ? `<div class="chat-turn-extras">${extras.join('')}</div>` : ''
+  }
+
+  function userPill(turn: TurnModel): string {
+    const p = turn.prompt
+    const extrasHtml = contextExtras(p)
     const queued = turn.queueItemId ? `<div class="chat-turn-queued">From queue${turn.agent ? ` · ${escapeHtml(AGENT_LABELS[turn.agent])}` : ''}${turn.model ? ` · ${escapeHtml(consoleModelLabel(turn.model))}` : ''}</div>` : ''
     return `${queued}<div class="chat-msg chat-msg-user"><div class="chat-msg-body">${escapeHtml(p.text)}${extrasHtml}</div></div>`
   }
@@ -786,7 +790,7 @@ export function createTranscriptView(container: HTMLElement, handlers: Transcrip
             node.innerHTML = questionHtml(item, focusedHere)
             restoreQuestion(node, item.key)
             break
-          case 'steer': node.innerHTML = `<div class="chat-msg chat-msg-user chat-msg-steer"><div class="chat-msg-body"><span class="chat-msg-mode-tag">steer</span>${escapeHtml(item.text)}</div></div>`; break
+          case 'steer': node.innerHTML = `<div class="chat-msg chat-msg-user chat-msg-steer"><div class="chat-msg-body"><span class="chat-msg-mode-tag">steer</span>${escapeHtml(item.text)}${contextExtras(item)}</div></div>`; break
           case 'error': node.innerHTML = `<div class="chat-msg chat-msg-agent chat-msg-error"><div class="chat-msg-body">${escapeHtml(item.message)}</div></div>`; break
         }
       }

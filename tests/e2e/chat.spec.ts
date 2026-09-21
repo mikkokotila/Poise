@@ -2475,3 +2475,84 @@ test('command models: the next message waits for a model-only selection and is p
   await expect(page.locator('.chat-notice')).toContainText('Model not available')
   expect(sock.framesOf('prompt')).toHaveLength(0)
 })
+
+for (const queued of [false, true]) test(`QC2: a header model change holds the following ${queued ? 'queue item' : 'message'} until acknowledged`, async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  sock.autoAck = false
+  await page.locator('.chat-model-select').selectOption('opus-5-high')
+  await expect.poll(() => sock.framesOf('set_model').length).toBe(1)
+  await input(page).fill(queued ? '/queue Preserve the selected model' : 'Preserve the selected model')
+  await input(page).press('Enter')
+  await page.waitForTimeout(80)
+  expect(sock.framesOf(queued ? 'queue.add' : 'prompt')).toHaveLength(0)
+  const updated = { ...state.sessions[0], model: 'opus-5-high', effort: 'high', lastSeq: sock.seq + 1 }
+  state.sessions[0] = updated
+  sock.autoAck = true
+  sock.push('s1', { type: 'session.updated', session: updated })
+  sock.ack(sock.framesOf('set_model')[0], true, '', undefined, { session: updated })
+  await expect.poll(() => sock.framesOf(queued ? 'queue.add' : 'prompt').length).toBe(1)
+  const command = sock.framesOf(queued ? 'queue.add' : 'prompt')[0].command
+  expect(command).toMatchObject({ sessionId: 's1', text: 'Preserve the selected model' })
+  if (queued) expect(command).toMatchObject({ model: 'opus-5-high', effort: 'high' })
+})
+
+for (const fails of [false, true]) test(`QC2: steering ${fails ? 'failure preserves' : 'sends'} attached context`, async ({ page }) => {
+  const state = makeState([session({ status: 'running' })], { s1: [env('s1', 1, { type: 'turn.started', turnId: 'active', prompt: { text: 'Work', attachments: [], mentions: [] } })] })
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  const attachment = { id: 'steering-file', name: 'context.txt', path: '.poise-chat/attachments/s1/context.txt', size: 7 }
+  await page.route('**/api/chat/attachments?**', route => route.fulfill({ json: { attachment } }))
+  await page.goto('/'); await sock.subscribed('s1'); sock.autoAck = false
+  await page.locator('.chat-file-input').setInputFiles({ name: 'context.txt', mimeType: 'text/plain', buffer: Buffer.from('context') })
+  await expect(page.locator('.chat-attachment-chip')).toContainText('context.txt')
+  await input(page).fill('Use this too'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('steer').length).toBe(1)
+  expect(sock.framesOf('steer')[0].command).toMatchObject({ text: 'Use this too', attachments: [attachment] })
+  await expect(page.locator('.chat-attachment-chip')).toHaveCount(0)
+  if (fails) {
+    await input(page).fill('My next draft')
+    sock.ack(sock.framesOf('steer')[0], false, 'Turn ended', 'no_turn')
+    await expect(input(page)).toHaveValue('Use this too\n\nMy next draft')
+    await expect(page.locator('.chat-attachment-chip')).toContainText('context.txt')
+  } else sock.ack(sock.framesOf('steer')[0])
+  expect(sock.framesOf('prompt')).toHaveLength(0); expect(sock.framesOf('queue.add')).toHaveLength(0)
+})
+
+test('QC2: a work-mode selection is acknowledged before a following task starts', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  sock.autoAck = false
+  await page.locator('.chat-mode-select').selectOption('plan')
+  await expect.poll(() => sock.framesOf('set_mode').length).toBe(1)
+  await input(page).fill('Investigate without making edits'); await input(page).press('Enter')
+  await page.waitForTimeout(80); expect(sock.framesOf('prompt')).toHaveLength(0)
+  sock.ack(sock.framesOf('set_mode')[0])
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ text: 'Investigate without making edits' })
+})
+
+test('QC2: a failed queued model change preserves the message and does not queue under the old model', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  sock.autoAck = false; await page.locator('.chat-model-select').selectOption('opus-5-high')
+  await expect.poll(() => sock.framesOf('set_model').length).toBe(1)
+  await input(page).fill('/queue Follow-up using the selected model'); await input(page).press('Enter')
+  sock.ack(sock.framesOf('set_model')[0], false, 'Model unavailable', 'unavailable')
+  await expect(input(page)).toHaveValue('Follow-up using the selected model')
+  await expect(page.locator('.chat-v-chip')).toHaveText('/queue')
+  expect(sock.framesOf('queue.add')).toHaveLength(0); expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('QC2: attaching context alone during a turn sends that context once', async ({ page }) => {
+  const state = makeState([session({ status: 'running' })]); await installRoutes(page, state)
+  const sock = await installSocket(page, state)
+  const attachment = { id: 'context-only', name: 'context.txt', path: '.poise-chat/attachments/s1/context.txt', size: 7 }
+  await page.route('**/api/chat/attachments?**', route => route.fulfill({ json: { attachment } }))
+  await page.goto('/'); await sock.subscribed('s1')
+  await page.locator('.chat-file-input').setInputFiles({ name: 'context.txt', mimeType: 'text/plain', buffer: Buffer.from('context') })
+  await expect(page.locator('.chat-attachment-chip')).toContainText('context.txt')
+  await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('steer').length).toBe(1)
+  expect(sock.framesOf('steer')[0].command).toMatchObject({ text: '', attachments: [attachment] })
+  await expect(page.locator('.chat-attachment-chip')).toHaveCount(0)
+})

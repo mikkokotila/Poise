@@ -68,3 +68,20 @@ describe('recent user message history', () => {
     expect(item.draft.text).toBe(text)
   })
 })
+
+it('QC2: recalling a queued review keeps its original reviewer and effort', () => {
+  const w = world()
+  w.emit({ type: 'turn.started', turnId: 'queued', queueItemId: 'q1', agent: 'codex', model: 'gpt-6-astra-max', prompt: prompt('/review correctness') })
+  expect(recentMessages(w.model)[0].draft).toMatchObject({ mode: 'queue', model: 'gpt-6-astra-max', text: '/review correctness' })
+})
+
+it('QC2: steering history carries independent copies of attached and mentioned context', () => {
+  const w = world(); w.turn('task', 'Continue')
+  const file = { id: 'f', name: 'notes.txt', path: 'uploads/notes.txt', size: 4 }
+  w.emit({ type: 'steer.sent', turnId: 'task', text: '', attachments: [file], mentions: [{ path: 'README.md' }] })
+  const recalled = recentMessages(w.model).at(-1)!
+  expect(recalled.draft).toMatchObject({ text: '', attachments: [file], mentions: [{ path: 'README.md' }] })
+  expect(historyLabel(recalled)).toBe('notes.txt')
+  recalled.draft.attachments[0].name = 'changed'
+  expect(file.name).toBe('notes.txt')
+})

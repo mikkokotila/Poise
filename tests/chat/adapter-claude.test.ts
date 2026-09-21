@@ -239,3 +239,15 @@ describe('Claude adapter', () => {
     expect(host.ofType('tool.finished')[0]).toMatchObject({ status: 'failed' })
   })
 })
+
+it('QC2: starts a resumed Plan session in the explicitly saved work mode', async () => {
+  const host = createFakeHost(FAKE)
+  const adapter = createClaudeAdapter(host)
+  try {
+    await adapter.start({ ...MODEL, mode: 'plan', resume: 'a1b2c3d4-0000-4000-8000-000000000001' })
+    const args = host.spawns[0].args
+    expect(args[args.indexOf('--permission-mode') + 1]).toBe('plan')
+    expect(args).toContain('--resume=a1b2c3d4-0000-4000-8000-000000000001')
+    expect(host.ofType('text.delta')).toEqual([])
+  } finally { await adapter.close(); host.dispose() }
+})

@@ -69,6 +69,8 @@ export interface AdapterHost {
 }
 
 export interface AdapterStartOptions {
+  /** Preserve an explicitly selected native work mode when resuming. */
+  mode?: string
   /** Native risk approvals when true, unrestricted when false/missing; neither enables a sandbox. */
   safeMode?: boolean
   /** Native model selector (`claude-opus-5`, `grok-4.6`, `gpt-6-astra`, `muse-spark-1.3-contributor`). */
