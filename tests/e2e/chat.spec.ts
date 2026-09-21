@@ -68,8 +68,8 @@ async function installRoutes(page: Page, state: ServerState): Promise<void> {
     if (path === '/api/chat/sessions' && method === 'GET') { await route.fulfill({ json: { sessions: state.sessions, instance: 'poise-dev:test' } }); return }
     if (path === '/api/chat/sessions' && method === 'POST') {
       if (state.createDelay) await state.createDelay()
-      const req2 = body as { agent: SessionRecord['agent'], model: string, effort: string, autoMerge?: boolean, deferStart?: boolean }
-      const created = session({ id: `new-${state.sessions.length + 1}`, agent: req2.agent, model: req2.model, effort: req2.effort, autoMerge: req2.autoMerge,
+      const req2 = body as { agent: SessionRecord['agent'], model: string, effort: string, autoMerge?: boolean, safeMode?: boolean, deferStart?: boolean }
+      const created = session({ id: `new-${state.sessions.length + 1}`, agent: req2.agent, model: req2.model, effort: req2.effort, autoMerge: req2.autoMerge, safeMode: req2.safeMode === true,
         repo: '', checkout: '/poise/.poise-chat/workspace', workspaceKind: 'poise-local', title: '', status: req2.deferStart ? 'idle' : 'starting', createdAt: new Date().toISOString(),
         branch: { name: 'chat/generated', origin: 'new', provisional: true } })
       state.sessions.unshift(created)
@@ -156,6 +156,13 @@ async function installSocket(page: Page, state?: ServerState): Promise<Socket> {
         s.queue = queue
         sock.push(s.id, { type: 'queue.updated', queue })
         sock.ack(frame, true, '', undefined, { queue })
+      } else if (sock.autoAck && frame.command.type === 'set_safe_mode' && state) {
+        const command = frame.command
+        const s = state.sessions.find(s => s.id === command.sessionId)!
+        s.safeMode = command.enabled
+        s.lastSeq = sock.seq + 1
+        sock.push(s.id, { type: 'session.updated', session: { ...s } })
+        sock.ack(frame, true, '', undefined, { session: { ...s }, applies: 'current_turn' })
       } else if (sock.autoAck && frame.command.type === 'set_auto_merge' && state) {
         const command = frame.command
         const s = state.sessions.find(s => s.id === command.sessionId)!
@@ -477,6 +484,7 @@ test('shows tool cards with diffs, reverts one by its diffId, and folds consecut
   await expect(page.locator('.chat-plan-entry')).toHaveCount(3)
   sock.push('s1', { type: 'thought.delta', turnId: 't1', messageId: 'th1', delta: 'Considering the options' })
   await expect(page.locator('.chat-thought-body')).toBeHidden()
+  await page.getByRole('button', { name: 'Reasoning', exact: true }).click()
   await page.locator('.chat-thought-toggle').click()
   await expect(page.locator('.chat-thought-body')).toContainText('Considering the options')
 })
@@ -746,7 +754,7 @@ test('shows all five catalogue providers and keeps efforts specific to each mode
   await effort.selectOption('xhigh')
   await dialog.getByRole('button', { name: 'Create', exact: true }).click()
   await expect.poll(() => state.calls.filter(c => c.path === '/api/chat/sessions' && c.method === 'POST').map(c => c.body)).toEqual([
-    { agent: 'muse', model: 'muse-spark-1.3-contributor-xhigh', effort: 'xhigh' },
+    { agent: 'muse', model: 'muse-spark-1.3-contributor-xhigh', effort: 'xhigh', safeMode: false },
   ])
   await expect(page.locator('.chat-h-repo')).toHaveText(/Poise · local/)
 })
@@ -1355,7 +1363,7 @@ test('Auto-merge stays beside Memories, follows the selected session, and persis
   await expect(toggle).toHaveAttribute('aria-pressed', 'false')
   await expect(toggle.locator('svg')).toHaveCount(1)
   expect(await toggle.textContent()).toBe('')
-  expect(await toggle.evaluate(el => el.nextElementSibling?.getAttribute('aria-label'))).toBe('Memories')
+  expect(await toggle.evaluate(el => el.nextElementSibling?.getAttribute('aria-label'))).toBe('Safe mode')
   await input(page).fill('Keep this draft')
   await toggle.focus()
   await toggle.press('Space')
@@ -1458,7 +1466,7 @@ test('queues five idle messages before the first task, with an expanded collapsi
     await expect(queuedRows(page).last().locator('select')).toBeEnabled()
   }
   expect(sock.framesOf('prompt')).toHaveLength(0); expect(sock.framesOf('steer')).toHaveLength(0)
-  expect(state.calls.filter(c => c.path === '/api/chat/sessions' && c.method === 'POST').map(c => c.body)).toEqual([{ agent: 'claude', model: 'opus-5-high', effort: 'high', deferStart: true }])
+  expect(state.calls.filter(c => c.path === '/api/chat/sessions' && c.method === 'POST').map(c => c.body)).toEqual([{ agent: 'claude', model: 'opus-5-high', effort: 'high', deferStart: true, safeMode: false }])
   await expect(queuePanel(page)).toHaveAttribute('open', '')
   expect((await queuePanel(page).boundingBox())!.y + (await queuePanel(page).boundingBox())!.height).toBeLessThanOrEqual((await page.locator('.chat-v-composer').boundingBox())!.y)
   await input(page).fill('The first real task')
@@ -2162,4 +2170,82 @@ test('history: history, queue and Memories share the layout and never hide the f
   await expect.poll(() => page.locator('.chat-history-list').evaluate(el => el.scrollTop)).toBeGreaterThan(0)
   await expect(page.locator('.chat-v-composer .chat-send')).toBeInViewport()
   await page.screenshot({ path: info.outputPath('history-compact.png'), animations: 'disabled' })
+})
+
+
+test('safe mode: fresh chats default off and preserve an explicit choice through reload and first send', async ({ page }) => {
+  const state = makeState([]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.ready()
+  const safe = page.getByRole('button', { name: 'Safe mode', exact: true })
+  await expect(safe).toHaveAttribute('aria-pressed', 'false')
+  await expect(page.getByRole('button', { name: 'Reasoning', exact: true })).toHaveAttribute('aria-pressed', 'false')
+  await safe.focus(); await safe.press('Space')
+  await expect(safe).toHaveAttribute('aria-pressed', 'true')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  await page.reload(); await expect(safe).toHaveAttribute('aria-pressed', 'true')
+  await input(page).fill('Inspect the project'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(state.calls.find(call => call.method === 'POST' && call.path === '/api/chat/sessions')?.body).toMatchObject({ safeMode: true })
+})
+
+test('safe mode: remains independent of Auto-merge and a failed Memories save', async ({ page }) => {
+  const state = makeState([session({ autoMerge: true })]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); const memory = await installMemoryRoutes(page)
+  await page.goto('/'); await sock.subscribed('s1'); await memoryToggle(page).click()
+  await expect(memoryText(page)).toBeEnabled(); memory.fail = true
+  await memoryText(page).fill('Preserve this unsaved note')
+  await page.getByRole('button', { name: 'Safe mode', exact: true }).click()
+  await expect(page.locator('.chat-h-safe-mode')).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.locator('.chat-h-auto-merge')).toHaveAttribute('aria-pressed', 'true')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  await expect(memoryText(page)).toHaveValue('Preserve this unsaved note')
+})
+
+test('safe mode: a failed update never sends a following draft under the wrong choice', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  sock.autoAck = false
+  const safe = page.locator('.chat-h-safe-mode')
+  await safe.click(); await expect(safe).toBeDisabled()
+  await input(page).fill('Keep my draft'); await input(page).press('Enter')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  sock.ack(sock.framesOf('set_safe_mode')[0], false, 'Connection failed', 'unavailable')
+  await expect(safe).toBeEnabled(); await expect(safe).toHaveAttribute('aria-pressed', 'false')
+  await expect(input(page)).toHaveValue('Keep my draft')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('safe mode: deferred native changes are labelled and late answers stay in their own session', async ({ page }) => {
+  const state = makeState([session(), session({ id: 's2', title: 'Other session' })])
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1'); sock.autoAck = false
+  await page.locator('.chat-h-safe-mode').click()
+  await page.locator('.chat-session-item[data-id="s2"]').click()
+  const updated = { ...state.sessions[0], safeMode: true, safeModePending: true, lastSeq: 10 }
+  sock.ack(sock.framesOf('set_safe_mode')[0], true, '', undefined, { session: updated, applies: 'next_turn', warning: 'Next turn' })
+  await expect(page.locator('.chat-h-safe-mode')).toHaveAttribute('aria-pressed', 'false')
+  await page.locator('.chat-session-item[data-id="s1"]').click()
+  await expect(page.locator('.chat-h-safe-mode')).toHaveClass(/is-deferred/)
+  await expect(page.locator('#chat-safe-mode-status')).toContainText('next turn')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('icon tooltips: wait one second, stay short, and dismiss without a native title', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state); await installSocket(page, state)
+  await page.goto('/'); await expect(page.locator('.chat-h-safe-mode')).toBeVisible()
+  await page.clock.install({ time: new Date('2026-09-21T00:00:00Z') })
+  await page.clock.pauseAt(new Date('2026-09-21T00:00:01Z'))
+  const button = page.locator('.chat-h-safe-mode'); const tip = page.getByRole('tooltip')
+  const box = (await button.boundingBox())!
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  await page.clock.runFor(999); await expect(tip).toBeHidden()
+  await page.clock.runFor(1); await expect(tip).toHaveText('Safe mode')
+  await expect(button).not.toHaveAttribute('title')
+  await page.keyboard.press('Escape'); await expect(tip).toBeHidden()
+  await page.mouse.move(1, 1)
+  const other = page.locator('.chat-h-auto-merge'); const b = (await other.boundingBox())!
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2)
+  await page.clock.runFor(1000); await expect(tip).toHaveText('Auto-merge')
+  await expect(other).not.toHaveAttribute('title')
+  await page.mouse.move(1, 1); await expect(tip).toBeHidden()
 })

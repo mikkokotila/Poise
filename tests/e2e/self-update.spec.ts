@@ -292,7 +292,7 @@ test('Poise: from a fresh console first creates an ordinary session on the chose
   await input(page).fill('Poise: Make the Behaviors table sortable')
   await input(page).press('Enter')
   await expect.poll(() => state.calls.filter((c) => c.method === 'POST' && c.path === '/api/chat/sessions').map((c) => c.body)).toEqual([
-    { agent: 'codex', model: 'gpt-6-astra-max', effort: 'max', title: 'Poise: Make the Behaviors table sortable' },
+    { agent: 'codex', model: 'gpt-6-astra-max', effort: 'max', title: 'Poise: Make the Behaviors table sortable', safeMode: false },
   ])
   await expect.poll(() => sock.framesOf('poise.change').length).toBe(1)
   expect(sock.framesOf('poise.change')[0].command).toMatchObject({ sessionId: 'new-1', text: 'Make the Behaviors table sortable' })

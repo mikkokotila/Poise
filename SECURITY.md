@@ -60,8 +60,9 @@ Checkout locks coordinate Poise instances and compatible Caller writers; they
 are not a system-wide filesystem lock. Registered worker groups and in-flight
 Poise file operations must settle before releasing a checkout. Uncertainty
 keeps it blocked rather than allowing another writer to proceed. Native
-agents retain their own permissions and sandbox behavior; setting their cwd
-does not sandbox arbitrary native tools or commands. Poise's own filesystem
+agents now launch without an OS sandbox in both Chat permission modes. Safe
+mode is off by default (full access); enabling it retains native risk-based
+approvals. A working directory is not a filesystem boundary. Poise's own filesystem
 services use checked checkout paths, bounded reads and atomic writes.
 
 Uploaded files have server-issued, session-owned records. Editor handoffs use
@@ -123,15 +124,15 @@ shutdown of a browser connection is not proof that its file operation ended.
 
 The user can separately enable Auto-merge in a Chat session for requested work
 across repositories. The server validates a boolean command, session ownership
-and durable replay receipts; agent output cannot toggle the setting. Native
-tool requests with an allow-once option are then resolved with an audited
-`auto_merge` decision. This is broad delegation to the selected coding agent,
-not an OS sandbox or a persistent native permission grant. Existing explicit
-refusals remain effective, real questions remain unanswered until addressed,
-and disabling stops automatic tool approvals. Shared instructions require
-normal repository checks/protections and verified merges; those are not
-replaced by a new general-purpose server merge gate. The Poise-only release
-controller and its credential scope remain unchanged.
+and durable replay receipts; agent output cannot toggle the setting. Merge
+delegation is independent of tool permissions. Safe mode controls whether
+native risk approvals are shown; Auto-merge cannot override Safe mode. In
+unrestricted mode, once-only native approvals are recorded as `unrestricted`,
+not forged manual clicks. Questions still require real answers. The shared
+instructions require normal repository checks/protections and verified merges;
+those are not replaced by a new general-purpose server merge gate. The
+Poise-only release controller and its credential scope remain unchanged.
+See [Chat controls](docs/Chat-controls.md) for policy application timing.
 
 ## Deferred Chat messages
 

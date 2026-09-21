@@ -23,6 +23,7 @@ function scripted() {
   let sessionId = null
   let modelId = 'muse-spark-1.3-contributor'
   let reasoningEffort = 'medium'
+  let approvalMode = 'onRequest'
   let turn = null // { id, interrupted, steered: [], decided: [], answered: [] }
   const requireDialogs = process.argv.includes('--require-dialogs')
   const dropSteer = process.argv.includes('--drop-steer')
@@ -33,7 +34,7 @@ function scripted() {
   const sessionObject = (id, extra = {}) => ({
     sessionId: id, path: `/tmp/muse/${id}/session.jsonl`, status: 'idle', activeTurnId: null, createdAt: '2026-09-18T13:17:02.687053Z',
     updatedAt: '2026-09-18T13:17:02.687057Z', workspaceRoot: '/tmp/fixture', providerId: 'meta', modelId, turnCount: 0, forkedFrom: null,
-    approvalMode: { mode: 'onRequest', source: 'startup', lastCommandId: null }, ...extra,
+    approvalMode: { mode: approvalMode, source: 'startup', lastCommandId: null }, ...extra,
   })
   const models = ['muse-spark-1.3', 'muse-spark-1.3-contributor'].map((id) => ({
     modelId: id, displayLabel: id, providerId: 'meta', profileId: 'tbh', releaseDate: '2026-09-02', description: null,
@@ -57,6 +58,7 @@ function scripted() {
         case 'session/start':
           sessionId = uuid('session')
           modelId = params.modelId ?? modelId
+          approvalMode = params.approvalMode ?? 'onRequest'
           peer.notify('session/started', { session: sessionObject(sessionId) })
           return { session: sessionObject(sessionId), viewCursor: viewCursor() }
         case 'session/resume':
@@ -69,6 +71,9 @@ function scripted() {
         }
         case 'view/subscribe':
           return { viewCursor: viewCursor() }
+        case 'session/setApprovalMode':
+          approvalMode = params.mode
+          return { commandId: params.commandId, status: 'accepted', applyOutcome: 'completed', effectiveMode: { mode: approvalMode, source: 'approvalReconfigure', lastCommandId: params.commandId } }
         case 'session/setModel':
           modelId = params.model.modelId
           view('session/modelChanged', { modelId, providerId: 'meta', source: 'user' })

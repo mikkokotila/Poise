@@ -235,3 +235,18 @@ it('deduplicates queue commands on reconnect and never turns an enqueue into a p
   expect(enqueue).toHaveBeenCalledWith('one', '11111111-1111-4111-8111-111111111111', { text: 'Later', attachments: [], mentions: [] }, 'grok-4.6-high', undefined)
   expect(prompt).not.toHaveBeenCalled(); expect(steer).not.toHaveBeenCalled()
 })
+
+it('records Safe mode once across reconnect and rejects conflicting request IDs', async () => {
+  const setSafeMode = vi.fn(async (sessionId: string, enabled: boolean) => ({ session: { id: sessionId, safeMode: enabled }, applies: 'next_turn' }))
+  const connect = await serve(async () => ({}), { setSafeMode })
+  const frame = (enabled: boolean) => JSON.stringify({ id: 'safe-mode-on', command: { type: 'set_safe_mode', sessionId: 's1', enabled } })
+  const first = await connect(); const initial = ack(first, 'safe-mode-on'); first.send(frame(true))
+  expect((await initial).ok).toBe(true)
+  first.terminate()
+  const second = await connect(); const repeated = ack(second, 'safe-mode-on'); second.send(frame(true))
+  expect((await repeated).ok).toBe(true)
+  expect(setSafeMode).toHaveBeenCalledExactlyOnceWith('s1', true)
+  const conflict = ack(second, 'safe-mode-on'); second.send(frame(false))
+  expect((await conflict).ok).toBe(false)
+  expect(setSafeMode).toHaveBeenCalledTimes(1)
+})

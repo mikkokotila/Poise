@@ -36,6 +36,9 @@ class FakeAdapter implements Adapter {
   alive = false
   steered: string[] = []
   inputs: PromptInput[] = []
+  starts: AdapterStartOptions[] = []
+  safeChanges: boolean[] = []
+  deferSafeMode = false
   cancelled = 0
   closed = 0
   auto = true
@@ -44,6 +47,7 @@ class FakeAdapter implements Adapter {
   constructor(readonly host: AdapterHost, readonly controls: FakeControls) {}
   async start(options: AdapterStartOptions) {
     this.controls.startCount += 1
+    this.starts.push(options)
     if (this.controls.failStart) throw new Error(this.controls.failStart)
     this.alive = true
     this.nativeSessionId = options.resume || options.forkFrom || `native-${this.controls.startCount}`
@@ -63,6 +67,7 @@ class FakeAdapter implements Adapter {
   async cancel() { this.cancelled += 1; this.finishTurn?.('cancelled') }
   async setModel(modelId: string, effort: string) { return { modelId, effort, efforts: ['high', 'xhigh'] } }
   async setMode() { throw new Error('unsupported') }
+  async setSafeMode(enabled: boolean): Promise<'current_turn' | 'next_turn'> { this.safeChanges.push(enabled); return this.deferSafeMode ? 'next_turn' : 'current_turn' }
   async fork() { return `${this.nativeSessionId}-fork` }
   async close() { this.closed += 1; this.alive = false; for (const l of this.exitListeners) l(0, null) }
   onExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void) { this.exitListeners.push(listener) }
@@ -199,7 +204,7 @@ describe('chat runtime', () => {
   it('answers permissions and questions inline, remembers "always" only for the session, and clears them on cancel', async () => {
     ensureBranch('chat/alpha')
     const { runtime, controls, events } = makeRuntime()
-    const session = await runtime.create({ agent: 'grok', model: 'grok-4.6-xhigh', repo: 'acme/repo', branch: { existing: 'chat/alpha' } })
+    const session = await runtime.create({ agent: 'grok', model: 'grok-4.6-xhigh', safeMode: true, repo: 'acme/repo', branch: { existing: 'chat/alpha' } })
     await waitFor(() => lastStatus(events, session.id) === 'idle')
     const adapter = controls.adapters[0]
     adapter.auto = false
@@ -322,7 +327,7 @@ describe('chat runtime', () => {
     // has already exited and a clock that stays in the past.
     const deadPid = spawnSync('true').pid
     const crashed = makeRuntime({ instance: 'poise-crash:db', caller, leaseProbes: { hostPid: deadPid, now: () => Date.now() - 120_000 } })
-    const session = await crashed.runtime.create({ agent: 'grok', model: 'grok-4.6-xhigh', repo: 'acme/repo', branch: { existing: 'chat/alpha' } })
+    const session = await crashed.runtime.create({ agent: 'grok', model: 'grok-4.6-xhigh', safeMode: true, repo: 'acme/repo', branch: { existing: 'chat/alpha' } })
     await waitFor(() => lastStatus(crashed.events, session.id) === 'idle')
     crashed.controls.adapters[0].auto = false
     await crashed.runtime.prompt(session.id, { text: 'never finishes', attachments: [], mentions: [] })
@@ -551,9 +556,9 @@ describe('Auto-merge sessions', () => {
     expect(ofType(revived.events, s.id, 'turn.started')[0].prompt.text).toBe('Continue normally')
   })
 
-  it('updates a running turn, releases a pending once-only tool approval, and stops automatic approvals when disabled', async () => {
+  it('updates merge instructions independently of Safe mode and never overrides its pending risk approvals', async () => {
     const { runtime, controls, events } = makeRuntime()
-    const s = await runtime.create({ agent: 'grok', model: 'grok-4.6-high', repo: 'acme/tools', branch: { existing: 'main' } })
+    const s = await runtime.create({ agent: 'grok', model: 'grok-4.6-high', safeMode: true, repo: 'acme/tools', branch: { existing: 'main' } })
     await waitFor(() => runtime.get(s.id)?.status === 'idle')
     const adapter = controls.adapters[0]; adapter.auto = false
     runtime.prompt(s.id, { text: 'Finish the PRs', attachments: [], mentions: [] })
@@ -563,9 +568,12 @@ describe('Auto-merge sessions', () => {
     const waiting = host.requestPermission(request)
     await waitFor(() => runtime.get(s.id)?.status === 'waiting')
     expect((await runtime.setAutoMerge(s.id, true)).applies).toBe('current_turn')
+    expect(runtime.get(s.id)?.status).toBe('waiting')
+    expect(ofType(events, s.id, 'permission.resolved')).toHaveLength(0)
+    await runtime.setSafeMode(s.id, false)
     await expect(waiting).resolves.toBe('once')
     expect(adapter.steered[0]).toContain('Auto-merge ON')
-    expect(ofType(events, s.id, 'permission.resolved').at(-1)).toMatchObject({ optionId: 'once', by: 'auto_merge' })
+    expect(ofType(events, s.id, 'permission.resolved').at(-1)).toMatchObject({ optionId: 'once', by: 'unrestricted' })
     await expect(host.requestPermission(request)).resolves.toBe('once')
     await runtime.steer(s.id, 'Also finish the independent docs PR')
     expect(adapter.steered.at(-1)).toContain('Auto-merge ON')
@@ -573,6 +581,8 @@ describe('Auto-merge sessions', () => {
     expect(ofType(events, s.id, 'steer.sent')).toHaveLength(1)
     await runtime.setAutoMerge(s.id, false)
     expect(adapter.steered.at(-1)).toContain('Auto-merge OFF')
+    await expect(host.requestPermission(request)).resolves.toBe('once')
+    await runtime.setSafeMode(s.id, true)
     const count = ofType(events, s.id, 'permission.resolved').length
     const manual = host.requestPermission(request)
     await waitFor(() => runtime.get(s.id)?.status === 'waiting')
@@ -639,5 +649,85 @@ describe('Auto-merge sessions', () => {
     await waitFor(() => ofType(events, handoff.id, 'turn.finished').length === 1)
     const unrelated = await runtime.create(request)
     expect(unrelated.autoMerge).toBeUndefined()
+  })
+})
+
+
+describe('Safe mode permission ownership', () => {
+  it.each(['claude', 'codex', 'grok', 'muse'] as const)('defaults %s to unrestricted approvals without enabling Auto-merge', async agent => {
+    const { runtime, controls, events } = makeRuntime({ agent })
+    const model = CATALOG.models.find(row => row.provider === agent)!.identity
+    const s = await runtime.create({ agent, model, repo: 'acme/tools', branch: { existing: 'main' } })
+    await waitFor(() => runtime.get(s.id)?.status === 'idle')
+    const adapter = controls.adapters[0]; adapter.auto = false
+    expect(adapter.starts[0].safeMode).toBe(false)
+    expect(runtime.get(s.id)?.autoMerge).toBeUndefined()
+    runtime.prompt(s.id, { text: 'Work normally', attachments: [], mentions: [] })
+    await waitFor(() => adapter.inputs.length === 1)
+    await expect(controls.hosts[0].requestPermission({ title: 'Run tool', options: [{ id: 'yes', name: 'Allow', kind: 'allow_once' }] })).resolves.toBe('yes')
+    expect(ofType(events, s.id, 'permission.resolved').at(-1)).toMatchObject({ by: 'unrestricted' })
+    expect(runtime.get(s.id)?.pendingRequests).toEqual([])
+    adapter.finish()
+  })
+
+  it('persists the setting without waking agents and enforces instance ownership', async () => {
+    const first = makeRuntime({ instance: 'safe-persist' })
+    const req = { agent: 'grok' as const, model: 'grok-4.6-high', repo: 'acme/tools', branch: { existing: 'main' } }
+    await expect(first.runtime.create({ ...req, safeMode: 'false' as unknown as boolean })).rejects.toThrow(/boolean/)
+    const s = await first.runtime.create({ ...req, safeMode: true })
+    await waitFor(() => first.runtime.get(s.id)?.status === 'idle')
+    const fork = await first.runtime.fork(s.id)
+    expect(fork.safeMode).toBe(true)
+    await waitFor(() => first.runtime.get(fork.id)?.status === 'idle')
+    const handoff = await first.runtime.handoff(s.id, { agent: 'grok', model: req.model })
+    expect(handoff.safeMode).toBe(true)
+    await waitFor(() => ofType(first.events, handoff.id, 'turn.finished').length === 1)
+    expect((await first.runtime.create(req)).safeMode).toBe(false)
+    await first.runtime.stop()
+    const revived = makeRuntime({ instance: 'safe-persist' })
+    await revived.runtime.recover()
+    expect(revived.runtime.get(s.id)?.safeMode).toBe(true)
+    expect(revived.controls.startCount).toBe(0)
+    expect(() => revived.runtime.setSafeMode(s.id, 'true' as unknown as boolean)).toThrow(/boolean/)
+    expect(() => makeRuntime({ instance: 'other' }).runtime.setSafeMode(s.id, false)).toThrow(/another Poise server/)
+    await revived.runtime.setSafeMode(s.id, false)
+    expect(revived.controls.startCount).toBe(0)
+  })
+
+  it('defers unsupported native switches and applies the setting before the next prompt', async () => {
+    const { runtime, controls, events } = makeRuntime()
+    const s = await runtime.create({ agent: 'grok', model: 'grok-4.6-high', repo: 'acme/tools', branch: { existing: 'main' } })
+    await waitFor(() => runtime.get(s.id)?.status === 'idle')
+    const adapter = controls.adapters[0]; adapter.auto = false; adapter.deferSafeMode = true
+    runtime.prompt(s.id, { text: 'First task', attachments: [], mentions: [] })
+    await waitFor(() => adapter.inputs.length === 1)
+    expect(await runtime.setSafeMode(s.id, true)).toMatchObject({ applies: 'next_turn', session: { safeMode: true, safeModePending: true }, warning: expect.any(String) })
+    expect(adapter.closed).toBe(0)
+    adapter.finish()
+    await waitFor(() => runtime.get(s.id)?.status === 'idle')
+    runtime.prompt(s.id, { text: 'Next task', attachments: [], mentions: [] })
+    await waitFor(() => ofType(events, s.id, 'turn.finished').length === 2)
+    expect(adapter.closed).toBe(1)
+    expect(controls.adapters[1].starts[0]).toMatchObject({ safeMode: true, resume: s.nativeSessionId })
+    expect(controls.adapters[1].inputs[0].text).toBe('Next task')
+    expect(runtime.get(s.id)?.safeModePending).toBe(false)
+  })
+
+  it('closes an externally superseded approval instead of leaving a phantom waiting card', async () => {
+    const { runtime, controls, events } = makeRuntime()
+    const s = await runtime.create({ agent: 'grok', model: 'grok-4.6-high', safeMode: true, repo: 'acme/tools', branch: { existing: 'main' } })
+    await waitFor(() => runtime.get(s.id)?.status === 'idle')
+    const adapter = controls.adapters[0]; adapter.auto = false
+    runtime.prompt(s.id, { text: 'Approval test', attachments: [], mentions: [] })
+    await waitFor(() => adapter.inputs.length === 1)
+    const controller = new AbortController()
+    const waiting = controls.hosts[0].requestPermission({ signal: controller.signal, title: 'Obsolete action', options: [{ id: 'yes', name: 'Yes', kind: 'allow_once' }] })
+    const outcome = expect(waiting).rejects.toThrow(/no longer pending/)
+    await waitFor(() => runtime.get(s.id)?.status === 'waiting')
+    controller.abort(); await outcome
+    expect(runtime.get(s.id)?.pendingRequests).toEqual([])
+    expect(ofType(events, s.id, 'permission.resolved').at(-1)).toMatchObject({ by: 'cancelled' })
+    expect(runtime.get(s.id)?.status).toBe('running')
+    adapter.finish()
   })
 })

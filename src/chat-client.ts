@@ -23,6 +23,7 @@ import type {
   AgentId,
   PoiseChangeAck,
   AutoMergeAck,
+  SafeModeAck,
 } from '../server/chat/protocol'
 import type { SelfChange, SelfUpdateStatus } from './self-update-types'
 import { parseMessageQueue } from './chat-queue'
@@ -440,6 +441,12 @@ export class ChatClient {
   async setAutoMerge(sessionId: string, enabled: boolean): Promise<AutoMergeAck> {
     const result = await this.send({ type: 'set_auto_merge', sessionId, enabled }) as AutoMergeAck | undefined
     if (result?.session?.id !== sessionId || typeof result.session.autoMerge !== 'boolean') throw new Error('The server did not confirm the Auto-merge setting')
+    return result
+  }
+
+  async setSafeMode(sessionId: string, enabled: boolean): Promise<SafeModeAck> {
+    const result = await this.send({ type: 'set_safe_mode', sessionId, enabled }) as SafeModeAck | undefined
+    if (result?.session?.id !== sessionId || typeof result.session.safeMode !== 'boolean') throw new Error('The server did not confirm Safe mode')
     return result
   }
 

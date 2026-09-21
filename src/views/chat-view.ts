@@ -36,7 +36,7 @@ import { createComposer, emptyDraft, type Composer, type ComposerDraft } from '.
 import { quickSessionRequest, QUICK_SESSION_MODEL, consoleModelLabel } from '../chat-catalog'
 import { attachChatSidebar } from './chat-sidebar'
 import { createFilePreview } from './chat-file-preview'
-import { ICON_FORK, ICON_HANDOFF, ICON_ACTIVITY, ICON_AUTO_MERGE, ICON_MEMORIES } from './chat-icons'
+import { ICON_FORK, ICON_HANDOFF, ICON_ACTIVITY, ICON_AUTO_MERGE, ICON_MEMORIES, ICON_SAFE_MODE, ICON_REASONING } from './chat-icons'
 import { createDeployCard, type DeployCard, type LocalPendingChange } from './chat-deploy-card'
 import { recognisePoiseRequest } from '../poise-request-intent'
 import { parsePoiseCommand, reconcilePendingChanges, releaseChangeId, reserveChangeId, type PoiseCommand } from '../self-update-command'
@@ -101,6 +101,14 @@ const AUTO_MERGE_DRAFT_KEY = 'poise-chat-fresh-auto-merge'
 let freshAutoMerge = false
 try { freshAutoMerge = sessionStorage.getItem(AUTO_MERGE_DRAFT_KEY) === 'true' } catch { /* optional draft state */ }
 const autoMergeUpdates = new Map<string, Promise<boolean>>()
+const safeModeUpdates = new Map<string, Promise<boolean>>()
+const SAFE_MODE_DRAFT_KEY = 'poise-chat-fresh-safe-mode'
+let freshSafeMode = false
+try { freshSafeMode = sessionStorage.getItem(SAFE_MODE_DRAFT_KEY) === 'true' } catch { /* optional draft state */ }
+function setFreshSafeMode(enabled: boolean): void {
+  freshSafeMode = enabled
+  try { sessionStorage.setItem(SAFE_MODE_DRAFT_KEY, String(enabled)) } catch { /* in-page choice remains */ }
+}
 
 function setFreshAutoMerge(enabled: boolean): void {
   freshAutoMerge = enabled
@@ -137,6 +145,9 @@ const pendingStore = (() => {
 const CLICK_DELAY_MS = 220
 const STICK_TO_BOTTOM_PX = 40
 const DELETE_ARM_MS = 4000
+const REASONING_KEY = 'poise-chat-show-reasoning'
+let showReasoning = false
+try { showReasoning = localStorage.getItem(REASONING_KEY) === 'true' } catch { /* optional preference */ }
 const ACTIVITY_KEY = 'poise-chat-show-activity'
 let showActivity = true
 try { showActivity = localStorage.getItem(ACTIVITY_KEY) !== 'false' } catch { /* optional preference */ }
@@ -709,17 +720,20 @@ function ensureQuickSession(firstPrompt?: ComposerDraft, title?: string, deferSt
   const draft = firstPrompt || deferStart ? null : composer.getDraft()
   const selectedModel = freshModelIdentity
   const selectedAutoMerge = freshAutoMerge
+  const selectedSafeMode = freshSafeMode
   quickSessionPromise = (async () => {
     const catalogue = await loadAgents(true)
     if (!catalogue) throw new Error('Could not load the model catalogue. Your message has not been sent.')
     const request = quickSessionRequest(catalogue.agents, selectedModel)
     if (selectedAutoMerge) request.autoMerge = true
+    request.safeMode = selectedSafeMode
     if (deferStart) request.deferStart = true
     if (firstPrompt?.text) request.title = firstPrompt.text.slice(0, 200)
     else if (title) request.title = title.slice(0, 200)
     const created = await createSessionEntry(request, draft, firstPrompt, null)
     freshModelIdentity = QUICK_SESSION_MODEL
     setFreshAutoMerge(false)
+    setFreshSafeMode(false)
     return created
   })().finally(() => { quickSessionPromise = null; queueRender() })
   queueRender()
@@ -1030,6 +1044,11 @@ async function sendPrompt(draft: ComposerDraft): Promise<void> {
     if (beforeQueue && activeId !== beforeQueue) { keepDraft(beforeQueue, draft); return }
   }
   const sourceId = activeId
+  const permissionUpdate = sourceId ? safeModeUpdates.get(sourceId) : null
+  if (permissionUpdate) {
+    const saved = await permissionUpdate
+    if (!saved || activeId !== sourceId) { keepDraft(sourceId, draft); return }
+  }
   const modeUpdate = sourceId ? autoMergeUpdates.get(sourceId) : null
   if (modeUpdate) {
     const saved = await modeUpdate
@@ -1271,10 +1290,7 @@ function renderHeader(): void {
 }
 
 function autoMergeButton(enabled: boolean, pending = false): string {
-  const title = enabled
-    ? 'Auto-merge on — finish and merge the requested PRs across repositories; defer non-blocking questions until the end. Click to turn off.'
-    : 'Auto-merge off — click to let this agent complete and merge the whole requested batch across repositories without merge confirmations.'
-  return `<button type="button" class="chat-icon-btn chat-h-auto-merge" aria-label="Auto-merge" aria-pressed="${enabled}" title="${title}"${pending ? ' disabled aria-busy="true"' : ''}>${ICON_AUTO_MERGE}</button>`
+  return `<button type="button" class="chat-icon-btn chat-h-auto-merge" aria-label="Auto-merge" aria-pressed="${enabled}" data-tooltip="Auto-merge"${pending ? ' disabled aria-busy="true"' : ''}>${ICON_AUTO_MERGE}</button>`
 }
 
 async function toggleAutoMerge(): Promise<void> {
@@ -1317,15 +1333,62 @@ async function toggleAutoMerge(): Promise<void> {
   await update
 }
 
+function reasoningButton(): string {
+  return `<button type="button" class="chat-icon-btn chat-h-reasoning" aria-label="Reasoning" aria-pressed="${showReasoning}" aria-controls="chat-transcript" data-tooltip="Reasoning">${ICON_REASONING}</button>`
+}
+
+function safeModeButton(enabled: boolean, pending = false, deferred = false): string {
+  return `<button type="button" class="chat-icon-btn chat-h-safe-mode${deferred ? ' is-deferred' : ''}" aria-label="Safe mode" aria-pressed="${enabled}" data-tooltip="Safe mode"${pending ? ' disabled aria-busy="true"' : ''}${deferred ? ' aria-describedby="chat-safe-mode-status"' : ''}>${ICON_SAFE_MODE}</button>`
+}
+
+async function toggleSafeMode(): Promise<void> {
+  const e = entry()
+  if (!e) {
+    if (quickSessionPromise || firstPromptPending) return
+    setFreshSafeMode(!freshSafeMode)
+    renderHeader()
+    headerEl.querySelector<HTMLButtonElement>('.chat-h-safe-mode')?.focus()
+    return
+  }
+  const id = e.record.id
+  if (e.pending || safeModeUpdates.has(id)) return
+  const enabled = e.record.safeMode !== true
+  const hadFocus = !!document.activeElement?.closest('.chat-h-safe-mode')
+  const update = (async (): Promise<boolean> => {
+    try {
+      // Permission controls must remain usable even if a Memories save fails.
+      const result = await chatClient.setSafeMode(id, enabled)
+      if (result.session.lastSeq >= e.record.lastSeq) upsertRecord(result.session)
+      if (activeId === id) setNotice(result.warning || null, 'info')
+      return true
+    } catch (error) {
+      if (activeId === id) commandFailed(error, 'Safe mode')
+      else e.error = `Safe mode update failed — ${(error as Error).message}`
+      return false
+    } finally {
+      safeModeUpdates.delete(id)
+      if (activeId === id) {
+        const restoreFocus = hadFocus && (document.activeElement === document.body || !!document.activeElement?.closest('.chat-h-safe-mode'))
+        renderHeader()
+        if (restoreFocus) headerEl.querySelector<HTMLButtonElement>('.chat-h-safe-mode')?.focus()
+      }
+      queueRender()
+    }
+  })()
+  safeModeUpdates.set(id, update)
+  renderHeader()
+  await update
+}
+
 function memoriesButton(): string {
   const open = memories?.open ?? false
   const error = memories?.editor.state.error
-  return `<button type="button" class="chat-icon-btn chat-h-memories${error ? ' has-error' : ''}" aria-label="Memories" aria-controls="chat-memories-pane" aria-expanded="${open}" aria-pressed="${open}" title="${error ? 'Memories have unsaved changes' : 'Edit memories included last in every Chat message'}">${ICON_MEMORIES}</button>`
+  return `<button type="button" class="chat-icon-btn chat-h-memories${error ? ' has-error' : ''}" aria-label="Memories" aria-controls="chat-memories-pane" aria-expanded="${open}" aria-pressed="${open}" data-tooltip="Memories">${ICON_MEMORIES}</button>`
 }
 
 function headerHtml(): string {
   const e = entry()
-  if (!e) return `<div class="chat-h-row chat-h-fresh"><span class="chat-controls-spacer"></span>${autoMergeButton(freshAutoMerge, !!quickSessionPromise || firstPromptPending)}${memoriesButton()}</div>`
+  if (!e) return `<div class="chat-h-row chat-h-fresh"><span class="chat-controls-spacer"></span>${reasoningButton()}${autoMergeButton(freshAutoMerge, !!quickSessionPromise || firstPromptPending)}${safeModeButton(freshSafeMode, !!quickSessionPromise || firstPromptPending)}${memoriesButton()}</div>`
   const s = e.record
   const agent = agentFor(s.agent)
   const between = !isRunning(s.status) && s.status !== 'starting' && s.status !== 'closed'
@@ -1352,11 +1415,14 @@ function headerHtml(): string {
       <span class="chat-controls-spacer"></span>
       ${isRunning(s.status) ? `<button type="button" class="chat-h-btn chat-h-stop" title="Stop the turn (⌘.)">${ICON_STOP} Stop</button>` : ''}
       ${s.capabilities?.fork ? `<button type="button" class="chat-icon-btn chat-h-fork" title="Fork session" aria-label="Fork"${between ? '' : ' disabled'}>${ICON_FORK}</button>` : ''}
-      <button type="button" class="chat-icon-btn chat-h-activity" aria-label="${showActivity ? 'Hide activity' : 'Show activity'}" title="${showActivity ? 'Hide' : 'Show'} thinking and tool activity" aria-pressed="${showActivity}" aria-controls="chat-transcript">${ICON_ACTIVITY}</button>
+      <button type="button" class="chat-icon-btn chat-h-activity" aria-label="${showActivity ? 'Hide activity' : 'Show activity'}" data-tooltip="Activity" aria-pressed="${showActivity}" aria-controls="chat-transcript">${ICON_ACTIVITY}</button>
       ${others.length ? `<span class="chat-h-handoff-wrap"><button type="button" class="chat-icon-btn chat-h-handoff" title="Hand off to another agent" aria-label="Hand off…" aria-haspopup="true" aria-expanded="${handoffOpen}">${ICON_HANDOFF}</button>${handoffOpen ? handoffMenu(others) : ''}</span>` : ''}
+      ${reasoningButton()}
       ${autoMergeButton(s.autoMerge === true, e.pending || autoMergeUpdates.has(s.id))}
+      ${safeModeButton(s.safeMode === true, e.pending || safeModeUpdates.has(s.id) || s.status === 'closed', s.safeModePending === true)}
       ${memoriesButton()}
     </div>
+    ${s.safeModePending ? '<div id="chat-safe-mode-status" class="st-help chat-safe-mode-status" role="status">Permission change queued for the next turn; current native permissions are unchanged.</div>' : ''}
     ${s.orphanNotice ? `<div class="st-help st-help-error">${escapeHtml(s.orphanNotice)}</div>` : ''}
   `
 }
@@ -1393,6 +1459,15 @@ function attachHeader(): void {
     const t = e.target as HTMLElement
     if (t.closest('.chat-h-stop')) { void cancelTurn(); return }
     if (t.closest('.chat-h-memories')) { memories.toggle(); renderHeader(); return }
+    if (t.closest('.chat-h-safe-mode')) { void toggleSafeMode(); return }
+    if (t.closest('.chat-h-reasoning')) {
+      showReasoning = !showReasoning
+      try { localStorage.setItem(REASONING_KEY, String(showReasoning)) } catch { /* optional preference */ }
+      renderHeader()
+      headerEl.querySelector<HTMLButtonElement>('.chat-h-reasoning')?.focus()
+      queueRender()
+      return
+    }
     if (t.closest('.chat-h-auto-merge')) { void toggleAutoMerge(); return }
     if (t.closest('.chat-h-activity')) {
       showActivity = !showActivity
@@ -1533,7 +1608,7 @@ function render(): void {
   const distance = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
   const wasAtBottom = distance <= STICK_TO_BOTTOM_PX
   if (e) {
-    transcript.render(e.model, { showActivity, agent: e.record.agent, running: isRunning(e.record.status) || !!e.model.running, interruptedTurnId: e.record.interruptedTurnId })
+    transcript.render(e.model, { showActivity, showReasoning, agent: e.record.agent, running: isRunning(e.record.status) || !!e.model.running, interruptedTurnId: e.record.interruptedTurnId })
   } else {
     transcript.clear()
   }
@@ -1585,7 +1660,7 @@ async function createSessionEntry(req: NewSessionRequest, draft: ComposerDraft |
     branch: { name: '', origin: 'new', provisional: true },
     title: req.title || req.context?.title || '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'starting',
     capabilities: { steer: true, fork: false, thought: false, plan: false, commands: false, modes: false, permissions: true, questions: true, resume: true, images: false },
-    lastSeq: 0, pendingRequests: [], instance: '', context: req.context, autoMerge: req.autoMerge,
+    lastSeq: 0, pendingRequests: [], instance: '', context: req.context, autoMerge: req.autoMerge, safeMode: req.safeMode === true,
   }
   const temporary = upsertRecord(placeholder, { pending: true })
   temporary.draft = draft
@@ -1625,8 +1700,8 @@ async function createSessionEntry(req: NewSessionRequest, draft: ComposerDraft |
 async function createSession(req: NewSessionRequest, errorEl: HTMLElement): Promise<void> {
   try {
     const fresh = !activeId
-    await createSessionEntry(fresh && freshAutoMerge ? { ...req, autoMerge: true } : req, activeId ? null : composer.getDraft())
-    if (fresh) setFreshAutoMerge(false)
+    await createSessionEntry({ ...req, ...(fresh && freshAutoMerge ? { autoMerge: true } : {}), safeMode: fresh && freshSafeMode }, activeId ? null : composer.getDraft())
+    if (fresh) { setFreshAutoMerge(false); setFreshSafeMode(false) }
   } catch (err) {
     const code = err instanceof ChatHttpError ? err.code : undefined
     const message = (err as Error).message

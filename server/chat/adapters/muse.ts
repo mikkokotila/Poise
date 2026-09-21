@@ -29,6 +29,10 @@ import type {
   ApprovalDecideParams,
   ApprovalDecideResult,
   ApprovalRequestParams,
+  ApprovalUpdatedParams,
+  ApprovalResolvedParams,
+  ApprovalListPendingParams,
+  ApprovalListPendingResult,
   InitializeParams,
   InitializeResult,
   Item,
@@ -48,6 +52,8 @@ import type {
   SessionReasoningEffortChangedParams,
   SessionResumeParams,
   SessionResumeResult,
+  SessionSetApprovalModeParams,
+  SessionSetApprovalModeResult,
   SessionSetModelParams,
   SessionSetModelResult,
   SessionSetReasoningEffortParams,
@@ -121,6 +127,7 @@ interface Methods {
   'session/start': { params: SessionStartParams, result: SessionStartResult }
   'session/resume': { params: SessionResumeParams, result: SessionResumeResult }
   'session/fork': { params: SessionForkParams, result: SessionForkResult }
+  'session/setApprovalMode': { params: SessionSetApprovalModeParams, result: SessionSetApprovalModeResult }
   'session/setModel': { params: SessionSetModelParams, result: SessionSetModelResult }
   'session/setReasoningEffort': { params: SessionSetReasoningEffortParams, result: SessionSetReasoningEffortResult }
   'view/subscribe': { params: ViewSubscribeParams, result: ViewSubscribeResult }
@@ -129,6 +136,7 @@ interface Methods {
   'turn/interrupt': { params: TurnInterruptParams, result: TurnInterruptResult }
   'turn/unqueue': { params: TurnUnqueueParams, result: TurnUnqueueResult }
   'approval/decide': { params: ApprovalDecideParams, result: ApprovalDecideResult }
+  'approval/listPending': { params: ApprovalListPendingParams, result: ApprovalListPendingResult }
   'userInput/answer': { params: UserInputAnswerParams, result: UserInputAnswerResult }
   'userInput/cancel': { params: UserInputCancelParams, result: UserInputCancelResult }
 }
@@ -143,6 +151,8 @@ interface Notifications {
   'item/delta': ItemDeltaParams
   'item/completed': ItemCompletedParams
   'approval/requested': ApprovalRequestParams
+  'approval/updated': ApprovalUpdatedParams
+  'approval/resolved': ApprovalResolvedParams
   'userInput/requested': UserInputRequestParams
   'session/statusChanged': SessionStatusChangedParams
   'session/modelChanged': SessionModelChangedParams
@@ -162,8 +172,7 @@ const INITIALIZED: MspNotification = 'initialized'
 /** View notifications Muse sends that the transcript does not need; each is
  *  logged once so a new Muse build stays visible in the server log. */
 const IGNORED_NOTIFICATIONS: readonly MspNotification[] = [
-  'approval/updated',
-  'approval/resolved',
+
   'userInput/settled',
   'session/branchChanged',
   'session/contextUsage',
@@ -384,6 +393,10 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
   const loggedOnce = new Set<string>()
   /** Approvals and questions already being answered, by their id. */
   const pendingApprovals = new Set<string>()
+  const approvalControllers = new Map<string, AbortController>()
+  const decidedApprovalStages = new Set<string>()
+  const approvalRequests = new Map<string, ApprovalRequestParams>()
+  const resolvedApprovals = new Set<string>()
   /** Pre-images taken for an approval whose tool item had not started yet. */
   const preApproved = new Map<string, Map<string, Promise<Snapshot>>>()
   const pendingUserInputs = new Set<string>()
@@ -745,7 +758,15 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
       if (turn) turn.usage = { inputTokens: params.promptTokens, outputTokens: params.usage.outputTokens, totalTokens: params.totalTokens }
     })
 
-    on('approval/requested', (params) => { void handleApproval(params) })
+    on('approval/requested', receiveApproval)
+    on('approval/updated', params => {
+      const previous = approvalRequests.get(params.approvalId)
+      if (previous) receiveApproval({ ...previous, ...params })
+    })
+    on('approval/resolved', params => {
+      resolvedApprovals.add(params.approvalId)
+      for (const [key, controller] of approvalControllers) if (key.startsWith(`${params.approvalId}:`)) controller.abort()
+    })
     on('userInput/requested', (params) => { void handleUserInput(params) })
 
     on('session/modelChanged', (params) => {
@@ -796,9 +817,33 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
       ?? params.availableChoices.find((choice) => choiceKind(choice) === 'reject_always')
   }
 
+  function receiveApproval(params: ApprovalRequestParams): void {
+    const previous = approvalRequests.get(params.approvalId)
+    if (previous && previous.currentRequirementId.sourceIndex > params.currentRequirementId.sourceIndex) return
+    if (previous && previous.currentRequirementId.sourceIndex < params.currentRequirementId.sourceIndex) {
+      approvalControllers.get(`${params.approvalId}:${previous.currentRequirementId.sourceIndex}`)?.abort()
+    }
+    approvalRequests.set(params.approvalId, params)
+    void handleApproval(params).catch(error => interactionFailed('approval', error))
+  }
+
+  function interactionFailed(kind: string, error: unknown, origin: ActiveTurn | null = active): void {
+    const message = `${LABEL}: ${kind} delivery failed: ${error instanceof Error ? error.message : String(error)}. The turn has stopped; its work was not replayed.`
+    host.log(message)
+    if (!active || active !== origin || active.done || closing || active.interruptRequested) return
+    host.emit({ type: 'error', message, recoverable: true })
+    rpc?.fail(new AdapterError(AGENT, message, 'protocol'))
+  }
+
   async function handleApproval(params: ApprovalRequestParams): Promise<void> {
-    if (pendingApprovals.has(params.approvalId)) return
-    pendingApprovals.add(params.approvalId)
+    // A single shell command can ask about several stages under one approval id.
+    // A follow-up often arrives before the previous decide response is read.
+    const key = `${params.approvalId}:${params.currentRequirementId.sourceIndex}`
+    if (resolvedApprovals.has(params.approvalId) || pendingApprovals.has(key) || decidedApprovalStages.has(key)) return
+    pendingApprovals.add(key)
+    const origin = active
+    const controller = new AbortController()
+    approvalControllers.set(key, controller)
     const options: PermissionOption[] = params.availableChoices.map((choice) => ({ id: choice.choiceId, name: choice.label, kind: choiceKind(choice) }))
     // An edit that waits for this decision has not touched its files yet:
     // the pre-images read now (before the decision goes out) are exact.
@@ -817,6 +862,7 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
     try {
       const optionId = await host.requestPermission({
         toolId: params.itemId,
+        signal: controller.signal,
         title: approvalTitle(params),
         ...(params.subject.kind ? { description: `${params.toolName} (${params.subject.kind})` } : {}),
         input: { tool: params.toolName, args: approvedArgs, subject: params.subject, protectedWrite: params.protectedWrite },
@@ -826,9 +872,13 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
     } catch {
       choice = rejectChoice(params)
     }
+    if (controller.signal.aborted || resolvedApprovals.has(params.approvalId) || active !== origin) {
+      pendingApprovals.delete(key); approvalControllers.delete(key); return
+    }
     if (!choice) {
+      interactionFailed('approval', new Error('No usable permission choice was offered'), origin)
       host.log(`${LABEL}: approval ${params.approvalId} offers no usable choice (${params.availableChoices.map((entry) => entry.choiceId).join(', ')})`)
-      pendingApprovals.delete(params.approvalId)
+      pendingApprovals.delete(key)
       return
     }
     if (choice.scope === 'localPersistent') {
@@ -837,17 +887,29 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
       choice = rejectChoice(params) ?? choice
     }
     try {
-      await call('approval/decide', {
+      const result = await call('approval/decide', {
         commandId: uuidv7(),
         sessionId: session(),
         approvalId: params.approvalId,
         choiceId: choice.choiceId,
         requirementId: params.currentRequirementId,
       }, { timeoutMs: 30_000 })
+      if (result.status !== 'accepted') throw new Error('Muse did not accept the approval decision')
+      decidedApprovalStages.add(key)
+      if (result.terminal) resolvedApprovals.add(params.approvalId)
+      else {
+        // Recover from a lost/reordered notification using its read-only dual.
+        const pending = await call('approval/listPending', { sessionId: session() }, { timeoutMs: 30_000 })
+        for (const next of pending.approvals) receiveApproval(next)
+      }
     } catch (error) {
-      host.log(`${LABEL}: approval/decide failed: ${error instanceof Error ? error.message : String(error)}`)
+      // A competing decision may advance a stage while our answer is in flight.
+      // Never apply that earlier consent to the new requirement.
+      const latest = approvalRequests.get(params.approvalId)
+      if (!resolvedApprovals.has(params.approvalId) && (!latest || latest.currentRequirementId.sourceIndex <= params.currentRequirementId.sourceIndex)) interactionFailed('approval', error, origin)
     } finally {
-      pendingApprovals.delete(params.approvalId)
+      pendingApprovals.delete(key)
+      approvalControllers.delete(key)
     }
   }
 
@@ -886,21 +948,21 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
         await call('userInput/cancel', { commandId: uuidv7(), sessionId: session(), userInputId: params.userInputId, reason: 'turn cancelled' }, { timeoutMs: 30_000 })
       }
     } catch (error) {
-      host.log(`${LABEL}: userInput/${answers ? 'answer' : 'cancel'} failed: ${error instanceof Error ? error.message : String(error)}`)
+      interactionFailed(`userInput/${answers ? 'answer' : 'cancel'}`, error)
     } finally {
       pendingUserInputs.delete(params.userInputId)
     }
   }
 
   function registerServerRequests(): void {
-    serve('approval/request', (params) => { void handleApproval(params) })
+    serve('approval/request', receiveApproval)
     serve('userInput/request', (params) => { void handleUserInput(params) })
   }
 
   // ── Process lifecycle ───────────────────────────────────────────────
 
   async function launch(): Promise<void> {
-    const process = await host.spawn('muse', ['serve'])
+    const process = await host.spawn('muse', ['serve', '--disable-sandbox', '--trust-workspace'])
     child = process
     const link = new StdioRpc(process, { label: LABEL, onStderr: (text) => { if (text.trim()) host.log(`${LABEL} stderr: ${text.trimEnd()}`) } })
     rpc = link
@@ -1055,12 +1117,13 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
           const response = await call('session/start', {
             commandId: uuidv7(),
             workspaceRoot: host.checkout,
-            approvalMode: 'onRequest',
+            approvalMode: options.safeMode === true ? 'onRequest' : 'allowAll',
             modelId,
           }, { timeoutMs: 60_000 })
           id = response.session.sessionId
           sessionId = id
         }
+        if (options.resume || options.forkFrom) await adapter.setSafeMode!(options.safeMode === true)
         await call('session/setReasoningEffort', { commandId: uuidv7(), sessionId: id, reasoningEffort: effort as ReasoningEffort }, { timeoutMs: 30_000 })
       } catch (error) {
         if (error instanceof AdapterError) throw error
@@ -1156,6 +1219,13 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
         effort = chosen
       }
       return { modelId, effort, efforts: [...EFFORTS] }
+    },
+
+    async setSafeMode(enabled) {
+      const mode = enabled ? 'onRequest' : 'allowAll'
+      const result = await call('session/setApprovalMode', { commandId: uuidv7(), sessionId: session(), mode }, { timeoutMs: 30_000 })
+      if (result.status !== 'accepted' || result.effectiveMode.mode !== mode) throw new AdapterError(AGENT, `${LABEL} did not apply the requested permission mode`, 'protocol')
+      return 'current_turn'
     },
 
     async setMode() {

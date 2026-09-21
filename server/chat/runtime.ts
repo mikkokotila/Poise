@@ -28,7 +28,7 @@ import { EventEmitter } from 'node:events'
 import { enqueueMessage, transferQueuedContext, readQueue, updateQueuedModel, removeQueuedMessage, pauseQueue, QueueError, queueOwner, delegateQueue } from './message-queue'
 import type { MessageQueue, QueuedMessage } from './protocol'
 import { autoMergeInstructions, withAutoMergeInstructions } from './auto-merge'
-import type { AutoMergeAck } from './protocol'
+import type { AutoMergeAck, SafeModeAck } from './protocol'
 import type { ChildProcess } from 'node:child_process'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname } from 'node:path'
@@ -131,6 +131,7 @@ interface LiveSession {
   adapter: Adapter | null
   /** Cancellation of native startup is independent of a running turn. */
   startup: AbortController | null
+  nativeSafeMode?: boolean
   worker: WorkerHandle | null
   lease: CheckoutLease | null
   turn: RunningTurn | null
@@ -568,6 +569,7 @@ export class ChatRuntime extends EventEmitter {
   private async createSession(request: NewSessionRequest): Promise<SessionRecord> {
     if (this.stopped) throw new ChatError(503, 'the chat runtime is stopping', 'agent_error')
     if (request.deferStart !== undefined && typeof request.deferStart !== 'boolean') throw new ChatError(400, 'deferStart must be a boolean', 'invalid')
+    if (request.safeMode !== undefined && typeof request.safeMode !== 'boolean') throw new ChatError(400, 'safeMode must be a boolean', 'invalid')
     if (request.autoMerge !== undefined && typeof request.autoMerge !== 'boolean') throw new ChatError(400, 'autoMerge must be a boolean', 'invalid')
     if (!AGENT_IDS.includes(request.agent)) throw new ChatError(400, `unknown agent ${String(request.agent)}`, 'invalid')
     const { agent, model, effort } = await this.resolveModel(request.model, request.effort)
@@ -602,6 +604,7 @@ export class ChatRuntime extends EventEmitter {
       instance: this.instance,
       context: request.context,
       ...(request.autoMerge !== undefined ? { autoMerge: request.autoMerge } : {}),
+      safeMode: request.safeMode === true,
     }
     storage.insertSession(record)
     const live = this.requireLive(record.id)
@@ -645,12 +648,15 @@ export class ChatRuntime extends EventEmitter {
       const startOptions = {
         modelId: record.modelId,
         effort: record.effort,
+        safeMode: record.safeMode === true,
         ...(options.forkFrom
           ? (record.agent === 'claude' ? { forkFrom: options.forkFrom.nativeSessionId } : { resume: record.nativeSessionId })
           : record.nativeSessionId ? { resume: record.nativeSessionId } : {}),
       }
       const started = await adapter.start(startOptions)
       signal.throwIfAborted()
+      session.nativeSafeMode = startOptions.safeMode
+      record.safeModePending = session.nativeSafeMode !== (record.safeMode === true)
       record.nativeSessionId = started.nativeSessionId
       record.capabilities = started.capabilities
       record.modelId = started.modelId || record.modelId
@@ -819,6 +825,7 @@ export class ChatRuntime extends EventEmitter {
       branch: { existing: source.record.branch.name },
       title: `${source.record.title} → ${AGENT_LABEL[target.agent]}`.slice(0, CHAT_LIMITS.titleChars),
       autoMerge: source.record.autoMerge,
+      safeMode: source.record.safeMode === true,
       context: { kind: 'handoff', title: source.record.title, body: summary, fromSession: source.record.id },
     })
     const live = this.requireLive(created.id)
@@ -957,6 +964,7 @@ export class ChatRuntime extends EventEmitter {
       selfChangeId: id,
       ...(contextKey ? { selfChangeContextKey: contextKey } : {}),
       autoMerge: source.autoMerge,
+      safeMode: source.safeMode === true,
       branch: { name: prepared.branch, origin: 'existing', provisional: false, baseSha: prepared.baseSha },
       title: `Poise: ${title}`.slice(0, CHAT_LIMITS.titleChars),
       createdAt: now,
@@ -1415,6 +1423,8 @@ export class ChatRuntime extends EventEmitter {
     session.draining = false
     try {
       if (turn.abort.signal.aborted) throw new Error(turn.failure || 'cancelled before it started')
+      await session.steering
+      if (record.safeModePending && session.adapter?.alive) await this.stopProcess(session)
       if (turn.queueItem) { this.publishQueue(session); await this.prepareQueuedAgent(session, turn) }
       if (!session.adapter?.alive) await this.startSession(session, { fresh: !record.nativeSessionId && !record.branch.baseSha && record.branch.provisional })
       const adapter = session.adapter!
@@ -1600,6 +1610,47 @@ export class ChatRuntime extends EventEmitter {
     return task
   }
 
+  /** Permissions and merge delegation are independent session settings. */
+  setSafeMode(id: string, enabled: boolean): Promise<SafeModeAck> {
+    if (typeof enabled !== 'boolean') throw new ChatError(400, 'enabled must be a boolean', 'invalid')
+    const session = this.requireLive(id)
+    return this.control(session, async () => {
+      if (!this.ownsSession(id)) throw new ChatError(404, 'unknown session', 'unknown_session')
+      if (session.lifecycle.signal.aborted || session.record.status === 'closed') throw new ChatError(409, 'the session is closed', 'no_turn')
+      const record = session.record
+      const previous = { safeMode: record.safeMode, safeModePending: record.safeModePending }
+      record.safeMode = enabled
+      record.safeModePending = !!session.adapter && session.nativeSafeMode !== enabled
+      try { this.saveRecord(session) } catch (error) { Object.assign(record, previous); throw error }
+      // Old allow-always grants must not silently disable a newly enabled checkpoint.
+      session.grants.clear()
+      this.emit_(id, { type: 'session.updated', session: record })
+      let applies: SafeModeAck['applies'] = 'next_turn'
+      let warning: string | undefined
+      if (session.adapter?.alive && !session.startup && !session.turn?.stopping && session.nativeSafeMode !== enabled) {
+        try {
+          applies = await session.adapter.setSafeMode?.(enabled) ?? 'next_turn'
+          if (applies === 'current_turn') session.nativeSafeMode = enabled
+        } catch (error) {
+          warning = `Safe mode ${enabled ? 'on' : 'off'} is saved, but the native agent could not switch yet: ${error instanceof Error ? error.message : String(error)}. It will apply on the next turn; Stop remains available.`
+        }
+      } else if (session.nativeSafeMode === enabled && !session.startup) applies = 'current_turn'
+      // No native process means there is nothing still running with an old policy.
+      record.safeModePending = !!session.adapter && session.nativeSafeMode !== enabled
+      if (record.safeModePending && !warning) warning = `${AGENT_LABEL[record.agent]} applies this permission change on the next turn. The current turn keeps its previous native permissions.`
+      if (!this.ownsSession(id) || session.lifecycle.signal.aborted) throw new ChatError(409, 'the session closed while permissions were changing', 'no_turn')
+      this.saveRecord(session)
+      this.emit_(id, { type: 'session.updated', session: record })
+      if (!enabled && session.turn && !session.turn.stopping) {
+        for (const [requestId, pending] of session.pending) {
+          const once = pending.kind === 'permission' && pending.options?.find(option => option.kind === 'allow_once')
+          if (once) this.resolvePermission(session, requestId, once.id, 'unrestricted')
+        }
+      }
+      return { session: this.withLive(record), applies, ...(warning ? { warning } : {}) }
+    })
+  }
+
   setAutoMerge(id: string, enabled: boolean): Promise<AutoMergeAck> {
     this.assertAcceptingWork()
     if (typeof enabled !== 'boolean') throw new ChatError(400, 'enabled must be a boolean', 'invalid')
@@ -1622,14 +1673,7 @@ export class ChatRuntime extends EventEmitter {
           warning = `Auto-merge ${enabled ? 'on' : 'off'} is saved for the next message, but the running agent could not receive the update: ${error instanceof Error ? error.message : String(error)}. Use Stop to end its current work.`
         }
       }
-      // Opt-in also releases existing native tool approval cards; questions
-      // still need actual answers and are never fabricated on the user's behalf.
-      if (enabled && !warning && session.turn && !session.turn.stopping) {
-        for (const [requestId, pending] of session.pending) {
-          const once = pending.kind === 'permission' && pending.options?.find(option => option.kind === 'allow_once')
-          if (once) this.resolvePermission(session, requestId, once.id, 'auto_merge')
-        }
-      }
+      // Merge delegation never overrides Safe mode or resolves its risk prompts.
       return { session: session.record, applies, ...(warning ? { warning } : {}) }
     })
   }
@@ -1705,7 +1749,7 @@ export class ChatRuntime extends EventEmitter {
     this.resolvePermission(this.requireLive(id), requestId, optionId, 'user')
   }
 
-  private resolvePermission(session: LiveSession, requestId: string, optionId: string, by: 'user' | 'auto_merge'): void {
+  private resolvePermission(session: LiveSession, requestId: string, optionId: string, by: 'user' | 'auto_merge' | 'unrestricted'): void {
     const id = session.record.id
     const pending = session.pending.get(requestId)
     if (!pending || pending.kind !== 'permission') {
@@ -2048,6 +2092,7 @@ export class ChatRuntime extends EventEmitter {
   private async askPermission(session: LiveSession, request: PermissionRequest): Promise<string> {
     const turn = session.turn
     if (!turn || turn.stopping) throw new Error('no turn is running')
+    if (request.signal?.aborted) throw new Error('permission is no longer pending')
     const grantKey = `${request.title}\0${canonicalJson(request.input)}`
     const granted = session.grants.get(grantKey)
     const requestId = randomUUID()
@@ -2058,14 +2103,24 @@ export class ChatRuntime extends EventEmitter {
       this.emit_(session.record.id, { type: 'permission.resolved', id: requestId, optionId: granted, by: 'session' })
       return onWire?.id ?? granted
     }
-    const once = session.record.autoMerge === true && request.options.find(option => option.kind === 'allow_once')
+    const once = session.record.safeMode !== true && request.options.find(option => option.kind === 'allow_once')
     if (once) {
       this.emit_(session.record.id, { type: 'permission.requested', id: requestId, turnId: turn.id, toolId: request.toolId, title: request.title, description: request.description, input: request.input, options: request.options })
-      this.emit_(session.record.id, { type: 'permission.resolved', id: requestId, optionId: once.id, by: 'auto_merge' })
+      this.emit_(session.record.id, { type: 'permission.resolved', id: requestId, optionId: once.id, by: 'unrestricted' })
       return once.id
     }
     return new Promise<string>((resolve, reject) => {
-      session.pending.set(requestId, { kind: 'permission', turnId: turn.id, options: request.options, grantKey, resolve, reject })
+      const cleanup = () => request.signal?.removeEventListener('abort', superseded)
+      const superseded = () => {
+        if (!session.pending.delete(requestId)) return
+        cleanup()
+        this.emit_(session.record.id, { type: 'permission.resolved', id: requestId, optionId: '', by: 'cancelled' })
+        reject(new Error('permission is no longer pending'))
+        this.afterRequestAnswered(session)
+      }
+      session.pending.set(requestId, { kind: 'permission', turnId: turn.id, options: request.options, grantKey,
+        resolve: value => { cleanup(); resolve(value) }, reject: error => { cleanup(); reject(error) } })
+      request.signal?.addEventListener('abort', superseded, { once: true })
       this.emit_(session.record.id, { type: 'permission.requested', id: requestId, turnId: turn.id, toolId: request.toolId, title: request.title, description: request.description, input: request.input, options: request.options })
       this.setStatus(session, 'waiting')
     })

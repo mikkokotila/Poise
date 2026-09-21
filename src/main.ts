@@ -1,4 +1,6 @@
 import './style.css'
+import { installIconTooltips } from './icon-tooltips'
+installIconTooltips()
 import { initTypography, toggleTypographyPanel, closeTypographyPanel } from './typo'
 import { initSettings, toggleSettingsPanel, openSettingsPanel, closeSettingsPanel, isFullyConfigured } from './settings'
 import { initMenu } from './menu'

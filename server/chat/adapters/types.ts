@@ -30,6 +30,8 @@ export type SpawnAgent = (command: string, args: readonly string[], options?: {
 }) => Promise<ChildProcess>
 
 export interface PermissionRequest {
+  /** Native request superseded or resolved elsewhere; closes its old UI card. */
+  signal?: AbortSignal
   toolId?: string
   title: string
   description?: string
@@ -67,6 +69,8 @@ export interface AdapterHost {
 }
 
 export interface AdapterStartOptions {
+  /** Native risk approvals when true, unrestricted when false/missing; neither enables a sandbox. */
+  safeMode?: boolean
   /** Native model selector (`claude-opus-5`, `grok-4.6`, `gpt-6-astra`, `muse-spark-1.3-contributor`). */
   modelId: string
   effort: string
@@ -116,6 +120,8 @@ export interface Adapter {
   cancel(): Promise<void>
   setModel(modelId: string, effort: string): Promise<{ modelId: string, effort: string, efforts?: string[] }>
   setMode(mode: string): Promise<void>
+  /** Applies a native permission choice; next_turn must never be presented as live protection. */
+  setSafeMode?(enabled: boolean): Promise<'current_turn' | 'next_turn'>
   /** Create a new native session from this one; returns its native id. */
   fork(): Promise<string>
   /** Close the native session and end the process gracefully. */
