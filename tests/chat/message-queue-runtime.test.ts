@@ -133,7 +133,11 @@ describe('deferred message execution', () => {
     await w.runtime.updateQueue(w.s.id, last.id, 'grok-4.6-xhigh')
     expect(w.runtime.get(w.s.id)?.agent).toBe('grok'); expect(w.c.adapters).toHaveLength(1)
     w.c.auto = true; w.finish()
-    await until(() => w.turns().length === 5 && w.runtime.get(w.s.id)?.status === 'idle')
+    // Each native handoff has its own bounded readiness step, as in the
+    // five-item FIFO test above; the batch is not a single startup deadline.
+    for (let completed = 1; completed <= 5; completed++) await until(() => w.turns().length >= completed)
+    await until(() => w.runtime.get(w.s.id)?.status === 'idle')
+    expect(w.turns()).toHaveLength(5)
     expect(w.c.calls.map(call => call.agent)).toEqual(['grok', 'claude', 'codex', 'muse', 'grok'])
     expect(w.c.calls[1].input.text).toContain('[Handoff from a Grok Build session')
     expect(w.c.calls[1].input.text).toContain('First task')
