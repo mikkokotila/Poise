@@ -13,6 +13,8 @@ import { escapeHtml } from '../markdown'
 import { parseQueueMessage } from '../chat-queue'
 import type { AgentInfo } from '../chat-client'
 import { attachModelPicker } from './chat-model-picker'
+import { createMessageHistory } from './chat-message-history'
+import type { MessageHistorySnapshot } from '../chat-message-history'
 
 export interface ComposerDraft {
   text: string
@@ -37,6 +39,7 @@ export interface ComposerState {
 }
 
 export interface ComposerHandlers {
+  history(): MessageHistorySnapshot
   onSend(draft: ComposerDraft): void
   onQueue(draft: ComposerDraft): void
   loadModels(): Promise<AgentInfo[]>
@@ -54,6 +57,7 @@ export interface ComposerHandlers {
 
 export interface Composer {
   el: HTMLElement
+  history: ReturnType<typeof createMessageHistory>
   setCommands(agentCommands: CommandOption[], own: { model?: boolean, modes: boolean, fork: boolean, poise?: boolean }): void
   setState(state: ComposerState): void
   getDraft(): ComposerDraft
@@ -139,6 +143,16 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   let ownCommands: CommandOption[] = [OWN_COMMANDS[0]]
   let state: ComposerState = { running: false, disabled: true, sessionId: null }
   let steerTimer: ReturnType<typeof setTimeout> | null = null
+
+  const history = createMessageHistory(input, {
+    read: handlers.history,
+    recall: entry => {
+      setComposerDraft(entry.draft)
+      input.setSelectionRange(input.value.length, input.value.length)
+      el.dispatchEvent(new Event('chat:composer-change', { bubbles: true }))
+    },
+    changed: () => el.dispatchEvent(new Event('chat:composer-change', { bubbles: true })),
+  })
 
   // ── Auto-resize ───────────────────────────────────────────────────────
   // Single-line height comes from the computed line-height plus vertical
@@ -242,6 +256,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
 
   async function uploadFiles(files: File[]): Promise<void> {
     if (state.disabled || uploading) return
+    history.close()
     uploading += 1
     applyState()
     let target = state.sessionId
@@ -457,16 +472,28 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     else submit()
   })
   input.addEventListener('input', () => {
+    history.close()
     applyState()
     autoResize()
     updatePalette()
     updateMentions()
   })
   let composing = false
-  input.addEventListener('compositionstart', () => { composing = true })
+  input.addEventListener('compositionstart', () => { composing = true; history.close() })
   input.addEventListener('compositionend', () => { composing = false })
+  let recalledOnEnter = false
+  input.addEventListener('keyup', event => { if (event.key === 'Enter') recalledOnEnter = false })
   input.addEventListener('keydown', (e) => {
     if (composing || e.isComposing || e.keyCode === 229) return
+    // Holding Enter to recall must not send the message on the next repeat.
+    if (e.key === 'Enter' && recalledOnEnter) { e.preventDefault(); return }
+    const canOpenHistory = !state.disabled && !uploading && !input.value && !activeMode && !attachments.length && !popKind
+    if (history.key(e, canOpenHistory)) {
+      if (e.key === 'Enter') recalledOnEnter = true
+      modelPicker.close()
+      closePopover()
+      return
+    }
     if (e.key === 'Escape') { closePopover(); return }
     if (popoverKey(e)) return
     if (tryEnterMode(e)) return
@@ -537,7 +564,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     sendBtn.title = queuing ? 'Add to queue (Enter)' : state.running ? 'Stop (⌘.)' : 'Send (Enter)'
     sendBtn.classList.toggle('is-stop', state.running && !queuing)
     resumeBtn.hidden = !state.resume
-    if (state.disabled) closePopover()
+    if (state.disabled) { closePopover(); history.close() }
   }
   applyState()
   autoResize()
@@ -551,8 +578,21 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   })
   widthObserver.observe(el)
 
+  function setComposerDraft(draft: ComposerDraft | null): void {
+    history.close()
+    modelPicker.close()
+    const d = draft || emptyDraft()
+    input.value = d.text
+    attachments = d.attachments.map(file => ({ ...file }))
+    mentions = d.mentions.map(mention => ({ ...mention }))
+    renderChips()
+    applyMode(d.mode)
+    closePopover()
+    autoResize()
+  }
+
   return {
-    el,
+    el, history,
     setCommands(list, own) {
       agentCommands = list
       ownCommands = OWN_COMMANDS.filter((c) => c.name === 'queue' || (c.name === 'model' && own.model !== false) || (c.name === 'mode' && own.modes) || (c.name === 'fork' && own.fork) || (c.name === 'poise' && own.poise !== false))
@@ -562,23 +602,15 @@ export function createComposer(handlers: ComposerHandlers): Composer {
       // only a real change touches the DOM.
       const same = state.running === next.running && state.disabled === next.disabled
         && state.modelIdentity === next.modelIdentity && state.modelLabel === next.modelLabel && state.placeholder === next.placeholder && state.resume === next.resume && state.sessionId === next.sessionId
+      if (state.sessionId !== next.sessionId) { history.close(); closePopover() }
       state = next
       if (!same) applyState()
+      history.refresh()
     },
     getDraft() {
       return { text: input.value, attachments: attachments.slice(), mentions: mentions.slice(), mode: activeMode }
     },
-    setDraft(draft) {
-      modelPicker.close()
-      const d = draft || emptyDraft()
-      input.value = d.text
-      attachments = d.attachments.slice()
-      mentions = d.mentions.slice()
-      renderChips()
-      applyMode(d.mode)
-      closePopover()
-      autoResize()
-    },
+    setDraft: setComposerDraft,
     focus() { input.focus() },
     layout() { autoResize(); modelPicker.layout(); if (activeMode) applyMode(activeMode) },
     isUploading() { return uploading > 0 },

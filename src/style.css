@@ -5999,3 +5999,31 @@ body:has(#view-chat:not([hidden])) #app { padding-bottom: 0; }
   .chat-memories-inner { width: min(360px, calc(100vw - 24px)); }
 }
 @media (prefers-reduced-motion: reduce) { .chat-memories-pane { transition: none; } }
+
+/* Terminal-style recall with a visible selection list, not a replaced draft. */
+.chat-message-history {
+  width: 100%; max-width: var(--typo-width, 960px); margin: 0 auto var(--sp-2);
+  border: 1px solid color-mix(in srgb, var(--hairline) 45%, transparent);
+  border-radius: var(--r-md); background: color-mix(in srgb, var(--surface) 45%, transparent);
+  color: var(--text-secondary); font-size: .75rem; overflow: hidden;
+  animation: chat-history-appear .14s ease-out;
+}
+.chat-message-history[hidden], .chat-history-state[hidden], .chat-history-list[hidden] { display: none; }
+.chat-empty-session .chat-message-history { max-width: min(640px, var(--typo-width, 960px)); }
+.chat-history-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 4px var(--sp-2); min-height: 32px; padding: var(--sp-1) var(--sp-3); font-weight: 600; }
+.chat-history-count { font-weight: 400; font-variant-numeric: tabular-nums; color: var(--text-tertiary); }
+.chat-history-help { margin-left: auto; font-size: .6875rem; font-weight: 400; color: var(--text-tertiary); }
+.chat-history-state { padding: var(--sp-2) var(--sp-3); color: var(--text-tertiary); }
+.chat-history-list { position: relative; max-height: min(320px, var(--chat-history-available, 320px)); overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
+.chat-history-item {
+  display: block; width: 100%; min-width: 0; border: 0; border-top: 1px solid color-mix(in srgb, var(--hairline) 25%, transparent);
+  padding: 7px var(--sp-3); background: transparent; color: inherit; font: inherit; line-height: 1.4; text-align: left;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer;
+}
+.chat-history-item:hover { background: var(--hover); color: var(--text); }
+.chat-history-item.active { background: var(--hover); color: var(--text); box-shadow: inset 2px 0 var(--text-tertiary); }
+@keyframes chat-history-appear { from { opacity: 0; } to { opacity: 1; } }
+@media (max-height: 550px) {
+  .chat-empty-session:has(.chat-message-history:not([hidden])) .chat-v-composer .chat-input { min-height: 64px; }
+}
+@media (prefers-reduced-motion: reduce) { .chat-message-history { animation: none; } }

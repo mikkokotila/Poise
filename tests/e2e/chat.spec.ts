@@ -1975,3 +1975,191 @@ test('QC: the tab that initiated an older release update can recover its legacy 
   expect(await page.evaluate(() => localStorage.getItem('poise-chat-draft-snapshot'))).toBeNull()
   expect(sock.framesOf('prompt')).toHaveLength(0)
 })
+
+
+// Message recall: selection above the console, never an automatic submission.
+const historyPanel = (page: Page) => page.locator('.chat-message-history')
+const historyRows = (page: Page) => historyPanel(page).getByRole('option')
+function historyFixture(id = 's1', messages = Array.from({ length: 12 }, (_, i) => `Past message ${i + 1}`)): ChatEnvelope[] {
+  return messages.flatMap((text, i) => [
+    env(id, i * 2 + 1, { type: 'turn.started', turnId: `${id}-history-${i}`, prompt: { text, attachments: [], mentions: [] } }),
+    env(id, i * 2 + 2, { type: 'turn.finished', turnId: `${id}-history-${i}`, stopReason: 'end_turn' }),
+  ])
+}
+
+test('history: Up opens the last ten messages, arrows navigate rows, and Enter recalls without sending', async ({ page }) => {
+  const state = makeState([session()], { s1: historyFixture() }); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  await input(page).press('ArrowUp')
+  await expect(historyRows(page)).toHaveCount(10)
+  await expect(historyRows(page).first()).toHaveText('Past message 3')
+  await expect(historyRows(page).last()).toHaveAttribute('aria-selected', 'true')
+  await expect(input(page)).toHaveValue('')
+  await expect(input(page)).toBeFocused()
+  await expect(input(page)).toHaveAttribute('aria-activedescendant', 'chat-history-option-9')
+  await input(page).press('ArrowUp'); await expect(historyRows(page).nth(8)).toHaveAttribute('aria-selected', 'true')
+  await input(page).press('ArrowDown'); await expect(historyRows(page).nth(9)).toHaveAttribute('aria-selected', 'true')
+  await input(page).press('Home'); await input(page).press('ArrowUp')
+  await expect(historyRows(page).first()).toHaveAttribute('aria-selected', 'true')
+  await input(page).press('End'); await input(page).press('ArrowUp'); await input(page).press('Enter')
+  await expect(historyPanel(page)).toBeHidden()
+  await expect(input(page)).toHaveValue('Past message 11')
+  await expect(input(page)).not.toHaveAttribute('aria-activedescendant')
+  expect(sock.framesOf('prompt')).toHaveLength(0); expect(sock.framesOf('steer')).toHaveLength(0)
+  await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ text: 'Past message 11' })
+})
+
+test('history: rows are single-line and ellipsized in both themes; clicking restores the complete multiline message', async ({ page }, info) => {
+  const text = 'Keep the full request <script>window.historyPwned = true</script>\n\n' + 'A detailed instruction with context. '.repeat(30)
+  const state = makeState([session()], { s1: historyFixture('s1', ['Earlier message', text]) })
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1'); await input(page).press('ArrowUp')
+  const row = historyRows(page).last()
+  expect(await row.evaluate(el => ({ overflow: getComputedStyle(el).textOverflow, wrap: getComputedStyle(el).whiteSpace, truncated: el.scrollWidth > el.clientWidth })))
+    .toEqual({ overflow: 'ellipsis', wrap: 'nowrap', truncated: true })
+  await expect(row.locator('script')).toHaveCount(0)
+  expect(await page.evaluate(() => (window as any).historyPwned)).toBeUndefined()
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate(value => { document.documentElement.dataset.theme = value }, theme)
+    await page.screenshot({ path: info.outputPath(`message-history-${theme}.png`), animations: 'disabled' })
+  }
+  await row.click()
+  await expect(input(page)).toHaveValue(text)
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('history: nonempty drafts, command chips, modified arrows and composition retain their normal keyboard behavior', async ({ page }) => {
+  const state = makeState([session()], { s1: historyFixture() }); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('Writing\na new request'); await input(page).press('ArrowUp')
+  await expect(historyPanel(page)).toBeHidden(); await expect(input(page)).toHaveValue('Writing\na new request')
+  await input(page).fill('/queue'); await input(page).press('Space'); await input(page).press('ArrowUp')
+  await expect(historyPanel(page)).toBeHidden(); await expect(page.locator('.chat-v-chip')).toHaveText('/queue')
+  await input(page).press('Backspace'); await input(page).fill('')
+  await input(page).press('Shift+ArrowUp'); await input(page).press('ArrowDown')
+  await expect(historyPanel(page)).toBeHidden()
+  await input(page).evaluate(el => el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', isComposing: true, bubbles: true })))
+  await expect(historyPanel(page)).toBeHidden()
+  await input(page).press('ArrowUp'); await expect(historyPanel(page)).toBeVisible()
+  expect(sock.framesOf('prompt')).toHaveLength(0); expect(sock.framesOf('queue.add')).toHaveLength(0)
+})
+
+test('history: Escape, Down past newest, typing, Tab and outside clicks dismiss without changing or sending text', async ({ page }) => {
+  const state = makeState([session()], { s1: historyFixture() }); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  for (const key of ['Escape', 'ArrowDown', 'Tab']) {
+    await input(page).press('ArrowUp'); await expect(historyPanel(page)).toBeVisible()
+    await input(page).press(key); await expect(historyPanel(page)).toBeHidden(); await expect(input(page)).toHaveValue('')
+  }
+  await input(page).press('ArrowUp'); await input(page).press('x')
+  await expect(historyPanel(page)).toBeHidden(); await expect(input(page)).toHaveValue('x')
+  await input(page).fill(''); await input(page).press('ArrowUp'); await page.locator('.chat-session-header').click({ position: { x: 15, y: 10 } })
+  await expect(historyPanel(page)).toBeHidden(); await expect(input(page)).toHaveValue('')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('history: holding Enter to recall cannot accidentally submit the selected message', async ({ page }) => {
+  const state = makeState([session()], { s1: historyFixture() }); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  await input(page).press('ArrowUp')
+  await input(page).evaluate(el => {
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', repeat: true, bubbles: true, cancelable: true }))
+    el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }))
+  })
+  await expect(input(page)).toHaveValue('Past message 12')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('history: streaming keeps selection stable, while switching or reloading restores only that conversation history', async ({ page }) => {
+  const state = makeState([session({ status: 'running' }), session({ id: 's2', title: 'Other conversation' })], { s1: historyFixture(), s2: historyFixture('s2', ['Other session message']) })
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1'); sock.seq = 24
+  await input(page).press('ArrowUp'); await input(page).press('ArrowUp')
+  sock.push('s1', { type: 'text.delta', turnId: 's1-history-11', messageId: 'stream', delta: 'New streamed text' })
+  await expect(page.locator('.chat-msg-agent')).toContainText('New streamed text')
+  await expect(historyRows(page).nth(8)).toHaveAttribute('aria-selected', 'true')
+  await input(page).press('Enter'); await expect(input(page)).toHaveValue('Past message 11')
+  expect(sock.framesOf('steer')).toHaveLength(0)
+  await input(page).fill(''); await input(page).press('ArrowUp')
+  await page.locator('.chat-session-item[data-id="s2"]').click()
+  await expect(page.locator('.chat-session-item[data-id="s2"]')).toHaveClass(/active/)
+  await expect(historyPanel(page)).toBeHidden(); await input(page).press('ArrowUp')
+  await expect(historyRows(page)).toHaveCount(1); await expect(historyRows(page)).toHaveText('Other session message')
+  await input(page).press('Escape'); await page.reload(); await input(page).press('ArrowUp')
+  await expect(historyRows(page)).toHaveText('Other session message')
+})
+
+test('history: completed queued tasks recall their switch and attachments without enqueueing or changing models', async ({ page }) => {
+  const file = { id: 'f1', name: 'notes.txt', path: '.poise-chat/uploads/notes.txt', size: 5 }
+  const events = [env('s1', 1, { type: 'turn.started', turnId: 'queued-history', queueItemId: 'q1', prompt: { text: 'Review @README.md', attachments: [file], mentions: [{ path: 'README.md' }] } }),
+    env('s1', 2, { type: 'turn.finished', turnId: 'queued-history', stopReason: 'end_turn' })]
+  const state = makeState([session()], { s1: events }); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  await input(page).press('ArrowUp'); await expect(historyRows(page)).toContainText('/queue Review @README.md')
+  await input(page).press('Enter')
+  await expect(input(page)).toHaveValue('Review @README.md'); await expect(page.locator('.chat-v-chip')).toHaveText('/queue')
+  await expect(page.locator('.chat-attachment-name')).toHaveText('notes.txt')
+  expect(sock.framesOf('queue.add')).toHaveLength(0); expect(sock.framesOf('set_model')).toHaveLength(0)
+  await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('queue.add').length).toBe(1)
+  expect(sock.framesOf('queue.add')[0].command).toMatchObject({ text: 'Review @README.md', attachments: [file], mentions: [{ path: 'README.md' }] })
+})
+
+test('history: an empty conversation opens an empty-state list without creating or waking an agent', async ({ page }) => {
+  const state = makeState([]); await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await input(page).press('ArrowUp')
+  await expect(historyPanel(page)).toContainText('No messages in this conversation yet.')
+  await input(page).press('Enter'); await input(page).press('Escape')
+  await expect(input(page)).toHaveValue('')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  expect(state.calls.filter(call => call.method === 'POST')).toHaveLength(0)
+})
+
+
+test('history: a loading transcript fills the open list but never reopens a dismissed picker', async ({ page }) => {
+  const state = makeState([session()], { s1: historyFixture() }); await installRoutes(page, state)
+  const sock = await installSocket(page, state)
+  let release!: () => void; let requested = false
+  const held = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/chat/sessions/s1?**', async route => {
+    requested = true; await held
+    await route.fulfill({ json: { session: state.sessions[0], events: state.history.s1 } })
+  })
+  await page.goto('/'); await expect.poll(() => requested).toBe(true)
+  await input(page).press('ArrowUp'); await expect(historyPanel(page)).toContainText('Loading message history…')
+  await input(page).press('Escape'); release()
+  await sock.subscribed('s1'); await expect(historyPanel(page)).toBeHidden()
+  await input(page).press('ArrowUp'); await expect(historyRows(page)).toHaveCount(10)
+  await expect(historyRows(page).last()).toHaveAttribute('aria-selected', 'true')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('history: history, queue and Memories share the layout and never hide the full console in a short window', async ({ page }, info) => {
+  const state = makeState([session()], { s1: historyFixture() }); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await installMemoryRoutes(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/'); await sock.subscribed('s1')
+  for (const text of ['Later task one', 'Later task two', 'Later task three']) { await input(page).fill(`/queue ${text}`); await input(page).press('Enter') }
+  await expect(queuedRows(page)).toHaveCount(3)
+  await memoryToggle(page).click(); await expect(memoryText(page)).toBeEnabled()
+  await input(page).press('ArrowUp'); await expect(historyRows(page)).toHaveCount(10)
+  await expect(page.locator('.chat-v-composer .chat-send')).toBeInViewport()
+  const panel = await historyPanel(page).boundingBox(); const consoleBox = await page.locator('.chat-v-composer').boundingBox()
+  expect(panel!.y + panel!.height).toBeLessThanOrEqual(consoleBox!.y)
+  await page.screenshot({ path: info.outputPath('history-queue-memories.png'), animations: 'disabled' })
+  await memoryToggle(page).click(); await page.setViewportSize({ width: 600, height: 500 })
+  await input(page).press('ArrowUp'); await expect(historyRows(page)).toHaveCount(10)
+  await expect.poll(async () => {
+    const h = await historyPanel(page).boundingBox(); const c = await page.locator('.chat-v-composer').boundingBox(); const header = await page.locator('.chat-session-header').boundingBox()
+    return !!h && !!c && !!header && h.y >= header.y + header.height - 1 && c.y + c.height <= 500 && h.x >= 0 && h.x + h.width <= 600
+  }).toBe(true)
+  await input(page).press('Home')
+  await expect.poll(() => page.locator('.chat-history-list').evaluate(el => el.scrollTop)).toBe(0)
+  await input(page).press('End')
+  await expect.poll(() => page.locator('.chat-history-list').evaluate(el => el.scrollTop)).toBeGreaterThan(0)
+  await expect(page.locator('.chat-v-composer .chat-send')).toBeInViewport()
+  await page.screenshot({ path: info.outputPath('history-compact.png'), animations: 'disabled' })
+})
