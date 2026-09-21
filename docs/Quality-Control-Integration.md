@@ -70,6 +70,26 @@ The transcript and recalled history retain independently copied file references.
 Long file labels now truncate within compact conversations rather than spilling
 out of the message; the complete name remains in the accessible text.
 
+### Steering cannot overtake startup
+
+The broader WebKit journey exposed a real ordering race: the optimistic running
+indicator allowed an interjection while the native prompt was still preparing.
+Its durable receipt preceded the native prompt, which could discard that context.
+The runtime now waits for prompt invocation outside the control chain (so startup
+and permission changes cannot deadlock), and Grok separately waits for its native
+prompt frame after file-context preparation. Stop settles the wait without replay.
+Held-handshake and delayed-file regressions exercise both paths. The browser
+readiness assertion and its timeout are unchanged.
+
+### Verified recovery releases the retained checkout
+
+A deliberately failed worker termination correctly kept the checkout locked,
+but a later successful Close or Resume forgot to release the retained lease.
+The same fault-injection test now proves both halves: another session cannot
+start during uncertain termination, and it can start after termination is
+verified. Startup and shutdown release only the existing, owned token, and
+never release a checkout while a native turn or filesystem service is active.
+
 ### A late Muse answer cannot stop another turn
 
 A delayed question-answer failure used the then-current turn when reporting its

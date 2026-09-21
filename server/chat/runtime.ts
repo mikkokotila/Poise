@@ -125,6 +125,9 @@ interface RunningTurn {
   shown?: PromptInput
   /** True only once the native prompt was invoked, not while queued/startup. */
   agentInvoked?: boolean
+  /** Settles at native prompt invocation, cancellation, or failed startup. */
+  promptReady: Promise<void>
+  releasePrompt(): void
   queueItem?: QueuedMessage
   queueContext?: string
   commandModel?: string
@@ -407,7 +410,23 @@ export class ChatRuntime extends EventEmitter {
     if (session.idleTimer) clearTimeout(session.idleTimer)
     if (session.turn) return // still running after forceStop: leave it, the lease stays
     await this.stopProcess(session)
+    this.releaseSettledLease(session)
     if (session.record.status !== 'closed' && session.record.status !== 'error') this.setStatus(session, 'idle')
+  }
+
+  /** A failed worker stop deliberately retains the lease. Once a later close
+   * or resume verifies termination, release that same token, not a new lease. */
+  private releaseSettledLease(session: LiveSession): void {
+    const lease = session.lease
+    if (!lease?.held) return
+    if (session.startup || session.services || session.turn?.agentInvoked || session.worker?.alive || session.adapter?.alive) {
+      throw new ChatError(409, 'the checkout still has active work; its lease remains held', 'checkout_busy')
+    }
+    lease.clearWorker()
+    lease.release()
+    session.lease = null
+    session.record.orphanNotice = undefined
+    this.saveRecord(session)
   }
 
   // ── Drain and readiness ────────────────────────────────────────────────
@@ -624,6 +643,10 @@ export class ChatRuntime extends EventEmitter {
    *  error event and the `error` status; nothing is retried on its own. */
   private async startSession(session: LiveSession, options: { fresh?: boolean, forkFrom?: SessionRecord, lease?: CheckoutLease } = {}): Promise<void> {
     if (session.adapter?.alive) return
+    if (!options.lease && session.lease?.held) {
+      await this.stopProcess(session)
+      this.releaseSettledLease(session)
+    }
     const record = session.record
     const startup = new AbortController()
     session.startup = startup
@@ -1124,7 +1147,10 @@ export class ChatRuntime extends EventEmitter {
     if (session.turn) throw new ChatError(409, 'a turn is already running; Enter steers it', 'turn_in_progress')
     if (session.record.status === 'closed') throw new ChatError(409, 'the session is closed; resume it first', 'no_turn')
     if (session.lifecycle.signal.aborted) throw new ChatError(409, 'the session is closing', 'no_turn')
-    const turn: RunningTurn = { id: randomUUID(), callId: null, startedAt: Date.now(), abort: new AbortController(), stopping: false }
+    let releasePrompt!: () => void
+    const promptReady = new Promise<void>(resolve => { releasePrompt = resolve })
+    const turn: RunningTurn = { id: randomUUID(), callId: null, startedAt: Date.now(), abort: new AbortController(), stopping: false, promptReady, releasePrompt }
+    turn.abort.signal.addEventListener('abort', releasePrompt, { once: true })
     storage.reserveQueueTurn(session.record.id, turn.id, queueItem?.id)
     if (queueItem) turn.queueItem = queueItem
     session.turn = turn
@@ -1534,7 +1560,9 @@ export class ChatRuntime extends EventEmitter {
       agentInvoked = true
       turn.agentInvoked = true
       if (record.queuedHandoff) adapterInput.text = `${record.queuedHandoff}\n\n[Current task]\n${adapterInput.text}`
-      const result = await adapter.prompt(turn.id, withAutoMergeInstructions({ ...adapterInput, memories: readMemories().text }, record.autoMerge, turn.implementsChange), turn.abort.signal)
+      const response = adapter.prompt(turn.id, withAutoMergeInstructions({ ...adapterInput, memories: readMemories().text }, record.autoMerge, turn.implementsChange), turn.abort.signal)
+      turn.releasePrompt()
+      const result = await response
       agentSettled = true
       if (record.queuedHandoff && result.stopReason === 'end_turn') { record.queuedHandoff = undefined; this.saveRecord(session) }
       stopReason = turn.stopping || turn.abort.signal.aborted ? 'cancelled' : result.stopReason
@@ -1553,6 +1581,8 @@ export class ChatRuntime extends EventEmitter {
         if (!cancelled) this.emit_(record.id, { type: 'error', message: error || 'turn failed', recoverable: true })
       } catch { /* mirror */ }
     } finally {
+      turn.releasePrompt()
+      turn.abort.signal.removeEventListener('abort', turn.releasePrompt)
       this.settlePending(session, 'cancelled')
       // The lease is released only once nothing of this turn can still write:
       // the agent reported the turn finished (or its process is verifiably
@@ -1744,10 +1774,13 @@ export class ChatRuntime extends EventEmitter {
     const session = this.requireLive(id)
     const turn = session.turn
     if (!turn || turn.stopping) throw new ChatError(409, 'no turn is running', 'no_turn')
-    if (!session.record.capabilities.steer) throw new ChatError(409, `${AGENT_LABEL[session.record.agent]} does not support steering`, 'unsupported')
     const shown = this.validatePrompt(id, { text, attachments: context.attachments, mentions: context.mentions })
+    // Do not put this wait on the control chain: startup drains that chain
+    // before invoking the prompt. Early interjections belong after that boundary.
+    if (!turn.agentInvoked) await this.track(() => turn.promptReady)
     await this.control(session, async () => {
-      if (session.turn !== turn || turn.stopping || turn.abort.signal.aborted) throw new ChatError(409, 'the turn has ended', 'no_turn')
+      if (session.turn !== turn || !turn.agentInvoked || turn.stopping || turn.abort.signal.aborted) throw new ChatError(409, 'the turn has ended', 'no_turn')
+      if (!session.record.capabilities.steer) throw new ChatError(409, `${AGENT_LABEL[session.record.agent]} does not support steering`, 'unsupported')
       await this.serve(session, async () => {
         const resolved = await this.resolveInput(session, shown)
         if (session.turn !== turn || session.draining || turn.stopping || turn.abort.signal.aborted) throw new ChatError(409, 'the turn has ended', 'no_turn')

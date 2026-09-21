@@ -786,7 +786,7 @@ it.each(['claude', 'codex', 'grok', 'muse'] as const)('QC2: %s steering carries 
   } finally { memories.saveMemories({ text: before.text, revision: memories.readMemories().revision }); controls.adapters[0].finish() }
 })
 
-it('QC2: a failed pre-prompt worker replacement keeps the checkout locked until termination is verified', async () => {
+it.each(['close', 'resume'])('QC2: a failed worker stop retains its lease until verified recovery via %s', async recovery => {
   const { runtime, controls, events } = makeRuntime()
   let release!: () => void; let refuseTermination = true
   controls.startWait = new Promise<void>(resolve => { release = resolve }); controls.spawnDuringStart = true
@@ -810,5 +810,43 @@ it('QC2: a failed pre-prompt worker replacement keeps the checkout locked until 
     await waitFor(() => runtime.get(s.id)?.status === 'error')
     expect(runtime.get(s.id)?.status).toBe('error')
     await other.runtime.stop()
+    refuseTermination = false
+    if (recovery === 'close') await runtime.close(s.id)
+    else { await runtime.resume(s.id); expect(runtime.get(s.id)?.status).toBe('idle'); await runtime.stop() }
+    expect(storage.listWorkers().filter(row => row.sessionId === s.id)).toEqual([])
+    const successor = makeRuntime({ instance: 'qc-after-verified-termination' })
+    const next = await successor.runtime.create({ agent: 'grok', model: 'grok-4.6-high', repo: 'fixture/repo', branch: { existing: 'main' } })
+    await waitFor(() => successor.runtime.get(next.id)?.status === 'idle')
+    expect(successor.controls.startCount).toBe(1)
   } finally { refuseTermination = false; controls.startWait = undefined; release(); spy.mockRestore(); await runtime.stop() }
 }, 30_000)
+
+it.each([false, true])('QC2: an early steer waits for native prompt startup, or is preserved on Stop (stop=%s)', async stopping => {
+  const { runtime, events } = makeRuntime()
+  const s = await runtime.create({ agent: 'grok', model: 'grok-4.6-high', repo: 'fixture/repo', branch: { existing: 'main' } })
+  await waitFor(() => runtime.get(s.id)?.status === 'idle')
+  await runtime.stop()
+  const revived = makeRuntime({ instance: 'poise-test:db' }); await revived.runtime.recover()
+  let release!: () => void
+  revived.controls.startWait = new Promise<void>(resolve => { release = resolve })
+  revived.runtime.prompt(s.id, { text: 'Start the real task', attachments: [], mentions: [] })
+  await waitFor(() => revived.controls.startCount === 1)
+  const adapter = revived.controls.adapters[0]; adapter.auto = false
+  const order: string[] = []; const send = adapter.prompt.bind(adapter)
+  adapter.prompt = async (...args) => { order.push('prompt'); return send(...args) }
+  adapter.steer = async text => { order.push('steer'); adapter.steered.push(text) }
+  const steer = revived.runtime.steer(s.id, 'Additional context before startup finishes')
+  void steer.catch(() => undefined)
+  try {
+    await new Promise(resolve => setTimeout(resolve, 40))
+    expect(order).toEqual([])
+    const cancel = stopping ? revived.runtime.cancel(s.id) : null
+    revived.controls.startWait = undefined; release()
+    if (cancel) { await cancel; await expect(steer).rejects.toMatchObject({ code: 'no_turn' }); expect(order).toEqual([]) }
+    else {
+      await steer; expect(order).toEqual(['prompt', 'steer']); adapter.finish()
+      await waitFor(() => ofType(revived.events, s.id, 'turn.finished').length === 1)
+    }
+    expect(ofType(events, s.id, 'steer.sent')).toHaveLength(0)
+  } finally { revived.controls.startWait = undefined; release(); await revived.runtime.stop() }
+})
