@@ -135,6 +135,17 @@ commands or model identities. The new tests reproduced both faults before fixing
 them. An existing catalogue test also now waits for its asynchronous options to
 arrive before asserting all five groups; its expected providers remain unchanged.
 
+### Development dependency audit
+
+The existing CI audit gate passed at its unchanged high-severity threshold,
+but its output still reported the moderate redirect-mock file-read advisory
+[GHSA-82fw-gwwq-j7x9](https://github.com/advisories/GHSA-82fw-gwwq-j7x9)
+in the test dependency Vitest 4.1.10 and its mocker package. Updated that existing
+dev dependency to the upstream patched 4.1.11 release and regenerated the lockfile.
+This is a development-server advisory, not evidence of a production compromise.
+The complete audit and all verification suites are rerun after the patch; no
+new package, runtime permission, workflow threshold or release gate is introduced.
+
 ## Reproducing verification
 
 Use the supported Node version matching the checkout's native dependencies.
