@@ -747,6 +747,8 @@ test('shows all five catalogue providers and keeps efforts specific to each mode
   await page.getByRole('button', { name: 'New session' }).click()
   const dialog = page.getByRole('dialog', { name: 'New session' })
   const model = dialog.getByLabel('Model'), effort = dialog.getByLabel('Effort')
+  // The dialog opens before its asynchronous catalogue request completes.
+  await expect(model.locator('optgroup')).toHaveCount(5)
   expect(await model.locator('optgroup').evaluateAll(groups => groups.map(group => group.getAttribute('label'))))
     .toEqual(['Claude Code', 'Codex', 'Grok Build', 'Antigravity (Google)', 'Muse'])
   await model.selectOption('gemini-3.8-flash-high')
@@ -2574,4 +2576,22 @@ for (const steering of [false, true]) test(`QC2: long ${steering ? 'steered' : '
   expect(await badge.evaluate(el => ({ clipped: el.scrollWidth > el.clientWidth, ellipsis: getComputedStyle(el).textOverflow })))
     .toEqual({ clipped: true, ellipsis: 'ellipsis' })
   await page.screenshot({ path: info.outputPath('qc-compact-file-label.png'), animations: 'disabled' })
+})
+
+for (const outcome of ['no matches', 'failed catalogue']) test(`QC2: the model picker does not trap Tab with ${outcome}`, async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1')
+  if (outcome === 'failed catalogue') {
+    await page.route('**/api/chat/agents', route => route.fulfill({ status: 503, json: { error: 'Catalogue temporarily unavailable' } }))
+  }
+  const text = outcome === 'no matches' ? '/model nonexistent-model-xyz' : '/model'
+  await input(page).fill(text)
+  await expect(commandModels(page).getByRole('status')).toHaveText(outcome === 'no matches' ? 'No matching models.' : 'Could not load the catalogue.')
+  await input(page).press('Tab')
+  await expect(commandModels(page)).toBeHidden()
+  await expect(input(page)).not.toBeFocused()
+  await expect(input(page)).toHaveValue(text)
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  expect(sock.framesOf('set_model')).toHaveLength(0)
 })

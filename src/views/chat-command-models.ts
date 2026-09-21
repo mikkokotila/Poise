@@ -101,6 +101,9 @@ export function createCommandModels(input: HTMLTextAreaElement, handlers: Handle
     key(event: KeyboardEvent): boolean {
       if (el.hidden || event.isComposing || event.keyCode === 229 || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false
       if (event.key === 'Escape') { event.preventDefault(); close(); return true }
+      // Tab selects a ready choice, but must never trap focus in an empty,
+      // loading or failed picker. Let normal keyboard navigation continue.
+      if (event.key === 'Tab' && (loading || error || !visible[index]?.available)) { close(); return false }
       if (!['ArrowUp', 'ArrowDown', 'Home', 'End', 'Enter', 'Tab'].includes(event.key)) return false
       event.preventDefault()
       if (event.key === 'Enter' || event.key === 'Tab') { choose(); return true }

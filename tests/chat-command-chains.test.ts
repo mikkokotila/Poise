@@ -48,3 +48,18 @@ describe('Chat command chains', () => {
     expect(recoverDraft(first, draft)).toMatchObject({ model: 'opus-5-high', mode: 'review', text: 'earlier' })
   })
 })
+
+it.each(['\n', '\r\n', '\t', ' '])('QC2: restored command chips accept whitespace boundaries (%j)', separator => {
+  const body = 'Check the proposal\nKeep the second line.'
+  const selected = { ...draft, model: 'opus-5-high', mode: 'review', text: body }
+  const sent = { ...selected, text: `/model opus-5-high${separator}/review${separator}${body}` }
+  expect(editableCommandDraft(sent)).toEqual(selected)
+  expect(commandDraftText(sent)).toBe(`/model opus-5-high /review${separator}${body}`)
+  expect(commandDraftText(editableCommandDraft(sent))).toBe('/model opus-5-high /review ' + body)
+  expect(recoverDraft(sent, draft)).toEqual(selected)
+})
+
+it('QC2: similarly named commands and model identities are not stripped from drafts', () => {
+  expect(editableCommandDraft({ ...draft, mode: 'review', text: '/reviewer note' }).text).toBe('/reviewer note')
+  expect(editableCommandDraft({ ...draft, model: 'opus-5-high', text: '/model opus-5-higher task' }).text).toBe('/model opus-5-higher task')
+})

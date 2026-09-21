@@ -1617,6 +1617,9 @@ export class ChatRuntime extends EventEmitter {
         if (report.kind !== 'unchanged' && report.kind !== 'missing') this.saveRecord(session) // revision/version moved
         if (isBridgeProblem(report)) { try { this.emit_(record.id, { type: 'error', message: report.message, recoverable: true }) } catch { /* mirror */ } }
       }
+      // A storage/protocol failure uses cancellation to stop native work,
+      // but it is not a user Stop. Keep its cause visible in Chat and Caller.
+      if (turn.failure && !turn.stopping) { stopReason = 'error'; error = turn.failure }
       let terminalRecorded = false
       try {
         const envelope = storage.finalizeTurn(record.id,
@@ -2173,6 +2176,24 @@ export class ChatRuntime extends EventEmitter {
     storage.forgetWorker(session.record.id)
   }
 
+  /** Publishing a native request is part of its admission. If it cannot be
+   * recorded, stop only that turn; leave the entry for normal cancellation
+   * cleanup so a partially recorded request also receives its terminal event. */
+  private publishPendingRequest(session: LiveSession, turn: RunningTurn, requestId: string,
+    event: Extract<ChatEvent, { type: 'permission.requested' | 'question.asked' }>): void {
+    try {
+      this.emit_(session.record.id, event)
+      this.setStatus(session, 'waiting')
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error))
+      session.pending.get(requestId)?.reject(failure)
+      if (session.turn !== turn) return
+      turn.failure ??= `the agent request could not be recorded: ${failure.message}`
+      turn.abort.abort()
+      void session.adapter?.cancel().catch(reason => this.emit('log', `[chat] cancellation failed: ${String(reason)}`))
+    }
+  }
+
   private async askPermission(session: LiveSession, request: PermissionRequest): Promise<string> {
     const turn = session.turn
     if (!turn || turn.stopping) throw new Error('no turn is running')
@@ -2219,8 +2240,7 @@ export class ChatRuntime extends EventEmitter {
       session.pending.set(requestId, { kind: 'permission', turnId: turn.id, options: request.options, grantKey,
         resolve: value => { cleanup(); resolve(value) }, reject: error => { cleanup(); reject(error) } })
       request.signal?.addEventListener('abort', superseded, { once: true })
-      this.emit_(session.record.id, { type: 'permission.requested', id: requestId, turnId: turn.id, toolId: request.toolId, title: request.title, description: request.description, input: request.input, options: request.options })
-      this.setStatus(session, 'waiting')
+      this.publishPendingRequest(session, turn, requestId, { type: 'permission.requested', id: requestId, turnId: turn.id, toolId: request.toolId, title: request.title, description: request.description, input: request.input, options: request.options })
     })
   }
 
@@ -2230,8 +2250,7 @@ export class ChatRuntime extends EventEmitter {
     const requestId = randomUUID()
     return new Promise<QuestionAnswers>((resolve, reject) => {
       session.pending.set(requestId, { kind: 'question', turnId: turn.id, questions: request.questions, resolve, reject })
-      this.emit_(session.record.id, { type: 'question.asked', id: requestId, turnId: turn.id, toolId: request.toolId, questions: request.questions })
-      this.setStatus(session, 'waiting')
+      this.publishPendingRequest(session, turn, requestId, { type: 'question.asked', id: requestId, turnId: turn.id, toolId: request.toolId, questions: request.questions })
     })
   }
 

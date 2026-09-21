@@ -111,6 +111,30 @@ tab-local snapshot until Chat consumes it. A real release-bundle browser test
 refreshes from another view, then opens Chat and verifies the message, command
 chip and selected model remain intact without submitting anything.
 
+### Failed request admission ends the affected turn
+
+The initial permission/question receipt can fail too, before any usable card
+reaches the browser. The native promise used to reject while its live waiter
+remained registered and the turn kept running. Fault-injection tests now fail
+those initial inserts and verify a visible terminal error, no outstanding native
+or persisted request, and no false successful result. The same cancellation path
+also closes a request whose event was recorded before its waiting-status save
+failed. No answer is fabricated and no task is automatically replayed.
+
+### Keyboard navigation and multiline command restoration
+
+A model picker with no matching options or an unavailable catalogue used to
+consume Tab without choosing anything or moving focus. Tab now returns to normal
+navigation in those states (including loading), while a ready choice still uses
+Tab to select. The text and model stay untouched, and dismissal cannot send work.
+
+Restoring a submitted command with a newline or tab after a model or switch could
+repeat that prefix. Draft normalization now uses the same whitespace boundaries
+as command parsing, preserving body line breaks without stripping similarly named
+commands or model identities. The new tests reproduced both faults before fixing
+them. An existing catalogue test also now waits for its asynchronous options to
+arrive before asserting all five groups; its expected providers remain unchanged.
+
 ## Reproducing verification
 
 Use the supported Node version matching the checkout's native dependencies.
