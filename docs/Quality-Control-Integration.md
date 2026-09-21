@@ -27,6 +27,12 @@ database, and answer that same request once. Remembered permissions also retain
 their decision kind: a missing or reused native option ID cannot turn a remembered
 refusal into an approval. These cases were reproduced against the baseline.
 
+An externally withdrawn approval also settles its waiter when its cancellation
+receipt cannot be written. That error previously escaped an AbortSignal listener
+and could crash the server; it now stops only the affected turn and records the
+failure when storage permits. The regression injects a real SQLite insert failure
+while withdrawing a live permission request.
+
 ### Startup and work modes use the acknowledged choice
 
 A permission toggle during the native handshake could be saved yet miss the

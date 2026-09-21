@@ -351,3 +351,20 @@ it('QC2: counts filesystem admission while its branch check is still in flight',
   await until(() => runtime.get(id)?.status === 'idle')
   await expect((await import('node:fs/promises')).readFile(join(checkout, 'must-not-run-late.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
 })
+
+it('QC2: withdrawing an obsolete approval still settles its waiter when its receipt cannot be written', async () => {
+  const id = await session(true); runtime.prompt(id, input); await until(() => promptCount === 1)
+  const controller = new AbortController()
+  const waiting = host.requestPermission({ signal: controller.signal, title: 'Obsolete approval',
+    options: [{ id: 'yes', name: 'Allow', kind: 'allow_once' }] })
+  void waiting.catch(() => undefined)
+  await until(() => runtime.get(id)!.pendingRequests.length === 1)
+  const { db } = await import('../server/db')
+  db.exec("CREATE TRIGGER qc_withdraw_failure BEFORE INSERT ON chat_events WHEN json_extract(NEW.event, '$.type') = 'permission.resolved' BEGIN SELECT RAISE(ABORT, 'withdrawal receipt unavailable'); END")
+  try {
+    controller.abort()
+    await expect(waiting).rejects.toThrow(/no longer pending/)
+    expect(runtime.get(id)!.pendingRequests).toEqual([])
+  } finally { db.exec('DROP TRIGGER qc_withdraw_failure') }
+  await until(() => runtime.get(id)?.status === 'idle')
+})

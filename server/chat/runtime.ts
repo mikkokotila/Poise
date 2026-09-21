@@ -2199,9 +2199,22 @@ export class ChatRuntime extends EventEmitter {
       const superseded = () => {
         if (!session.pending.delete(requestId)) return
         cleanup()
-        this.emit_(session.record.id, { type: 'permission.resolved', id: requestId, optionId: '', by: 'cancelled' })
+        // The native request is already obsolete. Always release its waiter,
+        // even if its cancellation cannot be recorded; never throw from an
+        // AbortSignal listener and crash the server with an unanswered promise.
         reject(new Error('permission is no longer pending'))
-        this.afterRequestAnswered(session)
+        try {
+          this.emit_(session.record.id, { type: 'permission.resolved', id: requestId, optionId: '', by: 'cancelled' })
+          this.afterRequestAnswered(session)
+        } catch (error) {
+          const message = `the withdrawn permission could not be recorded: ${error instanceof Error ? error.message : String(error)}`
+          this.emit('log', `[chat ${session.record.id.slice(0, 8)}] ${message}`)
+          if (session.turn === turn) {
+            turn.failure ??= message
+            turn.abort.abort()
+            void session.adapter?.cancel().catch(failure => this.emit('log', `[chat] cancellation failed: ${String(failure)}`))
+          }
+        }
       }
       session.pending.set(requestId, { kind: 'permission', turnId: turn.id, options: request.options, grantKey,
         resolve: value => { cleanup(); resolve(value) }, reject: error => { cleanup(); reject(error) } })
