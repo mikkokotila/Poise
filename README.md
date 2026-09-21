@@ -320,3 +320,17 @@ See [Console message history](docs/Message-history.md).
 Safe mode is off by default; turn it on for native risk approvals without a sandbox.
 Reasoning is a separate, default-off display toggle. Icon tooltips appear after
 one second and use short labels. See [Chat controls](docs/Chat-controls.md).
+
+## Model choices and critical reply review
+
+Type **`/model`** to choose from the catalogue in a list immediately above the
+console. Pick a provider/model/effort, then continue with a task or another
+switch. **`/model` → choose → `/review`** asks the chosen model for an
+adversarial, evidence-based critique of the latest assistant reply. The
+reviewer can inspect the full prior conversation and any relevant background,
+not just a Git diff. Optional focus follows `/review`.
+
+A review or model-prefixed task submitted during active work goes into the
+queue; it does not interrupt that work or change the active agent mid-turn.
+The selected model and command chips survive refresh. See
+[Chat command chains and reply review](docs/Chat-commands.md).

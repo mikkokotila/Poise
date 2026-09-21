@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentId, ChatEnvelope, PromptInput, StopReason } from '../../server/chat/protocol'
@@ -341,4 +341,101 @@ it('does not dispatch an armed queue when startup reconciliation fails', async (
   await recovering.recover()
   await until(() => recovering.get(w.s.id)?.queue?.items.length === 0)
   expect(w.c.calls).toHaveLength(1)
+})
+
+describe('Chained models and reply review', () => {
+  it.each(['grok-4.6-high', 'opus-5-max', 'gpt-6-astra-max', 'muse-spark-1.3-contributor-max'])(
+    'reviews the latest reply using the actual %s adapter', async model => {
+      const w = await world({ autoMerge: true })
+      w.runtime.prompt(w.s.id, input('Propose an implementation'))
+      await until(() => w.turns().length === 1 && w.runtime.get(w.s.id)?.status === 'idle')
+      const command = `/model ${model} /review challenge the assumptions`
+      w.runtime.prompt(w.s.id, input(command))
+      await until(() => w.turns().length === 2 && w.runtime.get(w.s.id)?.status === 'idle')
+      const call = w.c.calls[1]
+      expect(call.agent).toBe(CATALOG.models.find(row => row.identity === model)!.provider)
+      expect(call.input.text).toContain('adversarial critical review of the latest assistant reply')
+      expect(call.input.text).toContain('Completed by grok')
+      expect(call.input.text).toContain('Propose an implementation')
+      expect(call.input.text).toContain('challenge the assumptions')
+      expect(call.input.text).toContain('not limited to a Git diff')
+      expect(call.input.text).toContain('Auto-merge ON')
+      const starts = w.events.map(row => row.event).filter(event => event.type === 'turn.started')
+      expect(starts[1].prompt.text).toBe(command)
+      expect(starts[1]).toMatchObject({ model, agent: call.agent })
+      expect(w.c.maximum).toBe(1); expect(git(w.repo, 'status', '--porcelain')).toBe('')
+    }, 20_000)
+  it('leaves a fresh conversation untouched when there is no reply to review', async () => {
+    const w = await world({ deferStart: true })
+    expect(() => w.runtime.prompt(w.s.id, input('/model opus-5-max /review'))).toThrow(/no assistant reply/)
+    expect(w.c.calls).toEqual([]); expect(w.c.adapters).toEqual([])
+    expect(w.runtime.get(w.s.id)?.agent).toBe('grok'); expect(w.turns()).toHaveLength(0)
+  })
+
+  it('queues a review before the initial task and uses the final reply and edited queue model', async () => {
+    const w = await world({ auto: false, deferStart: true })
+    const queue = await w.add('/model opus-5-max /review assess the result')
+    expect(queue.items[0]).toMatchObject({ agent: 'claude', prompt: { text: '/review assess the result' } })
+    await w.runtime.updateQueue(w.s.id, queue.items[0].id, 'muse-spark-1.3-contributor-max')
+    expect(w.c.adapters).toEqual([])
+    w.runtime.prompt(w.s.id, input('First propose the result'))
+    await until(() => w.c.calls.length === 1)
+    const first = w.c.calls[0]
+    w.c.adapters[0].host.emit({ type: 'text.delta', turnId: first.turnId, messageId: 'final-answer', delta: 'The final proposed result.' })
+    w.c.auto = true; w.finish()
+    await until(() => w.turns().length === 2)
+    expect(w.c.calls[1].agent).toBe('muse')
+    expect(w.c.calls[1].input.text).toContain('The final proposed result.')
+    expect(w.c.calls[1].input.text).toContain('assess the result')
+    expect(w.c.adapters[0].steered).toEqual([])
+  }, 20_000)
+  it('makes the complete long reply and all earlier history pages available privately', async () => {
+    const w = await world()
+    w.runtime.prompt(w.s.id, input('Original request with essential context'))
+    await until(() => w.turns().length === 1 && w.runtime.get(w.s.id)?.status === 'idle')
+    const host = w.c.adapters[0].host, turnId = w.c.calls[0].turnId
+    for (let i = 0; i < 5100; i++) host.emit({ type: 'thought.delta', turnId, messageId: 'background', delta: `evidence ${i}\n` })
+    const complete = `Latest reply\n${'x'.repeat(70_000)}\nImportant final qualification`
+    host.emit({ type: 'text.delta', turnId, messageId: 'long-final', delta: complete })
+    const through = w.runtime.get(w.s.id)!.lastSeq
+    w.runtime.prompt(w.s.id, input('/review'))
+    await until(() => w.events.filter(row => row.event.type === 'turn.finished').length === 2)
+    const text = w.c.calls[1].input.text
+    expect(text).toContain('Reply excerpt only')
+    const path = /Full preceding history index: (\S+\.json)/.exec(text)![1]
+    const index = JSON.parse(await readFile(join(w.repo, path), 'utf8')) as { throughSeq: number, target: { reply: string }, parts: Array<{ path: string }> }
+    expect(index.throughSeq).toBe(through)
+    expect(await readFile(join(w.repo, index.target.reply), 'utf8')).toBe(complete)
+    const events = (await Promise.all(index.parts.map(part => readFile(join(w.repo, part.path), 'utf8')))).join('').trim().split('\n').map(line => JSON.parse(line) as ChatEnvelope)
+    expect(events.map(event => event.seq)).toEqual(Array.from({ length: through }, (_, i) => i + 1))
+    expect(new Set(events.map(event => event.sessionId))).toEqual(new Set([w.s.id]))
+    expect(git(w.repo, 'status', '--porcelain')).toBe('')
+  }, 25_000)
+  it('applies a model before passing the following native command without rewriting it', async () => {
+    const w = await world()
+    w.runtime.prompt(w.s.id, input('/model gpt-6-astra-max /compact preserve architecture'))
+    await until(() => w.turns().length === 1)
+    expect(w.c.calls).toHaveLength(1); expect(w.c.calls[0].agent).toBe('codex')
+    expect(w.c.calls[0].input.text).toContain('/compact preserve architecture')
+    expect(w.c.calls[0].input.text).not.toContain('/model gpt-6-astra-max')
+  })
+
+  it('does not fall back to the earlier agent or replay the proposal when a selected reviewer fails', async () => {
+    const w = await world()
+    w.runtime.prompt(w.s.id, input('Propose a plan'))
+    await until(() => w.turns().length === 1 && w.runtime.get(w.s.id)?.status === 'idle')
+    w.c.failAgent = 'claude'
+    w.runtime.prompt(w.s.id, input('/model opus-5-max /review'))
+    await until(() => w.turns().length === 2)
+    expect(w.c.calls).toHaveLength(1)
+    expect(w.turns()[1].event).toMatchObject({ stopReason: 'error', error: expect.stringContaining('unavailable') })
+  })
+})
+
+it('keeps a provider-resolved model alias when applying a catalogue effort', async () => {
+  const w = await world()
+  w.c.adapters[0].setModel = async (_modelId, effort) => ({ modelId: 'grok-4.6-resolved-revision', effort })
+  await w.runtime.setModel(w.s.id, 'grok-4.6-xhigh')
+  expect(w.runtime.get(w.s.id)).toMatchObject({ model: 'grok-4.6-xhigh', modelId: 'grok-4.6-resolved-revision', effort: 'xhigh' })
+  expect(w.c.calls).toEqual([])
 })

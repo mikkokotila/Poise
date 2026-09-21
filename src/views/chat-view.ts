@@ -22,6 +22,8 @@ import { AGENT_LABELS } from '../../server/chat/protocol'
 import { chatClient, ChatCommandError, ChatHttpError, type AgentsResponse, type AgentInfo } from '../chat-client'
 import { escapeHtml } from '../markdown'
 import { recoverDraft } from '../chat-draft-recovery'
+import { parseChatCommandChain, commandBody } from '../../server/chat/commands'
+import { commandDraftText } from '../chat-command-draft'
 import { recentMessages } from '../chat-message-history'
 import { reconcileSession } from '../chat-session-state'
 import { reserveQueuedMessage, releaseQueuedMessage } from '../chat-queue'
@@ -83,6 +85,7 @@ let messageQueue: ReturnType<typeof createQueuePanel>
 let queueAddChain: Promise<void> = Promise.resolve()
 const pendingQueueItems = new Map<string, { sessionId: string | null, item: QueuedMessage }>()
 const queueMutations = new Set<string>()
+const modelUpdates = new Map<string | null, Promise<void>>()
 
 const sessions = new Map<string, SessionEntry>()
 let order: string[] = []
@@ -285,7 +288,16 @@ function renderShell(): void {
       return { entries: e ? recentMessages(e.model, e.record.context) : [], loading: !!e?.loading, error: e?.error }
     },
     onSend: (draft) => { void withSavedMemories(draft, () => sendPrompt(draft)) },
-    onQueue: (draft) => { void withSavedMemories(draft, () => queueDraft(draft)) },
+    onQueue: (draft) => { void withSavedMemories(draft, async () => {
+      const origin = activeId
+      const update = modelUpdates.get(origin)
+      if (update) {
+        try { await update }
+        catch (error) { restoreDraftTo(origin, draft); if (activeId === origin) commandFailed(error, 'Model change'); return }
+        if (activeId !== origin) { restoreDraftTo(origin, draft); return }
+      }
+      queueDraft(draft)
+    }) },
     loadModels: async () => {
       const catalogue = await loadAgents(true)
       if (!catalogue) throw new Error('Could not load the model catalogue')
@@ -301,7 +313,12 @@ function renderShell(): void {
     onStop: () => { void cancelTurn() },
     onResume: () => { void resumeActive() },
     onCommand: (name, arg) => { void withSavedMemories({ ...emptyDraft(), text: arg, mode: name }, () => runOwnCommand(name, arg)) },
-    prepareUpload: async () => (await ensureQuickSession()).record.id,
+    prepareUpload: async () => {
+      const origin = activeId
+      await modelUpdates.get(origin)
+      if (activeId !== origin) throw new Error('The selected conversation changed before the upload started')
+      return (await ensureQuickSession()).record.id
+    },
     upload: async (file, sessionId) => {
       const attachment = await chatClient.uploadAttachment(sessionId, file)
       // A slow upload belongs to its original draft, even if the user switched.
@@ -324,7 +341,7 @@ function renderShell(): void {
     onModel: (id, itemId, model) => { void changeQueueItem(id, itemId, model) },
     onRemove: (id, itemId) => { void changeQueueItem(id, itemId) },
   })
-  dockEl.append(messageQueue.el, composer.history.el, composer.el)
+  dockEl.append(messageQueue.el, composer.history.el, composer.models.el, composer.el)
   composer.el.addEventListener('chat:composer-change', queueRender)
   composer.el.addEventListener('input', () => persistDrafts())
   // After the transcript, inside the same scroll, outside the activity toggle.
@@ -353,7 +370,7 @@ function attachReloadGuards(): void {
     const blockers: string[] = []
     if (memories.editor.state.dirty) blockers.push('unsaved:memories')
     if (memories.editor.state.saving || memorySubmissions) blockers.push('saving:memories')
-    if (chatClient.pendingCount() > 0) blockers.push('command')
+    if (chatClient.pendingCount() > 0 || modelUpdates.size) blockers.push('command')
     if (composer.isUploading()) blockers.push('upload')
     if (quickSessionPromise || firstPromptPending) blockers.push('session-create')
     for (const e of sessions.values()) if (e.pending) { blockers.push('session-create'); break }
@@ -396,10 +413,10 @@ function applyRestoredSnapshot(): void {
   restoredSnapshot = null
   for (const [id, draft] of Object.entries(snap.sessions)) {
     const e = sessions.get(id)
-    if (e) e.draft = { text: draft.text, attachments: draft.attachments, mentions: draft.mentions, mode: draft.mode }
+    if (e) e.draft = { text: draft.text, attachments: draft.attachments, mentions: draft.mentions, mode: draft.mode, ...(draft.model ? { model: draft.model } : {}) }
   }
   if (snap.fresh.modelIdentity) freshModelIdentity = snap.fresh.modelIdentity
-  if (snap.fresh.draft) freshDraft = { text: snap.fresh.draft.text, attachments: snap.fresh.draft.attachments, mentions: snap.fresh.draft.mentions, mode: snap.fresh.draft.mode }
+  if (snap.fresh.draft) freshDraft = { text: snap.fresh.draft.text, attachments: snap.fresh.draft.attachments, mentions: snap.fresh.draft.mentions, mode: snap.fresh.draft.mode, ...(snap.fresh.draft.model ? { model: snap.fresh.draft.model } : {}) }
   if (!activeId && freshDraft) composer.setDraft(freshDraft)
 }
 
@@ -712,13 +729,13 @@ function commandFailed(err: unknown, what: string): void {
 }
 
 /** One user action creates one session; neither focus nor typing launches an agent. */
-function ensureQuickSession(firstPrompt?: ComposerDraft, title?: string, deferStart = false): Promise<SessionEntry> {
+function ensureQuickSession(firstPrompt?: ComposerDraft, title?: string, deferStart = false, modelOverride?: string): Promise<SessionEntry> {
   if (quickSessionPromise) return quickSessionPromise
   const current = entry()
   if (current && !current.pending) return Promise.resolve(current)
   if (current) return Promise.reject(new Error('The session is still being created.'))
   const draft = firstPrompt || deferStart ? null : composer.getDraft()
-  const selectedModel = freshModelIdentity
+  const selectedModel = modelOverride || firstPrompt?.model || parseChatCommandChain(firstPrompt?.text || '').model || draft?.model || parseChatCommandChain(draft?.text || '').model || freshModelIdentity
   const selectedAutoMerge = freshAutoMerge
   const selectedSafeMode = freshSafeMode
   quickSessionPromise = (async () => {
@@ -748,16 +765,20 @@ function acceptQueue(e: SessionEntry, queue: MessageQueue): void {
 
 function queueDraft(draft: ComposerDraft): void {
   const source = entry()
+  const chain = parseChatCommandChain(draft.text)
+  const model = draft.model || chain.model || source?.record.model || freshModelIdentity
+  const agent = agentsInfo?.agents.find(agent => agent.models.some(option => option.identity === model))
+  const effort = agent?.models.find(option => option.identity === model)?.effort || ''
   const id = crypto.randomUUID()
   const pending = { sessionId: source?.record.id ?? null, item: {
-    id, prompt: { text: draft.text, attachments: draft.attachments, mentions: draft.mentions },
-    agent: source?.record.agent || 'claude', model: source?.record.model || freshModelIdentity,
-    effort: source?.record.effort || '', state: 'waiting', createdAt: new Date().toISOString(),
+    id, prompt: { text: commandBody(chain), attachments: draft.attachments, mentions: draft.mentions },
+    agent: (agent?.id as AgentId) || source?.record.agent || 'claude', model,
+    effort, state: 'waiting', createdAt: new Date().toISOString(),
   } as QueuedMessage }
   pendingQueueItems.set(id, pending)
   // Create idle session storage for a fresh queue, but do not start a native
   // agent or send any prompt. Every queued submission shares that creation.
-  const target = source && !source.pending ? Promise.resolve(source) : ensureQuickSession(undefined, undefined, true)
+  const target = source && !source.pending ? Promise.resolve(source) : ensureQuickSession(undefined, undefined, true, model)
   // Install a handler immediately so a failed creation cannot be unhandled
   // while an earlier queue acknowledgement is still outstanding.
   const captured = target.then(value => ({ value }), error => ({ error }))
@@ -769,7 +790,7 @@ function queueDraft(draft: ComposerDraft): void {
     const prompt = pending.item.prompt
     const receipt = reserveQueuedMessage(pendingStore, e.record.id, prompt, pending.item.model, pending.item.effort, id)
     if (receipt.id !== id) { pendingQueueItems.delete(id); pending.item.id = receipt.id; pendingQueueItems.set(receipt.id, pending) }
-    pending.item.agent = e.record.agent
+    if (!agent) pending.item.agent = e.record.agent
     queueRender()
     try {
       const queue = await chatClient.queueCommand({ type: 'queue.add', sessionId: e.record.id, itemId: receipt.id,
@@ -870,7 +891,7 @@ async function startPoiseChange(cmd: PoiseCommand, draft: ComposerDraft): Promis
       // A fresh console needs an ordinary local session on the chosen model
       // to be the source; it receives no prompt.
       firstPromptPending = true
-      try { source = await ensureQuickSession(undefined, `Poise: ${cmd.request}`) } finally { firstPromptPending = false }
+      try { source = await ensureQuickSession(undefined, `Poise: ${cmd.request}`, false, draft.model || parseChatCommandChain(draft.text).model) } finally { firstPromptPending = false }
       freshDraft = null
     }
     const sessionId = source.record.id
@@ -1037,7 +1058,61 @@ function renderDeployCard(): void {
   })
 }
 
+function applyCommandModel(identity: string, origin: string | null): Promise<void> {
+  const update = applyCommandModelNow(identity, origin)
+  modelUpdates.set(origin, update)
+  void update.finally(() => { if (modelUpdates.get(origin) === update) modelUpdates.delete(origin); queueRender() }).catch(() => undefined)
+  return update
+}
+
+async function applyCommandModelNow(identity: string, origin: string | null): Promise<void> {
+  if (!origin) {
+    const catalogue = await loadAgents(true)
+    if (!catalogue) throw new Error('Could not load the model catalogue')
+    quickSessionRequest(catalogue.agents, identity)
+    if (activeId !== null) throw new Error('The selected conversation changed before the model was chosen')
+    freshModelIdentity = identity; composerStateFor(null); queueRender()
+    return
+  }
+  const result = await chatClient.send({ type: 'set_model', sessionId: origin, model: identity }) as { session?: SessionRecord } | undefined
+  if (result?.session?.id !== origin) throw new Error('The server did not confirm the selected model')
+  const current = sessions.get(origin)
+  if (current && result.session.lastSeq >= current.record.lastSeq) upsertRecord(result.session)
+  queueRender()
+}
+
 async function sendPrompt(draft: ComposerDraft): Promise<void> {
+  const origin = activeId
+  await Promise.resolve() // The composer clears after passing us the immutable draft.
+  if (activeId !== origin) { restoreDraftTo(origin, draft); return }
+  draft = { ...draft, text: commandDraftText(draft) }
+  const pendingModel = modelUpdates.get(origin)
+  if (pendingModel) {
+    try { await pendingModel }
+    catch (error) { restoreDraftTo(origin, draft); if (activeId === origin) commandFailed(error, 'Model change'); return }
+    if (activeId !== origin) { restoreDraftTo(origin, draft); return }
+  }
+  const chain = parseChatCommandChain(draft.text)
+  if (chain.missingModel) { restoreDraftTo(origin, draft); setNotice('Choose a model from /model first.'); return }
+  if (chain.review && !entry()) { restoreDraftTo(origin, draft); setNotice('There is no reply to review yet.'); return }
+  const own = !chain.review && /^\/(mode|fork)(?:\s+(.*))?$/s.exec(chain.text)
+  if ((chain.model && !chain.text && !chain.review && !draft.attachments.length) || own) {
+    try {
+      if (chain.model) await applyCommandModel(chain.model, origin)
+      if (activeId !== origin) { restoreDraftTo(origin, draft); return }
+      if (own) {
+        if (!origin) throw new Error('Start a conversation before using this command')
+        if (own[1] === 'mode') await chatClient.send({ type: 'set_mode', sessionId: origin, mode: own[2]?.trim() || '' })
+        else {
+          const result = await chatClient.forkSession(origin)
+          upsertRecord(result.session)
+          if (activeId === origin) await selectSession(result.session.id)
+        }
+      }
+      if (activeId === origin) setNotice(null)
+    } catch (error) { restoreDraftTo(origin, draft); if (activeId === origin) commandFailed(error, 'Command') }
+    queueRender(); return
+  }
   const beforeQueue = activeId
   if (pendingQueueItems.size) {
     await queueAddChain
@@ -1055,16 +1130,23 @@ async function sendPrompt(draft: ComposerDraft): Promise<void> {
     if (!saved || activeId !== sourceId) { keepDraft(sourceId, draft); return }
   }
   const current = entry()?.record
-  const explicit = parsePoiseCommand(draft.text)
+  const explicit = chain.review ? null : parsePoiseCommand(chain.text)
   // A batch stays with its agent even when it includes Poise. Only the
   // explicit command selects the independent one-change release controller.
   const autoMerge = current ? current.autoMerge === true : freshAutoMerge
-  const natural = explicit || autoMerge ? null : recognisePoiseRequest(draft.text, { poiseChangeSession: current?.workspaceKind === 'poise-change' })
+  const natural = explicit || autoMerge || chain.review ? null : recognisePoiseRequest(chain.text, { poiseChangeSession: current?.workspaceKind === 'poise-change' })
   // Vocabulary alone must not reinterpret work on another repository as a
   // Poise request. An explicit Poise target still means what the user wrote.
   const otherRepository = !!current?.repo && current.repo.toLowerCase() !== 'mikkokotila/poise'
   const poise = explicit || (natural && (!otherRepository || natural.cue === 'explicit') ? natural : null)
-  if (poise) { await startPoiseChange(poise, draft); return }
+  if (poise) {
+    if (chain.model && sourceId) {
+      try { await applyCommandModel(chain.model, sourceId) }
+      catch (error) { restoreDraftTo(sourceId, draft); if (activeId === sourceId) commandFailed(error, 'Model change'); return }
+      if (activeId !== sourceId) { restoreDraftTo(sourceId, draft); return }
+    }
+    await startPoiseChange(poise, draft); return
+  }
   let e = entry()
   if (!e || e.pending) {
     if (firstPromptPending) {
@@ -1527,7 +1609,7 @@ function attachKeys(): void {
 
 function composerStateFor(e: SessionEntry | null): void {
   if (!e) {
-    composer.setCommands([], { model: false, modes: false, fork: false })
+    composer.setCommands([], { model: true, modes: false, fork: false })
     composer.setState({ running: false, disabled: !!quickSessionPromise, placeholder: quickSessionPromise ? 'Starting the session…' : undefined, modelLabel: consoleModelLabel(freshModelIdentity), modelIdentity: freshModelIdentity, sessionId: null })
     return
   }
@@ -1540,7 +1622,7 @@ function composerStateFor(e: SessionEntry | null): void {
   else if (s.status === 'interrupted') { disabled = true; placeholder = 'Interrupted by a restart — resume to continue' }
   else if (s.status === 'error') { disabled = true; placeholder = 'The session failed — resume to try again' }
   composer.setCommands(s.commands || [], { modes: !!s.capabilities?.modes, fork: !!s.capabilities?.fork })
-  composer.setState({ running, disabled, placeholder, resume: s.status === 'interrupted' || s.status === 'error', sessionId: e.pending ? null : s.id })
+  composer.setState({ running, disabled, placeholder, modelIdentity: s.model, resume: s.status === 'interrupted' || s.status === 'error', sessionId: e.pending ? null : s.id })
 }
 
 // The next render pins the transcript to its end regardless of where the
@@ -1578,7 +1660,7 @@ function render(): void {
   // in the calculation, so a taller draft never pushes it off-screen.
   if (lastEmpty !== empty) { lastEmpty = empty; composer.layout() }
   const contentHeight = Math.max(0, mainEl.clientHeight - headerEl.offsetHeight - noticeEl.offsetHeight)
-  const history = composer.history
+  const history = composer.models.open ? composer.models : composer.history
   if (history.open) {
     const dockStyle = getComputedStyle(dockEl)
     const padding = parseFloat(dockStyle.paddingTop) + parseFloat(dockStyle.paddingBottom)
@@ -1793,6 +1875,7 @@ export async function initChatView(): Promise<void> {
 // sidebar is current when the view comes back.
 export function stopChatRefresh(): void {
   composer?.history.close()
+  composer?.models.close()
   filePreview?.close()
   splitPane?.cancelResize()
   if (tickTimer) { clearInterval(tickTimer); tickTimer = null }

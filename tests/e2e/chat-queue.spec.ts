@@ -76,6 +76,27 @@ test('executes an idle five-item queue after the first task through real ACP, SQ
     await page.reload()
     await expect(page.locator('.chat-msg-user')).toHaveCount(6)
     expect((await (await page.request.get(`${origin}/__test__/timings`)).json()).spawnCount).toBe(1)
+    // The same real browser/runtime/stdio journey now chains a chosen model
+    // into the Poise reply-review instruction rather than a native diff review.
+    await expect(page.locator('.chat-h-status')).toHaveText('idle')
+    await input.fill('/model')
+    await page.locator('.chat-command-models [data-identity="grok-4.6-high"]').click()
+    await input.fill('/review'); await input.press('Space'); await input.press('Enter')
+    await expect.poll(async () => {
+      const state = await (await page.request.get(`${origin}/__test__/timings`)).json()
+      return state.events.filter((row: any) => row.event.type === 'turn.finished').length
+    }, { timeout: 30_000 }).toBe(7)
+    const reviewed = await (await page.request.get(`${origin}/__test__/timings`)).json()
+    expect(reviewed.spawnCount).toBe(1); expect(reviewed.nativeInputs).toHaveLength(7)
+    const reviewBlocks = reviewed.nativeInputs[6] as Array<{ type: string, text?: string }>
+    const reviewText = reviewBlocks.filter(block => block.type === 'text').map(block => block.text).join('\n')
+    expect(reviewText).toContain('adversarial critical review of the latest assistant reply')
+    expect(reviewText).toContain('DONE: Item 5')
+    expect(reviewText).toContain('Full preceding history index:')
+    expect(reviewBlocks.at(-1)).toEqual({ type: 'text', text: '\n\n[Memories]\nRemember this on every queued task: äö.' })
+    await page.reload()
+    await expect(page.locator('.chat-msg-user')).toHaveCount(7)
+    await expect(page.locator('.chat-msg-user').last()).toContainText('/model grok-4.6-high /review')
   } finally {
     await stop(child)
   }

@@ -161,3 +161,21 @@ repositories, or independently authorize a self-release. All four native
 adapters place them after other human-message content. As prompt content they
 are sent to the selected provider and may remain in its native conversation;
 clearing memories affects future messages, not historical provider context.
+
+## Reply-review context
+
+`/review` resolves its target from the server's own session transcript before
+starting a direct review, or at dispatch for a queued review. Browsers cannot
+substitute a different session's reply or archive. A model-prefixed task is
+reserved once through the existing command-receipt path; model selection does
+not grant merge authority or change Safe mode.
+
+The reviewing agent intentionally receives access to the full preceding
+conversation, including tool outputs. Generated reply and paginated-history
+files are private local staging under ignored `.poise-chat/reviews/`, created
+with restrictive permissions and checked paths while the checkout lease is
+held. The visible transcript records the person's original command, not a
+second copy of the generated archive. Session deletion removes its review
+staging. These are same-user filesystem files, not a separate OS sandbox;
+review instructions identify quoted history as evidence rather than new
+execution instructions. Credentials retain the existing provider isolation.

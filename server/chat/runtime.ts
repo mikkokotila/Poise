@@ -28,6 +28,8 @@ import { EventEmitter } from 'node:events'
 import { enqueueMessage, transferQueuedContext, readQueue, updateQueuedModel, removeQueuedMessage, pauseQueue, QueueError, queueOwner, delegateQueue } from './message-queue'
 import type { MessageQueue, QueuedMessage } from './protocol'
 import { autoMergeInstructions, withAutoMergeInstructions } from './auto-merge'
+import { parseChatCommandChain, commandBody } from './commands'
+import { latestReviewTarget, prepareReview, type ReviewTarget } from './review'
 import type { AutoMergeAck, SafeModeAck } from './protocol'
 import type { ChildProcess } from 'node:child_process'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
@@ -124,6 +126,8 @@ interface RunningTurn {
   agentInvoked?: boolean
   queueItem?: QueuedMessage
   queueContext?: string
+  commandModel?: string
+  review?: { target: ReviewTarget, throughSeq: number }
 }
 
 interface LiveSession {
@@ -1128,8 +1132,18 @@ export class ChatRuntime extends EventEmitter {
     this.assertAcceptingWork()
     const session = this.requireLive(id)
     const prompt = this.validatePrompt(id, input)
+    const chain = parseChatCommandChain(prompt.text)
+    if (chain.missingModel) throw new ChatError(400, 'Choose a model from /model first.', 'invalid')
+    if (chain.queue) throw new ChatError(400, 'Use the queue command to defer a message.', 'invalid')
+    if (chain.model && !chain.text && !chain.review && !prompt.attachments.length) throw new ChatError(400, 'A model-only selection uses set_model; add a task to send a message.', 'invalid')
+    const throughSeq = session.record.lastSeq
+    const target = chain.review ? latestReviewTarget(id, throughSeq) : null
+    if (chain.review && !target) throw new ChatError(400, 'There is no assistant reply to review yet.', 'invalid')
     const turn = this.reserveTurn(session)
-    void this.serialized(session, () => this.runTurn(session, turn, prompt)).catch(() => undefined)
+    turn.commandModel = chain.model
+    if (target) turn.review = { target, throughSeq }
+    if (chain.model || chain.review) turn.shown = prompt
+    void this.serialized(session, () => this.runTurn(session, turn, { ...prompt, text: chain.text })).catch(() => undefined)
     return { turnId: turn.id }
   }
 
@@ -1158,8 +1172,11 @@ export class ChatRuntime extends EventEmitter {
     const session = this.requireLive(id)
     if (!UUID_PATTERN.test(itemId)) throw new ChatError(400, 'itemId must be a UUID', 'invalid')
     return this.control(session, async () => {
-      const prompt = this.validatePrompt(id, input)
-      const target = await this.resolveModel(model || session.record.model, effort)
+      const submitted = this.validatePrompt(id, input)
+      const chain = parseChatCommandChain(submitted.text)
+      if (chain.missingModel) throw new ChatError(400, 'Choose a model from /model first.', 'invalid')
+      const prompt = this.validatePrompt(id, { ...submitted, text: commandBody(chain) })
+      const target = await this.resolveModel(model || chain.model || session.record.model, effort)
       if (!this.ownsSession(id)) throw new ChatError(404, 'unknown session', 'unknown_session')
       return this.mutateQueue(session, () => enqueueMessage(queueOwner(id), { id: itemId, sourceSessionId: id, prompt, agent: target.agent, model: target.model.identity,
         effort: target.effort, createdAt: new Date().toISOString(), state: 'waiting' }))
@@ -1271,28 +1288,38 @@ export class ChatRuntime extends EventEmitter {
     const item = turn.queueItem!
     const target = await this.resolveModel(item.model, item.effort)
     if (target.agent !== item.agent) throw new ChatError(409, 'The queued model now belongs to a different agent.', 'invalid')
+    await this.selectSessionModel(session, item.model, item.effort)
+  }
+
+  /** Selecting another provider is a real adapter handoff in this conversation.
+   *  Merely selecting never starts a model call; the next admitted task does. */
+  private async selectSessionModel(session: LiveSession, identity: string, effortOverride?: string): Promise<void> {
+    const target = await this.resolveModel(identity, effortOverride)
     const record = session.record
+    let nativeModelId = target.model.selector
     if (target.agent === 'claude') await this.requireClaudeReady()
+    if (target.agent === record.agent && target.model.selector === record.modelId && record.efforts?.length && !record.efforts.includes(target.effort)) {
+      throw new ChatError(400, `${target.model.selector} offers native efforts ${record.efforts.join(', ')}`, 'invalid')
+    }
     if (record.agent !== target.agent) {
-      turn.queueContext = this.handoffSummary(record)
-      record.queuedHandoff = turn.queueContext
+      const context = this.handoffSummary(record)
       await this.stopProcess(session)
+      record.queuedHandoff = context
       record.agent = target.agent
       record.nativeSessionId = undefined
       record.capabilities = emptyCapabilities()
-      record.mode = undefined
-      record.modes = undefined
-      record.commands = undefined
-      record.efforts = undefined
+      record.mode = undefined; record.modes = undefined; record.commands = undefined; record.efforts = undefined
       session.grants.clear()
-    } else if (session.adapter?.alive && (record.model !== item.model || record.effort !== item.effort)) {
-      const result = await session.adapter.setModel(target.model.selector, target.effort)
-      if (result.efforts) record.efforts = result.efforts
-    }
-    record.model = target.model.identity
-    record.modelId = target.model.selector
-    record.effort = target.effort
+    } else if (session.adapter?.alive && (record.model !== target.model.identity || record.effort !== target.effort)) {
+      const applied = await session.adapter.setModel(target.model.selector, target.effort)
+      if (applied.efforts || record.modelId !== target.model.selector) record.efforts = applied.efforts
+      // Providers may resolve a catalogue selector to a dated native alias.
+      nativeModelId = applied.modelId || target.model.selector
+      if (applied.effort && applied.effort !== target.effort) throw new ChatError(409, 'The agent did not apply the selected effort.', 'agent_error')
+    } else if (record.modelId !== target.model.selector) record.efforts = undefined
+    record.model = target.model.identity; record.modelId = nativeModelId; record.effort = target.effort
     this.saveRecord(session)
+    this.emit_(record.id, { type: 'model.updated', model: record.model, modelId: record.modelId, effort: record.effort, efforts: record.efforts })
     this.emit_(record.id, { type: 'session.updated', session: record })
   }
 
@@ -1362,10 +1389,12 @@ export class ChatRuntime extends EventEmitter {
   }
 
   private async removeAttachments(session: LiveSession): Promise<void> {
-    try {
-      const { absolute } = await resolveInsideCheckout(session.record.checkout, `${ATTACHMENT_DIR}/${session.record.id}`)
-      await rm(absolute, { recursive: true, force: true })
-    } catch { /* nothing staged */ }
+    for (const directory of [ATTACHMENT_DIR, '.poise-chat/reviews']) {
+      try {
+        const { absolute } = await resolveInsideCheckout(session.record.checkout, `${directory}/${session.record.id}`)
+        await rm(absolute, { recursive: true, force: true })
+      } catch { /* missing or inaccessible private staging is never followed outside the checkout */ }
+    }
   }
 
   /** Under the held lease, on the session's branch: read every attachment
@@ -1425,7 +1454,17 @@ export class ChatRuntime extends EventEmitter {
       if (turn.abort.signal.aborted) throw new Error(turn.failure || 'cancelled before it started')
       await session.steering
       if (record.safeModePending && session.adapter?.alive) await this.stopProcess(session)
-      if (turn.queueItem) { this.publishQueue(session); await this.prepareQueuedAgent(session, turn) }
+      if (turn.queueItem) {
+        const chain = parseChatCommandChain(input.text)
+        if (chain.review) {
+          const throughSeq = record.lastSeq
+          const target = latestReviewTarget(record.id, throughSeq)
+          if (!target) throw new ChatError(400, 'There is no assistant reply to review yet.', 'invalid')
+          turn.review = { target, throughSeq }; turn.shown = input
+          input = { ...input, text: chain.text }
+        }
+        this.publishQueue(session); await this.prepareQueuedAgent(session, turn)
+      } else if (turn.commandModel) await this.selectSessionModel(session, turn.commandModel)
       if (!session.adapter?.alive) await this.startSession(session, { fresh: !record.nativeSessionId && !record.branch.baseSha && record.branch.provisional })
       const adapter = session.adapter!
       const isFirst = !storage.findEvent(record.id, (e) => e.type === 'turn.started')
@@ -1441,7 +1480,7 @@ export class ChatRuntime extends EventEmitter {
         storage.setOpenTurn(record.id, turn.id, turn.callId)
       }
       const nativeInput = await this.composePrompt(session, input, isFirst)
-      this.emit_(record.id, { type: 'turn.started', turnId: turn.id, prompt: turn.shown ?? nativeInput, callId: turn.callId ?? undefined, ...(turn.queueItem ? { queueItemId: turn.queueItem.id, agent: record.agent, model: record.model } : {}) })
+      this.emit_(record.id, { type: 'turn.started', turnId: turn.id, prompt: turn.shown ?? nativeInput, callId: turn.callId ?? undefined, agent: record.agent, model: record.model, ...(turn.queueItem ? { queueItemId: turn.queueItem.id } : {}) })
       started = true
       this.setStatus(session, 'queued')
       // Created after the title settled: the label names what is queued behind.
@@ -1459,7 +1498,8 @@ export class ChatRuntime extends EventEmitter {
         if (!lease.registerWorker({ pid: session.worker.pid, pgid: session.worker.pgid, ident: session.worker.ident })) throw new Error('the checkout lease was lost before the turn started')
         storage.setWorkerLeaseToken(record.id, lease.currentToken)
       }
-      const adapterInput = await this.resolveInput(session, nativeInput, turn.queueItem?.sourceSessionId)
+      let adapterInput = await this.resolveInput(session, nativeInput, turn.queueItem?.sourceSessionId)
+      if (turn.review) adapterInput = await prepareReview(record.checkout, record.id, turn.id, turn.review.throughSeq, turn.review.target, { ...adapterInput, text: input.text }, turn.abort.signal)
       if (session.staged) {
         const report = await refreshDocument(record.checkout, session.staged)
         if (report.kind === 'refreshed' || report.kind === 'staged') this.saveRecord(session)
@@ -1472,7 +1512,7 @@ export class ChatRuntime extends EventEmitter {
       this.setStatus(session, 'running')
       agentInvoked = true
       turn.agentInvoked = true
-      if (record.queuedHandoff) adapterInput.text = `${record.queuedHandoff}\n\n[Queued task]\n${adapterInput.text}`
+      if (record.queuedHandoff) adapterInput.text = `${record.queuedHandoff}\n\n[Current task]\n${adapterInput.text}`
       const result = await adapter.prompt(turn.id, withAutoMergeInstructions({ ...adapterInput, memories: readMemories().text }, record.autoMerge, turn.implementsChange), turn.abort.signal)
       agentSettled = true
       if (record.queuedHandoff && result.stopReason === 'end_turn') { record.queuedHandoff = undefined; this.saveRecord(session) }
@@ -1813,28 +1853,11 @@ export class ChatRuntime extends EventEmitter {
   async setModel(id: string, identity: string, effortOverride?: string): Promise<SessionRecord> {
     this.assertAcceptingWork()
     const session = this.requireLive(id)
+    if (session.turn) throw new ChatError(409, 'Choose a model for the next task or change it between turns.', 'turn_in_progress')
     return this.serialized(session, async () => {
-      if (session.turn) throw new ChatError(409, 'change the model between turns', 'turn_in_progress')
-      const { agent, model, effort } = await this.resolveModel(identity, effortOverride)
-      if (model.selector === session.record.modelId && session.record.efforts?.length && !session.record.efforts.includes(effort)) {
-        throw new ChatError(400, `${model.selector} offers native efforts ${session.record.efforts.join(', ')}`, 'invalid')
-      }
-      if (agent !== session.record.agent) throw new ChatError(400, `${identity} is a ${AGENT_LABEL[agent]} model; hand the conversation off instead`, 'invalid')
-      const changedFamily = model.selector !== session.record.modelId
-      if (session.adapter?.alive) {
-        const applied = await session.adapter.setModel(model.selector, effort)
-        session.record.modelId = applied.modelId || model.selector
-        session.record.effort = applied.effort || effort
-        if (applied.efforts || changedFamily) session.record.efforts = applied.efforts
-      } else {
-        session.record.modelId = model.selector
-        session.record.effort = effort
-        if (changedFamily) session.record.efforts = undefined
-      }
-      session.record.model = model.identity
-      this.saveRecord(session)
-      this.emit_(id, { type: 'model.updated', model: model.identity, modelId: session.record.modelId, effort: session.record.effort, efforts: session.record.efforts })
-      this.emit_(id, { type: 'session.updated', session: session.record })
+      if (session.turn) throw new ChatError(409, 'A turn started before the model could change.', 'turn_in_progress')
+      if (session.record.status === 'closed' || session.lifecycle.signal.aborted) throw new ChatError(409, 'The session is closed.', 'no_turn')
+      await this.selectSessionModel(session, identity, effortOverride)
       return session.record
     })
   }
