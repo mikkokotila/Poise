@@ -2556,3 +2556,22 @@ test('QC2: attaching context alone during a turn sends that context once', async
   expect(sock.framesOf('steer')[0].command).toMatchObject({ text: '', attachments: [attachment] })
   await expect(page.locator('.chat-attachment-chip')).toHaveCount(0)
 })
+
+for (const steering of [false, true]) test(`QC2: long ${steering ? 'steered' : 'message'} file labels remain inside compact conversations`, async ({ page }, info) => {
+  const file = { id: 'long-file', name: 'a-very-long-attachment-name-'.repeat(5) + '.txt', path: '.poise-chat/attachments/s1/file.txt', size: 4 }
+  const events: ChatEnvelope[] = [env('s1', 1, { type: 'turn.started', turnId: 't1', prompt: { text: 'Read this context', attachments: steering ? [] : [file], mentions: [] } })]
+  if (steering) events.push(env('s1', 2, { type: 'steer.sent', turnId: 't1', text: 'Additional context', attachments: [file] }))
+  events.push(env('s1', 3, { type: 'turn.finished', turnId: 't1', stopReason: 'end_turn' }))
+  const state = makeState([session()], { s1: events }); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.setViewportSize({ width: 600, height: 500 })
+  await page.goto('/'); await sock.subscribed('s1')
+  const badge = page.locator('.chat-turn-extra')
+  await expect(badge).toHaveText(file.name); await expect(badge).toHaveAttribute('title', file.path)
+  await expect.poll(async () => {
+    const box = await badge.boundingBox(); const bounds = await page.locator('.chat-transcript-scroll').boundingBox()
+    return !!box && !!bounds && box.x >= bounds.x && box.x + box.width <= bounds.x + bounds.width
+  }).toBe(true)
+  expect(await badge.evaluate(el => ({ clipped: el.scrollWidth > el.clientWidth, ellipsis: getComputedStyle(el).textOverflow })))
+    .toEqual({ clipped: true, ellipsis: 'ellipsis' })
+  await page.screenshot({ path: info.outputPath('qc-compact-file-label.png'), animations: 'disabled' })
+})

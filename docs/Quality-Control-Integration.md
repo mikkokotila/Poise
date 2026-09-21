@@ -67,6 +67,8 @@ checkout is held, and supplies text/path context before the final Memories
 appendix. Attachment-only steering also works. Failed sends restore the complete
 draft alongside newer text; successful sends clear the submitted chips.
 The transcript and recalled history retain independently copied file references.
+Long file labels now truncate within compact conversations rather than spilling
+out of the message; the complete name remains in the accessible text.
 
 ### A late Muse answer cannot stop another turn
 
