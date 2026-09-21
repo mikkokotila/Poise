@@ -10,6 +10,7 @@
 import type { Attachment, Mention } from '../server/chat/protocol'
 
 export interface DraftSnapshotDraft {
+  model?: string
   text: string
   attachments: Attachment[]
   mentions: Mention[]
@@ -54,8 +55,9 @@ export function cleanDraft(v: unknown): DraftSnapshotDraft | null {
   const attachments = Array.isArray(v.attachments) ? v.attachments.map(cleanAttachment).filter((a): a is Attachment => !!a) : []
   const mentions = Array.isArray(v.mentions) ? v.mentions.filter((m): m is Mention => isRecord(m) && typeof m.path === 'string').map((m) => ({ path: m.path })) : []
   const mode = typeof v.mode === 'string' && v.mode ? v.mode : null
-  if (!text && !attachments.length && !mode) return null
-  return { text, attachments, mentions, mode }
+  const model = typeof v.model === 'string' && v.model && v.model.length < 200 && !/\s/.test(v.model) ? v.model : undefined
+  if (!text && !attachments.length && !mode && !model) return null
+  return { text, attachments, mentions, mode, ...(model ? { model } : {}) }
 }
 
 export interface DraftSnapshotInput {

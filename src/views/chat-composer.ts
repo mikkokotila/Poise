@@ -10,13 +10,18 @@
 
 import type { Attachment, CommandOption, Mention } from '../../server/chat/protocol'
 import { escapeHtml } from '../markdown'
-import { parseQueueMessage } from '../chat-queue'
+import { parseChatCommandChain, modelCompletion, commandBody } from '../../server/chat/commands'
+import { commandDraftText, editableCommandDraft } from '../chat-command-draft'
+import { createCommandModels } from './chat-command-models'
 import type { AgentInfo } from '../chat-client'
+import { consoleModelLabel } from '../chat-catalog'
 import { attachModelPicker } from './chat-model-picker'
 import { createMessageHistory } from './chat-message-history'
 import type { MessageHistorySnapshot } from '../chat-message-history'
 
 export interface ComposerDraft {
+  /** Optional per-message model choice; applied only when submitted. */
+  model?: string
   text: string
   attachments: Attachment[]
   mentions: Mention[]
@@ -58,6 +63,7 @@ export interface ComposerHandlers {
 export interface Composer {
   el: HTMLElement
   history: ReturnType<typeof createMessageHistory>
+  models: ReturnType<typeof createCommandModels>
   setCommands(agentCommands: CommandOption[], own: { model?: boolean, modes: boolean, fork: boolean, poise?: boolean }): void
   setState(state: ComposerState): void
   getDraft(): ComposerDraft
@@ -86,7 +92,8 @@ const STEER_HINT_MS = 2000
 const DEFAULT_PLACEHOLDER = 'Message…'
 
 const OWN_COMMANDS: CommandOption[] = [
-  { name: 'model', description: 'Switch model', hint: '<identity>' },
+  { name: 'model', description: 'Choose model and effort' },
+  { name: 'review', description: 'Critically review the latest reply', hint: '[focus]' },
   { name: 'mode', description: 'Switch mode', hint: '<mode>' },
   { name: 'fork', description: 'Fork this session' },
   { name: 'queue', description: 'Queue a message after the current or next task', hint: '<message>' },
@@ -97,6 +104,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   const el = document.createElement('form')
   el.className = 'chat-composer chat-v-composer'
   el.innerHTML = `
+    <div class="chat-command-chips" hidden></div>
     <div class="chat-input-wrap">
       <div class="chat-attachments" hidden></div>
       <div class="chat-input-row">
@@ -131,7 +139,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   const fileInput = el.querySelector<HTMLInputElement>('.chat-file-input')!
   const steerHint = el.querySelector<HTMLElement>('.chat-steer-hint')!
   const modelPicker = attachModelPicker(el.querySelector<HTMLElement>('.chat-model-control')!, {
-    loadModels: handlers.loadModels, onSelect: handlers.onModelSelect,
+    loadModels: handlers.loadModels, onSelect: identity => { selectedModel = undefined; renderSelectedModel(); handlers.onModelSelect(identity); changed() },
   })
   const popover = el.querySelector<HTMLElement>('.chat-popover')!
 
@@ -139,6 +147,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   let attachments: Attachment[] = []
   let mentions: Mention[] = []
   let activeMode: string | null = null
+  let selectedModel: string | undefined
   let agentCommands: CommandOption[] = []
   let ownCommands: CommandOption[] = [OWN_COMMANDS[0]]
   let state: ComposerState = { running: false, disabled: true, sessionId: null }
@@ -153,6 +162,41 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     },
     changed: () => el.dispatchEvent(new Event('chat:composer-change', { bubbles: true })),
   })
+
+  const commandChips = el.querySelector<HTMLElement>('.chat-command-chips')!
+  function changed(): void { el.dispatchEvent(new Event('chat:composer-change', { bubbles: true })) }
+  function rawDraft(): ComposerDraft {
+    return { text: input.value, attachments: attachments.slice(), mentions: currentMentions(), mode: activeMode, ...(selectedModel ? { model: selectedModel } : {}) }
+  }
+  function renderSelectedModel(): void {
+    commandChips.hidden = !selectedModel
+    commandChips.innerHTML = selectedModel ? `<span class="chat-command-model-chip"><span>${escapeHtml(consoleModelLabel(selectedModel))}</span><button type="button" class="chat-icon-btn" aria-label="Clear model">×</button></span>` : ''
+  }
+  commandChips.addEventListener('click', event => {
+    if (!(event.target as HTMLElement).closest('button')) return
+    selectedModel = undefined; renderSelectedModel(); applyState(); changed(); input.focus()
+  })
+  function canChainMode(): boolean {
+    return !activeMode || activeMode.split(/\s+/).every(name => ['queue', 'review'].includes(name.replace(/^\//, '')))
+  }
+  const models = createCommandModels(input, {
+    load: handlers.loadModels, changed,
+    choose: identity => {
+      const location = modelCompletion(input.value)
+      if (!location) return
+      input.value = [input.value.slice(0, location.start).trimEnd(), input.value.slice(location.end).trimStart()].filter(Boolean).join(' ')
+      selectedModel = identity
+      renderSelectedModel(); applyState(); autoResize(); closePopover(); changed()
+      input.setSelectionRange(input.value.length, input.value.length)
+    },
+  })
+  function updateModels(): boolean {
+    const location = canChainMode() && !state.disabled && !uploading ? modelCompletion(input.value) : null
+    if (!location) { models.close(); return false }
+    history.close(); closePopover(); modelPicker.close()
+    models.show(location.query, selectedModel || state.modelIdentity || '')
+    return true
+  }
 
   // ── Auto-resize ───────────────────────────────────────────────────────
   // Single-line height comes from the computed line-height plus vertical
@@ -182,7 +226,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   // ── Mode-lock chip ────────────────────────────────────────────────────
 
   function allCommands(): CommandOption[] {
-    return [...ownCommands, ...agentCommands]
+    return [...ownCommands, ...agentCommands.filter(command => !ownCommands.some(own => own.name === command.name))]
   }
 
   function applyMode(mode: string | null): void {
@@ -208,7 +252,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
 
   // Space at end-of-input with the value exactly `/<command>` locks the chip.
   function tryEnterMode(e: KeyboardEvent): boolean {
-    if (activeMode || e.key !== ' ' || e.metaKey || e.ctrlKey || e.altKey) return false
+    if (!canChainMode() || e.key !== ' ' || e.metaKey || e.ctrlKey || e.altKey) return false
     if (input.selectionStart !== input.selectionEnd) return false
     if (input.selectionStart !== input.value.length) return false
     const t = input.value.trim().toLowerCase()
@@ -216,9 +260,10 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     const match = allCommands().find((c) => `/${c.name.toLowerCase()}` === t)
     if (!match) return false
     e.preventDefault()
+    if (match.name === 'model') { input.value = '/model '; updateModels(); autoResize(); return true }
     input.value = ''
     autoResize()
-    applyMode(match.name)
+    applyMode(activeMode ? `${activeMode} /${match.name}` : match.name)
     closePopover()
     return true
   }
@@ -256,7 +301,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
 
   async function uploadFiles(files: File[]): Promise<void> {
     if (state.disabled || uploading) return
-    history.close()
+    history.close(); models.close()
     uploading += 1
     applyState()
     let target = state.sessionId
@@ -296,6 +341,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   let popKind: 'command' | 'mention' | null = null
   let popItems: PopItem[] = []
   let popIndex = 0
+  let commandStart = 0
   let mentionStart = -1
   let mentionTimer: ReturnType<typeof setTimeout> | null = null
   let mentionSeq = 0
@@ -320,13 +366,17 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   }
 
   function updatePalette(): void {
+    if (updateModels()) return
     const v = input.value
-    // A palette only while the whole input is one `/token` being typed.
-    if (activeMode || !v.startsWith('/') || /\s/.test(v)) {
+    const token = /\/([^\s/]*)$/.exec(v)
+    const prefix = token ? v.slice(0, token.index) : ''
+    const chain = parseChatCommandChain(prefix)
+    if (!canChainMode() || !token || chain.text || chain.missingModel || (prefix && !/\s$/.test(prefix))) {
       if (popKind === 'command') closePopover()
       return
     }
-    const q = v.slice(1).toLowerCase()
+    commandStart = token.index
+    const q = token[1].toLowerCase()
     const items = allCommands().filter((c) => c.name.toLowerCase().startsWith(q))
     popKind = 'command'
     popItems = items.map((c) => ({ label: `/${c.name}`, hint: [c.hint, c.description].filter(Boolean).join(' — '), value: c.name }))
@@ -371,12 +421,16 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     const item = popItems[index]
     if (!item || !popKind) return
     if (popKind === 'command') {
-      input.value = `/${item.value}`
-      // Own commands that take no argument act at once; the rest lock.
+      const prefix = input.value.slice(0, commandStart)
       closePopover()
-      applyMode(item.value)
-      input.value = ''
-      autoResize()
+      if (item.value === 'model') {
+        input.value = `${prefix}/model `
+        updateModels()
+      } else if (!prefix.trim()) {
+        applyMode(activeMode ? `${activeMode} /${item.value}` : item.value)
+        input.value = ''
+      } else input.value = `${prefix}/${item.value} `
+      autoResize(); changed()
       return
     }
     const caret = input.selectionStart
@@ -409,58 +463,30 @@ export function createComposer(handlers: ComposerHandlers): Composer {
 
   function submit(): void {
     if (state.disabled || uploading) return
-    const text = input.value.trim()
-    const queued = parseQueueMessage(text, activeMode)
-    if (queued !== null) {
-      if (!queued && !attachments.length) return
-      handlers.onQueue({ text: queued, attachments: attachments.slice(), mentions: currentMentions(), mode: 'queue' })
-      input.value = ''
-      attachments = []
-      mentions = []
-      renderChips()
-      applyMode(null)
-      autoResize()
-      closePopover()
-      return
+    const draft = rawDraft()
+    draft.text = commandDraftText(draft)
+    const chain = parseChatCommandChain(draft.text)
+    if (chain.missingModel) { updateModels(); return }
+    if (!chain.text && !chain.review && !chain.model && !attachments.length) return
+    if (state.running && chain.model && !chain.text && !chain.review && !attachments.length) {
+      showNote('Model chosen for the next task'); return
     }
-    if (state.running) {
-      if (!text) return
-      handlers.onSteer(text)
+    if (chain.queue || (state.running && (chain.review || chain.model))) {
+      if (!chain.text && !chain.review && !attachments.length) return
+      handlers.onQueue({ ...draft, text: commandBody(chain), mode: 'queue', ...(chain.model ? { model: chain.model } : {}) })
+    } else if (state.running) {
+      if (!draft.text) return
+      handlers.onSteer(draft.text)
       input.value = ''
-      autoResize()
-      steerHint.textContent = 'steering'
-      steerHint.hidden = false
+      applyMode(null); autoResize(); closePopover()
+      steerHint.textContent = 'steering'; steerHint.hidden = false
       if (steerTimer) clearTimeout(steerTimer)
       steerTimer = setTimeout(() => { steerHint.hidden = true }, STEER_HINT_MS)
       return
-    }
-    if (activeMode && ownCommands.some((c) => c.name === activeMode)) {
-      const name = activeMode
-      if (name !== 'fork' && !text) return
-      if (name === 'poise') {
-        handlers.onSend({ text: `/poise ${text}`.trim(), attachments: attachments.slice(), mentions: currentMentions(), mode: name })
-        attachments = []; mentions = []; renderChips()
-      } else handlers.onCommand(name, text)
-      input.value = ''
-      applyMode(null)
-      autoResize()
-      return
-    }
-    if (!text && !attachments.length) return
-    const draft: ComposerDraft = {
-      text: activeMode ? `/${activeMode} ${text}`.trim() : text,
-      attachments: attachments.slice(),
-      mentions: currentMentions(),
-      mode: activeMode,
-    }
-    handlers.onSend(draft)
-    input.value = ''
-    attachments = []
-    mentions = []
-    renderChips()
-    applyMode(null)
-    autoResize()
-    closePopover()
+    } else handlers.onSend(draft)
+    input.value = ''; attachments = []; mentions = []; selectedModel = undefined
+    renderChips(); renderSelectedModel(); applyMode(null); autoResize()
+    models.close(); closePopover(); changed()
   }
 
   // ── Wiring ────────────────────────────────────────────────────────────
@@ -468,7 +494,8 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   el.addEventListener('submit', (e) => {
     e.preventDefault()
     if (state.disabled) return
-    if (state.running && parseQueueMessage(input.value, activeMode) === null) handlers.onStop()
+    const chain = parseChatCommandChain(commandDraftText(rawDraft()))
+    if (state.running && !chain.queue && !chain.review && !chain.model && !chain.missingModel) handlers.onStop()
     else submit()
   })
   input.addEventListener('input', () => {
@@ -476,10 +503,10 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     applyState()
     autoResize()
     updatePalette()
-    updateMentions()
+    if (!models.open) updateMentions()
   })
   let composing = false
-  input.addEventListener('compositionstart', () => { composing = true; history.close() })
+  input.addEventListener('compositionstart', () => { composing = true; history.close(); models.close() })
   input.addEventListener('compositionend', () => { composing = false })
   let recalledOnEnter = false
   input.addEventListener('keyup', event => { if (event.key === 'Enter') recalledOnEnter = false })
@@ -487,7 +514,8 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     if (composing || e.isComposing || e.keyCode === 229) return
     // Holding Enter to recall must not send the message on the next repeat.
     if (e.key === 'Enter' && recalledOnEnter) { e.preventDefault(); return }
-    const canOpenHistory = !state.disabled && !uploading && !input.value && !activeMode && !attachments.length && !popKind
+    if (models.key(e)) { if (e.key === 'Enter') recalledOnEnter = true; return }
+    const canOpenHistory = !state.disabled && !uploading && !input.value && !activeMode && !selectedModel && !attachments.length && !popKind
     if (history.key(e, canOpenHistory)) {
       if (e.key === 'Enter') recalledOnEnter = true
       modelPicker.close()
@@ -495,7 +523,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
       return
     }
     if (e.key === 'Escape') { closePopover(); return }
-    if (popoverKey(e)) return
+    if (popoverKey(e)) { if (e.key === 'Enter') recalledOnEnter = true; return }
     if (tryEnterMode(e)) return
     if (tryExitMode(e)) return
     if ((e.metaKey || e.ctrlKey) && e.key === '.') {
@@ -555,7 +583,8 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   function applyState(): void {
     input.disabled = state.disabled
     attachBtn.disabled = state.disabled || uploading > 0
-    const queuing = parseQueueMessage(input.value, activeMode) !== null
+    const chain = parseChatCommandChain(commandDraftText(rawDraft()))
+    const queuing = chain.queue || (state.running && (!!chain.model || chain.review || chain.missingModel))
     input.placeholder = state.disabled ? (state.placeholder || 'Unavailable') : queuing ? 'Queue a follow-up…' : (state.running ? 'Steer the agent… (Enter)' : (state.placeholder || DEFAULT_PLACEHOLDER))
     sendBtn.disabled = state.disabled || (uploading > 0 && (queuing || !state.running))
     modelPicker.setState({ identity: state.modelIdentity || '', label: state.modelLabel || '', visible: !!state.modelLabel, disabled: state.disabled || uploading > 0 })
@@ -564,7 +593,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     sendBtn.title = queuing ? 'Add to queue (Enter)' : state.running ? 'Stop (⌘.)' : 'Send (Enter)'
     sendBtn.classList.toggle('is-stop', state.running && !queuing)
     resumeBtn.hidden = !state.resume
-    if (state.disabled) { closePopover(); history.close() }
+    if (state.disabled) { closePopover(); history.close(); models.close() }
   }
   applyState()
   autoResize()
@@ -581,7 +610,11 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   function setComposerDraft(draft: ComposerDraft | null): void {
     history.close()
     modelPicker.close()
-    const d = draft || emptyDraft()
+    models.close()
+    const restored = editableCommandDraft(draft || emptyDraft())
+    const d = restored.mode === 'model' ? { ...restored, mode: null, text: `/model ${restored.text}` } : restored
+    selectedModel = d.model
+    renderSelectedModel()
     input.value = d.text
     attachments = d.attachments.map(file => ({ ...file }))
     mentions = d.mentions.map(mention => ({ ...mention }))
@@ -592,23 +625,23 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   }
 
   return {
-    el, history,
+    el, history, models,
     setCommands(list, own) {
       agentCommands = list
-      ownCommands = OWN_COMMANDS.filter((c) => c.name === 'queue' || (c.name === 'model' && own.model !== false) || (c.name === 'mode' && own.modes) || (c.name === 'fork' && own.fork) || (c.name === 'poise' && own.poise !== false))
+      ownCommands = OWN_COMMANDS.filter((c) => c.name === 'queue' || c.name === 'review' || (c.name === 'model' && own.model !== false) || (c.name === 'mode' && own.modes) || (c.name === 'fork' && own.fork) || (c.name === 'poise' && own.poise !== false))
     },
     setState(next) {
       // The view calls this on every render, including each streamed delta;
       // only a real change touches the DOM.
       const same = state.running === next.running && state.disabled === next.disabled
         && state.modelIdentity === next.modelIdentity && state.modelLabel === next.modelLabel && state.placeholder === next.placeholder && state.resume === next.resume && state.sessionId === next.sessionId
-      if (state.sessionId !== next.sessionId) { history.close(); closePopover() }
+      if (state.sessionId !== next.sessionId) { history.close(); models.close(); closePopover() }
       state = next
       if (!same) applyState()
       history.refresh()
     },
     getDraft() {
-      return { text: input.value, attachments: attachments.slice(), mentions: mentions.slice(), mode: activeMode }
+      return { text: input.value, attachments: attachments.slice(), mentions: mentions.slice(), mode: activeMode, ...(selectedModel ? { model: selectedModel } : {}) }
     },
     setDraft: setComposerDraft,
     focus() { input.focus() },

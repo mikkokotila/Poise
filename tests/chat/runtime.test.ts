@@ -382,7 +382,7 @@ describe('chat runtime', () => {
     await compat.runtime.stop()
   }, 40_000)
 
-  it('forks, hands off with a labelled summary, and rejects model changes across agents', async () => {
+  it('forks, hands off with a labelled summary, and selects another agent without starting a turn', async () => {
     ensureBranch('chat/alpha')
     const { runtime, controls, events } = makeRuntime()
     const session = await runtime.create({ agent: 'grok', model: 'grok-4.6-xhigh', repo: 'acme/repo', branch: { existing: 'chat/alpha' } })
@@ -395,7 +395,11 @@ describe('chat runtime', () => {
     expect(fork.forkedFrom).toBe(session.id)
     expect(fork.branch).toMatchObject({ name: 'chat/alpha', provisional: false })
     expect(controls.adapters.at(-1)?.nativeSessionId).toBe('native-1-fork')
-    await expect(runtime.setModel(session.id, 'opus-5-max')).rejects.toMatchObject({ code: 'invalid' })
+    const count = controls.startCount
+    await runtime.setModel(session.id, 'opus-5-max')
+    expect(runtime.get(session.id)).toMatchObject({ agent: 'claude', model: 'opus-5-max', effort: 'max' })
+    expect(controls.startCount).toBe(count)
+    expect(controls.adapters[0].alive).toBe(false)
     await runtime.setModel(session.id, 'grok-4.6-high')
     expect(runtime.get(session.id)).toMatchObject({ model: 'grok-4.6-high', effort: 'high' })
     const handoff = await runtime.handoff(session.id, { agent: 'grok', model: 'grok-4.6-xhigh' })

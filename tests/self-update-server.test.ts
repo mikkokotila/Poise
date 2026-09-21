@@ -225,6 +225,9 @@ describe('self-update routes', () => {
     expect((await fetch(`${base}/api/self-update/readiness`, { headers: { 'x-poise-release-key': 'K'.repeat(40) } })).status).toBe(503)
     bridge.key = 'K'.repeat(40)
 
+    // Listening is not the same as completing startup reconciliation; that
+    // work correctly counts as busy until it has actually settled.
+    await expect.poll(() => cache.getChatRuntime().busy(), { timeout: 5_000 }).toBe(0)
     const before = await (await fetch(`${base}/api/self-update/readiness`, { headers: key })).json() as any
     expect(before).toEqual({ ready: false, busy: 0, build: { sha: null, releaseId: null }, draining: false })
     expect((await post('/api/self-update/drain', {}, key)).status).toBe(400)

@@ -156,6 +156,14 @@ async function installSocket(page: Page, state?: ServerState): Promise<Socket> {
         s.queue = queue
         sock.push(s.id, { type: 'queue.updated', queue })
         sock.ack(frame, true, '', undefined, { queue })
+      } else if (sock.autoAck && frame.command.type === 'set_model' && state) {
+        const command = frame.command
+        const s = state.sessions.find(s => s.id === command.sessionId)!
+        const agent = (AGENTS.agents as Array<{ id: SessionRecord['agent'], models: Array<{ identity: string, selector: string, effort: string }> }>).find(agent => agent.models.some(model => model.identity === command.model))!
+        const model = agent.models.find(model => model.identity === command.model)!
+        Object.assign(s, { agent: agent.id, model: model.identity, modelId: model.selector, effort: command.effort || model.effort, lastSeq: sock.seq + 1 })
+        sock.push(s.id, { type: 'session.updated', session: { ...s } })
+        sock.ack(frame, true, '', undefined, { session: { ...s } })
       } else if (sock.autoAck && frame.command.type === 'set_safe_mode' && state) {
         const command = frame.command
         const s = state.sessions.find(s => s.id === command.sessionId)!
@@ -1986,7 +1994,7 @@ test('QC: the tab that initiated an older release update can recover its legacy 
 
 
 // Message recall: selection above the console, never an automatic submission.
-const historyPanel = (page: Page) => page.locator('.chat-message-history')
+const historyPanel = (page: Page) => page.getByRole('region', { name: 'Recent messages', includeHidden: true })
 const historyRows = (page: Page) => historyPanel(page).getByRole('option')
 function historyFixture(id = 's1', messages = Array.from({ length: 12 }, (_, i) => `Past message ${i + 1}`)): ChatEnvelope[] {
   return messages.flatMap((text, i) => [
@@ -2165,9 +2173,9 @@ test('history: history, queue and Memories share the layout and never hide the f
     return !!h && !!c && !!header && h.y >= header.y + header.height - 1 && c.y + c.height <= 500 && h.x >= 0 && h.x + h.width <= 600
   }).toBe(true)
   await input(page).press('Home')
-  await expect.poll(() => page.locator('.chat-history-list').evaluate(el => el.scrollTop)).toBe(0)
+  await expect.poll(() => historyPanel(page).locator('.chat-history-list').evaluate(el => el.scrollTop)).toBe(0)
   await input(page).press('End')
-  await expect.poll(() => page.locator('.chat-history-list').evaluate(el => el.scrollTop)).toBeGreaterThan(0)
+  await expect.poll(() => historyPanel(page).locator('.chat-history-list').evaluate(el => el.scrollTop)).toBeGreaterThan(0)
   await expect(page.locator('.chat-v-composer .chat-send')).toBeInViewport()
   await page.screenshot({ path: info.outputPath('history-compact.png'), animations: 'disabled' })
 })
@@ -2248,4 +2256,222 @@ test('icon tooltips: wait one second, stay short, and dismiss without a native t
   await page.clock.runFor(1000); await expect(tip).toHaveText('Auto-merge')
   await expect(other).not.toHaveAttribute('title')
   await page.mouse.move(1, 1); await expect(tip).toBeHidden()
+})
+
+const commandModels = (page: Page) => page.locator('.chat-command-models')
+const chooseCommandModel = async (page: Page, identity: string) => {
+  await input(page).fill('/model')
+  await commandModels(page).locator(`[data-identity="${identity}"]`).click()
+}
+const reviewHistory = (): ChatEnvelope[] => [
+  env('s1', 1, { type: 'turn.started', turnId: 'proposal', prompt: { text: 'Propose a design', attachments: [], mentions: [] } }),
+  env('s1', 2, { type: 'text.delta', turnId: 'proposal', messageId: 'reply', delta: 'Here is the proposed design.' }),
+  env('s1', 3, { type: 'turn.finished', turnId: 'proposal', stopReason: 'end_turn' }),
+]
+
+test('command models: typing /model opens catalogue rows above the console without starting work', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('/model')
+  await expect(commandModels(page)).toBeVisible()
+  await expect(commandModels(page).getByRole('option')).toHaveCount((AGENTS.agents as Array<{ models: unknown[] }>).reduce((n, agent) => n + agent.models.length, 0))
+  await expect(commandModels(page).locator('[data-identity="grok-4.6-xhigh"]')).toHaveAttribute('aria-disabled', 'true')
+  const panel = (await commandModels(page).boundingBox())!, console = (await page.locator('.chat-v-composer').boundingBox())!
+  expect(panel.y + panel.height).toBeLessThanOrEqual(console.y)
+  await commandModels(page).locator('[data-identity="gpt-6-astra-max"]').click()
+  await expect(input(page)).toHaveValue(''); await expect(page.locator('.chat-command-model-chip')).toContainText('GPT 6 Astra')
+  expect(sock.framesOf('set_model')).toHaveLength(0); expect(sock.framesOf('prompt')).toHaveLength(0)
+  await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('set_model').length).toBe(1)
+  await expect(page.locator('.chat-model-select')).toHaveValue('gpt-6-astra-max')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('command chains: select a model then /review and submit exactly one task with both switches', async ({ page }) => {
+  const state = makeState([session()], { s1: reviewHistory() }); await installRoutes(page, state)
+  const sock = await installSocket(page, state); sock.seq = 3; await page.goto('/'); await sock.subscribed('s1')
+  await chooseCommandModel(page, 'gpt-6-astra-max')
+  await input(page).fill('/rev')
+  await page.locator('.chat-pop-item').filter({ hasText: '/review' }).click()
+  await expect(page.locator('.chat-v-chip')).toHaveText('/review')
+  await expect(page.locator('.chat-command-model-chip')).toBeVisible()
+  await input(page).fill('challenge the assumptions'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ text: '/model gpt-6-astra-max /review challenge the assumptions' })
+  expect(sock.framesOf('set_model')).toHaveLength(0)
+  await expect(page.locator('.chat-command-chips')).toBeHidden()
+})
+
+test('command chains: pasted model prefixes preserve the following native command and full text', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('/model opus-5-high /compact keep the architecture\nand important details')
+  await expect(commandModels(page).getByRole('option')).toHaveCount(1)
+  await input(page).press('Enter')
+  await expect(input(page)).toHaveValue('/compact keep the architecture\nand important details')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ text: '/model opus-5-high /compact keep the architecture\nand important details' })
+})
+
+test('review command: a bare review is a task, not a native-command argument or a Poise deployment', async ({ page }) => {
+  const state = makeState([session()], { s1: reviewHistory() }); await installRoutes(page, state)
+  const sock = await installSocket(page, state); sock.seq = 3; await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('/review'); await input(page).press('Space'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ text: '/review' })
+  expect(sock.framesOf('poise.change')).toHaveLength(0)
+})
+
+test('review command: while working, a model-selected review queues without steering or switching the current agent', async ({ page }) => {
+  const state = makeState([session({ status: 'running' })], { s1: reviewHistory().slice(0, 2) }); await installRoutes(page, state)
+  const sock = await installSocket(page, state); sock.seq = 3; await page.goto('/'); await sock.subscribed('s1')
+  await chooseCommandModel(page, 'muse-spark-1.3-contributor-max')
+  await input(page).fill('/review check the final result'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('queue.add').length).toBe(1)
+  expect(sock.framesOf('queue.add')[0].command).toMatchObject({ text: '/review check the final result', model: 'muse-spark-1.3-contributor-max', effort: 'max' })
+  await expect(page.locator('.chat-queue-agent')).toHaveValue('muse-spark-1.3-contributor-max')
+  await expect(page.locator('.chat-h-agent')).toHaveText('Claude Code')
+  for (const command of ['prompt', 'steer', 'cancel', 'set_model']) expect(sock.framesOf(command)).toHaveLength(0)
+})
+
+test('command models: fresh selection starts nothing and review without a reply preserves the draft', async ({ page }) => {
+  const state = makeState([]); await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.ready()
+  await chooseCommandModel(page, 'gpt-6-astra-max'); await input(page).press('Enter')
+  await expect(page.locator('.chat-default-model')).toContainText('GPT 6 Astra')
+  expect(state.calls.filter(call => call.method === 'POST' && call.path === '/api/chat/sessions')).toHaveLength(0)
+  await input(page).fill('/review'); await input(page).press('Space'); await input(page).press('Enter')
+  await expect(page.locator('.chat-notice')).toContainText('no reply to review')
+  await expect(page.locator('.chat-v-chip')).toHaveText('/review')
+  expect(state.calls.filter(call => call.method === 'POST' && call.path === '/api/chat/sessions')).toHaveLength(0)
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('command chains: /queue can precede model selection and /review without starting an idle task', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('/queue'); await input(page).press('Space')
+  await input(page).fill('/model'); await commandModels(page).locator('[data-identity="gpt-6-astra-max"]').click()
+  await input(page).fill('/review'); await input(page).press('Space'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('queue.add').length).toBe(1)
+  expect(sock.framesOf('queue.add')[0].command).toMatchObject({ model: 'gpt-6-astra-max', text: '/review' })
+  expect(sock.framesOf('prompt')).toHaveLength(0); expect(sock.framesOf('set_model')).toHaveLength(0)
+})
+
+test('command models: filtering and keyboard selection never submit through key repeat', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('/model ast')
+  await expect(commandModels(page).getByRole('option')).toHaveCount(2)
+  await input(page).press('End')
+  await expect(commandModels(page).locator('[aria-selected="true"]')).toHaveAttribute('data-identity', 'gpt-6-astra-max')
+  await page.keyboard.down('Enter')
+  await input(page).evaluate(el => el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', repeat: true, bubbles: true })))
+  await page.keyboard.up('Enter')
+  expect(sock.framesOf('set_model')).toHaveLength(0); expect(sock.framesOf('prompt')).toHaveLength(0)
+  await expect(page.locator('.chat-command-model-chip')).toContainText('Max')
+  await page.getByRole('button', { name: 'Clear model', exact: true }).click()
+  await input(page).fill('/model'); await expect(commandModels(page).locator('[data-identity="grok-4.6-xhigh"]')).toBeDisabled()
+  // Exercise the disabled-row handler without bypassing layout stability via a forced pointer click.
+  await commandModels(page).locator('[data-identity="grok-4.6-xhigh"]').dispatchEvent('click')
+  await expect(commandModels(page)).toBeVisible(); await expect(page.locator('.chat-command-chips')).toBeHidden()
+})
+
+test('command chains: failed review acknowledgements restore the selected model and command', async ({ page }) => {
+  const state = makeState([session()], { s1: reviewHistory() }); await installRoutes(page, state); const sock = await installSocket(page, state)
+  sock.seq = 3; await page.goto('/'); await sock.subscribed('s1'); await chooseCommandModel(page, 'gpt-6-astra-max')
+  sock.autoAck = false
+  await input(page).fill('/review check evidence'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  sock.ack(sock.framesOf('prompt')[0], false, 'Reviewer unavailable', 'agent_error')
+  await expect(input(page)).toHaveValue('/review check evidence')
+  await expect(page.locator('.chat-command-model-chip')).toContainText('GPT 6 Astra')
+  await expect(page.locator('.chat-notice')).toContainText('Reviewer unavailable')
+})
+
+test('command models: a dismissed slow catalogue never reopens or replaces the draft', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1')
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/chat/agents', async route => { await gate; await route.fulfill({ json: AGENTS }) })
+  await input(page).fill('/model'); await expect(commandModels(page)).toBeVisible()
+  await input(page).press('Escape'); await input(page).fill('An unrelated draft')
+  release(); await page.waitForTimeout(150)
+  await expect(commandModels(page)).toBeHidden(); await expect(input(page)).toHaveValue('An unrelated draft')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('command models: chosen model and subsequent switches survive ordinary refresh without starting work', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1'); await chooseCommandModel(page, 'muse-spark-1.3-contributor-max')
+  await input(page).fill('/review'); await input(page).press('Space'); await input(page).fill('Question this design')
+  await page.reload()
+  await expect(input(page)).toHaveValue('Question this design')
+  await expect(page.locator('.chat-v-chip')).toHaveText('/review')
+  await expect(page.locator('.chat-command-model-chip')).toContainText('Muse Spark')
+  expect(sock.framesOf('prompt')).toHaveLength(0); expect(sock.framesOf('set_model')).toHaveLength(0)
+})
+
+test('command chains: /model /review asks for a choice and retains the following switch', async ({ page }) => {
+  const state = makeState([session()], { s1: reviewHistory() }); await installRoutes(page, state)
+  const sock = await installSocket(page, state); sock.seq = 3; await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('/model /review')
+  await commandModels(page).locator('[data-identity="gpt-6-astra-max"]').click()
+  await expect(input(page)).toHaveValue('/review')
+  await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ text: '/model gpt-6-astra-max /review' })
+})
+
+test('command chains: a following mode switch waits for model acknowledgement', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1'); await chooseCommandModel(page, 'opus-5-high')
+  sock.autoAck = false
+  await input(page).fill('/mode plan'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('set_model').length).toBe(1)
+  expect(sock.framesOf('set_mode')).toHaveLength(0); expect(sock.framesOf('prompt')).toHaveLength(0)
+  sock.ack(sock.framesOf('set_model')[0], true, '', undefined, { session: session({ model: 'opus-5-high', effort: 'high', lastSeq: 1 }) })
+  await expect.poll(() => sock.framesOf('set_mode').length).toBe(1)
+  expect(sock.framesOf('set_mode')[0].command).toMatchObject({ mode: 'plan', sessionId: 's1' })
+  sock.ack(sock.framesOf('set_mode')[0])
+})
+
+test('command models: catalogue, queue and Memories fit together in both themes and a short window', async ({ page }, info) => {
+  const state = makeState([session()]); await installRoutes(page, state); const sock = await installSocket(page, state)
+  await installMemoryRoutes(page)
+  await page.setViewportSize({ width: 1440, height: 900 }); await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('/queue Later task'); await input(page).press('Enter')
+  await expect(queuedRows(page)).toHaveCount(1)
+  await page.getByRole('button', { name: 'Memories', exact: true }).click()
+  await input(page).fill('/model'); await expect(commandModels(page).getByRole('option').first()).toBeVisible()
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate(value => { document.documentElement.dataset.theme = value }, theme)
+    const bounds = (await commandModels(page).boundingBox())!, composer = (await page.locator('.chat-v-composer').boundingBox())!
+    expect(bounds.y + bounds.height).toBeLessThanOrEqual(composer.y + 1)
+    expect(composer.y + composer.height).toBeLessThanOrEqual(900)
+    await page.screenshot({ path: info.outputPath(`command-models-${theme}.png`), animations: 'disabled' })
+  }
+  await page.getByRole('button', { name: 'Close memories', exact: true }).click()
+  await page.setViewportSize({ width: 660, height: 540 }); await input(page).fill('/model')
+  await expect(commandModels(page)).toBeVisible()
+  const send = (await page.locator('.chat-send').boundingBox())!
+  expect(send.y + send.height).toBeLessThanOrEqual(540)
+  await page.screenshot({ path: info.outputPath('command-models-compact.png'), animations: 'disabled' })
+})
+
+test('command models: the next message waits for a model-only selection and is preserved if that change fails', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1'); await chooseCommandModel(page, 'gpt-6-astra-max')
+  sock.autoAck = false
+  await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('set_model').length).toBe(1)
+  await input(page).fill('Use the model I selected'); await input(page).press('Enter')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  sock.ack(sock.framesOf('set_model')[0], false, 'Model not available', 'invalid')
+  await expect(input(page)).toHaveValue(/Use the model I selected/)
+  await expect(page.locator('.chat-notice')).toContainText('Model not available')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
 })

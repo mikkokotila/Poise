@@ -6036,3 +6036,14 @@ body:has(#view-chat:not([hidden])) #app { padding-bottom: 0; }
 .chat-safe-mode-status { padding: var(--sp-1) var(--sp-3); color: var(--text-secondary); }
 .icon-tooltip { position: fixed; z-index: 1000; pointer-events: none; max-width: calc(100vw - 16px); padding: 5px 8px; border: 1px solid var(--hairline); border-radius: var(--r-sm); background: var(--surface); color: var(--text-secondary); font: inherit; font-size: .6875rem; line-height: 1.4; white-space: nowrap; box-shadow: var(--e-1); }
 .icon-tooltip[hidden] { display: none; }
+
+/* Command choices sit in the same quiet extension as message history. */
+.chat-command-chips { display: flex; flex-wrap: wrap; gap: var(--sp-1); padding: var(--sp-2) var(--sp-3) 0; min-width: 0; }
+.chat-command-chips[hidden] { display: none; }
+.chat-command-model-chip { display: inline-flex; align-items: center; gap: var(--sp-1); max-width: 100%; color: var(--text-secondary); background: var(--hover); border-radius: var(--r-sm); padding-left: var(--sp-2); font-size: .6875rem; }
+.chat-command-model-chip > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-command-model-chip button { width: 24px; height: 24px; flex: 0 0 24px; }
+.chat-command-model-option[aria-disabled="true"] { color: var(--text-tertiary); cursor: default; }
+.chat-command-model-option[aria-disabled="true"]:hover { background: transparent; }
+.chat-command-model-retry { margin: 0 var(--sp-3) var(--sp-2); border: var(--b-hair); border-radius: var(--r-sm); background: transparent; color: var(--text-secondary); font: inherit; font-size: .75rem; cursor: pointer; }
+.chat-command-model-retry[hidden] { display: none; }
