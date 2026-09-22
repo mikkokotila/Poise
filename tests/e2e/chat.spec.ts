@@ -2709,3 +2709,37 @@ test('context controls: compacting a fresh console creates no session', async ({
   expect(sock.framesOf('prompt')).toHaveLength(0)
   await expect(input(page)).toHaveValue('')
 })
+
+test('context controls: model list stays mounted between pointer down and Send activation', async ({ page }) => {
+  const state = makeState([session()], { s1: historyFixture() })
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('/model gpt-6-astra-max /reset A fresh task')
+  await expect(commandModels(page).getByRole('option')).toHaveCount(1)
+  const button = page.locator('.chat-send')
+  await page.evaluate(() => {
+    // Hold the actual entrance at its filled final frame until the press.
+    document.querySelector<HTMLElement>('.chat-shell')!.style.animationDuration = '1ms'
+    document.querySelector('#view-chat')!.classList.add('view-entering')
+  })
+  await button.hover()
+  const pressedAt = await button.boundingBox()
+  await page.mouse.down()
+  try {
+    // Dismissing the extension here moves the button before mouseup,
+    // losing the click in Firefox and potentially on a slow real device.
+    await expect(commandModels(page)).toBeVisible()
+    await page.evaluate(() => { document.querySelector('#view-chat')!.classList.remove('view-entering') })
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+    const current = await button.boundingBox()
+    const pointerX = pressedAt!.x + pressedAt!.width / 2
+    const pointerY = pressedAt!.y + pressedAt!.height / 2
+    expect(pointerX).toBeGreaterThanOrEqual(current!.x)
+    expect(pointerX).toBeLessThanOrEqual(current!.x + current!.width)
+    expect(pointerY).toBeGreaterThanOrEqual(current!.y)
+    expect(pointerY).toBeLessThanOrEqual(current!.y + current!.height)
+    await expect(commandModels(page)).toBeVisible()
+  } finally { await page.mouse.up() }
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('context.reset')).toHaveLength(1)
+})

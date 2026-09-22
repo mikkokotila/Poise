@@ -4958,6 +4958,11 @@ body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
 /* The layout owns the viewport height, so #app's page padding would only
    add a scrollbar under it. */
 body:has(#view-chat:not([hidden])) #app { padding-bottom: 0; }
+/* A transformed app-width wrapper temporarily includes the full-bleed
+   child's pre-transform bounds in page overflow. Keep the entrance a fade
+   so focus cannot horizontally scroll the page and move Send mid-click. */
+.view-entering > .chat-shell { animation-name: chatViewIn; }
+@keyframes chatViewIn { from { opacity: 0; } to { opacity: 1; } }
 
 .chat-view-controls { gap: var(--sp-2); }
 

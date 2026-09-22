@@ -19,6 +19,7 @@ export function createCommandModels(input: HTMLTextAreaElement, handlers: Handle
   let choices: ModelChoice[] = [], visible: ModelChoice[] = []
   let index = -1, generation = 0
   let query = '', current = '', loading = false, error = false
+  let pointerSubmitting = false
   function select(next: number): void {
     index = next
     for (let i = 0; i < list.children.length; i++) {
@@ -57,6 +58,7 @@ export function createCommandModels(input: HTMLTextAreaElement, handlers: Handle
     handlers.changed()
   }
   function close(): void {
+    pointerSubmitting = false
     generation++
     if (el.hidden) return
     el.hidden = true; loading = false
@@ -85,8 +87,18 @@ export function createCommandModels(input: HTMLTextAreaElement, handlers: Handle
     if (row) { index = Number(row.dataset.index); choose() }
   })
   retry.addEventListener('click', () => { input.focus({ preventScroll: true }); void load() })
-  document.addEventListener('pointerdown', event => { if (event.target !== input && !el.contains(event.target as Node)) close() })
-  input.addEventListener('blur', () => { setTimeout(() => { if (document.activeElement !== input && !el.contains(document.activeElement)) close() }, 0) })
+  // Removing the extension on pointerdown can move Send before pointerup,
+  // swallowing the click. Submission itself closes it after activation.
+  const submitting = (target: EventTarget | null) => target instanceof Element
+    && !!target.closest('.chat-send') && input.form?.contains(target)
+  document.addEventListener('pointerdown', event => {
+    pointerSubmitting = !!submitting(event.target)
+    if (event.target !== input && !el.contains(event.target as Node) && !pointerSubmitting) close()
+  })
+  document.addEventListener('pointercancel', () => { pointerSubmitting = false; close() })
+  // Safari does not necessarily focus buttons after a pointer press. Retain
+  // the pointer's intent as well as focus until submit closes the extension.
+  input.addEventListener('blur', () => { setTimeout(() => { if (!pointerSubmitting && document.activeElement !== input && !el.contains(document.activeElement) && !submitting(document.activeElement)) close() }, 0) })
   return {
     el, close,
     get open() { return !el.hidden },
