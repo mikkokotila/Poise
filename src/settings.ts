@@ -53,6 +53,7 @@ let fixedEl: HTMLElement | null = null
 let catalogStatusEl: HTMLElement | null = null
 let productionEl: HTMLElement | null = null
 let refreshBtn: HTMLButtonElement | null = null
+let focusTimer: ReturnType<typeof setTimeout> | null = null
 // A model select someone has changed keeps its value across background
 // reloads until Save, exactly like the text fields keep typed text.
 const dirtyModels = new Set<string>()
@@ -569,7 +570,14 @@ export function openSettingsPanel() {
   void refreshStatus()
   void loadModels()
   void loadProduction()
-  setTimeout(() => {
+  if (focusTimer) clearTimeout(focusTimer)
+  const openingFocus = document.activeElement
+  focusTimer = setTimeout(() => {
+    focusTimer = null
+    // The entrance must not redirect typing into Organization after the
+    // person has already selected another field or returned to the console.
+    if (!panelEl?.classList.contains('open')) return
+    if (document.activeElement !== openingFocus && document.activeElement !== document.body) return
     // Focus the first empty required field
     if (!orgInput || !meInput) return
     if (!orgInput.value) orgInput.focus()
@@ -579,6 +587,8 @@ export function openSettingsPanel() {
 }
 
 export function closeSettingsPanel() {
+  if (focusTimer) clearTimeout(focusTimer)
+  focusTimer = null
   if (!panelEl) return
   panelEl.classList.remove('open')
   // Translated off-screen is not gone: without this the closed panel keeps its
