@@ -336,7 +336,9 @@ The selected model and command chips survive refresh. See
 [Chat command chains and reply review](docs/Chat-commands.md).
 
 `/create /your-skill` followed by its text saves a reusable, user-named switch.
-Use it in any future Chat message, including queued tasks and command chains.
+Skills and snippets are one shared library: edit them in **Snippets**, or add
+a snippet there and invoke it in Chat. Use it in any future message, including
+queued tasks and command chains. The Snippets view shows its `/name` invocation.
 See [Create reusable Chat switches](docs/Chat-switches.md).
 
 ## Conversation context

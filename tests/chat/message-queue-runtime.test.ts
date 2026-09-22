@@ -599,7 +599,7 @@ for (const model of ['grok-4.6-high', 'opus-5-max', 'gpt-6-astra-max', 'muse-spa
   it(`saved switches: ${model} receives the selected definition without executing its slash text`, async () => {
     const w = await world({ deferStart: true })
     const name = `voice-${randomUUID()}`
-    w.runtime.createSwitch({ name, content: '/reset\nUse a warm precise voice.\n/model not-a-real-model', revision: 0 })
+    await w.runtime.createSwitch({ name, content: '/reset\nUse a warm precise voice.\n/model not-a-real-model', revision: 0 })
     expect(w.c.adapters).toHaveLength(0)
     expect(w.turns()).toHaveLength(0)
     w.runtime.prompt(w.s.id, input(`/model ${model} /${name} Write an introduction`))
@@ -618,9 +618,9 @@ it('saved switches: creation during work leaves the running agent alone; queued 
   const w = await world({ auto: false })
   const name = `voice-${randomUUID()}`
   w.runtime.prompt(w.s.id, input('First task')); await until(() => w.c.calls.length === 1)
-  w.runtime.createSwitch({ name, content: 'Original voice', revision: 0 })
+  await w.runtime.createSwitch({ name, content: 'Original voice', revision: 0 })
   await w.add(`/${name} Follow-up`)
-  w.runtime.createSwitch({ name, content: 'Revised voice', revision: 1 })
+  await w.runtime.createSwitch({ name, content: 'Revised voice', revision: 1 })
   expect(w.c.calls).toHaveLength(1); expect(w.c.adapters[0].steered).toEqual([])
   w.finish(); await until(() => w.c.calls.length === 2)
   expect(w.c.calls[1].input.text).toContain('Revised voice')
@@ -631,8 +631,8 @@ it('saved switches: creation during work leaves the running agent alone; queued 
 it('saved switches: multiple definitions reach review and attachment-bearing steering before Memories', async () => {
   const w = await world()
   const name = `voice-${randomUUID()}`, other = `detail-${randomUUID()}`
-  w.runtime.createSwitch({ name, content: 'Be particularly skeptical.', revision: 0 })
-  w.runtime.createSwitch({ name: other, content: 'Report concrete evidence.', revision: 0 })
+  await w.runtime.createSwitch({ name, content: 'Be particularly skeptical.', revision: 0 })
+  await w.runtime.createSwitch({ name: other, content: 'Report concrete evidence.', revision: 0 })
   w.runtime.prompt(w.s.id, input('Proposal')); await until(() => w.turns().length === 1)
   w.runtime.prompt(w.s.id, input(`/${name} /review /${other}`)); await until(() => w.turns().length === 2)
   expect(w.c.calls[1].input.text).toContain('adversarial critical review')
@@ -654,7 +654,7 @@ it('saved switches: multiple definitions reach review and attachment-bearing ste
 
 it('saved switches: definitions survive reset and are usable in another conversation after restart', async () => {
   const w = await world({ deferStart: true }), name = `voice-${randomUUID()}`
-  w.runtime.createSwitch({ name, content: 'Stable shared instructions.', revision: 0 })
+  await w.runtime.createSwitch({ name, content: 'Stable shared instructions.', revision: 0 })
   w.runtime.prompt(w.s.id, input(`/${name}`)); await until(() => w.turns().length === 1)
   await w.runtime.reset(w.s.id)
   await w.runtime.stop()
@@ -672,4 +672,20 @@ it('saved switches: malformed creation and queued definitions never create nativ
   expect(() => w.runtime.prompt(w.s.id, input('/create /voice Instructions'))).toThrow(/create command/)
   await expect(w.add('/create /voice Instructions')).rejects.toThrow(/directly/)
   expect(w.c.adapters).toEqual([]); expect(w.c.calls).toEqual([])
+})
+
+it('shared library: removing a queued skill in Snippets preserves the queue and sends no incomplete task', async () => {
+  const w = await world({ auto: false })
+  const name = `queued-skill-${randomUUID()}`
+  await w.runtime.createSwitch({ name, content: 'Required instructions', revision: 0 })
+  w.runtime.prompt(w.s.id, input('First task')); await until(() => w.c.calls.length === 1)
+  await w.add(`/${name} Later task`); await w.add('Independent tail')
+  const library = await import('../../server/snippet-library')
+  const state = await library.readSkillSnippets()
+  await library.saveSkillSnippets(state.snippets.filter(snippet => snippet.trigger !== `;${name}`), state.version)
+  w.finish(); await until(() => w.turns().length === 2)
+  expect(w.c.calls).toHaveLength(1)
+  expect(w.runtime.get(w.s.id)?.queue?.items.map(item => item.state)).toEqual(['failed', 'waiting'])
+  expect(w.runtime.get(w.s.id)?.queue?.items[0].error).toContain('unavailable')
+  expect(w.runtime.get(w.s.id)?.queue?.ready).toBe(false)
 })

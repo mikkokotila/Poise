@@ -12,7 +12,7 @@
 // the user can also edit, version, or sync by hand.
 
 import { mkdir, open, writeFile, unlink, rename } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, openSync, fstatSync, readSync, closeSync } from 'node:fs'
 import { join, dirname, delimiter } from 'node:path'
 import { homedir } from 'node:os'
 import { createHash } from 'node:crypto'
@@ -24,9 +24,9 @@ import { withProcessLock } from './process-lock'
 // non-default installs or tests.
 const MATCH_DIR = process.env.POISE_ESPANSO_MATCH_DIR
   || join(homedir(), 'Library', 'Application Support', 'espanso', 'match')
-const MATCH_FILE = join(MATCH_DIR, 'poise.yml')
+export const MATCH_FILE = join(MATCH_DIR, 'poise.yml')
 const LOCK_FILE = join(MATCH_DIR, '.poise-snippets-lock.sqlite3')
-const MAX_SNIPPETS_BYTES = 1 * 1024 * 1024
+export const MAX_SNIPPETS_BYTES = 1 * 1024 * 1024
 
 export interface Snippet {
   trigger: string
@@ -105,6 +105,10 @@ export async function readSnippetState(): Promise<SnippetState> {
     if (err.code === 'ENOENT') raw = null
     else throw err
   }
+  return parseSnippetSource(raw)
+}
+
+export function parseSnippetSource(raw: string | null): SnippetState {
   if (raw === null) {
     return { snippets: [], version: MISSING_SNIPPETS_VERSION }
   }
@@ -136,6 +140,31 @@ export async function readSnippetState(): Promise<SnippetState> {
     }
   }
   return { snippets, version: versionFor(raw) }
+}
+
+/** Synchronous snapshot for the runtime's atomic prompt-admission path.
+ * Writes are atomic renames, and this handle reads one bounded file generation. */
+export function readSnippetSnapshotSync(): { raw: string | null, state: SnippetState } {
+  let raw: string | null = null
+  let fd: number | undefined
+  try {
+    fd = openSync(MATCH_FILE, 'r')
+    const stat = fstatSync(fd)
+    if (!stat.isFile()) throw new Error('poise.yml is not a regular file')
+    if (stat.size > MAX_SNIPPETS_BYTES) throw new Error(`poise.yml exceeds ${MAX_SNIPPETS_BYTES} bytes`)
+    const buffer = Buffer.alloc(MAX_SNIPPETS_BYTES + 1)
+    let offset = 0
+    while (offset < buffer.length) {
+      const bytes = readSync(fd, buffer, offset, buffer.length - offset, offset)
+      if (!bytes) break
+      offset += bytes
+    }
+    if (offset > MAX_SNIPPETS_BYTES) throw new Error(`poise.yml exceeds ${MAX_SNIPPETS_BYTES} bytes`)
+    raw = buffer.subarray(0, offset).toString('utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  } finally { if (fd !== undefined) closeSync(fd) }
+  return { raw, state: parseSnippetSource(raw) }
 }
 
 function isSimpleMatch(m: unknown): m is Snippet {
@@ -276,13 +305,17 @@ async function ensureEspansoConfigDir(): Promise<void> {
 // espanso stays startable) if espanso hasn't been initialized yet.
 let tmpCounter = 0
 
-async function writeSnippets(snippets: Snippet[], expectedVersion: string): Promise<string> {
+async function writeSnippets(snippets: Snippet[], expectedVersion: string, libraryHeader?: string): Promise<string> {
   await mkdir(MATCH_DIR, { recursive: true })
   await ensureEspansoConfigDir()
   // espanso schema: { matches: [{ trigger, replace }] }. yaml.stringify
   // owns the quoting/escaping and emits block scalars for multi-line
   // bodies — no manual escaping here.
-  const body = await renderSnippetFile(snippets)
+  let body = await renderSnippetFile(snippets)
+  if (libraryHeader !== undefined) {
+    body = body.replace(/^# poise-chat-library-v1 [^\r\n]*(?:\r?\n|$)/gm, '')
+    body = `${libraryHeader}\n${body}`
+  }
   if (Buffer.byteLength(body, 'utf8') > MAX_SNIPPETS_BYTES) {
     throw new Error(`serialized snippets exceed ${MAX_SNIPPETS_BYTES} bytes`)
   }
@@ -341,6 +374,20 @@ export async function addSnippet(input: unknown): Promise<{ snippet: Snippet, ve
       const version = await writeSnippets(next, current.version)
       return { snippet: next[next.length - 1], version }
     }))
+}
+
+/** A shared-library mutation uses the exact same process lock and durable
+ * compare-and-swap as Snippets and the Editor. Metadata is a YAML comment,
+ * atomically committed with the bodies; Espanso still sees ordinary matches. */
+export async function mutateSnippetLibrary(operation: (snapshot: { raw: string | null, state: SnippetState }) => { snippets: Snippet[], header: string } | null): Promise<SnippetState> {
+  return serializeMutation(() => withProcessLock({ path: LOCK_FILE }, async () => {
+    const snapshot = readSnippetSnapshotSync()
+    const next = operation(snapshot)
+    if (!next) return snapshot.state
+    const snippets = validateSnippets(next.snippets)
+    const version = await writeSnippets(snippets, snapshot.state.version, next.header)
+    return { snippets, version }
+  }))
 }
 
 // Best-effort "is espanso installed?" — drives a UI hint only. We look

@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { ChatRuntime } from '../../../server/chat/runtime'
 import { ChatSocketServer, handleChatApi } from '../../../server/chat/transport'
 import { createGrokAdapter } from '../../../server/chat/adapters/grok'
+import { handleSnippetApi } from '../../../server/snippet-api'
 import { enforceApiRequest } from '../../../server/http'
 import { CATALOG } from '../../model-catalog-fixture'
 
@@ -83,6 +84,7 @@ const server = createServer((req, res) => {
     if (path === '/api/claude-auth') return json(res, { status: 'authenticated', reason: null, loginInProgress: false })
     if (path === '/api/models') return json(res, { catalog: CATALOG, places: [], fixed: [], refresh: null })
     if (path === '/api/chat/agents') return json(res, { agents: [{ id: 'grok', label: 'Grok Build', available: true, models: CATALOG.models.filter(m => m.provider === 'grok'), efforts: ['high'] }], defaults: { model: 'grok-4.6-high', fallback: 'grok-4.6-high' }, settings: { branchPrefix: 'chat/', idleTimeoutMinutes: 0 } })
+    if (await handleSnippetApi(req, res, req.url || '')) return
     if (await handleChatApi(req, res, req.url || '', runtime)) return
     if (path.startsWith('/api/')) return json(res, {})
     // Serve the built app from Playwright's existing preview server; no API

@@ -1,4 +1,4 @@
-import { readSwitches } from './custom-switches'
+import { readSwitches, readSkillSnippets, snippetLibraryEvents } from '../snippet-library'
 import type { ChatSwitches } from '../../src/chat-switches'
 import { readChatFile } from './file-preview'
 import { readMemories, saveMemories } from './memories'
@@ -66,7 +66,14 @@ export class ChatSocketServer {
   private readonly serverStartedAt = `${new Date().toISOString()}:${randomUUID()}`
   private closing: Promise<void> | null = null
   private readonly upgrades = new Map<Server, (req: IncomingMessage, socket: Duplex, head: Buffer) => void>()
+  private libraryRevision = -1
+  private readonly libraryPoll = setInterval(() => {
+    if (!this.connections.size) return
+    try { this.onSwitches(readSwitches()) } catch { /* keep the last readable library; GET reports errors */ }
+  }, 2_000).unref()
   private readonly onSwitches = (catalogue: ChatSwitches) => {
+    if (catalogue.revision === this.libraryRevision) return
+    this.libraryRevision = catalogue.revision
     for (const connection of this.connections) this.send(connection, { kind: 'switches.updated', catalogue })
   }
   private readonly onEvent = (envelope: ChatEnvelope) => this.broadcast(envelope)
@@ -80,6 +87,7 @@ export class ChatSocketServer {
   constructor(private readonly runtime: ChatRuntime, private readonly policy: ApiRequestPolicy = {}) {
     this.wss = new WebSocketServer({ noServer: true, maxPayload: CHAT_LIMITS.frameBytes, perMessageDeflate: false })
     runtime.on('switches', this.onSwitches)
+    snippetLibraryEvents.on('changed', this.onSwitches)
     runtime.on('event', this.onEvent)
     runtime.on('deleted', this.onDeleted)
   }
@@ -184,7 +192,7 @@ export class ChatSocketServer {
     const runtime = this.runtime
     switch (command.type) {
       case 'switch.create':
-        return { catalogue: runtime.createSwitch(command) }
+        return { catalogue: await runtime.createSwitch(command) }
       case 'subscribe': {
         const sessionId = String(command.sessionId || '')
         const afterSeq = Number.isSafeInteger(command.afterSeq) && command.afterSeq >= 0 ? command.afterSeq : 0
@@ -298,6 +306,8 @@ export class ChatSocketServer {
   close(): Promise<void> {
     if (this.closing) return this.closing
     this.runtime.off('switches', this.onSwitches)
+    snippetLibraryEvents.off('changed', this.onSwitches)
+    clearInterval(this.libraryPoll)
     this.runtime.off('event', this.onEvent)
     this.runtime.off('deleted', this.onDeleted)
     for (const [server, listener] of this.upgrades) server.off('upgrade', listener)
@@ -359,7 +369,7 @@ export async function handleChatApi(req: IncomingMessage, res: ServerResponse, u
   if (!path.startsWith('/api/chat/')) return false
   try {
     if (path === '/api/chat/switches') {
-      if (req.method === 'GET') return json(res, 200, readSwitches()), true
+      if (req.method === 'GET') return json(res, 200, (await readSkillSnippets()).skills), true
       return json(res, 405, { error: 'Use GET to read saved switches.' }), true
     }
     if (path === '/api/chat/memories') {

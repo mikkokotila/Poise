@@ -609,8 +609,8 @@ it('QC: queue handback also preserves borrowed files when the former executor is
 it('saved switches: an isolated Poise change retains selected instructions and its retry identity', async () => {
   const bridge = fakeBridge('poise-test:db')
   const { runtime, controls, events } = makeRuntime({ bridge })
-  runtime.createSwitch({ name: 'implementation-style', content: 'Include regression evidence and concise outcomes.', revision: 0 })
-  runtime.createSwitch({ name: 'another-style', content: 'A different instruction.', revision: 0 })
+  await runtime.createSwitch({ name: 'implementation-style', content: 'Include regression evidence and concise outcomes.', revision: 0 })
+  await runtime.createSwitch({ name: 'another-style', content: 'A different instruction.', revision: 0 })
   const source = await sourceSession(runtime, events), changeId = randomUUID()
   const context = { attachments: [], mentions: [], switches: ['implementation-style'] }
   const result = await runtime.startPoiseChange(source.id, 'Improve the console', changeId, context)

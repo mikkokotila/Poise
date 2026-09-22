@@ -6063,3 +6063,7 @@ body:has(#view-chat:not([hidden])) #app { padding-bottom: 0; }
 .chat-command-model-option[aria-disabled="true"]:hover { background: transparent; }
 .chat-command-model-retry { margin: 0 var(--sp-3) var(--sp-2); border: var(--b-hair); border-radius: var(--r-sm); background: transparent; color: var(--text-secondary); font: inherit; font-size: .75rem; cursor: pointer; }
 .chat-command-model-retry[hidden] { display: none; }
+
+/* One library: show the Chat invocation beside the text-expansion trigger. */
+.snip-skill-name { display: block; color: var(--text-tertiary); font-size: .6875rem; overflow-wrap: anywhere; }
+.snip-skill-help { margin-top: var(--sp-3); }

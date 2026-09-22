@@ -26,8 +26,12 @@ invocation rather than repeating the whole definition. A switch can also be
 sent alone when its instructions contain the task. Saved names appear in
 the slash palette and can be selected with the keyboard or mouse.
 
-Definitions are shared across Chat sessions on this Poise instance. They
-persist in Poise's database across reloads, restarts, updates and `/reset`.
+Skills are snippets. The Snippets view is the shared library for creating,
+editing, renaming and deleting them. `/create /my-skill` saves a `;my-skill`
+snippet; adding a snippet makes its instructions available in Chat as well.
+The view shows each snippet's Chat invocation beside its text-expansion trigger.
+Definitions persist in the existing Espanso `match/poise.yml` across reloads,
+restarts, updates and `/reset`. Espanso need not be installed for Chat use.
 
 ## Chaining and updates
 
@@ -55,6 +59,28 @@ Using the same switch twice in a chain includes its definition once.
 Names start with a letter and can contain letters, digits, hyphens and
 underscores, up to 64 characters; matching is case-insensitive. Built-in and
 known native command names cannot be replaced. A definition holds up to
-64 KiB of UTF-8 text; the library holds up to 128 definitions or 512 KiB.
+64 KiB of UTF-8 text through `/create`. Existing larger snippets remain
+available in the catalogue; the shared file retains its existing 1 MiB bound.
 An expanded message must fit the existing 256 KiB prompt limit. Oversized
 content is rejected with a readable error, never silently truncated.
+
+## One shared library
+
+Edits in Snippets affect subsequent messages and queued tasks at dispatch.
+Renaming changes the displayed invocation; deleting removes it from both
+surfaces. A queued or recalled invocation of a deleted skill fails explicitly
+rather than sending a task without the requested instructions.
+
+Existing Chat-only definitions are imported automatically, once. Matching
+entries share one body; conflicting entries keep both original bodies with
+distinct triggers and invocation names. The former database record remains
+an inactive backup, never a second writable source. An atomic YAML comment
+records stable skill names and import receipts without changing Espanso pairs.
+Comments and advanced Espanso options are preserved by the existing file editor.
+
+Unusual or reserved snippet triggers receive a valid, distinct Chat name shown
+in Snippets. Normal `;name` triggers use `/name`; no particular skill is bundled.
+Catalogue updates reach open tabs immediately for Poise saves; another process
+or file editor is detected by the Chat connection's two-second library check.
+An open Snippets editor retains its text and uses the existing version conflict
+check before overwriting a change made elsewhere.

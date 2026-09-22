@@ -84,7 +84,11 @@ export async function withProcessLock<T>(
   const lock = await acquireProcessLock(options)
   try {
     const result = await operation()
-    lock.exec('COMMIT')
+    // This connection only reserves the lock; the callback commits its own
+    // file/database. An empty COMMIT can request an exclusive lock and fail
+    // after that durable write if another acquirer is reading the schema.
+    // ROLLBACK releases the same reservation without an unnecessary upgrade.
+    lock.exec('ROLLBACK')
     return result
   } catch (error) {
     if (lock.inTransaction) {

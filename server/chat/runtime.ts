@@ -1215,10 +1215,10 @@ export class ChatRuntime extends EventEmitter {
     await this.flushSelfUpdateOutbox()
   }
 
-  createSwitch(input: { name: string, content: string, revision: number }) {
+  async createSwitch(input: { name: string, content: string, revision: number }) {
     this.assertAcceptingWork()
     const nativeNames = storage.listSessions(this.instance).flatMap(record => (record.commands || []).map(command => command.name))
-    const catalogue = saveSwitch(input, nativeNames)
+    const catalogue = await this.track(() => saveSwitch(input, nativeNames))
     this.emit('switches', catalogue)
     return catalogue
   }

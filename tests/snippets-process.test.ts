@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3'
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -24,6 +24,7 @@ function startSnippetWorker(trigger: string): {
     env: {
       ...process.env,
       POISE_ESPANSO_MATCH_DIR: matchDir,
+      POISE_DB: join(matchDir, 'shared-library.sqlite3'),
       SNIPPET_JOB: JSON.stringify({ trigger, replace: `value ${trigger}` }),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -62,6 +63,7 @@ function startSnippetWorker(trigger: string): {
       resolve(JSON.parse(line.slice('RESULT '.length)) as WorkerResult)
     })
   })
+  void result.catch(() => undefined) // readiness failure still fails the test, without an unobserved secondary rejection
   return { ready, result }
 }
 
@@ -71,7 +73,7 @@ beforeAll(async () => {
   const workerModulePath = join(workerRoot, 'snippets.mjs')
   workerScriptPath = join(workerRoot, 'worker.mjs')
   await build({
-    entryPoints: [join(process.cwd(), 'server', 'snippets.ts')],
+    entryPoints: [join(process.cwd(), 'server', 'snippet-library.ts')],
     outfile: workerModulePath,
     bundle: true,
     platform: 'node',
@@ -80,17 +82,26 @@ beforeAll(async () => {
     packages: 'external',
     logLevel: 'silent',
   })
+  // Test concurrent library mutations against an initialized application DB,
+  // not two first-install schema initializations racing WAL setup.
+  const seedPath = join(workerRoot, 'seed.mjs')
+  await writeFile(seedPath, "import './snippets.mjs'\n")
+  execFileSync(process.execPath, [seedPath], {
+    env: { ...process.env, POISE_DB: join(matchDir, 'shared-library.sqlite3'), POISE_ESPANSO_MATCH_DIR: matchDir },
+    timeout: 10_000, stdio: 'pipe',
+  })
   await writeFile(workerScriptPath, `
     import * as snippets from './snippets.mjs'
     const job = JSON.parse(process.env.SNIPPET_JOB)
     process.stdout.write('READY\\n')
     try {
-      await snippets.addSnippet(job)
+      if (job.trigger.endsWith('-a')) await snippets.saveSwitch({ name: job.trigger.slice(1), content: job.replace, revision: 0 })
+      else await snippets.addSkillSnippet(job)
       process.stdout.write('RESULT ' + JSON.stringify({ ok: true }) + '\\n')
     } catch (error) {
       process.stdout.write('RESULT ' + JSON.stringify({
         ok: false,
-        message: error?.message,
+        message: error?.stack || error?.message,
       }) + '\\n')
     }
   `, 'utf8')
@@ -102,7 +113,7 @@ afterAll(async () => {
 })
 
 describe('snippet process integrity', () => {
-  it('preserves appends made concurrently by separate Poise processes', async () => {
+  it('preserves Chat and Snippets additions made concurrently by separate Poise processes', async () => {
     const blocker = new Database(join(matchDir, '.poise-snippets-lock.sqlite3'), { timeout: 0 })
     blocker.exec('BEGIN IMMEDIATE')
     const workers = [startSnippetWorker(';process-a'), startSnippetWorker(';process-b')]
