@@ -11,7 +11,7 @@ import { handleGhBody, listOrgRepos, setReviewAgentUsername } from './gh'
 import { fetchAgentLogs, fetchAgentResponse, fetchAgentReasoning, triggerPrReview, replayAgentJob, stopAgentJob } from './agent'
 import { listChatHistory, sendChat, saveAttachment, runDebate } from './chat'
 import { listDocs, readDoc, writeDoc, deleteDoc, newSlug, readAnnotations, writeAnnotations, getOrCreateChatSession, MAX_DOC_BYTES, MAX_ANNOTATIONS_BYTES, EditorConflictError } from './editor'
-import { readSnippetState, saveSnippets, addSnippet, espansoDetected, SnippetConflictError } from './snippets'
+import { handleSnippetApi } from './snippet-api'
 import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, setScratchpad as setBehaviorScratchpad, setReviewers as setBehaviorReviewers, getEnabledMap, getSettingMap, getScratchpadMap, getReviewers, getBehaviorsRuntimeHealth, isValidSetting, isValidReviewers, startBehaviorsRuntime, stopBehaviorsRuntime, getResolveUnblockingLastFired, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
 import { ContentLaunchPendingError, getContentJobResponse, launchAndEnqueueContentJob, startContentFinalizer, stopContentFinalizer } from './content-jobs'
 import { ProcessLockError } from './process-lock'
@@ -835,52 +835,7 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
           }
         }
 
-        // ── /api/snippets — espanso text-expansion pairs ──
-        // Poise manages one espanso match file (<match>/poise.yml) as the
-        // single source of truth. GET returns the current pairs, their
-        // source-byte version, and whether espanso looks installed (drives a
-        // UI hint). PUT conditionally replaces
-        // the whole set. See server/snippets.ts. espanso hot-reloads the
-        // file, so a successful PUT makes the `;trigger` expansions live
-        // immediately — no restart.
-        if (url === '/api/snippets' && req.method === 'GET') {
-          try {
-            const state = await readSnippetState()
-            return json(res, 200, { ...state, espansoDetected: espansoDetected() })
-          } catch (err: any) {
-            return json(res, 500, { error: err.message || String(err) })
-          }
-        }
-        if (url === '/api/snippets' && req.method === 'PUT') {
-          try {
-            const body = await readJson<any>(req)
-            if (body?.base_version === undefined) {
-              return json(res, 428, { error: 'snippet write precondition is required; reload snippets' })
-            }
-            const state = await saveSnippets(body.snippets, body.base_version)
-            return json(res, 200, state)
-          } catch (err: any) {
-            const conflict = err instanceof SnippetConflictError
-            const lockUnavailable = err instanceof ProcessLockError
-            return json(res, conflict ? 409 : lockUnavailable ? 503 : httpStatus(err, 400), {
-              error: err.message || String(err),
-              ...(conflict ? { current_version: err.currentVersion } : {}),
-            })
-          }
-        }
-        // POST appends a single pair — used by the editor's "save
-        // selection as snippet" action so it needn't hold the full list.
-        if (url === '/api/snippets' && req.method === 'POST') {
-          try {
-            const body = await readJson<any>(req)
-            const result = await addSnippet(body)
-            return json(res, 200, result)
-          } catch (err: any) {
-            return json(res, err instanceof ProcessLockError ? 503 : httpStatus(err, 400), {
-              error: err.message || String(err),
-            })
-          }
-        }
+        if (await handleSnippetApi(req, res, url)) return
 
         return next()
       }

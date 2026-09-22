@@ -17,7 +17,7 @@ test('renders native streamed events within one second through the real transpor
     define: { 'import.meta.url': JSON.stringify(pathToFileURL(resolve('server/process.ts')).href) }, logLevel: 'silent' })
   const child = spawn(process.execPath, [bundle], {
     cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, POISE_DB: join(root, 'chat.sqlite3'), POISE_EDITOR_DIR: join(root, 'editor'), POISE_LOCK_DIR: join(root, 'locks'),
+    env: { ...process.env, POISE_ESPANSO_MATCH_DIR: join(root, 'snippets'), POISE_DB: join(root, 'chat.sqlite3'), POISE_EDITOR_DIR: join(root, 'editor'), POISE_LOCK_DIR: join(root, 'locks'),
       LATENCY_ROOT: root, LATENCY_SOURCE_ROOT: process.cwd(), LATENCY_ASSETS_URL: baseURL! },
   })
   let stderr = ''

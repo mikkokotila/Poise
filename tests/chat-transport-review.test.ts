@@ -254,8 +254,8 @@ it('records Safe mode once across reconnect and rejects conflicting request IDs'
 it('saved switches: creation broadcasts without a session and reconnect replay never reverts a newer definition', async () => {
   const { saveSwitch, readSwitches } = await import('../server/chat/custom-switches')
   const create = vi.fn(async () => { throw new Error('No native session should be created') })
-  const createSwitch = vi.fn(function (this: EventEmitter, input: { name: string, content: string, revision: number }) {
-    const catalogue = saveSwitch(input)
+  const createSwitch = vi.fn(async function (this: EventEmitter, input: { name: string, content: string, revision: number }) {
+    const catalogue = await saveSwitch(input)
     this.emit('switches', catalogue)
     return catalogue
   })

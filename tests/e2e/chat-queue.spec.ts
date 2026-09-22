@@ -17,7 +17,7 @@ test('executes an idle five-item queue after the first task through real ACP, SQ
     define: { 'import.meta.url': JSON.stringify(pathToFileURL(resolve('server/process.ts')).href) }, logLevel: 'silent' })
   const child = spawn(process.execPath, [bundle], {
     cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, POISE_DB: join(root, 'chat.sqlite3'), POISE_EDITOR_DIR: join(root, 'editor'), POISE_LOCK_DIR: join(root, 'locks'),
+    env: { ...process.env, POISE_ESPANSO_MATCH_DIR: join(root, 'snippets'), POISE_DB: join(root, 'chat.sqlite3'), POISE_EDITOR_DIR: join(root, 'editor'), POISE_LOCK_DIR: join(root, 'locks'),
       LATENCY_ROOT: root, LATENCY_SOURCE_ROOT: process.cwd(), LATENCY_ASSETS_URL: baseURL! },
   })
   let stderr = ''
@@ -175,6 +175,113 @@ test('executes an idle five-item queue after the first task through real ACP, SQ
       await page.evaluate(value => { document.documentElement.dataset.theme = value }, theme)
       await page.screenshot({ path: info.outputPath(`saved-switch-${theme}.png`), animations: 'disabled' })
     }
+    // The same real server now exposes its skills through Snippets.
+    await input.fill('')
+    await page.getByRole('button', { name: 'Snippets', exact: true }).click()
+    const snippetsView = page.locator('#view-snippets')
+    const existingRow = snippetsView.locator('.snip-row[data-trigger=";release-notes"]')
+    await expect(existingRow).toContainText('/release-notes')
+    await existingRow.click()
+    await expect(snippetsView.getByRole('textbox', { name: 'Snippet instructions' })).toHaveValue('Updated reusable instructions: concrete outcomes only.')
+    await snippetsView.getByRole('textbox', { name: 'Snippet instructions' }).fill('Edited in Snippets. Preserve evidence and explain tradeoffs.')
+    await snippetsView.getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(snippetsView.locator('.snip-expand-row')).toHaveCount(0)
+    await page.getByRole('button', { name: 'Chat', exact: true }).click()
+    await input.fill('/release-notes Check the shared body'); await input.press('Enter')
+    await expect(page.locator('.chat-msg-agent').last()).toContainText('DONE: Check the shared body')
+    await expect(page.locator('.chat-h-status')).toHaveText('idle')
+    const edited = await (await page.request.get(`${origin}/__test__/timings`)).json()
+    expect(edited.nativeInputs.at(-1)[0].text).toContain('Edited in Snippets. Preserve evidence and explain tradeoffs.')
+    expect(edited.nativeInputs.at(-1).at(-1).text).toBe('\n\n[Memories]\nRemember this on every queued task: äö.')
+
+    await page.getByRole('button', { name: 'Snippets', exact: true }).click()
+    await snippetsView.getByRole('button', { name: 'Add snippet', exact: true }).click()
+    await snippetsView.getByRole('textbox', { name: 'Snippet trigger' }).fill(';shared-check')
+    await snippetsView.getByRole('textbox', { name: 'Snippet instructions' }).fill('Original snippet instructions.')
+    await snippetsView.getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(snippetsView.locator('.snip-row[data-trigger=";shared-check"]')).toContainText('/shared-check')
+    await page.getByRole('button', { name: 'Chat', exact: true }).click()
+    await input.fill('/queue /shared-check Follow the shared instructions'); await input.press('Enter')
+    await expect(page.locator('.chat-queue-item')).toHaveCount(1)
+    await page.getByRole('button', { name: 'Snippets', exact: true }).click()
+    await snippetsView.locator('.snip-row[data-trigger=";shared-check"]').click()
+    await snippetsView.getByRole('textbox', { name: 'Snippet instructions' }).fill('Newest queued instructions from Snippets. äö')
+    await snippetsView.getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(snippetsView.locator('.snip-expand-row')).toHaveCount(0)
+    await page.getByRole('button', { name: 'Chat', exact: true }).click()
+    await input.fill('Initial task for shared snippets'); await input.press('Enter')
+    await expect(page.locator('.chat-msg-agent').last()).toContainText('DONE: Follow the shared instructions')
+    await expect(page.locator('.chat-h-status')).toHaveText('idle')
+    const dispatched = await (await page.request.get(`${origin}/__test__/timings`)).json()
+    expect(dispatched.nativeInputs.at(-1)[0].text).toContain('Newest queued instructions from Snippets. äö')
+    expect(dispatched.nativeInputs.at(-1)[0].text).not.toContain('Original snippet instructions.')
+    await page.getByRole('button', { name: 'Snippets', exact: true }).click()
+    await snippetsView.locator('.snip-row[data-trigger=";shared-check"]').click()
+    await snippetsView.getByRole('textbox', { name: 'Snippet trigger' }).fill(';renamed-check')
+    await snippetsView.getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(snippetsView.locator('.snip-row[data-trigger=";renamed-check"]')).toContainText('/renamed-check')
+    for (const theme of ['light', 'dark']) {
+      await page.evaluate(value => { document.documentElement.dataset.theme = value }, theme)
+      await page.screenshot({ path: info.outputPath(`shared-snippets-${theme}.png`), animations: 'disabled' })
+    }
+    await page.getByRole('button', { name: 'Chat', exact: true }).click()
+    await input.fill('/renamed')
+    await expect(page.locator('.chat-pop-label')).toHaveText('/renamed-check')
+    await input.fill('')
+    await page.getByRole('button', { name: 'Snippets', exact: true }).click()
+    await snippetsView.locator('.snip-row[data-trigger=";renamed-check"]').click()
+    page.once('dialog', dialog => dialog.accept())
+    await snippetsView.getByRole('button', { name: 'Delete', exact: true }).click()
+    await expect(snippetsView.locator('.snip-row[data-trigger=";renamed-check"]')).toHaveCount(0)
+    await page.getByRole('button', { name: 'Chat', exact: true }).click()
+    await input.fill('/renamed-check Do not send without the skill'); await input.press('Enter')
+    await expect(page.locator('.chat-notice')).toContainText('unavailable')
+    const deleted = await (await page.request.get(`${origin}/__test__/timings`)).json()
+    expect(deleted.nativeInputs).toHaveLength(dispatched.nativeInputs.length)
+    await input.fill('')
+    await input.fill('/create /shared-edit Original shared body'); await input.press('Enter')
+    await expect(page.locator('.chat-notice')).toContainText('Saved /shared-edit')
+    await page.getByRole('button', { name: 'Snippets', exact: true }).click()
+    await snippetsView.locator('.snip-row[data-trigger=";shared-edit"]').click()
+    await snippetsView.getByRole('textbox', { name: 'Snippet instructions' }).fill('My preserved local edit')
+    const other = await page.context().newPage()
+    try {
+      await other.goto(origin)
+      await other.getByRole('button', { name: 'Chat', exact: true }).click()
+      const otherInput = other.locator('.chat-v-composer .chat-input')
+      await expect(other.locator('.chat-session-item.active')).toBeVisible()
+      await otherInput.fill('/create /shared-edit Changed from another tab'); await otherInput.press('Enter')
+      await expect(other.locator('.chat-notice')).toContainText('Updated /shared-edit')
+      await expect(snippetsView.locator('.snip-status')).toContainText('changed elsewhere')
+      await expect(snippetsView.getByRole('textbox', { name: 'Snippet instructions' })).toHaveValue('My preserved local edit')
+      await snippetsView.getByRole('button', { name: 'Save', exact: true }).click()
+      await expect(snippetsView.locator('.snip-status')).toContainText('Review and save again')
+      await expect(snippetsView.getByRole('textbox', { name: 'Snippet instructions' })).toHaveValue('My preserved local edit')
+      await snippetsView.getByRole('button', { name: 'Save', exact: true }).click()
+      await expect(snippetsView.locator('.snip-expand-row')).toHaveCount(0)
+      await otherInput.fill('/shared-edit Use the resolved version'); await otherInput.press('Enter')
+      await expect(other.locator('.chat-msg-agent').last()).toContainText('DONE: Use the resolved version')
+      const resolved = await (await other.request.get(`${origin}/__test__/timings`)).json()
+      expect(resolved.nativeInputs.at(-1)[0].text).toContain('My preserved local edit')
+    } finally { await other.close() }
+    // A newly opened editor survives a slow list refresh on view re-entry.
+    await page.getByRole('button', { name: 'Chat', exact: true }).click()
+    let releaseLoad!: () => void
+    let waitingLoad = false
+    const heldLoad = new Promise<void>(resolve => { releaseLoad = resolve })
+    await page.route('**/api/snippets', async route => {
+      if (route.request().method() === 'GET') { waitingLoad = true; await heldLoad }
+      await route.continue()
+    })
+    try {
+      await page.getByRole('button', { name: 'Snippets', exact: true }).click()
+      await expect.poll(() => waitingLoad).toBe(true)
+      await snippetsView.locator('.snip-row[data-trigger=";shared-edit"]').click()
+      await snippetsView.getByRole('textbox', { name: 'Snippet instructions' }).fill('Draft written while library reloads')
+      const loaded = page.waitForResponse(response => response.url().endsWith('/api/snippets'))
+      releaseLoad(); await loaded
+      await expect(snippetsView.getByRole('textbox', { name: 'Snippet instructions' })).toHaveValue('Draft written while library reloads')
+    } finally { releaseLoad(); await page.unroute('**/api/snippets') }
   } finally {
     await stop(child)
   }

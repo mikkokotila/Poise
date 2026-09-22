@@ -10,8 +10,11 @@
 // match/poise.yml (see server/snippets.ts): Poise rewrites the whole set
 // on each save and espanso hot-reloads, so a `;trigger` goes live at once.
 
+import { chatClient } from '../chat-client'
+import { parseChatSwitches, type ChatSwitches } from '../chat-switches'
+
 interface Snippet { trigger: string; replace: string }
-interface SnippetState { snippets: Snippet[]; version: string }
+interface SnippetState { snippets: Snippet[]; version: string; skills?: ChatSwitches }
 
 class SnippetConflictError extends Error {}
 
@@ -21,6 +24,9 @@ let initialized = false
 let snippets: Snippet[] = []
 let snippetVersion = ''
 let espansoOk = true
+let skills: ChatSwitches = { revision: 0, switches: [] }
+let saving = false
+let loadGeneration = 0
 
 // Chevron — identical to Swarm's (src/views/swarm-view.ts). Points right
 // when collapsed, rotates 90° via `.expand-btn.open .chev`.
@@ -44,21 +50,22 @@ function renderShell(): string {
       <div class="filter-cluster" id="snippets-filters">
         <button type="button" class="st-save snip-add">Add snippet</button>
         <span class="filter-count" id="snippets-count"></span>
-        <span class="st-help st-help-info snip-espanso-hint" hidden>espanso not detected — install it (<code>brew install espanso</code>) for snippets to expand.</span>
+        <span class="st-help st-help-info snip-espanso-hint" hidden>Chat skills work without Espanso. Install Espanso for system-wide text expansion.</span>
       </div>
     </header>
     <main>
       <table id="snippets-table">
         <thead>
           <tr>
-            <th class="col-snip-trigger">Trigger</th>
+            <th class="col-snip-trigger">Trigger / Chat skill</th>
             <th class="col-title">Snippet</th>
             <th class="col-action"></th>
           </tr>
         </thead>
         <tbody id="snippets-tbody"></tbody>
       </table>
-      <p class="snip-empty" hidden>No snippets yet. Add one to create your first <code>;trigger</code>.</p>
+      <p class="st-help snip-skill-help">Every snippet is a Chat skill. Use <code>;name</code> for text expansion and <code>/name</code> in Chat. Skills saved with <code>/create</code> appear here too.</p>
+      <p class="snip-empty" hidden>No snippets yet. Add one here, or use <code>/create /name</code> in Chat.</p>
       <div class="snip-load-error" hidden>
         <p class="snip-load-error-title">Your snippets could not be read.</p>
         <p class="snip-load-error-detail"></p>
@@ -76,12 +83,29 @@ function previewLine(body: string): string {
   return body.split('\n').map((l) => l.trim()).find((l) => l) || ''
 }
 
+function skillBadge(trigger: string): string {
+  const name = skills.switches.find(skill => skill.snippetTrigger === trigger)?.name
+  return name ? `<span class="snip-skill-name" aria-label="Chat skill /${escapeHtml(name)}">/${escapeHtml(name)}</span>` : ''
+}
+function libraryChanged(catalogue: ChatSwitches): void {
+  if (catalogue.revision > skills.revision) refreshLibraryView()
+}
+function refreshLibraryView(): void {
+  if (!initialized || saving || viewEl.hidden) return
+  const editor = tbodyEl.querySelector('.snip-expand-row')
+  if (editor) {
+    setStatus(editor.querySelector('.snip-status'), 'The library changed elsewhere. Your edit is kept; Save will check for conflicts.', 'info')
+    return
+  }
+  void fetchSnippets().then(loaded => { if (loaded && !tbodyEl.querySelector('.snip-expand-row')) renderRows() })
+}
+
 function renderRow(s: Snippet): HTMLTableRowElement {
   const tr = document.createElement('tr')
   tr.className = 'snip-row'
   tr.dataset.trigger = s.trigger
   tr.innerHTML = `
-    <td class="title-cell"><span class="snip-trigger">${escapeHtml(s.trigger)}</span></td>
+    <td class="title-cell"><span class="snip-trigger">${escapeHtml(s.trigger)}</span>${skillBadge(s.trigger)}</td>
     <td><span class="snip-preview">${escapeHtml(previewLine(s.replace))}</span></td>
     <td class="action-cell"><button type="button" class="expand-btn" title="Edit" aria-label="Edit snippet">${CHEV_SVG}</button></td>
   `
@@ -130,8 +154,8 @@ function buildEditRow(snip: Snippet | null, isDraft: boolean): HTMLTableRowEleme
   tr.innerHTML = `
     <td colspan="3">
       <div class="snip-edit">
-        <input type="text" class="st-input snip-trigger-input" placeholder=";hello" autocomplete="off" spellcheck="false" />
-        <textarea class="st-input snip-body-input" placeholder="The text that replaces the trigger…" spellcheck="false"></textarea>
+        <input type="text" class="st-input snip-trigger-input" aria-label="Snippet trigger" placeholder=";hello" autocomplete="off" spellcheck="false" />
+        <textarea class="st-input snip-body-input" aria-label="Snippet instructions" placeholder="Text to expand, or instructions to include in Chat…" spellcheck="false"></textarea>
         <div class="st-row">
           <button type="button" class="st-save snip-save">Save</button>
           <button type="button" class="st-clear snip-delete">${isDraft ? 'Discard' : 'Delete'}</button>
@@ -151,10 +175,12 @@ function buildEditRow(snip: Snippet | null, isDraft: boolean): HTMLTableRowEleme
   // Escape collapses (discard); ⌘/Ctrl+↵ saves; plain Enter in the
   // trigger jumps to the body (which keeps Enter for newlines).
   triggerInput.addEventListener('keydown', (e) => {
+    if (e.isComposing || e.keyCode === 229) return
     if (e.key === 'Escape') { e.preventDefault(); collapseOpen(); return }
     if (e.key === 'Enter') { e.preventDefault(); if (e.metaKey || e.ctrlKey) void save(tr); else bodyInput.focus() }
   })
   bodyInput.addEventListener('keydown', (e) => {
+    if (e.isComposing || e.keyCode === 229) return
     if (e.key === 'Escape') { e.preventDefault(); collapseOpen(); return }
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void save(tr) }
   })
@@ -164,6 +190,7 @@ function buildEditRow(snip: Snippet | null, isDraft: boolean): HTMLTableRowEleme
 // Collapse whatever row is open: remove its expand row, un-rotate the
 // chevron, and discard the draft main row if that's what was open.
 function collapseOpen() {
+  if (saving) return
   const editRow = tbodyEl.querySelector('.snip-expand-row')
   if (!editRow) return
   const main = editRow.previousElementSibling as HTMLElement | null
@@ -183,6 +210,7 @@ function collapseOpen() {
 }
 
 function onTbodyClick(e: MouseEvent) {
+  if (saving) return
   // Only main rows toggle. Clicks inside the expand row (inputs/buttons)
   // have no `tr.snip-row` ancestor, so they never collapse the editor.
   const main = (e.target as HTMLElement).closest<HTMLTableRowElement>('tr.snip-row')
@@ -211,6 +239,7 @@ async function putSnippets(list: Snippet[]): Promise<SnippetState> {
   const data = await res.json().catch(() => ({})) as {
     snippets?: unknown
     version?: unknown
+    skills?: unknown
     error?: string
   }
   if (res.status === 409) throw new SnippetConflictError(data.error || 'Snippets changed elsewhere.')
@@ -218,7 +247,7 @@ async function putSnippets(list: Snippet[]): Promise<SnippetState> {
   if (!Array.isArray(data.snippets) || typeof data.version !== 'string') {
     throw new Error('server returned an invalid snippet state')
   }
-  return { snippets: data.snippets as Snippet[], version: data.version }
+  return { snippets: data.snippets as Snippet[], version: data.version, skills: parseChatSwitches(data.skills) ?? undefined }
 }
 
 async function preserveEditAfterConflict(
@@ -280,7 +309,13 @@ function repaintRowsAroundOpenEditor(): void {
   }
 }
 
+function setMutationDisabled(row: HTMLTableRowElement, disabled: boolean): void {
+  for (const el of row.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement>('input,textarea,button')) el.disabled = disabled
+  viewEl.querySelector<HTMLButtonElement>('.snip-add')!.disabled = disabled
+}
+
 async function save(editRow: HTMLTableRowElement) {
+  if (saving) return
   const main = editRow.previousElementSibling as HTMLElement | null
   const isDraft = !!main?.classList.contains('snip-draft')
   const editingTrigger = isDraft ? null : (main?.dataset.trigger ?? null)
@@ -304,22 +339,27 @@ async function save(editRow: HTMLTableRowElement) {
     return
   }
   const saveBtn = editRow.querySelector<HTMLButtonElement>('.snip-save')!
+  saving = true
+  loadGeneration++
+  setMutationDisabled(editRow, true)
   saveBtn.disabled = true
   saveBtn.textContent = 'Saving…'
   try {
     const saved = await putSnippets(next)
     snippets = saved.snippets
     snippetVersion = saved.version
+    if (saved.skills) skills = saved.skills
     renderRows()                                       // rebuild collapses the (transient) edit row
   } catch (err) {
     if (err instanceof SnippetConflictError) await preserveEditAfterConflict(status)
     else setStatus(status, (err as Error).message || 'Failed to save.', 'error')
     saveBtn.disabled = false
     saveBtn.textContent = 'Save'
-  }
+  } finally { saving = false; setMutationDisabled(editRow, false) }
 }
 
 async function del(editRow: HTMLTableRowElement) {
+  if (saving) return
   const main = editRow.previousElementSibling as HTMLElement | null
   const editingTrigger = main?.dataset.trigger ?? null
   // Draft (never saved) or somehow unkeyed → just discard, no server call.
@@ -331,23 +371,28 @@ async function del(editRow: HTMLTableRowElement) {
   if (!window.confirm(`Delete the snippet "${editingTrigger}"? This cannot be undone.`)) return
   const next = snippets.filter((s) => s.trigger !== editingTrigger)
   const delBtn = editRow.querySelector<HTMLButtonElement>('.snip-delete')!
+  saving = true
+  loadGeneration++
+  setMutationDisabled(editRow, true)
   delBtn.disabled = true
   try {
     const saved = await putSnippets(next)
     snippets = saved.snippets
     snippetVersion = saved.version
+    if (saved.skills) skills = saved.skills
     renderRows()
   } catch (err) {
     const status = editRow.querySelector<HTMLElement>('.snip-status')
     if (err instanceof SnippetConflictError) await preserveEditAfterConflict(status, 'delete')
     else setStatus(status, (err as Error).message || 'Failed to delete.', 'error')
     delBtn.disabled = false
-  }
+  } finally { saving = false; setMutationDisabled(editRow, false) }
 }
 
 // "Add snippet" → a draft main row pinned at the top, opened in edit mode.
 // A second click on it / Escape / Discard removes it. One draft at a time.
 function openAdd() {
+  if (saving) return
   const existingDraft = tbodyEl.querySelector<HTMLElement>('tr.snip-draft')
   if (existingDraft) {
     ;(existingDraft.nextElementSibling?.querySelector('.snip-trigger-input') as HTMLElement | null)?.focus()
@@ -384,6 +429,8 @@ function attachHandlers() {
 }
 
 async function fetchSnippets(): Promise<boolean> {
+  const generation = ++loadGeneration
+  const editorAtStart = tbodyEl?.querySelector('.snip-expand-row')
   try {
     const res = await fetch('/api/snippets')
     if (!res.ok) {
@@ -399,6 +446,8 @@ async function fetchSnippets(): Promise<boolean> {
       loadError = 'The server returned an unreadable snippet list.'
       return false
     }
+    if (generation !== loadGeneration || tbodyEl?.querySelector('.snip-expand-row') !== editorAtStart) return false
+    skills = parseChatSwitches(data.skills) ?? skills
     snippets = Array.isArray(data.snippets) ? data.snippets : []
     snippetVersion = data.version
     espansoOk = data.espansoDetected !== false
@@ -420,6 +469,9 @@ export async function initSnippetsView() {
     viewEl.innerHTML = renderShell()
     tbodyEl = viewEl.querySelector<HTMLTableSectionElement>('#snippets-tbody')!
     attachHandlers()
+    chatClient.on('switches', libraryChanged)
+    chatClient.on('restart', refreshLibraryView)
+    chatClient.start()
   }
   // Re-entering the view re-renders the table from scratch, and renderRows
   // starts by emptying the tbody — which threw away an open editor and every
@@ -427,5 +479,6 @@ export async function initSnippetsView() {
   // leave the screen alone: the list is refreshed the next time it is safe.
   if (tbodyEl.querySelector('.snip-expand-row')) return
   await fetchSnippets()
-  renderRows()
+  // Opening an editor while the request was in flight is newer user work.
+  if (!tbodyEl.querySelector('.snip-expand-row')) renderRows()
 }
