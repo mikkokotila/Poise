@@ -32,6 +32,7 @@ class Fake implements Adapter {
   options?: AdapterStartOptions
   finish?: (result: TurnResult) => void
   steered: string[] = []
+  compactions: Array<{ turnId: string, memories: string }> = []
   modelChanges: string[] = []
   modeChanges: string[] = []
   constructor(readonly agent: AgentId, readonly host: AdapterHost, readonly c: Controls) { this.capabilities.modes = agent === 'claude'; c.adapters.push(this) }
@@ -52,6 +53,7 @@ class Fake implements Adapter {
       })
     } finally { this.c.active-- }
   }
+  async compact(turnId: string, memories: string): Promise<TurnResult> { this.compactions.push({ turnId, memories }); return { stopReason: 'end_turn', compaction: { changed: true } } }
   async steer(text: string) { this.steered.push(text) }
   async cancel() { this.finish?.({ stopReason: 'cancelled' }) }
   async close() { this.alive = false; this.finish?.({ stopReason: 'cancelled' }) }
@@ -414,10 +416,10 @@ describe('Chained models and reply review', () => {
   }, 25_000)
   it('applies a model before passing the following native command without rewriting it', async () => {
     const w = await world()
-    w.runtime.prompt(w.s.id, input('/model gpt-6-astra-max /compact preserve architecture'))
+    w.runtime.prompt(w.s.id, input('/model gpt-6-astra-max /context inspect architecture'))
     await until(() => w.turns().length === 1)
     expect(w.c.calls).toHaveLength(1); expect(w.c.calls[0].agent).toBe('codex')
-    expect(w.c.calls[0].input.text).toContain('/compact preserve architecture')
+    expect(w.c.calls[0].input.text).toContain('/context inspect architecture')
     expect(w.c.calls[0].input.text).not.toContain('/model gpt-6-astra-max')
   })
 
@@ -455,4 +457,140 @@ it('QC2: can select a work mode immediately after changing to an agent that supp
   expect(w.c.adapters.at(-1)?.options).toMatchObject({ mode: 'plan' })
   expect(revived.get(w.s.id)?.mode).toBe('plan')
   expect(w.c.calls).toHaveLength(0)
+})
+
+for (const model of ['grok-4.6-high', 'opus-5-max', 'gpt-6-astra-max', 'muse-spark-1.3-contributor-max']) {
+  it(`context: reset starts ${model} with no native resume or previous transcript`, async () => {
+    const w = await world({ autoMerge: true })
+    await w.runtime.setModel(w.s.id, model)
+    w.runtime.prompt(w.s.id, input('An old conversation secret'))
+    await until(() => w.turns().length === 1 && w.runtime.get(w.s.id)?.status === 'idle')
+    const original = w.runtime.get(w.s.id)!
+    const native = original.nativeSessionId
+    const oldHost = w.c.adapters.at(-1)!.host
+    const title = original.title
+    await writeFile(join(w.repo, 'keep.txt'), 'User work remains')
+    const reset = await w.runtime.reset(w.s.id)
+    expect(reset).toMatchObject({ id: w.s.id, title, model, autoMerge: true, status: 'idle' })
+    expect(reset.nativeSessionId).toBeUndefined(); expect(reset.context).toBeUndefined()
+    oldHost.emit({ type: 'text.delta', turnId: 'old-turn', messageId: 'late', delta: 'A stale reply' })
+    await expect(oldHost.readTextFile('README.md')).rejects.toThrow(/conversation was reset/)
+    await expect(oldHost.requestPermission({ title: 'Old permission', options: [] })).rejects.toThrow(/conversation was reset/)
+    expect(w.runtime.events(w.s.id, 0).events.some(e => e.event.type === 'text.delta')).toBe(false)
+    expect(w.runtime.events(w.s.id, 0).events[0].event.type).toBe('session.reset')
+    expect(reset.contextResetSeq).toBeGreaterThan(1)
+    expect(await readFile(join(w.repo, 'keep.txt'), 'utf8')).toBe('User work remains')
+    expect(() => w.runtime.prompt(w.s.id, input('/review'))).toThrow(/no assistant reply/i)
+    w.runtime.prompt(w.s.id, input('Fresh task'))
+    await until(() => w.turns().length === 1 && w.runtime.get(w.s.id)?.status === 'idle')
+    expect(w.c.adapters.at(-1)?.options?.resume).toBeUndefined()
+    expect(w.runtime.get(w.s.id)?.nativeSessionId).not.toBe(native)
+    expect(w.c.calls.at(-1)?.input.text).not.toContain('An old conversation secret')
+    expect(w.c.calls.at(-1)?.input.text).not.toContain('[Handoff')
+    expect(w.runtime.get(w.s.id)?.title).toBe(title)
+  })
+}
+
+it('context: compaction completes before a chained task and keeps the transcript', async () => {
+  const w = await world()
+  w.runtime.prompt(w.s.id, input('Original proposal'))
+  await until(() => w.turns().length === 1 && w.runtime.get(w.s.id)?.status === 'idle')
+  const adapter = w.c.adapters[0]
+  let finish!: (value: TurnResult) => void
+  adapter.compact = async () => new Promise<TurnResult>(resolve => { finish = resolve })
+  w.runtime.prompt(w.s.id, input('/compact Continue with the same task'))
+  await until(() => !!finish)
+  await w.add('After compaction')
+  expect(w.c.calls).toHaveLength(1)
+  expect(w.runtime.get(w.s.id)?.contextCompacting).toBe(true)
+  await expect(w.runtime.steer(w.s.id, 'Do not inject into compaction')).rejects.toThrow(/maintenance/i)
+  finish({ stopReason: 'end_turn', compaction: { changed: true } })
+  await until(() => w.turns().length === 3 && w.runtime.get(w.s.id)?.status === 'idle')
+  expect(w.c.calls.map(call => call.input.text)).toEqual(['Original proposal', 'Continue with the same task', 'After compaction'])
+  expect(w.runtime.events(w.s.id, 0).events.some(e => e.event.type === 'context.compacted')).toBe(true)
+  expect(w.runtime.get(w.s.id)?.contextCompacting).toBe(false)
+})
+
+it('context: a fresh reset or compact never launches a provider', async () => {
+  const w = await world({ deferStart: true })
+  await w.runtime.reset(w.s.id)
+  w.runtime.prompt(w.s.id, input('/compact'))
+  await until(() => w.turns().length === 1)
+  expect(w.c.adapters).toEqual([]); expect(w.c.calls).toEqual([])
+})
+
+it('context: reset stops a running task and pauses future queued tasks without deleting them', async () => {
+  const w = await world({ auto: false })
+  w.runtime.prompt(w.s.id, input('Still working'))
+  await until(() => w.c.calls.length === 1)
+  await w.add('Explicit future task')
+  await w.runtime.reset(w.s.id)
+  expect(w.runtime.get(w.s.id)?.status).toBe('idle')
+  expect(w.runtime.get(w.s.id)?.queue).toMatchObject({ ready: false, items: [{ prompt: { text: 'Explicit future task' }, state: 'waiting' }] })
+  await pause(50); expect(w.c.calls).toHaveLength(1)
+  w.c.auto = true
+  w.runtime.prompt(w.s.id, input('New initial task'))
+  await until(() => w.turns().length === 2)
+  expect(w.c.calls.at(-1)?.input.text).toBe('Explicit future task')
+})
+
+it('context: a queued reset clears its prefix history and the remaining queue starts fresh', async () => {
+  const w = await world({ deferStart: true })
+  await w.add('/reset'); await w.add('Next context')
+  w.runtime.prompt(w.s.id, input('Before reset'))
+  await until(() => w.c.calls.length === 2 && w.runtime.get(w.s.id)?.status === 'idle')
+  expect(w.c.adapters).toHaveLength(2)
+  expect(w.c.adapters[1].options?.resume).toBeUndefined()
+  expect(w.c.calls.map(call => call.input.text)).toEqual(['Before reset', 'Next context'])
+  expect(w.runtime.events(w.s.id, 0).events[0].event.type).toBe('session.reset')
+  expect(w.runtime.events(w.s.id, 0).events.filter(e => e.event.type === 'turn.started').map(e => e.event)).not.toContainEqual(expect.objectContaining({ prompt: expect.objectContaining({ text: 'Before reset' }) }))
+  expect(w.runtime.get(w.s.id)?.queue?.items).toEqual([])
+})
+
+it('context: reset transaction failure preserves history and a successful reset survives restart', async () => {
+  const w = await world()
+  w.runtime.prompt(w.s.id, input('Preserve this until reset commits'))
+  await until(() => w.turns().length === 1 && w.runtime.get(w.s.id)?.status === 'idle')
+  const { db } = await import('../../server/db')
+  db.exec("CREATE TRIGGER reset_receipt_failure BEFORE INSERT ON chat_events WHEN json_extract(NEW.event, '$.type') = 'session.reset' BEGIN SELECT RAISE(ABORT, 'reset receipt unavailable'); END")
+  try { await expect(w.runtime.reset(w.s.id)).rejects.toThrow('reset receipt unavailable') }
+  finally { db.exec('DROP TRIGGER reset_receipt_failure') }
+  expect(JSON.stringify(w.runtime.events(w.s.id, 0))).toContain('Preserve this until reset commits')
+  expect(w.runtime.get(w.s.id)?.contextResetting).toBe(false)
+  await w.runtime.reset(w.s.id)
+  await w.runtime.stop()
+  const next = w.make(); await next.recover()
+  expect(next.get(w.s.id)?.nativeSessionId).toBeUndefined()
+  expect(next.events(w.s.id, 0).events.some(e => e.event.type === 'text.delta')).toBe(false)
+  expect(() => next.prompt(w.s.id, input('/review'))).toThrow(/no assistant reply/i)
+  next.prompt(w.s.id, input('After restart'))
+  await until(() => w.c.calls.length === 2)
+  expect(w.c.adapters.at(-1)?.options?.resume).toBeUndefined()
+})
+
+it('context: reset cannot be combined with a review of the erased reply', async () => {
+  const w = await world({ deferStart: true })
+  expect(() => w.runtime.prompt(w.s.id, input('/reset /review'))).toThrow(/reset removes the reply/i)
+  await expect(w.add('/reset /review')).rejects.toThrow(/reset removes the reply/i)
+  expect(w.c.calls).toEqual([])
+})
+
+it('context: reconnect replay cannot reset newly added conversation a second time', async () => {
+  const w = await world({ deferStart: true })
+  const { executeCommandOnce } = await import('../../server/chat/command-receipts')
+  const requestId = randomUUID()
+  let executions = 0
+  const reset = () => executeCommandOnce(w.runtime.instance, requestId, { type: 'context.reset', sessionId: w.s.id }, async () => {
+    executions++
+    return { kind: 'ack' as const, id: requestId, ok: true as const, result: { session: await w.runtime.reset(w.s.id) } }
+  })
+  await reset()
+  const barrier = w.runtime.get(w.s.id)?.contextResetSeq
+  w.runtime.prompt(w.s.id, input('Keep this new conversation'))
+  await until(() => w.turns().length === 1 && w.runtime.get(w.s.id)?.status === 'idle')
+  await reset()
+  expect(executions).toBe(1)
+  expect(w.runtime.get(w.s.id)?.contextResetSeq).toBe(barrier)
+  expect(w.turns()).toHaveLength(1)
+  expect(w.c.calls.at(-1)?.input.text).toBe('Keep this new conversation')
 })

@@ -94,6 +94,8 @@ export interface AdapterStartResult {
 }
 
 export interface TurnResult {
+  /** Native compaction result; no-op is distinct from actually reducing context. */
+  compaction?: { changed: boolean, detail?: string }
   stopReason: StopReason
   error?: string
   usage?: TurnUsage
@@ -116,6 +118,8 @@ export interface Adapter {
   prompt(turnId: string, input: PromptInput, signal: AbortSignal): Promise<TurnResult>
   /** Interject into the running turn. Rejects with `unsupported` when the
    *  agent has no steering. */
+  /** Native context maintenance, not a request for an ordinary summary reply. */
+  compact?(turnId: string, memories: string, signal: AbortSignal): Promise<TurnResult>
   steer(text: string): Promise<void>
   /** Cancel the running turn; the pending `prompt()` then resolves with
    *  `stopReason: 'cancelled'`. */

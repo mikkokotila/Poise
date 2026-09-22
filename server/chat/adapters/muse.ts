@@ -1,3 +1,4 @@
+import { compactionWaiter } from './compaction'
 import { appendMemories } from '../memory-content'
 // Muse adapter: one `muse serve` process per session, speaking the Muse
 // Session Protocol (MSP v1, Muse 1.3.0; types in server/chat/generated/muse/
@@ -46,6 +47,8 @@ import type {
   MspNotification,
   MspServerRequest,
   ReasoningEffort,
+  SessionCompactParams,
+  SessionCompactResult,
   SessionForkParams,
   SessionForkResult,
   SessionModelChangedParams,
@@ -127,6 +130,7 @@ interface Methods {
   'session/start': { params: SessionStartParams, result: SessionStartResult }
   'session/resume': { params: SessionResumeParams, result: SessionResumeResult }
   'session/fork': { params: SessionForkParams, result: SessionForkResult }
+  'session/compact': { params: SessionCompactParams, result: SessionCompactResult }
   'session/setApprovalMode': { params: SessionSetApprovalModeParams, result: SessionSetApprovalModeResult }
   'session/setModel': { params: SessionSetModelParams, result: SessionSetModelResult }
   'session/setReasoningEffort': { params: SessionSetReasoningEffortParams, result: SessionSetReasoningEffortResult }
@@ -379,13 +383,15 @@ async function exitMessage(process: ChildProcess, link: StdioRpc, fallback: Erro
 
 // ── Adapter ─────────────────────────────────────────────────────────────
 
-export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: number } = {}): Adapter {
+export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: number, compactTimeoutMs?: number } = {}): Adapter {
   const steerSettleMs = options.steerSettleMs ?? STEER_SETTLE_MS
   let child: ChildProcess | null = null
   let rpc: StdioRpc | null = null
   let sessionId: string | undefined
   let modelId = ''
   let effort = ''
+  let compaction: { commandId: string, wait: ReturnType<typeof compactionWaiter>, itemId?: string } | null = null
+  const seenCompactions = new Set<string>()
   let active: ActiveTurn | null = null
   let lastFinishedNativeId: string | null = null
   let closing = false
@@ -669,6 +675,21 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
     }
   }
 
+  function observeCompaction(item: Item): void {
+    if (item.kind !== 'compaction') return
+    const current = compaction
+    if (current && (!item.commandId || item.commandId === current.commandId)
+      && item.trigger === 'manual' && (!seenCompactions.has(item.itemId) || current.itemId === item.itemId)) {
+      if (item.status === 'inProgress' || item.commandId === current.commandId) current.itemId ??= item.itemId
+      if (current.itemId === item.itemId && item.status !== 'inProgress') {
+        const ok = item.outcome === 'compacted' || item.outcome === 'noop'
+        current.wait.finish(ok ? { stopReason: 'end_turn', compaction: { changed: item.outcome === 'compacted', ...(item.reason ? { detail: item.reason } : {}) } }
+          : { stopReason: item.outcome === 'cancelled' ? 'cancelled' : 'error', error: `Muse compaction: ${item.reason || item.outcome || item.status}` })
+      }
+    }
+    seenCompactions.add(item.itemId)
+  }
+
   function registerNotifications(): void {
     on('turn/started', ({ turnId }) => {
       const turn = turnFor(turnId)
@@ -690,11 +711,13 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
     })
 
     on('item/started', ({ item }) => {
+      observeCompaction(item)
       const turn = turnFor(item.turnId)
       if (turn) handleItemStarted(turn, item)
     })
 
     on('item/updated', ({ item }) => {
+      observeCompaction(item)
       const turn = turnFor(item.turnId)
       if (!turn) return
       if (item.kind === 'reminderChild') { turn.internalItems.add(item.itemId); return }
@@ -708,6 +731,7 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
     })
 
     on('item/completed', ({ item }) => {
+      observeCompaction(item)
       const turn = turnFor(item.turnId)
       if (turn) handleItemCompleted(turn, item)
     })
@@ -1182,6 +1206,17 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
       return result.finally(() => signal.removeEventListener('abort', onAbort))
     },
 
+    async compact(_id, _memories, signal) {
+      if (!child || active || compaction) throw new AdapterError(AGENT, 'Muse is not ready to compact.', 'protocol')
+      const current = { commandId: uuidv7(), wait: compactionWaiter(child, signal, options.compactTimeoutMs) }
+      compaction = current
+      if (!signal.aborted) void call('session/compact', { commandId: current.commandId, sessionId: session() }, { timeoutMs: 60_000 }).then(receipt => {
+        if (receipt.commandId !== current.commandId || !['accepted', 'noop'].includes(receipt.status)) throw new Error('Native compaction admission was not confirmed')
+        if (receipt.status === 'noop') current.wait.finish({ stopReason: 'end_turn', compaction: { changed: false, detail: receipt.reason } })
+      }).catch(error => current.wait.finish({ stopReason: 'error', error: `Muse compaction failed: ${String(error)}`, terminate: true }))
+      return current.wait.result.finally(() => { if (compaction === current) compaction = null })
+    },
+
     async steer(text) {
       const turn = active
       if (!turn || turn.done || turn.interruptRequested || !turn.nativeId) throw new AdapterError(AGENT, `${LABEL} has no running turn to steer`, 'protocol')
@@ -1240,6 +1275,7 @@ export function createMuseAdapter(host: AdapterHost, options: { steerSettleMs?: 
     },
 
     async close() {
+      compaction?.wait.finish({ stopReason: 'cancelled', terminate: true })
       const process = child
       if (!process) return
       closing = true

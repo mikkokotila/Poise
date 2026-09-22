@@ -77,3 +77,8 @@ browser queue journey also submits a model-selected review through the real
 ACP process adapter, SQLite and WebSockets, checking the exact outgoing review
 instruction and final Memories appendix. Provider processes in these tests
 are scripted; they do not contact live model accounts.
+
+## Context maintenance
+
+`/compact` and `/reset` are Poise-owned context switches across the native agents.
+See [Chat context controls](Chat-context.md) for completion, reset and queue behavior.

@@ -156,6 +156,14 @@ async function installSocket(page: Page, state?: ServerState): Promise<Socket> {
         s.queue = queue
         sock.push(s.id, { type: 'queue.updated', queue })
         sock.ack(frame, true, '', undefined, { queue })
+      } else if (sock.autoAck && frame.command.type === 'context.reset' && state) {
+        const id = frame.command.sessionId
+        const s = state.sessions.find(s => s.id === id)!
+        sock.seq = Math.max(sock.seq, s.lastSeq, ...(state.history[s.id] || []).map(e => e.seq)) + 3
+        Object.assign(s, { contextResetSeq: sock.seq + 1, lastSeq: sock.seq + 1, contextResetting: false, contextCompacting: false, status: 'idle', nativeSessionId: undefined, context: undefined, pendingRequests: [] })
+        const envelope = sock.push(s.id, { type: 'session.reset', session: { ...s } })
+        state.history[s.id] = [envelope]
+        sock.ack(frame, true, '', undefined, { session: { ...s } })
       } else if (sock.autoAck && frame.command.type === 'set_model' && state) {
         const command = frame.command
         const s = state.sessions.find(s => s.id === command.sessionId)!
@@ -522,8 +530,12 @@ test('renders an unanswered permission from history after a reload, and an inter
   await page.locator('.chat-session-item[data-id="s2"]').click()
   await expect(page.locator('.chat-turn-footer')).toHaveText('Interrupted')
   await expect(page.locator('.chat-h-status')).toHaveText('interrupted')
-  await expect(input(page)).toBeDisabled()
-  await expect(input(page)).toHaveAttribute('placeholder', /resume/)
+  await expect(input(page)).toBeEnabled() // /reset can recover without the old native log.
+  await expect(page.locator('.chat-send')).toBeDisabled()
+  await input(page).fill('Do not submit until resumed'); await input(page).press('Enter')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  await input(page).fill('')
+  await expect(input(page)).toHaveAttribute('placeholder', /resume/i)
   await page.locator('.chat-resume-btn').click()
   await expect.poll(() => state.calls.filter((c) => c.path.endsWith('/resume')).length).toBe(1)
   await expect(page.locator('.chat-h-status')).toHaveText('idle')
@@ -2594,4 +2606,106 @@ for (const outcome of ['no matches', 'failed catalogue']) test(`QC2: the model p
   await expect(input(page)).toHaveValue(text)
   expect(sock.framesOf('prompt')).toHaveLength(0)
   expect(sock.framesOf('set_model')).toHaveLength(0)
+})
+
+for (const status of ['idle', 'running', 'interrupted', 'error'] as const) {
+  test(`context controls: /reset clears a ${status} chat in place without a provider message`, async ({ page }) => {
+    const history = historyFixture('s1', ['Old context'])
+    const state = makeState([session({ status, autoMerge: true, safeMode: true, lastSeq: history.at(-1)!.seq })], { s1: history })
+    await installRoutes(page, state); const sock = await installSocket(page, state)
+    await page.goto('/'); await sock.subscribed('s1')
+    await input(page).fill('/reset'); await input(page).press('Space'); await input(page).press('Enter')
+    await expect.poll(() => sock.framesOf('context.reset').length).toBe(1)
+    await expect(page.locator('.chat-msg-user')).toHaveCount(0)
+    await expect(page.locator('.chat-note')).toContainText('Chat reset')
+    await expect(page.locator('.chat-session-item.active')).toHaveAttribute('data-id', 's1')
+    await expect(page.getByRole('button', { name: 'Safe mode', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    expect(sock.framesOf('prompt')).toHaveLength(0); expect(sock.framesOf('steer')).toHaveLength(0)
+    expect(state.calls.filter(c => c.method === 'POST')).toHaveLength(0)
+    await page.reload(); await sock.subscribed('s1')
+    await expect(page.locator('.chat-msg-user')).toHaveCount(0)
+    await input(page).press('ArrowUp'); await expect(historyPanel(page)).toContainText('No messages')
+    await input(page).press('Escape'); await input(page).fill('New task'); await input(page).press('Enter')
+    await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+    expect(sock.framesOf('prompt')[0].command).toMatchObject({ sessionId: 's1', text: 'New task' })
+  })
+}
+
+test('context controls: compact is a local switch and a running compaction queues new work', async ({ page }) => {
+  const state = makeState([session()], { s1: historyFixture() })
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('/compact'); await input(page).press('Space'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ text: '/compact' })
+  sock.seq = Math.max(sock.seq, state.history.s1.at(-1)!.seq)
+  sock.push('s1', { type: 'session.updated', session: { ...state.sessions[0], status: 'running', contextCompacting: true, lastSeq: sock.seq + 1 } })
+  await expect(page.locator('.chat-input')).toHaveAttribute('placeholder', 'Queue a follow-up…')
+  await input(page).fill('Run after the compact'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('queue.add').length).toBe(1)
+  expect(sock.framesOf('steer')).toHaveLength(0)
+  await expect(page.locator('.chat-msg-user').first()).toContainText('Past message')
+})
+
+test('context controls: model selection chains into reset then a fresh request', async ({ page }) => {
+  const state = makeState([session()], { s1: historyFixture() })
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('/model gpt-6-astra-max /reset A fresh independent task')
+  await page.locator('.chat-send').click()
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.frames.filter(f => ['context.reset', 'set_model', 'prompt'].includes(f.command.type)).map(f => f.command.type)).toEqual(['context.reset', 'set_model', 'prompt'])
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ sessionId: 's1', text: '/model gpt-6-astra-max A fresh independent task' })
+  await expect(page.locator('.chat-msg-user')).toHaveCount(1)
+})
+
+test('context controls: a failed reset preserves history and the submitted draft', async ({ page }) => {
+  const state = makeState([session()], { s1: historyFixture('s1', ['Keep this history']) })
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1'); sock.autoAck = false
+  await input(page).fill('/reset'); await input(page).press('Space'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('context.reset').length).toBe(1)
+  await input(page).fill('A newer unsent note')
+  sock.ack(sock.framesOf('context.reset')[0], false, 'worker has not stopped', 'agent_error')
+  await expect(page.locator('.chat-notice')).toContainText('worker has not stopped')
+  await expect(page.locator('.chat-msg-user')).toContainText('Keep this history')
+  expect(await input(page).inputValue()).toContain('A newer unsent note')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('context controls: Stop stays available during an otherwise empty compaction', async ({ page }) => {
+  const state = makeState([session({ status: 'running', contextCompacting: true })])
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1')
+  await expect(page.locator('.chat-send')).toHaveAttribute('aria-label', 'Stop')
+  await page.locator('.chat-send').click()
+  await expect.poll(() => sock.framesOf('cancel').length).toBe(1)
+  expect(sock.framesOf('queue.add')).toHaveLength(0)
+})
+
+test('context controls: a recorded reset with a lost acknowledgement never restores the reset command', async ({ page }) => {
+  const state = makeState([session()], { s1: historyFixture() })
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1'); sock.autoAck = false
+  await input(page).fill('/reset Follow-up remains unsent'); await page.locator('.chat-send').click()
+  await expect.poll(() => sock.framesOf('context.reset').length).toBe(1)
+  sock.seq = state.history.s1.at(-1)!.seq + 5
+  const record = { ...state.sessions[0], contextResetSeq: sock.seq + 1, lastSeq: sock.seq + 1 }
+  sock.push('s1', { type: 'session.reset', session: record })
+  await expect(page.locator('.chat-msg-user')).toHaveCount(0)
+  sock.ack(sock.framesOf('context.reset')[0], false, 'acknowledgement unavailable', 'command_in_doubt')
+  await expect(input(page)).toHaveValue('Follow-up remains unsent')
+  await expect(page.locator('.chat-v-chip')).toBeHidden()
+  await expect(page.locator('.chat-notice')).toContainText('Chat reset was recorded')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})
+
+test('context controls: compacting a fresh console creates no session', async ({ page }) => {
+  const state = makeState([]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.ready()
+  await input(page).fill('/compact'); await input(page).press('Space'); await input(page).press('Enter')
+  await expect(page.locator('.chat-notice')).toContainText('No conversation history to compact yet')
+  expect(state.calls.filter(c => c.method === 'POST')).toHaveLength(0)
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  await expect(input(page)).toHaveValue('')
 })

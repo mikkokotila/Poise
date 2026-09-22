@@ -102,6 +102,8 @@ export type Block =
   | { kind: 'note', key: string, rev: number, text: string }
 
 export interface TranscriptModel {
+  /** Buffered history cannot cross a reset barrier. */
+  resetSeq?: number
   blocks: Block[]
   turns: Map<string, TurnModel>
   tools: Map<string, ToolItem>
@@ -181,9 +183,19 @@ function ensureTurn(model: TranscriptModel, turnId: string, at: string): TurnMod
 }
 
 export function applyEvent(model: TranscriptModel, env: ChatEnvelope): void {
+  if (env.seq <= (model.resetSeq ?? 0)) return
   const e = env.event
   const at = env.at
   switch (e.type) {
+    case 'session.reset': {
+      Object.assign(model, createModel(), { rev: model.rev + 1, resetSeq: env.seq })
+      model.blocks.push({ kind: 'note', key: `reset:${env.seq}`, rev: model.rev, text: 'Chat reset. Previous conversation context cleared.' })
+      return
+    }
+    case 'context.compacted': {
+      model.blocks.push({ kind: 'note', key: `compact:${env.seq}`, rev: ++model.rev, text: e.detail })
+      return
+    }
     case 'turn.started': {
       // The optimistic turn for this prompt becomes the real one.
       dropOptimisticTurns(model)

@@ -131,6 +131,7 @@ interface RunningTurn {
   queueItem?: QueuedMessage
   queueContext?: string
   commandModel?: string
+  contextAction?: 'compact' | 'reset'
   review?: { target: ReviewTarget, throughSeq: number }
 }
 
@@ -336,6 +337,11 @@ export class ChatRuntime extends EventEmitter {
     }
     for (const record of storage.listSessions(this.instance)) {
       if (protectedSessions.has(record.id)) continue
+      if (record.contextResetting || record.contextCompacting) {
+        record.contextResetting = false; record.contextCompacting = false
+        storage.saveSession(record)
+        this.emit_(record.id, { type: 'error', message: 'Context maintenance was interrupted by restart; it was not replayed.', recoverable: true })
+      }
       if (['running', 'waiting', 'stopping', 'queued', 'starting'].includes(record.status)) {
         record.status = record.nativeSessionId ? 'interrupted' : 'idle'
         storage.saveSession(record)
@@ -731,6 +737,63 @@ export class ChatRuntime extends EventEmitter {
       if (!session.adapter?.alive) await this.startSession(session)
     })
     return session.record
+  }
+
+  /** Explicit reset settles active work first; no model is asked to forget. */
+  async reset(id: string): Promise<SessionRecord> {
+    this.assertAcceptingWork()
+    const session = this.requireLive(id)
+    if (session.record.contextResetting) throw new ChatError(409, 'The chat is already resetting.', 'turn_in_progress')
+    session.record.contextResetting = true
+    try { this.saveRecord(session) } catch (error) { session.record.contextResetting = false; throw error }
+    try {
+      this.emit_(id, { type: 'session.updated', session: session.record })
+      await this.track(async () => {
+        pauseQueue(queueOwner(id))
+        const timer = this.queueTimers.get(id)
+        if (timer) { clearTimeout(timer); this.queueTimers.delete(id) }
+        this.queueReleaseWait.delete(id)
+        session.startup?.abort()
+        await this.forceStop(session, 'chat reset')
+        if (session.turn) throw new ChatError(409, 'The agent is still stopping; history has not been reset.', 'agent_error')
+        await this.serialized(session, async () => {
+          await session.steering
+          await this.stopProcess(session)
+          this.releaseSettledLease(session)
+          if (session.lifecycle.signal.aborted) throw new ChatError(409, 'The session is closing; history has not been reset.', 'no_turn')
+          const lease = this.leaseFor(session)
+          try {
+            await lease.acquire({ signal: session.lifecycle.signal, onBusy: busy => this.reportBusy(session, busy) })
+            session.lease = lease
+            this.clearContext(session)
+          } finally {
+            if (lease.held) lease.release()
+            if (session.lease === lease && !lease.held) session.lease = null
+          }
+        })
+      })
+      return this.withLive(session.record)
+    } finally {
+      session.record.contextResetting = false
+      this.saveRecord(session)
+      this.emit_(id, { type: 'session.updated', session: session.record })
+      this.publishQueue(session)
+    }
+  }
+
+  /** Called only with the native worker stopped and the checkout held. */
+  private clearContext(session: LiveSession): void {
+    if (session.worker?.alive || session.adapter?.alive || session.services || !session.lease?.held) {
+      throw new ChatError(409, 'The previous agent has not settled; history has not been reset.', 'checkout_busy')
+    }
+    const committed = storage.resetConversation(session.record)
+    Object.assign(session.record, committed.session)
+    session.grants.clear()
+    session.staged = null
+    session.nativeSafeMode = undefined
+    // Old provider logs and project files are never deleted by this gesture.
+    // Only the Poise transcript and automatic context links are reset.
+    this.emit('event', { ...committed.envelope, event: { type: 'session.reset', session: this.withLive(session.record) } })
   }
 
   async rename(id: string, title: string): Promise<SessionRecord> {
@@ -1144,6 +1207,7 @@ export class ChatRuntime extends EventEmitter {
   /** Reserve the turn synchronously — before any await — so a second prompt
    *  in the same tick is refused, and persist it before acknowledging. */
   private reserveTurn(session: LiveSession, queueItem?: QueuedMessage): RunningTurn {
+    if (session.record.contextResetting) throw new ChatError(409, 'The chat is resetting; wait for it to finish.', 'turn_in_progress')
     if (session.turn) throw new ChatError(409, 'a turn is already running; Enter steers it', 'turn_in_progress')
     if (session.record.status === 'closed') throw new ChatError(409, 'the session is closed; resume it first', 'no_turn')
     if (session.lifecycle.signal.aborted) throw new ChatError(409, 'the session is closing', 'no_turn')
@@ -1165,14 +1229,16 @@ export class ChatRuntime extends EventEmitter {
     const chain = parseChatCommandChain(prompt.text)
     if (chain.missingModel) throw new ChatError(400, 'Choose a model from /model first.', 'invalid')
     if (chain.queue) throw new ChatError(400, 'Use the queue command to defer a message.', 'invalid')
-    if (chain.model && !chain.text && !chain.review && !prompt.attachments.length) throw new ChatError(400, 'A model-only selection uses set_model; add a task to send a message.', 'invalid')
+    if (chain.context === 'reset' && chain.review) throw new ChatError(400, 'A reset removes the reply to review. Review it first or send a new message after resetting.', 'invalid')
+    if (chain.model && !chain.text && !chain.review && !chain.context && !prompt.attachments.length) throw new ChatError(400, 'A model-only selection uses set_model; add a task to send a message.', 'invalid')
     const throughSeq = session.record.lastSeq
     const target = chain.review ? latestReviewTarget(id, throughSeq) : null
     if (chain.review && !target) throw new ChatError(400, 'There is no assistant reply to review yet.', 'invalid')
     const turn = this.reserveTurn(session)
     turn.commandModel = chain.model
+    turn.contextAction = chain.context
     if (target) turn.review = { target, throughSeq }
-    if (chain.model || chain.review) turn.shown = prompt
+    if (chain.model || chain.review || chain.context) turn.shown = prompt
     void this.serialized(session, () => this.runTurn(session, turn, { ...prompt, text: chain.text })).catch(() => undefined)
     return { turnId: turn.id }
   }
@@ -1204,6 +1270,7 @@ export class ChatRuntime extends EventEmitter {
     return this.control(session, async () => {
       const submitted = this.validatePrompt(id, input)
       const chain = parseChatCommandChain(submitted.text)
+      if (chain.context === 'reset' && chain.review) throw new ChatError(400, 'A reset removes the reply to review.', 'invalid')
       if (chain.missingModel) throw new ChatError(400, 'Choose a model from /model first.', 'invalid')
       const prompt = this.validatePrompt(id, { ...submitted, text: commandBody(chain) })
       const target = await this.resolveModel(model || chain.model || session.record.model, effort)
@@ -1270,7 +1337,7 @@ export class ChatRuntime extends EventEmitter {
   private scheduleQueue(session: LiveSession): void {
     const id = session.record.id
     if (this.stopped || this.recovering || this.drainState || session.lifecycle.signal.aborted || session.record.status === 'closed'
-      || session.record.orphanNotice || session.turn || this.queuePumps.has(id) || this.queueTimers.has(id) || !this.messageQueue(id).ready) return
+      || session.record.contextResetting || session.record.orphanNotice || session.turn || this.queuePumps.has(id) || this.queueTimers.has(id) || !this.messageQueue(id).ready) return
     const executor = this.messageQueue(id).executorSessionId
     if (executor && executor !== id) return
     this.queuePumps.add(id)
@@ -1332,7 +1399,7 @@ export class ChatRuntime extends EventEmitter {
       throw new ChatError(400, `${target.model.selector} offers native efforts ${record.efforts.join(', ')}`, 'invalid')
     }
     if (record.agent !== target.agent) {
-      const context = this.handoffSummary(record)
+      const context = storage.findEvent(record.id, event => event.type === 'text.delta') ? this.handoffSummary(record) : undefined
       await this.stopProcess(session)
       record.queuedHandoff = context
       record.agent = target.agent
@@ -1482,24 +1549,48 @@ export class ChatRuntime extends EventEmitter {
     session.draining = false
     try {
       if (turn.abort.signal.aborted) throw new Error(turn.failure || 'cancelled before it started')
+      if (turn.contextAction === 'compact' || (turn.queueItem && parseChatCommandChain(input.text).context === 'compact')) {
+        record.contextCompacting = true
+        this.saveRecord(session); this.emit_(record.id, { type: 'session.updated', session: record })
+      }
       await session.steering
       if (record.safeModePending && session.adapter?.alive) await this.stopProcess(session)
       if (turn.queueItem) {
         const chain = parseChatCommandChain(input.text)
+        turn.contextAction = chain.context
+        if (chain.context) { turn.shown = input; input = { ...input, text: chain.text } }
         if (chain.review) {
           const throughSeq = record.lastSeq
           const target = latestReviewTarget(record.id, throughSeq)
           if (!target) throw new ChatError(400, 'There is no assistant reply to review yet.', 'invalid')
-          turn.review = { target, throughSeq }; turn.shown = input
+          turn.review = { target, throughSeq }; turn.shown ??= input
           input = { ...input, text: chain.text }
         }
         this.publishQueue(session); await this.prepareQueuedAgent(session, turn)
       } else if (turn.commandModel) await this.selectSessionModel(session, turn.commandModel)
-      if (!session.adapter?.alive) await this.startSession(session, { fresh: !record.nativeSessionId && !record.branch.baseSha && record.branch.provisional })
+      if (turn.contextAction === 'reset') {
+        await this.stopProcess(session)
+        this.releaseSettledLease(session)
+        lease = this.leaseFor(session)
+        await lease.acquire({ signal: turn.abort.signal, onBusy: busy => this.reportBusy(session, busy) })
+        session.lease = lease
+        this.clearContext(session)
+        if (!input.text && !input.attachments.length) {
+          this.emit_(record.id, { type: 'turn.started', turnId: turn.id, prompt: turn.shown ?? { ...input, text: '/reset' }, ...(turn.queueItem ? { queueItemId: turn.queueItem.id } : {}) })
+          started = true; stopReason = 'end_turn'; return
+        }
+      }
+      if (turn.contextAction === 'compact' && (!record.nativeSessionId || record.queuedHandoff || !storage.findEvent(record.id, e => e.type === 'text.delta')) && !input.text && !input.attachments.length && !turn.review) {
+        this.emit_(record.id, { type: 'turn.started', turnId: turn.id, prompt: turn.shown ?? { ...input, text: '/compact' }, ...(turn.queueItem ? { queueItemId: turn.queueItem.id } : {}) })
+        started = true
+        this.emit_(record.id, { type: 'context.compacted', turnId: turn.id, detail: 'No native conversation history to compact yet.' })
+        stopReason = 'end_turn'; return
+      }
+      if (!session.adapter?.alive) await this.startSession(session, { fresh: !record.nativeSessionId && !record.branch.baseSha && record.branch.provisional, ...(lease ? { lease } : {}) })
       let adapter = session.adapter!
       const isFirst = !storage.findEvent(record.id, (e) => e.type === 'turn.started')
       // A change session is titled by its request, not by the runbook's first line.
-      if ((record.title === 'New session' || isFirst) && !record.selfChangeId) {
+      if ((record.title === 'New session' || (isFirst && !record.contextResetSeq)) && !record.selfChangeId) {
         record.title = (input.text.split('\n')[0] || record.title).slice(0, TITLE_CHARS) || record.title
         this.saveRecord(session)
         this.emit_(record.id, { type: 'session.updated', session: record })
@@ -1514,8 +1605,10 @@ export class ChatRuntime extends EventEmitter {
       started = true
       this.setStatus(session, 'queued')
       // Created after the title settled: the label names what is queued behind.
-      lease = this.leaseFor(session)
-      await lease.acquire({ signal: turn.abort.signal, onBusy: (busy) => this.reportBusy(session, busy) })
+      if (!lease) {
+        lease = this.leaseFor(session)
+        await lease.acquire({ signal: turn.abort.signal, onBusy: (busy) => this.reportBusy(session, busy) })
+      }
       session.lease = lease
       lease.onLost(() => {
         try { this.emit_(record.id, { type: 'error', message: 'the checkout lease was lost; stopping the turn', recoverable: true }) } catch { /* mirror */ }
@@ -1560,6 +1653,36 @@ export class ChatRuntime extends EventEmitter {
       agentInvoked = true
       turn.agentInvoked = true
       if (record.queuedHandoff) adapterInput.text = `${record.queuedHandoff}\n\n[Current task]\n${adapterInput.text}`
+      if (turn.contextAction === 'compact' && storage.findEvent(record.id, event => event.type === 'text.delta') && !record.queuedHandoff) {
+        if (!adapter.compact) throw new ChatError(409, `${AGENT_LABEL[record.agent]} does not expose context compaction.`, 'unsupported')
+        record.contextCompacting = true
+        this.saveRecord(session); this.emit_(record.id, { type: 'session.updated', session: record })
+        const compacted = await adapter.compact(turn.id, readMemories().text, turn.abort.signal)
+        if (compacted.stopReason !== 'end_turn') {
+          agentSettled = true; terminate = compacted.terminate === true
+          stopReason = compacted.stopReason; error = compacted.error; usage = compacted.usage
+          return
+        }
+        record.contextCompacting = false
+        this.saveRecord(session); this.emit_(record.id, { type: 'session.updated', session: record })
+        this.emit_(record.id, { type: 'context.compacted', turnId: turn.id,
+          detail: compacted.compaction?.detail || (compacted.compaction?.changed === false ? 'No further compaction was needed.' : 'Conversation context compacted. Chat history is unchanged.') })
+        if (!input.text && !input.attachments.length && !turn.review) { agentSettled = true; stopReason = 'end_turn'; usage = compacted.usage; return }
+        turn.abort.signal.throwIfAborted()
+      }
+      if (record.contextCompacting) { record.contextCompacting = false; this.saveRecord(session); this.emit_(record.id, { type: 'session.updated', session: record }) }
+      if (turn.contextAction === 'compact') {
+        turn.agentInvoked = false
+        await session.steering
+        if (record.safeModePending) {
+          await this.stopProcess(session)
+          await this.startSession(session, { lease })
+          adapter = session.adapter!
+        }
+      }
+      turn.abort.signal.throwIfAborted()
+      turn.contextAction = undefined
+      turn.agentInvoked = true
       const response = adapter.prompt(turn.id, withAutoMergeInstructions({ ...adapterInput, memories: readMemories().text }, record.autoMerge, turn.implementsChange), turn.abort.signal)
       turn.releasePrompt()
       const result = await response
@@ -1582,6 +1705,11 @@ export class ChatRuntime extends EventEmitter {
       } catch { /* mirror */ }
     } finally {
       turn.releasePrompt()
+      if (record.contextCompacting) {
+        record.contextCompacting = false
+        try { this.saveRecord(session); this.emit_(record.id, { type: 'session.updated', session: record }) }
+        catch (failure) { turn.failure ??= `Compaction status could not be recorded: ${String(failure)}` }
+      }
       turn.abort.signal.removeEventListener('abort', turn.releasePrompt)
       this.settlePending(session, 'cancelled')
       // The lease is released only once nothing of this turn can still write:
@@ -1759,7 +1887,7 @@ export class ChatRuntime extends EventEmitter {
       const turn = session.turn
       let applies: AutoMergeAck['applies'] = 'next_turn'
       let warning: string | undefined
-      if (turn?.agentInvoked && !turn.stopping && !turn.abort.signal.aborted && session.adapter?.alive) {
+      if (turn?.agentInvoked && !session.record.contextCompacting && !turn.stopping && !turn.abort.signal.aborted && session.adapter?.alive) {
         try {
           await session.adapter.steer(appendMemories(autoMergeInstructions(enabled, turn.implementsChange), readMemories().text))
           applies = 'current_turn'
@@ -1777,6 +1905,7 @@ export class ChatRuntime extends EventEmitter {
     const session = this.requireLive(id)
     const turn = session.turn
     if (!turn || turn.stopping) throw new ChatError(409, 'no turn is running', 'no_turn')
+    if (turn.contextAction === 'compact' || session.record.contextCompacting || session.record.contextResetting) throw new ChatError(409, 'Context maintenance is running; queue the next message.', 'turn_in_progress')
     const shown = this.validatePrompt(id, { text, attachments: context.attachments, mentions: context.mentions })
     // Do not put this wait on the control chain: startup drains that chain
     // before invoking the prompt. Early interjections belong after that boundary.
@@ -2058,12 +2187,17 @@ export class ChatRuntime extends EventEmitter {
 
   private hostFor(session: LiveSession): AdapterHost {
     const record = session.record
+    const contextSeq = record.contextResetSeq || 0
+    const currentContext = () => contextSeq === (record.contextResetSeq || 0)
+    const requireContext = () => { if (!currentContext()) throw new Error('This native conversation was reset.') }
     return {
       sessionId: record.id,
       checkout: record.checkout,
-      spawn: async (command, args, options) => this.spawnAgent(session, command, args, options?.env),
+      spawn: async (command, args, options) => { requireContext(); return this.spawnAgent(session, command, args, options?.env) },
       emit: (event) => {
-        if (session.record.status === 'closed') return
+        if (!currentContext() || session.record.status === 'closed') return
+        // Native compaction chatter is maintenance, not a new assistant reply.
+        if (session.record.contextCompacting && (event.type === 'text.delta' || event.type === 'thought.delta')) return
         try {
           this.emit_(record.id, event)
         } catch (error) {
@@ -2076,10 +2210,10 @@ export class ChatRuntime extends EventEmitter {
           }
         }
       },
-      requestPermission: (request) => this.askPermission(session, request),
-      askQuestion: (request) => this.askUser(session, request),
-      readTextFile: (path, options) => this.serve(session, () => readCheckoutTextFile(record.checkout, path, options)),
-      writeTextFile: (path, content) => this.serve(session, () => writeCheckoutTextFile(record.checkout, path, content)),
+      requestPermission: async (request) => { requireContext(); return this.askPermission(session, request) },
+      askQuestion: async (request) => { requireContext(); return this.askUser(session, request) },
+      readTextFile: async (path, options) => { requireContext(); return this.serve(session, () => readCheckoutTextFile(record.checkout, path, options)) },
+      writeTextFile: async (path, content) => { requireContext(); return this.serve(session, () => writeCheckoutTextFile(record.checkout, path, content)) },
       log: (message) => this.emit('log', `[chat ${record.id.slice(0, 8)}] ${message}`),
     }
   }

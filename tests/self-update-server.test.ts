@@ -227,7 +227,9 @@ describe('self-update routes', () => {
 
     // Listening is not the same as completing startup reconciliation; that
     // work correctly counts as busy until it has actually settled.
-    await expect.poll(() => cache.getChatRuntime().busy(), { timeout: 5_000 }).toBe(0)
+    // Use the complete public readiness count, including admitted HTTP
+    // handlers, rather than only the chat runtime's subset of that work.
+    await expect.poll(async () => (await (await fetch(`${base}/api/self-update/readiness`, { headers: key })).json() as any).busy, { timeout: 5_000 }).toBe(0)
     const before = await (await fetch(`${base}/api/self-update/readiness`, { headers: key })).json() as any
     expect(before).toEqual({ ready: false, busy: 0, build: { sha: null, releaseId: null }, draining: false })
     expect((await post('/api/self-update/drain', {}, key)).status).toBe(400)

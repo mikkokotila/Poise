@@ -139,3 +139,19 @@ describe('Chat client reconnect and transcript safety', () => {
     expect(await pending).toMatchObject({ code: 'command_in_doubt' })
   })
 })
+
+it('context: reset crosses a deleted history gap and discards an older refill', async () => {
+  client.subscribe('session', 0); latest().open(); hello()
+  const seen: number[] = []; client.on('event', e => seen.push(e.seq))
+  let release!: (value: { session: SessionRecord, events: ChatEnvelope[] }) => void
+  vi.spyOn(client, 'fetchSession').mockReturnValue(new Promise(resolve => { release = resolve }))
+  latest().receive({ kind: 'event', envelope: event(3) })
+  const record = { id: 'session', lastSeq: 12, contextResetSeq: 12 } as SessionRecord
+  latest().receive({ kind: 'event', envelope: { ...event(12), event: { type: 'session.reset', session: record } } })
+  latest().receive({ kind: 'event', envelope: event(13) })
+  release({ session: {} as SessionRecord, events: [event(1), event(2), event(3)] })
+  await vi.advanceTimersByTimeAsync(0)
+  expect(seen).toEqual([12, 13]); expect(client.subscribedAfter('session')).toBe(13)
+  latest().close(); await vi.advanceTimersByTimeAsync(500); latest().open(); hello()
+  expect(latest().sent[0].command.afterSeq).toBe(13)
+})
