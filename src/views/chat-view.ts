@@ -287,7 +287,10 @@ function renderShell(): void {
       const e = entry()
       return { entries: e ? recentMessages(e.model, e.record.context) : [], loading: !!e?.loading, error: e?.error }
     },
-    onSend: (draft) => { void withSavedMemories(draft, () => sendPrompt(draft)) },
+    onSend: (draft) => {
+      if (parseChatCommandChain(commandDraftText(draft)).context === 'reset') void sendPrompt(draft)
+      else void withSavedMemories(draft, () => sendPrompt(draft))
+    },
     onQueue: (draft) => { void withSavedMemories(draft, async () => {
       const origin = activeId
       const update = modelUpdates.get(origin)
@@ -441,6 +444,7 @@ function upsertRecord(record: SessionRecord, opts: { pending?: boolean } = {}): 
     e.record = reconcileSession(e.record, record)
     if (opts.pending !== undefined) e.pending = opts.pending
   }
+  applyResetRecord(e, e.record)
   sortOrder()
   return e
 }
@@ -651,6 +655,7 @@ async function loadHistory(e: SessionEntry): Promise<void> {
     for (let guard = 0; guard < 100; guard++) {
       const page = await chatClient.fetchSession(e.record.id, after)
       e.record = reconcileSession(e.record, page.session)
+      applyResetRecord(e, e.record)
       for (const env of page.events) {
         if (env.seq > after) { applyEvent(e.model, env); after = env.seq }
       }
@@ -674,7 +679,10 @@ function onEvent(env: ChatEnvelope): void {
   const e = sessions.get(env.sessionId)
   if (!e) return
   const ev = env.event
-  if (ev.type === 'session.created' || ev.type === 'session.resumed' || ev.type === 'session.updated') {
+  if (ev.type === 'session.reset') {
+    upsertRecord({ ...ev.session, lastSeq: env.seq }, { pending: false })
+    applyResetRecord(e, ev.session)
+  } else if (ev.type === 'session.created' || ev.type === 'session.resumed' || ev.type === 'session.updated') {
     upsertRecord({ ...ev.session, lastSeq: env.seq }, { pending: false })
   } else if (ev.type === 'status.changed') {
     e.record = { ...e.record, status: ev.status, queuedBehind: ev.queuedBehind }
@@ -1075,8 +1083,8 @@ function applyCommandModel(identity: string, origin: string | null, effort?: str
   return trackSettingUpdate(origin, () => applyCommandModelNow(identity, origin, effort))
 }
 
-function trackSettingUpdate(origin: string | null, operation: () => Promise<void>): Promise<void> {
-  const previous = modelUpdates.get(origin)
+function trackSettingUpdate(origin: string | null, operation: () => Promise<void>, ordered = true): Promise<void> {
+  const previous = ordered ? modelUpdates.get(origin) : undefined
   const update = previous ? previous.then(operation, operation) : operation()
   modelUpdates.set(origin, update)
   void update.finally(() => { if (modelUpdates.get(origin) === update) modelUpdates.delete(origin); queueRender() }).catch(() => undefined)
@@ -1099,11 +1107,58 @@ async function applyCommandModelNow(identity: string, origin: string | null, eff
   queueRender()
 }
 
+async function resetPrompt(draft: ComposerDraft, origin: string | null): Promise<void> {
+  const chain = parseChatCommandChain(commandDraftText(draft))
+  if (chain.review) { restoreDraftTo(origin, draft); setNotice('A reset removes the reply to review. Review first or start a new task after resetting.'); return }
+  let remaining = draft
+  const resetBefore = entry(origin)?.record.contextResetSeq || 0
+  let resetAcknowledged = false
+  try {
+    if (origin) await trackSettingUpdate(origin, async () => {
+      const result = await chatClient.send({ type: 'context.reset', sessionId: origin }) as { session?: SessionRecord }
+      if (result?.session?.id !== origin || !result.session.contextResetSeq) throw new Error('The server did not confirm the reset; check this chat before repeating it.')
+      upsertRecord(result.session)
+      applyResetRecord(sessions.get(origin)!, result.session)
+    }, false)
+    resetAcknowledged = true
+    remaining = { ...draft, text: chain.text, mode: null, ...(chain.model ? { model: chain.model } : {}) }
+    if (activeId !== origin) { if (remaining.text || remaining.attachments.length) restoreDraftTo(origin, remaining); return }
+    if (chain.model) await applyCommandModel(chain.model, origin)
+    setNotice('Chat reset. Previous conversation context cleared.', 'info')
+    if (remaining.text || remaining.attachments.length) await withSavedMemories(remaining, () => sendPrompt(remaining))
+  } catch (error) {
+    if (resetAcknowledged || (entry(origin)?.record.contextResetSeq || 0) > resetBefore) {
+      // The durable reset event can beat a lost acknowledgement. Never put
+      // /reset back into the editor where it could erase subsequent work.
+      remaining = { ...draft, text: chain.text, mode: null, ...(chain.model ? { model: chain.model } : {}) }
+      if (remaining.text || remaining.attachments.length || remaining.model) restoreDraftTo(origin, remaining)
+      if (activeId === origin) setNotice(resetAcknowledged ? `Chat was reset. The follow-up was not sent — ${(error as Error).message}` : 'Chat reset was recorded. Its acknowledgement was unavailable; any follow-up remains unsent.', 'info')
+    } else {
+      restoreDraftTo(origin, remaining)
+      if (activeId === origin) commandFailed(error, 'Reset')
+    }
+  } finally { queueRender() }
+}
+
+function applyResetRecord(e: SessionEntry, record: SessionRecord): void {
+  const seq = record.contextResetSeq || 0
+  if (seq <= (e.model.resetSeq || 0)) return
+  applyEvent(e.model, { sessionId: record.id, seq, at: record.updatedAt, event: { type: 'session.reset', session: record } })
+  e.error = null
+  if (activeId === record.id) {
+    transcript.clear()
+    composer.history.close(); composer.models.close(); filePreview.close()
+    setNotice('Chat reset. Previous conversation context cleared.', 'info')
+    scrollToBottom(true)
+  }
+}
+
 async function sendPrompt(draft: ComposerDraft): Promise<void> {
   const origin = activeId
   await Promise.resolve() // The composer clears after passing us the immutable draft.
   if (activeId !== origin) { restoreDraftTo(origin, draft); return }
   draft = { ...draft, text: commandDraftText(draft) }
+  if (parseChatCommandChain(draft.text).context === 'reset') { await resetPrompt(draft, origin); return }
   const pendingModel = modelUpdates.get(origin)
   if (pendingModel) {
     try { await pendingModel }
@@ -1113,8 +1168,15 @@ async function sendPrompt(draft: ComposerDraft): Promise<void> {
   const chain = parseChatCommandChain(draft.text)
   if (chain.missingModel) { restoreDraftTo(origin, draft); setNotice('Choose a model from /model first.'); return }
   if (chain.review && !entry()) { restoreDraftTo(origin, draft); setNotice('There is no reply to review yet.'); return }
+  if (chain.context === 'compact' && !entry() && !chain.review && !chain.text && !draft.attachments.length) {
+    try {
+      if (chain.model) await applyCommandModel(chain.model, origin)
+      if (activeId === origin) setNotice('No conversation history to compact yet.', 'info')
+    } catch (error) { restoreDraftTo(origin, draft); if (activeId === origin) commandFailed(error, 'Model choice') }
+    return
+  }
   const own = !chain.review && /^\/(mode|fork)(?:\s+(.*))?$/s.exec(chain.text)
-  if ((chain.model && !chain.text && !chain.review && !draft.attachments.length) || own) {
+  if ((chain.model && !chain.text && !chain.review && !chain.context && !draft.attachments.length) || (own && !chain.context)) {
     try {
       if (chain.model) await applyCommandModel(chain.model, origin)
       if (activeId !== origin) { restoreDraftTo(origin, draft); return }
@@ -1148,11 +1210,11 @@ async function sendPrompt(draft: ComposerDraft): Promise<void> {
     if (!saved || activeId !== sourceId) { keepDraft(sourceId, draft); return }
   }
   const current = entry()?.record
-  const explicit = chain.review ? null : parsePoiseCommand(chain.text)
+  const explicit = chain.review || chain.context ? null : parsePoiseCommand(chain.text)
   // A batch stays with its agent even when it includes Poise. Only the
   // explicit command selects the independent one-change release controller.
   const autoMerge = current ? current.autoMerge === true : freshAutoMerge
-  const natural = explicit || autoMerge || chain.review ? null : recognisePoiseRequest(chain.text, { poiseChangeSession: current?.workspaceKind === 'poise-change' })
+  const natural = explicit || autoMerge || chain.review || chain.context ? null : recognisePoiseRequest(chain.text, { poiseChangeSession: current?.workspaceKind === 'poise-change' })
   // Vocabulary alone must not reinterpret work on another repository as a
   // Poise request. An explicit Poise target still means what the user wrote.
   const otherRepository = !!current?.repo && current.repo.toLowerCase() !== 'mikkokotila/poise'
@@ -1638,10 +1700,11 @@ function composerStateFor(e: SessionEntry | null): void {
   let placeholder: string | undefined
   if (e.pending) { disabled = true; placeholder = 'Starting the session…' }
   else if (s.status === 'closed') { disabled = true; placeholder = 'This session is closed' }
-  else if (s.status === 'interrupted') { disabled = true; placeholder = 'Interrupted by a restart — resume to continue' }
-  else if (s.status === 'error') { disabled = true; placeholder = 'The session failed — resume to try again' }
+  else if (s.status === 'interrupted') { disabled = true; placeholder = 'Interrupted — Resume to continue, or /reset to start fresh' }
+  else if (s.status === 'error') { disabled = true; placeholder = 'The session failed — Resume to try again, or /reset to start fresh' }
   composer.setCommands(s.commands || [], { modes: !!s.capabilities?.modes, fork: !!s.capabilities?.fork })
-  composer.setState({ running, disabled, placeholder, modelIdentity: s.model, resume: s.status === 'interrupted' || s.status === 'error', sessionId: e.pending ? null : s.id })
+  if (s.contextResetting) { disabled = true; placeholder = 'Resetting chat…' }
+  composer.setState({ running, maintaining: s.contextCompacting, disabled, placeholder, modelIdentity: s.model, resume: !s.contextResetting && (s.status === 'interrupted' || s.status === 'error'), sessionId: e.pending ? null : s.id })
 }
 
 // The next render pins the transcript to its end regardless of where the

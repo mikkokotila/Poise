@@ -88,6 +88,12 @@ export interface MessageQueue {
 }
 
 export interface SessionRecord {
+  /** Monotonic reset barrier; earlier transcript events must never reappear. */
+  contextResetSeq?: number
+  /** A reset has been admitted and is waiting for native work to settle. */
+  contextResetting?: boolean
+  /** Native compaction is in progress; new tasks wait rather than steer it. */
+  contextCompacting?: boolean
   /** Server-owned pending tasks; never copied when a session is forked. */
   queue?: MessageQueue
   /** A queued cross-agent handoff survives a startup failure or restart. */
@@ -273,6 +279,8 @@ export interface PromptInput {
 // ── Events: runtime → view ────────────────────────────────────────────────
 
 export type ChatEvent =
+  | { type: 'session.reset', session: SessionRecord }
+  | { type: 'context.compacted', turnId: string, detail: string }
   | { type: 'session.created', session: SessionRecord }
   | { type: 'session.resumed', session: SessionRecord }
   | { type: 'session.updated', session: SessionRecord }
@@ -337,6 +345,7 @@ export type ChatCommand =
   | { type: 'session.list' }
   | ({ type: 'session.new' } & NewSessionRequest)
   | { type: 'session.resume', id: string }
+  | { type: 'context.reset', sessionId: string }
   | { type: 'session.fork', id: string }
   | { type: 'session.close', id: string }
   | { type: 'session.delete', id: string }

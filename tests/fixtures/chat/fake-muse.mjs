@@ -71,6 +71,22 @@ function scripted() {
         }
         case 'view/subscribe':
           return { viewCursor: viewCursor() }
+        case 'session/compact': {
+          writeFileSync('compact-admitted', 'yes')
+          view('item/completed', { item: { kind: 'compaction', itemId: 'old-compact', revision: 2, status: 'completed', outcome: 'compacted', trigger: 'manual', turnId: null } })
+          if (process.argv.includes('--compact-noop')) return { commandId: params.commandId, status: 'noop', reason: 'no_compactable_history' }
+          const compaction = { kind: 'compaction', itemId: uuid('compact'), turnId: null, trigger: 'manual', commandId: params.commandId, revision: 1, status: 'inProgress' }
+          view('item/started', { item: compaction })
+          const complete = () => {
+            if (process.argv.includes('--compact-gated') && !existsSync('compact-release')) { setTimeout(complete, 10); return }
+            if (process.argv.includes('--compact-hold')) return
+            const fail = process.argv.includes('--compact-fail')
+            view('item/completed', { item: { ...compaction, revision: 2, status: fail ? 'failed' : 'completed', outcome: fail ? 'failed' : 'compacted', ...(fail ? { reason: 'summarizer_failed' } : { tokensBefore: 1200, tokensAfter: 400 }) } })
+          }
+          if (process.argv.includes('--compact-before-ack')) complete()
+          else setTimeout(complete, 160)
+          return { commandId: params.commandId, status: 'accepted' }
+        }
         case 'session/setApprovalMode':
           approvalMode = params.mode
           return { commandId: params.commandId, status: 'accepted', applyOutcome: 'completed', effectiveMode: { mode: approvalMode, source: 'approvalReconfigure', lastCommandId: params.commandId } }

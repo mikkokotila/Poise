@@ -71,6 +71,23 @@ function scripted() {
           if (!threadId) threadId = forked
           return threadResponse(thread(forked, { forkedFromId: params.threadId }))
         }
+        case 'thread/compact/start': {
+          const id2 = uuid('compact')
+          writeFileSync('compact-admitted', 'yes')
+          peer.notify('item/completed', { threadId, turnId: 'old-compact', item: { type: 'contextCompaction', id: 'old-item' } })
+          peer.notify('turn/completed', { threadId, turn: turnObject('old-compact', 'completed') })
+          peer.notify('turn/started', { threadId, turn: turnObject(id2, 'inProgress') })
+          const complete = () => {
+            if (process.argv.includes('--compact-gated') && !existsSync('compact-release')) { setTimeout(complete, 10); return }
+            if (process.argv.includes('--compact-hold')) return
+            const fail = process.argv.includes('--compact-fail')
+            if (!fail) peer.notify('item/completed', { threadId, turnId: id2, item: { type: 'contextCompaction', id: uuid('item') } })
+            peer.notify('turn/completed', { threadId, turn: turnObject(id2, fail ? 'failed' : 'completed', fail ? { message: 'summarizer failed', codexErrorInfo: null } : null) })
+          }
+          if (process.argv.includes('--compact-before-ack')) complete()
+          else setTimeout(complete, 160)
+          return {}
+        }
         case 'turn/start': {
           if (turn) throw { code: -32000, message: 'turn already active' }
           turn = { id: uuid('turn'), interrupted: false, steered: [], input: params.input, effort: params.effort ?? null, model: params.model ?? null }

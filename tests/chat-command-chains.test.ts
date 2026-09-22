@@ -13,7 +13,7 @@ describe('Chat command chains', () => {
   it('composes queue/review/model and leaves a native command or prose intact', () => {
     const chain = parseChatCommandChain('/queue /model opus-5-high /review focus on /src files')
     expect(chain.queue).toBe(true); expect(commandBody(chain)).toBe('/review focus on /src files')
-    expect(parseChatCommandChain('/model opus-5-high /compact keep the architecture').text).toBe('/compact keep the architecture')
+    expect(parseChatCommandChain('/model opus-5-high /compact keep the architecture')).toMatchObject({ context: 'compact', text: 'keep the architecture' })
   })
   it.each(['Explain /review and /model', '/models catalogue', '/Users/person/file', '```\n/review\n```'])(
     'does not execute a switch embedded in %s', text => {
@@ -62,4 +62,14 @@ it.each(['\n', '\r\n', '\t', ' '])('QC2: restored command chips accept whitespac
 it('QC2: similarly named commands and model identities are not stripped from drafts', () => {
   expect(editableCommandDraft({ ...draft, mode: 'review', text: '/reviewer note' }).text).toBe('/reviewer note')
   expect(editableCommandDraft({ ...draft, model: 'opus-5-high', text: '/model opus-5-higher task' }).text).toBe('/model opus-5-higher task')
+})
+
+it.each(['/model opus-5-high /compact /review', '/queue /model opus-5-high /reset'])('parses context maintenance together with model selection: %s', text => {
+  const chain = parseChatCommandChain(text)
+  expect(chain.model).toBe('opus-5-high')
+  expect(commandBody(chain)).toBe(text.includes('/reset') ? '/reset' : '/compact /review')
+  expect(modelCompletion(text)?.query).toBe('opus-5-high')
+})
+it.each(['/compact /reset', '/reset /compact'])('does not lose a requested conversation reset: %s', text => {
+  expect(parseChatCommandChain(text).context).toBe('reset')
 })

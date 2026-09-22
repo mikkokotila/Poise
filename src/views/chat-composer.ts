@@ -31,6 +31,8 @@ export interface ComposerDraft {
 export interface ComposerState {
   /** A turn is running: Enter steers, the button stops. */
   running: boolean
+  /** Defer interjections while native context maintenance runs. */
+  maintaining?: boolean
   /** Nothing can be sent; `placeholder` says why. */
   disabled: boolean
   placeholder?: string
@@ -93,6 +95,8 @@ const DEFAULT_PLACEHOLDER = 'Message…'
 
 const OWN_COMMANDS: CommandOption[] = [
   { name: 'model', description: 'Choose model and effort' },
+  { name: 'compact', description: 'Compact model context; keep chat history' },
+  { name: 'reset', description: 'Clear chat history and start fresh' },
   { name: 'review', description: 'Critically review the latest reply', hint: '[focus]' },
   { name: 'mode', description: 'Switch mode', hint: '<mode>' },
   { name: 'fork', description: 'Fork this session' },
@@ -177,7 +181,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     selectedModel = undefined; renderSelectedModel(); applyState(); changed(); input.focus()
   })
   function canChainMode(): boolean {
-    return !activeMode || activeMode.split(/\s+/).every(name => ['queue', 'review'].includes(name.replace(/^\//, '')))
+    return !activeMode || activeMode.split(/\s+/).every(name => ['queue', 'review', 'compact', 'reset'].includes(name.replace(/^\//, '')))
   }
   const models = createCommandModels(input, {
     load: handlers.loadModels, changed,
@@ -462,19 +466,20 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   }
 
   function submit(): void {
-    if (state.disabled || uploading) return
+    if (uploading) return
     const draft = rawDraft()
     draft.text = commandDraftText(draft)
     const chain = parseChatCommandChain(draft.text)
+    if (state.disabled && !(state.resume && chain.context === 'reset' && !chain.queue)) return
     if (chain.missingModel) { updateModels(); return }
-    if (!chain.text && !chain.review && !chain.model && !attachments.length) return
-    if (state.running && chain.model && !chain.text && !chain.review && !attachments.length) {
+    if (!chain.text && !chain.review && !chain.model && !chain.context && !attachments.length) return
+    if (state.running && chain.model && !chain.text && !chain.review && !chain.context && !attachments.length) {
       showNote('Model chosen for the next task'); return
     }
-    if (chain.queue || (state.running && (chain.review || chain.model))) {
-      if (!chain.text && !chain.review && !attachments.length) return
+    if (chain.queue || (state.running && chain.context !== 'reset' && (chain.context || chain.review || chain.model || state.maintaining))) {
+      if (!chain.text && !chain.review && !chain.context && !attachments.length) return
       handlers.onQueue({ ...draft, text: commandBody(chain), mode: 'queue', ...(chain.model ? { model: chain.model } : {}) })
-    } else if (state.running) {
+    } else if (state.running && chain.context !== 'reset') {
       if (!draft.text && !draft.attachments.length) return
       handlers.onSteer(draft)
       input.value = ''; attachments = []; mentions = []; selectedModel = undefined
@@ -494,9 +499,9 @@ export function createComposer(handlers: ComposerHandlers): Composer {
 
   el.addEventListener('submit', (e) => {
     e.preventDefault()
-    if (state.disabled) return
     const chain = parseChatCommandChain(commandDraftText(rawDraft()))
-    if (state.running && !chain.queue && !chain.review && !chain.model && !chain.missingModel) handlers.onStop()
+    if (state.disabled && !(state.resume && chain.context === 'reset' && !chain.queue)) return
+    if (state.running && !chain.context && !chain.queue && !chain.review && !chain.model && !chain.missingModel && !(state.maintaining && (chain.text || attachments.length))) handlers.onStop()
     else submit()
   })
   input.addEventListener('input', () => {
@@ -582,17 +587,18 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   })
 
   function applyState(): void {
-    input.disabled = state.disabled
+    input.disabled = state.disabled && !state.resume
     attachBtn.disabled = state.disabled || uploading > 0
     const chain = parseChatCommandChain(commandDraftText(rawDraft()))
-    const queuing = chain.queue || (state.running && (!!chain.model || chain.review || chain.missingModel))
-    input.placeholder = state.disabled ? (state.placeholder || 'Unavailable') : queuing ? 'Queue a follow-up…' : (state.running ? 'Steer the agent… (Enter)' : (state.placeholder || DEFAULT_PLACEHOLDER))
-    sendBtn.disabled = state.disabled || (uploading > 0 && (queuing || !state.running))
+    const resetting = chain.context === 'reset' && !chain.queue
+    const queuing = chain.queue || (state.running && !resetting && (!!chain.model || chain.review || chain.missingModel || !!chain.context || (state.maintaining && (!!chain.text || !!attachments.length))))
+    input.placeholder = state.disabled ? (state.placeholder || 'Unavailable') : (queuing || state.maintaining) ? 'Queue a follow-up…' : (state.running ? 'Steer the agent… (Enter)' : (state.placeholder || DEFAULT_PLACEHOLDER))
+    sendBtn.disabled = (state.disabled && !(state.resume && resetting)) || (uploading > 0 && (queuing || resetting || !state.running))
     modelPicker.setState({ identity: state.modelIdentity || '', label: state.modelLabel || '', visible: !!state.modelLabel, disabled: state.disabled || uploading > 0 })
-    sendBtn.innerHTML = state.running && !queuing ? ICON_STOP : ICON_SEND
-    sendBtn.setAttribute('aria-label', queuing ? 'Queue message' : state.running ? 'Stop' : 'Send')
-    sendBtn.title = queuing ? 'Add to queue (Enter)' : state.running ? 'Stop (⌘.)' : 'Send (Enter)'
-    sendBtn.classList.toggle('is-stop', state.running && !queuing)
+    sendBtn.innerHTML = state.running && !queuing && !resetting ? ICON_STOP : ICON_SEND
+    sendBtn.setAttribute('aria-label', resetting ? 'Reset chat' : queuing ? 'Queue message' : state.running ? 'Stop' : 'Send')
+    sendBtn.title = resetting ? 'Reset chat' : queuing ? 'Add to queue (Enter)' : state.running ? 'Stop (⌘.)' : 'Send (Enter)'
+    sendBtn.classList.toggle('is-stop', state.running && !queuing && !resetting)
     resumeBtn.hidden = !state.resume
     if (state.disabled) { closePopover(); history.close(); models.close() }
   }
@@ -629,12 +635,12 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     el, history, models,
     setCommands(list, own) {
       agentCommands = list
-      ownCommands = OWN_COMMANDS.filter((c) => c.name === 'queue' || c.name === 'review' || (c.name === 'model' && own.model !== false) || (c.name === 'mode' && own.modes) || (c.name === 'fork' && own.fork) || (c.name === 'poise' && own.poise !== false))
+      ownCommands = OWN_COMMANDS.filter((c) => c.name === 'queue' || c.name === 'review' || c.name === 'compact' || c.name === 'reset' || (c.name === 'model' && own.model !== false) || (c.name === 'mode' && own.modes) || (c.name === 'fork' && own.fork) || (c.name === 'poise' && own.poise !== false))
     },
     setState(next) {
       // The view calls this on every render, including each streamed delta;
       // only a real change touches the DOM.
-      const same = state.running === next.running && state.disabled === next.disabled
+      const same = state.running === next.running && state.maintaining === next.maintaining && state.disabled === next.disabled
         && state.modelIdentity === next.modelIdentity && state.modelLabel === next.modelLabel && state.placeholder === next.placeholder && state.resume === next.resume && state.sessionId === next.sessionId
       if (state.sessionId !== next.sessionId) { history.close(); models.close(); closePopover() }
       state = next

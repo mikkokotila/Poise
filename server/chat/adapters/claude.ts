@@ -1,3 +1,4 @@
+import { compactionWaiter } from './compaction'
 import { appendMemories } from '../memory-content'
 // Claude Code through the Claude Agent SDK (pinned to the installed Claude
 // Code: package.json pins @anthropic-ai/claude-agent-sdk 0.3.274, whose
@@ -95,9 +96,12 @@ function textOf(content: unknown): string {
   return content.map((block: any) => (block?.type === 'text' && typeof block.text === 'string' ? block.text : '')).join('')
 }
 
-export function createClaudeAdapter(host: AdapterHost, options: { exitGraceMs?: number, queueSettleMs?: number } = {}): Adapter {
+export function createClaudeAdapter(host: AdapterHost, options: { exitGraceMs?: number, queueSettleMs?: number, compactTimeoutMs?: number } = {}): Adapter {
   const exitGraceMs = options.exitGraceMs ?? EXIT_GRACE_MS
   const queueSettleMs = options.queueSettleMs ?? QUEUE_SETTLE_MS
+  let nativeChild: ChildProcess | null = null
+  let compactBoundaries = 0
+  let compactFailure: string | undefined
   let active: Query | null = null
   let sessionId: string | undefined
   let modelId = ''
@@ -317,6 +321,8 @@ export function createClaudeAdapter(host: AdapterHost, options: { exitGraceMs?: 
   function dispatch(message: SDKMessage) {
     switch (message.type) {
       case 'system': {
+        if (message.subtype === 'compact_boundary') compactBoundaries++
+        if (message.subtype === 'status' && message.compact_result === 'failed') compactFailure = message.compact_error || 'Native compaction failed.'
         if (message.subtype === 'init') {
           sessionId = message.session_id
           modelId = message.model || modelId
@@ -540,6 +546,7 @@ export function createClaudeAdapter(host: AdapterHost, options: { exitGraceMs?: 
       const command = spawnOptions.command === 'node' ? process.execPath : spawnOptions.command
       pendingChild = host.spawn(command, spawnOptions.args, { env: spawnOptions.env })
       pendingChild.then((child) => {
+        nativeChild = child
         current.attach(child)
         alive = true
         child.once('exit', (code, signal) => {
@@ -619,6 +626,20 @@ export function createClaudeAdapter(host: AdapterHost, options: { exitGraceMs?: 
         current.resolve = (result: TurnResult) => { signal.removeEventListener('abort', onAbort); resolve(result) }
         send(current, appendMemories(parts.join('\n'), input.memories))
       })
+    },
+
+    async compact(id, memories, signal) {
+      if (signal.aborted) return { stopReason: 'cancelled' }
+      if (!nativeChild || !alive || !commands.some(command => command.name === 'compact')) throw new AdapterError('claude', 'Claude Code does not advertise /compact in this session.', 'unsupported')
+      if (turn) throw new AdapterError('claude', 'Wait for the running turn before compacting.', 'protocol')
+      const before = compactBoundaries; compactFailure = undefined
+      const wait = compactionWaiter(nativeChild, signal, options.compactTimeoutMs)
+      void adapter.prompt(id, { text: '/compact', attachments: [], mentions: [], memories }, signal).then(result => {
+        wait.finish(compactFailure ? { stopReason: 'error', error: compactFailure } : {
+          ...result, compaction: { changed: compactBoundaries > before,
+            detail: compactBoundaries > before ? 'Conversation context compacted. Chat history is unchanged.' : 'Claude did not need a new compaction boundary. Chat history is unchanged.' } })
+      }, error => wait.finish({ stopReason: 'error', error: String(error), terminate: true }))
+      return wait.result
     },
 
     async steer(text: string): Promise<void> {

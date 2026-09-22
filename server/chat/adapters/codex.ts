@@ -1,3 +1,4 @@
+import { compactionWaiter } from './compaction'
 import { memorySuffix } from '../memory-content'
 // Codex adapter: one `codex app-server --listen stdio://` process per session,
 // speaking the v2 app-server JSON-RPC protocol (codex-cli 0.154.0, types under
@@ -296,7 +297,7 @@ async function exitMessage(process: ChildProcess, link: StdioRpc, fallback: Erro
 
 // ── Adapter ─────────────────────────────────────────────────────────────
 
-export function createCodexAdapter(host: AdapterHost): Adapter {
+export function createCodexAdapter(host: AdapterHost, options: { compactTimeoutMs?: number } = {}): Adapter {
   let child: ChildProcess | null = null
   let rpc: StdioRpc | null = null
   let safeMode = false
@@ -304,6 +305,7 @@ export function createCodexAdapter(host: AdapterHost): Adapter {
   let modelId = ''
   let effort = ''
   let efforts: string[] = []
+  let compaction: { wait: ReturnType<typeof compactionWaiter>, nativeId: string | null, completed: boolean } | null = null
   let active: ActiveTurn | null = null
   let lastFinishedNativeId: string | null = null
   let closing = false
@@ -571,7 +573,10 @@ export function createCodexAdapter(host: AdapterHost): Adapter {
   }
 
   function registerNotifications(): void {
-    on('turn/started', ({ turn }) => { turnFor(turn.id) })
+    on('turn/started', ({ threadId: source, turn }) => {
+      if (compaction && source === threadId && turn.id !== lastFinishedNativeId) { compaction.nativeId = turn.id; return }
+      turnFor(turn.id)
+    })
 
     on('item/agentMessage/delta', ({ turnId, itemId, delta }) => {
       const turn = turnFor(turnId)
@@ -605,7 +610,11 @@ export function createCodexAdapter(host: AdapterHost): Adapter {
       if (turn) handleItemStarted(turn, item)
     })
 
-    on('item/completed', ({ turnId, item, completedAtMs }) => {
+    on('item/completed', ({ threadId: source, turnId, item, completedAtMs }) => {
+      if (compaction && source === threadId && item.type === 'contextCompaction' && turnId !== lastFinishedNativeId) {
+        if (compaction.nativeId === turnId) compaction.completed = true
+        return
+      }
       const turn = turnFor(turnId)
       if (turn) handleItemCompleted(turn, item, completedAtMs)
     })
@@ -640,7 +649,14 @@ export function createCodexAdapter(host: AdapterHost): Adapter {
       turn.usage = { inputTokens: tokenUsage.last.inputTokens, outputTokens: tokenUsage.last.outputTokens, totalTokens: tokenUsage.last.totalTokens }
     })
 
-    on('turn/completed', ({ turn: native }) => {
+    on('turn/completed', ({ threadId: source, turn: native }) => {
+      if (compaction && source === threadId && native.id === compaction.nativeId) {
+        lastFinishedNativeId = native.id
+        const ok = native.status === 'completed' && compaction.completed
+        compaction.wait.finish(ok ? { stopReason: 'end_turn', compaction: { changed: true } }
+          : { stopReason: native.status === 'interrupted' ? 'cancelled' : 'error', error: native.error ? describeTurnError(native.error) : 'Codex did not confirm a completed context compaction.' })
+        return
+      }
       const turn = turnFor(native.id)
       if (!turn) return
       const stopReason = turnStopReason(native.status)
@@ -962,6 +978,15 @@ export function createCodexAdapter(host: AdapterHost): Adapter {
       return result.finally(() => signal.removeEventListener('abort', onAbort))
     },
 
+    async compact(_id, _memories, signal) {
+      if (!threadId || !child || active || compaction) throw new AdapterError(AGENT, 'Codex is not ready to compact.', 'protocol')
+      const current = { wait: compactionWaiter(child, signal, options.compactTimeoutMs), nativeId: null as string | null, completed: false }
+      compaction = current
+      if (!signal.aborted) void call<'thread/compact/start', v2.ThreadCompactStartResponse>('thread/compact/start', { threadId }, { timeoutMs: 60_000 })
+        .catch(error => current.wait.finish({ stopReason: 'error', error: `Codex compaction failed: ${String(error)}`, terminate: true }))
+      return current.wait.result.finally(() => { if (compaction === current) compaction = null })
+    },
+
     async steer(text) {
       const turn = active
       if (!threadId || !turn || turn.done || !turn.nativeId) throw new AdapterError(AGENT, `${LABEL} has no running turn to steer`, 'protocol')
@@ -1006,6 +1031,7 @@ export function createCodexAdapter(host: AdapterHost): Adapter {
     },
 
     async close() {
+      compaction?.wait.finish({ stopReason: 'cancelled', terminate: true })
       const process = child
       if (!process) return
       closing = true

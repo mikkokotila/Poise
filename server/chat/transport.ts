@@ -217,6 +217,8 @@ export class ChatSocketServer {
       case 'session.new': {
         return { session: await runtime.create(localSessionRequest(command)) }
       }
+      case 'context.reset':
+        return { session: await runtime.reset(String(command.sessionId || '')) }
       case 'session.resume':
         return { session: await runtime.resume(String(command.id || '')) }
       case 'session.fork':

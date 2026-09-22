@@ -298,8 +298,15 @@ export class ChatClient {
 
   private deliver(envelope: ChatEnvelope): void {
     if (!envelope || !Number.isSafeInteger(envelope.seq) || envelope.seq < 1) return
-    const last = this.subscriptions.get(envelope.sessionId)
+    let last = this.subscriptions.get(envelope.sessionId)
     if (last === undefined || envelope.seq <= last) return
+    // A reset replaces intentionally removed events, rather than leaving
+    // an unfillable sequence gap for reconnecting subscribers.
+    if (envelope.event.type === 'session.reset') {
+      this.bufferedEvents.delete(envelope.sessionId)
+      last = envelope.seq - 1
+      this.subscriptions.set(envelope.sessionId, last)
+    }
     let buffered = this.bufferedEvents.get(envelope.sessionId)
     if (!buffered) { buffered = new Map(); this.bufferedEvents.set(envelope.sessionId, buffered) }
     buffered.set(envelope.seq, envelope)

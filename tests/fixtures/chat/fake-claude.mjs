@@ -23,7 +23,7 @@
 //   linger            like slow, but the process ignores stdin EOF and
 //                     SIGTERM for a while (exit cannot be verified in time)
 
-import { appendFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, writeFileSync, existsSync } from 'node:fs'
 
 const SESSION_ID = process.env.FAKE_CLAUDE_SESSION_ID || 'a1b2c3d4-0000-4000-8000-000000000001'
 const MODEL = 'claude-opus-5'
@@ -84,7 +84,15 @@ async function runTurn(message) {
   const [verb, ...rest] = prompt.split(/\s+/)
   running = { uuid, prompt, interrupted: false, wake: null }
   note(`turn ${uuid} ${verb}`)
-  if (verb === 'echo') {
+  if (verb === '/compact') {
+    writeFileSync('compact-input', prompt)
+    while (process.argv.includes('--compact-gated') && !existsSync('compact-release')) await new Promise(resolve => setTimeout(resolve, 10))
+    if (process.argv.includes('--compact-hold')) { await new Promise(resolve => { running.wake = resolve }); return }
+    await new Promise(resolve => setTimeout(resolve, 160))
+    if (process.argv.includes('--compact-fail')) write({ type: 'system', subtype: 'status', session_id: SESSION_ID, uuid: id('uuid'), status: null, compact_result: 'failed', compact_error: 'summarizer failed' })
+    else if (!process.argv.includes('--compact-noop')) write({ type: 'system', subtype: 'compact_boundary', session_id: SESSION_ID, uuid: id('uuid'), compact_metadata: { trigger: 'manual', pre_tokens: 1200 } })
+    result([uuid])
+  } else if (verb === 'echo') {
     text(uuid, `echo: ${rest.join(' ')}`)
     result([uuid])
   } else if (verb === 'old-cli') {

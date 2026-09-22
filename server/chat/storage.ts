@@ -376,3 +376,20 @@ export function getDiffEvent(sessionId: string, diffId: string): Extract<ChatEve
     .get(sessionId, diffId) as { event: string } | undefined
   return row ? JSON.parse(row.event) as Extract<ChatEvent, { type: 'diff' }> : null
 }
+
+/** Replace this chat's history atomically without reusing sequence numbers.
+ * Receipts, queued future work, files and Caller outcomes remain independent. */
+export const resetConversation = db.transaction((current: SessionRecord): { session: SessionRecord, envelope: ChatEnvelope } => {
+  const row = db.prepare('SELECT last_seq FROM chat_sessions WHERE id = ?').get(current.id) as { last_seq: number } | undefined
+  if (!row) throw new Error('unknown chat session')
+  const session: SessionRecord = { ...current, status: 'idle', contextResetting: false, contextCompacting: false,
+    contextResetSeq: row.last_seq + 1, lastSeq: row.last_seq + 1, pendingRequests: [],
+    nativeSessionId: undefined, context: undefined, queuedHandoff: undefined,
+    forkedFrom: undefined, staged: undefined, interruptedTurnId: undefined,
+    orphanNotice: undefined, safeModePending: false, queuedBehind: undefined }
+  db.prepare('DELETE FROM chat_events WHERE session_id = ?').run(session.id)
+  db.prepare('DELETE FROM chat_pending WHERE session_id = ?').run(session.id)
+  const envelope = appendEvent(session.id, { type: 'session.reset', session })
+  saveSession(session)
+  return { session, envelope }
+})

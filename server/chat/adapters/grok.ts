@@ -1,3 +1,4 @@
+import { compactionWaiter } from './compaction'
 import { memorySuffix } from '../memory-content'
 // Grok Build over the Agent Client Protocol (protocol version 1), which is
 // Chat's internal vocabulary, so this adapter is mostly a pass-through.
@@ -96,7 +97,7 @@ function stopReason(value: unknown): StopReason {
   }
 }
 
-export function createGrokAdapter(host: AdapterHost): Adapter {
+export function createGrokAdapter(host: AdapterHost, options: { compactTimeoutMs?: number } = {}): Adapter {
   let rpc: StdioRpc | null = null
   let child: ChildProcess | null = null
   let sessionId: string | undefined
@@ -473,6 +474,17 @@ export function createGrokAdapter(host: AdapterHost): Adapter {
         openTools.clear()
         turnId = null
       }
+    },
+
+    async compact(id, memories, signal) {
+      if (signal.aborted) return { stopReason: 'cancelled' }
+      if (!child || !alive || !commands.some(command => command.name.replace(/^\//, '') === 'compact')) throw new AdapterError('grok', 'Grok Build does not advertise /compact in this session.', 'unsupported')
+      if (turnId) throw new AdapterError('grok', 'Wait for the running turn before compacting.', 'protocol')
+      const wait = compactionWaiter(child, signal, options.compactTimeoutMs)
+      void adapter.prompt(id, { text: '/compact', attachments: [], mentions: [], memories }, signal).then(
+        result => wait.finish({ ...result, compaction: { changed: true, detail: 'Grok finished its native compaction command. Chat history is unchanged.' } }),
+        error => wait.finish({ stopReason: 'error', error: String(error), terminate: true }))
+      return wait.result
     },
 
     async steer(text: string): Promise<void> {
