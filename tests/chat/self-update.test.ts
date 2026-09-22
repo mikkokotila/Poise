@@ -605,3 +605,25 @@ it('QC: queue handback also preserves borrowed files when the former executor is
   await waitFor(() => ofType(events, source.id, 'turn.finished').length === 2)
   expect(controls.adapters[0].inputs.at(-1)?.attachments[0]?.text).toBe('Keep this after deleting the old executor')
 }, 20_000)
+
+it('saved switches: an isolated Poise change retains selected instructions and its retry identity', async () => {
+  const bridge = fakeBridge('poise-test:db')
+  const { runtime, controls, events } = makeRuntime({ bridge })
+  runtime.createSwitch({ name: 'implementation-style', content: 'Include regression evidence and concise outcomes.', revision: 0 })
+  runtime.createSwitch({ name: 'another-style', content: 'A different instruction.', revision: 0 })
+  const source = await sourceSession(runtime, events), changeId = randomUUID()
+  const context = { attachments: [], mentions: [], switches: ['implementation-style'] }
+  const result = await runtime.startPoiseChange(source.id, 'Improve the console', changeId, context)
+  await waitFor(() => ofType(events, result.session.id, 'turn.finished').length === 1)
+  const agent = controls.adapters.find(adapter => adapter.host.sessionId === result.session.id)!
+  expect(agent.inputs).toHaveLength(1)
+  expect(ofType(events, result.session.id, 'turn.started')[0].prompt.text).toBe('/implementation-style Improve the console')
+  expect(agent.inputs[0].text).toContain('Include regression evidence and concise outcomes.')
+  expect(agent.inputs[0].text).toContain('[Saved switch: /implementation-style]')
+  expect(agent.inputs[0].text).not.toContain('A different instruction.')
+  expect(ofType(events, source.id, 'turn.started')).toHaveLength(0)
+  const retried = await runtime.startPoiseChange(source.id, 'Improve the console', changeId, context)
+  expect(retried.session.id).toBe(result.session.id)
+  await expect(runtime.startPoiseChange(source.id, 'Improve the console', changeId, { ...context, switches: ['another-style'] })).rejects.toMatchObject({ statusCode: 409 })
+  expect(bridge.calls.filter(call => call.op === 'prepare' && call.input.id === changeId)).toHaveLength(1)
+})

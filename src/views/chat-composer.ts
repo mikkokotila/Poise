@@ -1,3 +1,4 @@
+import type { ChatSwitch } from '../chat-switches'
 // Chat composer — the chat pane's composer habits (mode-lock chip, auto-
 // resize, attachment chips, Enter sends / Shift+Enter newline) plus what a
 // coding session needs on top: `@` file mentions, a `/` command palette, and
@@ -10,7 +11,7 @@
 
 import type { Attachment, CommandOption, Mention } from '../../server/chat/protocol'
 import { escapeHtml } from '../markdown'
-import { parseChatCommandChain, modelCompletion, commandBody } from '../../server/chat/commands'
+import { parseChatCommandChain as parseChain, modelCompletion as completeModel, commandBody } from '../../server/chat/commands'
 import { commandDraftText, editableCommandDraft } from '../chat-command-draft'
 import { createCommandModels } from './chat-command-models'
 import type { AgentInfo } from '../chat-client'
@@ -68,6 +69,7 @@ export interface Composer {
   models: ReturnType<typeof createCommandModels>
   setCommands(agentCommands: CommandOption[], own: { model?: boolean, modes: boolean, fork: boolean, poise?: boolean }): void
   setState(state: ComposerState): void
+  setSwitches(switches: ChatSwitch[]): void
   getDraft(): ComposerDraft
   setDraft(draft: ComposerDraft | null): void
   focus(): void
@@ -94,6 +96,7 @@ const STEER_HINT_MS = 2000
 const DEFAULT_PLACEHOLDER = 'Message…'
 
 const OWN_COMMANDS: CommandOption[] = [
+  { name: 'create', description: 'Save a reusable switch', hint: '/name instructions' },
   { name: 'model', description: 'Choose model and effort' },
   { name: 'compact', description: 'Compact model context; keep chat history' },
   { name: 'reset', description: 'Clear chat history and start fresh' },
@@ -153,7 +156,11 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   let activeMode: string | null = null
   let selectedModel: string | undefined
   let agentCommands: CommandOption[] = []
-  let ownCommands: CommandOption[] = [OWN_COMMANDS[0]]
+  let customCommands: CommandOption[] = []
+  let switchNames = new Set<string>()
+  const parseChatCommandChain = (text: string) => parseChain(text, switchNames)
+  const modelCompletion = (text: string) => completeModel(text, switchNames)
+  let ownCommands: CommandOption[] = OWN_COMMANDS.filter(command => ['model', 'create'].includes(command.name))
   let state: ComposerState = { running: false, disabled: true, sessionId: null }
   let steerTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -181,7 +188,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     selectedModel = undefined; renderSelectedModel(); applyState(); changed(); input.focus()
   })
   function canChainMode(): boolean {
-    return !activeMode || activeMode.split(/\s+/).every(name => ['queue', 'review', 'compact', 'reset'].includes(name.replace(/^\//, '')))
+    return !activeMode || activeMode.split(/\s+/).every(name => (['queue', 'review', 'compact', 'reset'].includes(name.replace(/^\//, '')) || switchNames.has(name.replace(/^\//, ''))))
   }
   const models = createCommandModels(input, {
     load: handlers.loadModels, changed,
@@ -230,7 +237,8 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   // ── Mode-lock chip ────────────────────────────────────────────────────
 
   function allCommands(): CommandOption[] {
-    return [...ownCommands, ...agentCommands.filter(command => !ownCommands.some(own => own.name === command.name))]
+    const local = [...ownCommands, ...customCommands]
+    return [...local, ...agentCommands.filter(command => !local.some(own => own.name === command.name))]
   }
 
   function applyMode(mode: string | null): void {
@@ -238,12 +246,14 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     if (!mode) {
       chip.hidden = true
       chip.textContent = ''
+      chip.removeAttribute('title')
       wrap.classList.remove('mode-locked')
       input.style.paddingLeft = ''
       applyState()
       return
     }
     chip.textContent = `/${mode}`
+    chip.title = `/${mode}`
     chip.hidden = false
     wrap.classList.add('mode-locked')
     // The chip sits inside the textarea's box; its rendered width decides the
@@ -343,6 +353,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
 
   type PopItem = { label: string, hint?: string, value: string }
   let popKind: 'command' | 'mention' | null = null
+  let pendingCommandQuery: string | null = null
   let popItems: PopItem[] = []
   let popIndex = 0
   let commandStart = 0
@@ -351,6 +362,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   let mentionSeq = 0
 
   function closePopover(): void {
+    pendingCommandQuery = null
     mentionSeq++
     if (mentionTimer) { clearTimeout(mentionTimer); mentionTimer = null }
     popKind = null
@@ -386,6 +398,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     popItems = items.map((c) => ({ label: `/${c.name}`, hint: [c.hint, c.description].filter(Boolean).join(' — '), value: c.name }))
     popIndex = 0
     renderPopover()
+    if (!popItems.length) pendingCommandQuery = v
   }
 
   function mentionQuery(): { start: number, q: string } | null {
@@ -400,7 +413,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   }
 
   function updateMentions(): void {
-    const m = mentionQuery()
+    const m = parseChatCommandChain(commandDraftText(rawDraft())).create ? null : mentionQuery()
     if (!m || !state.sessionId) {
       if (popKind === 'mention') closePopover()
       return
@@ -470,14 +483,15 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     const draft = rawDraft()
     draft.text = commandDraftText(draft)
     const chain = parseChatCommandChain(draft.text)
-    if (state.disabled && !(state.resume && chain.context === 'reset' && !chain.queue)) return
+    if (state.disabled && !(state.resume && ((chain.context === 'reset' && !chain.queue) || chain.create))) return
     if (chain.missingModel) { updateModels(); return }
-    if (!chain.text && !chain.review && !chain.model && !chain.context && !attachments.length) return
-    if (state.running && chain.model && !chain.text && !chain.review && !chain.context && !attachments.length) {
+    if (!chain.text && !chain.review && !chain.model && !chain.context && !chain.switches?.length && !chain.create && !attachments.length) return
+    if (state.running && chain.model && !chain.text && !chain.switches?.length && !chain.review && !chain.context && !attachments.length) {
       showNote('Model chosen for the next task'); return
     }
-    if (chain.queue || (state.running && chain.context !== 'reset' && (chain.context || chain.review || chain.model || state.maintaining))) {
-      if (!chain.text && !chain.review && !chain.context && !attachments.length) return
+    if (chain.create) handlers.onSend(draft)
+    else if (chain.queue || (state.running && chain.context !== 'reset' && (chain.context || chain.review || chain.model || state.maintaining))) {
+      if (!chain.text && !chain.switches?.length && !chain.review && !chain.context && !attachments.length) return
       handlers.onQueue({ ...draft, text: commandBody(chain), mode: 'queue', ...(chain.model ? { model: chain.model } : {}) })
     } else if (state.running && chain.context !== 'reset') {
       if (!draft.text && !draft.attachments.length) return
@@ -500,8 +514,8 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   el.addEventListener('submit', (e) => {
     e.preventDefault()
     const chain = parseChatCommandChain(commandDraftText(rawDraft()))
-    if (state.disabled && !(state.resume && chain.context === 'reset' && !chain.queue)) return
-    if (state.running && !chain.context && !chain.queue && !chain.review && !chain.model && !chain.missingModel && !(state.maintaining && (chain.text || attachments.length))) handlers.onStop()
+    if (state.disabled && !(state.resume && ((chain.context === 'reset' && !chain.queue) || chain.create))) return
+    if (state.running && !chain.create && !chain.switches?.length && !chain.context && !chain.queue && !chain.review && !chain.model && !chain.missingModel && !(state.maintaining && (chain.text || attachments.length))) handlers.onStop()
     else submit()
   })
   input.addEventListener('input', () => {
@@ -590,15 +604,20 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     input.disabled = state.disabled && !state.resume
     attachBtn.disabled = state.disabled || uploading > 0
     const chain = parseChatCommandChain(commandDraftText(rawDraft()))
-    const resetting = chain.context === 'reset' && !chain.queue
-    const queuing = chain.queue || (state.running && !resetting && (!!chain.model || chain.review || chain.missingModel || !!chain.context || (state.maintaining && (!!chain.text || !!attachments.length))))
-    input.placeholder = state.disabled ? (state.placeholder || 'Unavailable') : (queuing || state.maintaining) ? 'Queue a follow-up…' : (state.running ? 'Steer the agent… (Enter)' : (state.placeholder || DEFAULT_PLACEHOLDER))
-    sendBtn.disabled = (state.disabled && !(state.resume && resetting)) || (uploading > 0 && (queuing || resetting || !state.running))
+    const creating = chain.create === true
+    const resetting = chain.context === 'reset' && !chain.queue && !creating
+    const hasContent = !!chain.text || !!chain.switches?.length || !!attachments.length
+    const queuing = !creating && (chain.queue || (state.running && !resetting && (!!chain.model || chain.review || chain.missingModel || !!chain.context || (state.maintaining && hasContent))))
+    const stopping = state.running && !queuing && !resetting && !creating && !chain.switches?.length
+    input.placeholder = creating ? '/switch-name Instructions to save…' : state.disabled ? (state.placeholder || 'Unavailable') : (queuing || state.maintaining) ? 'Queue a follow-up…' : (state.running ? 'Steer the agent… (Enter)' : (state.placeholder || DEFAULT_PLACEHOLDER))
+    sendBtn.disabled = (state.disabled && !(state.resume && (resetting || creating))) || (uploading > 0 && (queuing || resetting || creating || !state.running))
     modelPicker.setState({ identity: state.modelIdentity || '', label: state.modelLabel || '', visible: !!state.modelLabel, disabled: state.disabled || uploading > 0 })
-    sendBtn.innerHTML = state.running && !queuing && !resetting ? ICON_STOP : ICON_SEND
-    sendBtn.setAttribute('aria-label', resetting ? 'Reset chat' : queuing ? 'Queue message' : state.running ? 'Stop' : 'Send')
-    sendBtn.title = resetting ? 'Reset chat' : queuing ? 'Add to queue (Enter)' : state.running ? 'Stop (⌘.)' : 'Send (Enter)'
-    sendBtn.classList.toggle('is-stop', state.running && !queuing && !resetting)
+    const icon = stopping ? 'stop' : 'send'
+    if (sendBtn.dataset.icon !== icon) { sendBtn.innerHTML = stopping ? ICON_STOP : ICON_SEND; sendBtn.dataset.icon = icon }
+    const label = creating ? 'Save switch' : resetting ? 'Reset chat' : queuing ? 'Queue message' : stopping ? 'Stop' : state.running ? 'Steer' : 'Send'
+    sendBtn.setAttribute('aria-label', label)
+    sendBtn.title = label
+    sendBtn.classList.toggle('is-stop', stopping)
     resumeBtn.hidden = !state.resume
     if (state.disabled) { closePopover(); history.close(); models.close() }
   }
@@ -610,7 +629,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     observedWidth = box.contentRect.width
     // Resize the text outside observer delivery, avoiding a resize loop when
     // wrapping changes the composer height while its width is animating.
-    requestAnimationFrame(autoResize)
+    requestAnimationFrame(() => { if (activeMode) applyMode(activeMode); autoResize() })
   })
   widthObserver.observe(el)
 
@@ -635,7 +654,13 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     el, history, models,
     setCommands(list, own) {
       agentCommands = list
-      ownCommands = OWN_COMMANDS.filter((c) => c.name === 'queue' || c.name === 'review' || c.name === 'compact' || c.name === 'reset' || (c.name === 'model' && own.model !== false) || (c.name === 'mode' && own.modes) || (c.name === 'fork' && own.fork) || (c.name === 'poise' && own.poise !== false))
+      ownCommands = OWN_COMMANDS.filter((c) => c.name === 'create' || c.name === 'queue' || c.name === 'review' || c.name === 'compact' || c.name === 'reset' || (c.name === 'model' && own.model !== false) || (c.name === 'mode' && own.modes) || (c.name === 'fork' && own.fork) || (c.name === 'poise' && own.poise !== false))
+    },
+    setSwitches(switches) {
+      switchNames = new Set(switches.map(item => item.name))
+      customCommands = switches.map(item => ({ name: item.name, description: item.content.replace(/\s+/g, ' ').slice(0, 90), hint: 'Saved switch' }))
+      applyState()
+      if (popKind === 'command' || (pendingCommandQuery === input.value && document.activeElement === input)) updatePalette()
     },
     setState(next) {
       // The view calls this on every render, including each streamed delta;
@@ -652,7 +677,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
     },
     setDraft: setComposerDraft,
     focus() { input.focus() },
-    layout() { autoResize(); modelPicker.layout(); if (activeMode) applyMode(activeMode) },
+    layout() { if (activeMode) applyMode(activeMode); autoResize(); modelPicker.layout() },
     isUploading() { return uploading > 0 },
   }
 }

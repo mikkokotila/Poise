@@ -22,6 +22,7 @@
 //   so they are never queued behind a whole coding turn.
 
 import { readMemories } from './memories'
+import { expandSwitches, savedSwitchNames, saveSwitch } from './custom-switches'
 import { appendMemories } from './memory-content'
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
@@ -110,6 +111,7 @@ interface PendingRequest {
 }
 
 interface RunningTurn {
+  switches?: string[]
   id: string
   callId: string | null
   startedAt: number
@@ -197,6 +199,10 @@ export interface AgentAvailability {
   reason?: string
   models: CatalogModel[]
   efforts: string[]
+}
+
+function parseCommands(text: string) {
+  return parseChatCommandChain(text, /^\s*\//.test(text) ? savedSwitchNames() : undefined)
 }
 
 export class ChatRuntime extends EventEmitter {
@@ -974,12 +980,18 @@ export class ChatRuntime extends EventEmitter {
    *  reserve its one implementing turn (runbook + the exact request) before
    *  answering — so no browser prompt can slip in first and a resend of the
    *  same `changeId` finds the session instead of making a second one. */
-  async startPoiseChange(sourceId: string, text: string, changeId: string, context: Pick<PromptInput, 'attachments' | 'mentions'> = { attachments: [], mentions: [] }): Promise<PoiseChangeResult> {
+  async startPoiseChange(sourceId: string, text: string, changeId: string, context: Pick<PromptInput, 'attachments' | 'mentions'> & { switches?: string[] } = { attachments: [], mentions: [] }): Promise<PoiseChangeResult> {
     this.assertAcceptingWork()
     const request = String(text || '').trim()
+    const names = context.switches
+    if (names !== undefined) {
+      const known = savedSwitchNames()
+      if (!Array.isArray(names) || names.length > 128 || !names.every(name => typeof name === 'string' && known.has(name))) throw new ChatError(400, 'The selected saved switches are unavailable.', 'invalid')
+    }
+    expandSwitches(request, names)
     const input = this.validatePrompt(sourceId, { text: request, ...context })
-    const contextKey = input.attachments.length || input.mentions.length
-      ? sha256Of(Buffer.from(canonicalJson({ attachments: input.attachments, mentions: input.mentions }))) : ''
+    const contextKey = input.attachments.length || input.mentions.length || names?.length
+      ? sha256Of(Buffer.from(canonicalJson({ attachments: input.attachments, mentions: input.mentions, ...(names?.length ? { switches: names } : {}) }))) : ''
     // Two arrivals of one change id (a resend under a new request id while
     // the first is still preparing) share the one start — but only for the
     // same request from the same session; a second prepare and bind would
@@ -991,12 +1003,12 @@ export class ChatRuntime extends EventEmitter {
       if (running.sourceId !== sourceId || running.request !== request || running.contextKey !== contextKey) throw changeIdConflict()
       return running.promise
     }
-    const promise = this.track(() => this.startChange(sourceId, request, changeId, input, contextKey)).finally(() => this.changeStarts.delete(key))
+    const promise = this.track(() => this.startChange(sourceId, request, changeId, input, contextKey, names)).finally(() => this.changeStarts.delete(key))
     this.changeStarts.set(key, { sourceId, request, contextKey, promise })
     return promise
   }
 
-  private async startChange(sourceId: string, request: string, changeId: string, input: PromptInput, contextKey: string): Promise<PoiseChangeResult> {
+  private async startChange(sourceId: string, request: string, changeId: string, input: PromptInput, contextKey: string, names?: string[]): Promise<PoiseChangeResult> {
     if (this.stopped) throw new ChatError(503, 'the chat runtime is stopping', 'agent_error')
     const bridge = this.selfUpdate
     if (!bridge?.configured) {
@@ -1099,8 +1111,9 @@ export class ChatRuntime extends EventEmitter {
     // The agent gets the runbook around the request; the transcript shows
     // the request as the person typed it.
     const turn = this.reserveTurn(live)
+    turn.switches = names
     turn.implementsChange = true
-    turn.shown = transferred
+    turn.shown = names?.length ? { ...transferred, text: [...names.map(name => `/${name}`), transferred.text].join(' ') } : transferred
     const prompt: PromptInput = { ...transferred, text: poiseChangePrompt({ request, branch: prepared.branch, baseSha: prepared.baseSha, workspace: checkout }) }
     void this.serialized(live, () => this.runTurn(live, turn, prompt)).catch(() => undefined)
     return { session: this.withLive(live.record), change: bound }
@@ -1202,6 +1215,14 @@ export class ChatRuntime extends EventEmitter {
     await this.flushSelfUpdateOutbox()
   }
 
+  createSwitch(input: { name: string, content: string, revision: number }) {
+    this.assertAcceptingWork()
+    const nativeNames = storage.listSessions(this.instance).flatMap(record => (record.commands || []).map(command => command.name))
+    const catalogue = saveSwitch(input, nativeNames)
+    this.emit('switches', catalogue)
+    return catalogue
+  }
+
   // ── Turns ──────────────────────────────────────────────────────────────
 
   /** Reserve the turn synchronously — before any await — so a second prompt
@@ -1226,19 +1247,22 @@ export class ChatRuntime extends EventEmitter {
     this.assertAcceptingWork()
     const session = this.requireLive(id)
     const prompt = this.validatePrompt(id, input)
-    const chain = parseChatCommandChain(prompt.text)
+    const chain = parseCommands(prompt.text)
     if (chain.missingModel) throw new ChatError(400, 'Choose a model from /model first.', 'invalid')
+    if (chain.create) throw new ChatError(400, 'Save a switch with the create command, not an agent prompt.', 'invalid')
+    expandSwitches(chain.text, chain.switches)
     if (chain.queue) throw new ChatError(400, 'Use the queue command to defer a message.', 'invalid')
     if (chain.context === 'reset' && chain.review) throw new ChatError(400, 'A reset removes the reply to review. Review it first or send a new message after resetting.', 'invalid')
-    if (chain.model && !chain.text && !chain.review && !chain.context && !prompt.attachments.length) throw new ChatError(400, 'A model-only selection uses set_model; add a task to send a message.', 'invalid')
+    if (chain.model && !chain.text && !chain.switches?.length && !chain.review && !chain.context && !prompt.attachments.length) throw new ChatError(400, 'A model-only selection uses set_model; add a task to send a message.', 'invalid')
     const throughSeq = session.record.lastSeq
     const target = chain.review ? latestReviewTarget(id, throughSeq) : null
     if (chain.review && !target) throw new ChatError(400, 'There is no assistant reply to review yet.', 'invalid')
     const turn = this.reserveTurn(session)
+    turn.switches = chain.switches
     turn.commandModel = chain.model
     turn.contextAction = chain.context
     if (target) turn.review = { target, throughSeq }
-    if (chain.model || chain.review || chain.context) turn.shown = prompt
+    if (chain.model || chain.review || chain.context || chain.switches?.length) turn.shown = prompt
     void this.serialized(session, () => this.runTurn(session, turn, { ...prompt, text: chain.text })).catch(() => undefined)
     return { turnId: turn.id }
   }
@@ -1269,7 +1293,9 @@ export class ChatRuntime extends EventEmitter {
     if (!UUID_PATTERN.test(itemId)) throw new ChatError(400, 'itemId must be a UUID', 'invalid')
     return this.control(session, async () => {
       const submitted = this.validatePrompt(id, input)
-      const chain = parseChatCommandChain(submitted.text)
+      const chain = parseCommands(submitted.text)
+      if (chain.create) throw new ChatError(400, 'Save the switch directly with /create, then queue its use.', 'invalid')
+      expandSwitches(chain.text, chain.switches)
       if (chain.context === 'reset' && chain.review) throw new ChatError(400, 'A reset removes the reply to review.', 'invalid')
       if (chain.missingModel) throw new ChatError(400, 'Choose a model from /model first.', 'invalid')
       const prompt = this.validatePrompt(id, { ...submitted, text: commandBody(chain) })
@@ -1549,16 +1575,18 @@ export class ChatRuntime extends EventEmitter {
     session.draining = false
     try {
       if (turn.abort.signal.aborted) throw new Error(turn.failure || 'cancelled before it started')
-      if (turn.contextAction === 'compact' || (turn.queueItem && parseChatCommandChain(input.text).context === 'compact')) {
+      if (turn.contextAction === 'compact' || (turn.queueItem && parseCommands(input.text).context === 'compact')) {
         record.contextCompacting = true
         this.saveRecord(session); this.emit_(record.id, { type: 'session.updated', session: record })
       }
       await session.steering
       if (record.safeModePending && session.adapter?.alive) await this.stopProcess(session)
       if (turn.queueItem) {
-        const chain = parseChatCommandChain(input.text)
+        const chain = parseCommands(input.text)
+        if (chain.create) throw new ChatError(400, 'Switch definitions cannot be created by a queued provider task.', 'invalid')
+        turn.switches = chain.switches
         turn.contextAction = chain.context
-        if (chain.context) { turn.shown = input; input = { ...input, text: chain.text } }
+        if (chain.context || chain.switches?.length) { turn.shown = input; input = { ...input, text: chain.text } }
         if (chain.review) {
           const throughSeq = record.lastSeq
           const target = latestReviewTarget(record.id, throughSeq)
@@ -1575,12 +1603,12 @@ export class ChatRuntime extends EventEmitter {
         await lease.acquire({ signal: turn.abort.signal, onBusy: busy => this.reportBusy(session, busy) })
         session.lease = lease
         this.clearContext(session)
-        if (!input.text && !input.attachments.length) {
+        if (!input.text && !input.attachments.length && !turn.switches?.length) {
           this.emit_(record.id, { type: 'turn.started', turnId: turn.id, prompt: turn.shown ?? { ...input, text: '/reset' }, ...(turn.queueItem ? { queueItemId: turn.queueItem.id } : {}) })
           started = true; stopReason = 'end_turn'; return
         }
       }
-      if (turn.contextAction === 'compact' && (!record.nativeSessionId || record.queuedHandoff || !storage.findEvent(record.id, e => e.type === 'text.delta')) && !input.text && !input.attachments.length && !turn.review) {
+      if (turn.contextAction === 'compact' && (!record.nativeSessionId || record.queuedHandoff || !storage.findEvent(record.id, e => e.type === 'text.delta')) && !input.text && !input.attachments.length && !turn.switches?.length && !turn.review) {
         this.emit_(record.id, { type: 'turn.started', turnId: turn.id, prompt: turn.shown ?? { ...input, text: '/compact' }, ...(turn.queueItem ? { queueItemId: turn.queueItem.id } : {}) })
         started = true
         this.emit_(record.id, { type: 'context.compacted', turnId: turn.id, detail: 'No native conversation history to compact yet.' })
@@ -1667,7 +1695,7 @@ export class ChatRuntime extends EventEmitter {
         this.saveRecord(session); this.emit_(record.id, { type: 'session.updated', session: record })
         this.emit_(record.id, { type: 'context.compacted', turnId: turn.id,
           detail: compacted.compaction?.detail || (compacted.compaction?.changed === false ? 'No further compaction was needed.' : 'Conversation context compacted. Chat history is unchanged.') })
-        if (!input.text && !input.attachments.length && !turn.review) { agentSettled = true; stopReason = 'end_turn'; usage = compacted.usage; return }
+        if (!input.text && !input.attachments.length && !turn.switches?.length && !turn.review) { agentSettled = true; stopReason = 'end_turn'; usage = compacted.usage; return }
         turn.abort.signal.throwIfAborted()
       }
       if (record.contextCompacting) { record.contextCompacting = false; this.saveRecord(session); this.emit_(record.id, { type: 'session.updated', session: record }) }
@@ -1683,7 +1711,7 @@ export class ChatRuntime extends EventEmitter {
       turn.abort.signal.throwIfAborted()
       turn.contextAction = undefined
       turn.agentInvoked = true
-      const response = adapter.prompt(turn.id, withAutoMergeInstructions({ ...adapterInput, memories: readMemories().text }, record.autoMerge, turn.implementsChange), turn.abort.signal)
+      const response = adapter.prompt(turn.id, withAutoMergeInstructions({ ...adapterInput, text: expandSwitches(adapterInput.text, turn.switches), memories: readMemories().text }, record.autoMerge, turn.implementsChange), turn.abort.signal)
       turn.releasePrompt()
       const result = await response
       agentSettled = true
@@ -1907,6 +1935,8 @@ export class ChatRuntime extends EventEmitter {
     if (!turn || turn.stopping) throw new ChatError(409, 'no turn is running', 'no_turn')
     if (turn.contextAction === 'compact' || session.record.contextCompacting || session.record.contextResetting) throw new ChatError(409, 'Context maintenance is running; queue the next message.', 'turn_in_progress')
     const shown = this.validatePrompt(id, { text, attachments: context.attachments, mentions: context.mentions })
+    const chain = parseCommands(shown.text)
+    if (chain.create || chain.queue || chain.context || chain.review || chain.model) throw new ChatError(400, 'This command starts a separate action; queue it instead of steering.', 'invalid')
     // Do not put this wait on the control chain: startup drains that chain
     // before invoking the prompt. Early interjections belong after that boundary.
     if (!turn.agentInvoked) await this.track(() => turn.promptReady)
@@ -1916,7 +1946,7 @@ export class ChatRuntime extends EventEmitter {
       await this.serve(session, async () => {
         const resolved = await this.resolveInput(session, shown)
         if (session.turn !== turn || session.draining || turn.stopping || turn.abort.signal.aborted) throw new ChatError(409, 'the turn has ended', 'no_turn')
-        const input = withAutoMergeInstructions({ ...resolved, text: steeringContext(resolved) }, session.record.autoMerge, turn.implementsChange)
+        const input = withAutoMergeInstructions({ ...resolved, text: expandSwitches(steeringContext({ ...resolved, text: chain.text }), chain.switches) }, session.record.autoMerge, turn.implementsChange)
         await session.adapter!.steer(appendMemories(input.text, readMemories().text))
         this.emit_(id, { type: 'steer.sent', turnId: turn.id, text: shown.text,
           ...(shown.attachments.length ? { attachments: shown.attachments } : {}), ...(shown.mentions.length ? { mentions: shown.mentions } : {}) })

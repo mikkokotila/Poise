@@ -1,3 +1,4 @@
+import type { ChatSwitches } from '../../src/chat-switches'
 import { expect, test, type Page, type WebSocketRoute } from '@playwright/test'
 import type { ChatEnvelope, ChatEvent, ClientFrame, SessionRecord } from '../../server/chat/protocol'
 
@@ -34,6 +35,8 @@ const AGENTS: { agents: unknown[], defaults: { model: string, fallback: string, 
 }
 
 interface ServerState {
+  serverStartedAt?: string
+  switches?: ChatSwitches
   sessions: SessionRecord[]
   history: Record<string, ChatEnvelope[]>
   calls: { method: string, path: string, body: unknown }[]
@@ -59,6 +62,7 @@ async function installRoutes(page: Page, state: ServerState): Promise<void> {
     if (path === '/api/models') { await route.fulfill({ json: { catalog: { models: [], review_providers: [], path: '' }, places: [], fixed: [], refresh: null } }); return }
     if (path === '/api/claude-auth') { await route.fulfill({ json: { status: 'authenticated', reason: null, checkedAt: NOW, verifiedAt: NOW, authMethod: 'claude.ai', subscriptionType: 'max', loginInProgress: false } }); return }
     if (path === '/api/repos') { await route.fulfill({ json: { repos: ['acme/app', 'acme/docs'] } }); return }
+    if (path === '/api/chat/switches') { await route.fulfill({ json: state.switches || { revision: 0, switches: [] } }); return }
     if (path === '/api/chat/agents') { await route.fulfill({ json: state.agents || AGENTS }); return }
     if (path === '/api/chat/repo') {
       await route.fulfill({ json: { checkout: '/tmp/app', currentBranch: 'main', defaultBranch: 'main', dirty: false, dirtyFiles: 0, branches: ['main', 'feature/x'], prs: [{ number: 42, title: 'Add login', branch: 'feature/login' }] } })
@@ -134,11 +138,19 @@ async function installSocket(page: Page, state?: ServerState): Promise<Socket> {
   }
   await page.routeWebSocket('**/ws/chat', (ws) => {
     sock.ws = ws
-    ws.send(JSON.stringify({ kind: 'hello', instance: 'poise-dev:test', serverStartedAt: NOW }))
+    ws.send(JSON.stringify({ kind: 'hello', instance: 'poise-dev:test', serverStartedAt: state?.serverStartedAt || NOW }))
     ws.onMessage((message) => {
       const frame = JSON.parse(String(message)) as ClientFrame
       sock.frames.push(frame)
-      if (sock.autoAck && ['queue.add', 'queue.update', 'queue.remove'].includes(frame.command.type) && state) {
+      if (sock.autoAck && frame.command.type === 'switch.create' && state) {
+        const command = frame.command
+        const before = state.switches || { revision: 0, switches: [] }
+        const old = before.switches.find(item => item.name === command.name)
+        const item = { name: command.name, content: command.content, revision: (old?.revision || 0) + 1, updatedAt: NOW }
+        state.switches = { revision: before.revision + 1, switches: [...before.switches.filter(row => row.name !== command.name), item] }
+        ws.send(JSON.stringify({ kind: 'switches.updated', catalogue: state.switches }))
+        sock.ack(frame, true, '', undefined, { catalogue: state.switches })
+      } else if (sock.autoAck && ['queue.add', 'queue.update', 'queue.remove'].includes(frame.command.type) && state) {
         const cmd = frame.command
         if (cmd.type !== 'queue.add' && cmd.type !== 'queue.update' && cmd.type !== 'queue.remove') throw new Error('Unexpected queue command')
         const s = state.sessions.find(s => s.id === cmd.sessionId)!
@@ -2742,4 +2754,164 @@ test('context controls: model list stays mounted between pointer down and Send a
   } finally { await page.mouse.up() }
   await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
   expect(sock.framesOf('context.reset')).toHaveLength(1)
+})
+
+function switchCatalogue(content = 'Use the Velocin voice.'): ChatSwitches {
+  return { revision: 1, switches: [{ name: 'velocin-voice', content, revision: 1, updatedAt: NOW }, { name: 'terse', content: 'Keep it concise.', revision: 1, updatedAt: NOW }] }
+}
+
+test('saved switches: /create chip saves literal text from a fresh console without creating a session', async ({ page }) => {
+  const state = makeState([]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.ready()
+  await input(page).fill('/create'); await input(page).press('Space')
+  await expect(page.locator('.chat-v-chip')).toHaveText('/create')
+  await expect(input(page)).toHaveAttribute('placeholder', /switch-name/)
+  const content = 'Use short sentences.\n/reset\n/model not-a-model\nKeep the voice human. 🪶\n'
+  await input(page).fill('/velocin-voice\n' + content)
+  await expect(commandModels(page)).toBeHidden()
+  await expect(page.locator('.chat-popover')).toBeHidden()
+  await page.getByRole('button', { name: 'Save switch', exact: true }).click()
+  await expect(page.locator('.chat-notice')).toContainText('Saved /velocin-voice')
+  expect(sock.framesOf('switch.create')[0].command).toEqual({ type: 'switch.create', name: 'velocin-voice', content, revision: 0 })
+  expect(state.calls.filter(call => call.method === 'POST' && call.path === '/api/chat/sessions')).toEqual([])
+  for (const kind of ['prompt', 'steer', 'cancel', 'context.reset', 'queue.add']) expect(sock.framesOf(kind)).toEqual([])
+  await page.reload(); await input(page).fill('/vel')
+  await expect(page.locator('.chat-pop-label')).toHaveText('/velocin-voice')
+  await input(page).press('Enter'); await input(page).fill('Write an introduction'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ text: '/velocin-voice Write an introduction' })
+})
+
+test('saved switches: creation and replacement during a turn never steer, queue or stop it', async ({ page }) => {
+  const state = makeState([session({ status: 'running' })]); state.switches = switchCatalogue()
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('/create /velocin-voice Revised voice.'); await input(page).press('Enter')
+  await expect(page.locator('.chat-notice')).toContainText('Updated /velocin-voice')
+  expect(sock.framesOf('switch.create')[0].command).toMatchObject({ revision: 1, content: 'Revised voice.' })
+  for (const kind of ['prompt', 'steer', 'cancel', 'queue.add']) expect(sock.framesOf(kind)).toEqual([])
+  await expect(page.locator('.chat-h-status')).toHaveText('running')
+  await input(page).fill('/velocin-voice Check the wording'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('steer').length).toBe(1)
+  expect(sock.framesOf('steer')[0].command).toMatchObject({ text: '/velocin-voice Check the wording' })
+})
+
+test('saved switches: model, two saved switches and review chain through catalogue selections', async ({ page }) => {
+  const state = makeState([session()]); state.switches = switchCatalogue()
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('/velocin-voice'); await input(page).press('Space')
+  await input(page).fill('/model'); await commandModels(page).locator('[data-identity="gpt-6-astra-max"]').click()
+  await input(page).fill('/terse'); await input(page).press('Space')
+  await input(page).fill('/review'); await input(page).press('Space')
+  await input(page).fill('Check the claims'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ text: '/model gpt-6-astra-max /velocin-voice /terse /review Check the claims' })
+  expect(sock.framesOf('switch.create')).toEqual([])
+})
+
+test('saved switches: a definition body never opens command or mention pickers', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('/create'); await input(page).press('Space')
+  await input(page).fill('/my-writing-skill\n/reset\n/model\n@README.md')
+  await expect(page.locator('.chat-popover')).toBeHidden(); await expect(commandModels(page)).toBeHidden()
+  await page.getByRole('button', { name: 'Save switch', exact: true }).click()
+  await expect(page.locator('.chat-notice')).toContainText('Saved /my-writing-skill')
+  expect(sock.framesOf('switch.create')[0].command).toMatchObject({ name: 'my-writing-skill', content: '/reset\n/model\n@README.md' })
+  for (const kind of ['prompt', 'steer', 'context.reset', 'set_model']) expect(sock.framesOf(kind)).toEqual([])
+})
+
+test('saved switches: a failed save keeps the definition and newer text without starting a session', async ({ page }) => {
+  const state = makeState([]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.ready(); sock.autoAck = false
+  await input(page).fill('/create /custom-skill Keep this definition.'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('switch.create').length).toBe(1)
+  await input(page).fill('A newer draft')
+  sock.ack(sock.framesOf('switch.create')[0], false, 'Save unavailable')
+  await expect.poll(() => input(page).inputValue()).toContain('Keep this definition.')
+  await expect.poll(() => input(page).inputValue()).toContain('A newer draft')
+  await expect(page.locator('.chat-notice')).toContainText('Save unavailable')
+  expect(state.calls.filter(c => c.path === '/api/chat/sessions' && c.method === 'POST')).toEqual([])
+  expect(sock.framesOf('prompt')).toEqual([])
+})
+
+test('saved switches: a task waits for the preceding creation acknowledgement', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1'); sock.autoAck = false
+  await input(page).fill('/create /custom-skill Saved instructions'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('switch.create').length).toBe(1)
+  await input(page).fill('/custom-skill Do the work'); await input(page).press('Enter')
+  await expect(input(page)).toHaveValue(''); expect(sock.framesOf('prompt')).toEqual([])
+  const catalogue = { revision: 1, switches: [{ name: 'custom-skill', content: 'Saved instructions', revision: 1, updatedAt: NOW }] }
+  sock.ack(sock.framesOf('switch.create')[0], true, '', undefined, { catalogue })
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ text: '/custom-skill Do the work' })
+})
+
+test('saved switches: names created in another tab appear without reopening a dismissed picker', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('/'); await input(page).press('Escape')
+  const catalogue = { revision: 1, switches: [{ name: 'any-user-chosen-name', content: '<img src=x onerror=alert(1)>\nPlain instructions', revision: 1, updatedAt: NOW }] }
+  sock.ws!.send(JSON.stringify({ kind: 'switches.updated', catalogue }))
+  await expect(page.locator('.chat-popover')).toBeHidden()
+  await input(page).fill('/any-user')
+  await expect(page.locator('.chat-pop-label')).toHaveText('/any-user-chosen-name')
+  await expect(page.locator('.chat-pop-hint')).toContainText('<img')
+  await expect(page.locator('.chat-popover img')).toHaveCount(0)
+  await input(page).press('Enter'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ text: '/any-user-chosen-name' })
+})
+
+test('saved switches: a long user-chosen name leaves writing space in a compact console', async ({ page }) => {
+  const name = ('my-' + 'long-skill-name-'.repeat(4)).slice(0, 64)
+  const state = makeState([])
+  state.switches = { revision: 1, switches: [{ name, content: 'Reusable instructions.', revision: 1, updatedAt: NOW }] }
+  await page.setViewportSize({ width: 900, height: 640 }); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.ready()
+  await input(page).fill('/' + name); await expect(page.locator('.chat-pop-label')).toHaveText('/' + name)
+  await input(page).press('Space'); await input(page).fill('There must be room to write here.')
+  await page.setViewportSize({ width: 480, height: 640 })
+  await expect.poll(() => input(page).evaluate(el => el.clientWidth - parseFloat(getComputedStyle(el).paddingLeft) - parseFloat(getComputedStyle(el).paddingRight))).toBeGreaterThan(80)
+  await page.locator('.chat-send').click()
+  await expect.poll(() => sock.framesOf('prompt').length).toBe(1)
+  expect(sock.framesOf('prompt')[0].command).toMatchObject({ text: `/${name} There must be room to write here.` })
+})
+
+test('saved switches: a catalogue from before restart cannot replace the new server library', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state)
+  let release!: () => void, requests = 0
+  const held = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/chat/switches', async route => {
+    const old = ++requests === 1
+    if (old) await held
+    await route.fulfill({ json: { revision: old ? 5 : 1, switches: [{ name: old ? 'obsolete-skill' : 'new-skill', content: 'Instructions', revision: 1, updatedAt: NOW }] } })
+  })
+  try {
+    await page.goto('/'); await sock.subscribed('s1')
+    await input(page).fill('/new-skill')
+    state.serverStartedAt = 'new-server-start'
+    sock.ws!.close()
+    await expect.poll(() => requests).toBeGreaterThan(1)
+    await expect(page.locator('.chat-pop-label')).toHaveText('/new-skill')
+    const oldResponse = page.waitForResponse(response => response.url().endsWith('/api/chat/switches'))
+    release(); await oldResponse
+    await input(page).fill('/obsolete-skill'); await expect(page.locator('.chat-popover')).toBeHidden()
+    await input(page).fill('/new-skill'); await expect(page.locator('.chat-pop-label')).toHaveText('/new-skill')
+  } finally { release() }
+})
+
+test('saved switches: catalogue updates do not replace the Send click target', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('A draft in progress')
+  await page.locator('.chat-send svg').evaluate(el => el.setAttribute('data-preserved-click-target', 'yes'))
+  const catalogue = { revision: 1, switches: [{ name: 'brand-new-skill', content: 'Instructions', revision: 1, updatedAt: NOW }] }
+  sock.ws!.send(JSON.stringify({ kind: 'switches.updated', catalogue }))
+  await input(page).fill('/brand-new-skill')
+  await expect(page.locator('.chat-pop-label')).toHaveText('/brand-new-skill')
+  await expect(page.locator('.chat-send svg[data-preserved-click-target="yes"]')).toHaveCount(1)
 })

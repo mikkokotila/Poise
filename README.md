@@ -335,6 +335,10 @@ queue; it does not interrupt that work or change the active agent mid-turn.
 The selected model and command chips survive refresh. See
 [Chat command chains and reply review](docs/Chat-commands.md).
 
+`/create /your-skill` followed by its text saves a reusable, user-named switch.
+Use it in any future Chat message, including queued tasks and command chains.
+See [Create reusable Chat switches](docs/Chat-switches.md).
+
 ## Conversation context
 
 Use `/compact` to compact the native model context while keeping Chat history.

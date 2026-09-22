@@ -250,3 +250,28 @@ it('records Safe mode once across reconnect and rejects conflicting request IDs'
   expect((await conflict).ok).toBe(false)
   expect(setSafeMode).toHaveBeenCalledTimes(1)
 })
+
+it('saved switches: creation broadcasts without a session and reconnect replay never reverts a newer definition', async () => {
+  const { saveSwitch, readSwitches } = await import('../server/chat/custom-switches')
+  const create = vi.fn(async () => { throw new Error('No native session should be created') })
+  const createSwitch = vi.fn(function (this: EventEmitter, input: { name: string, content: string, revision: number }) {
+    const catalogue = saveSwitch(input)
+    this.emit('switches', catalogue)
+    return catalogue
+  })
+  const connect = await serve(create, { createSwitch })
+  const first = await connect(), observer = await connect()
+  const changes: unknown[] = []
+  observer.on('message', raw => { const frame = JSON.parse(raw.toString()); if (frame.kind === 'switches.updated') changes.push(frame.catalogue) })
+  const original = { id: 'create-reusable-switch', command: { type: 'switch.create', name: 'arbitrary-skill', content: 'Original instructions', revision: 0 } }
+  const saved = ack(first, original.id); first.send(JSON.stringify(original)); expect((await saved).ok).toBe(true)
+  await expect.poll(() => changes.length).toBe(1)
+  const replacement = { id: 'update-reusable-switch', command: { ...original.command, content: 'Updated instructions', revision: 1 } }
+  const updated = ack(first, replacement.id); first.send(JSON.stringify(replacement)); expect((await updated).ok).toBe(true)
+  await expect.poll(() => changes.length).toBe(2)
+  first.terminate()
+  const next = await connect(), replayed = ack(next, original.id)
+  next.send(JSON.stringify(original)); expect((await replayed).ok).toBe(true)
+  expect(createSwitch).toHaveBeenCalledTimes(2); expect(create).not.toHaveBeenCalled()
+  expect(readSwitches().switches.find(item => item.name === 'arbitrary-skill')).toMatchObject({ content: 'Updated instructions', revision: 2 })
+})

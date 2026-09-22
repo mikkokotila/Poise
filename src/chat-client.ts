@@ -1,3 +1,4 @@
+import { parseChatSwitches, type ChatSwitches } from './chat-switches'
 // Chat view's connection to the session runtime: one WebSocket for events and
 // commands, REST for everything that is a plain request/response (session
 // list, creation, history, catalog). The wire vocabulary is
@@ -81,6 +82,7 @@ interface Pending {
 }
 
 export interface ChatClientEvents {
+  switches: (catalogue: ChatSwitches) => void
   /** A transcript event for a subscribed session, in seq order, never repeated. */
   event: (envelope: ChatEnvelope) => void
   connection: (state: ConnectionState) => void
@@ -140,6 +142,7 @@ export class ChatClient {
   private handshakeTimer: ReturnType<typeof setTimeout> | null = null
   private bufferedEvents = new Map<string, Map<number, ChatEnvelope>>()
   private listeners: { [K in keyof ChatClientEvents]: Set<ChatClientEvents[K]> } = {
+    switches: new Set(),
     event: new Set(),
     connection: new Set(),
     restart: new Set(),
@@ -276,6 +279,11 @@ export class ChatClient {
         this.setState('open')
         return
       }
+      case 'switches.updated': {
+        const catalogue = parseChatSwitches(frame.catalogue)
+        if (catalogue) for (const fn of this.listeners.switches) fn(catalogue)
+        return
+      }
       case 'ack': {
         const p = this.pending.get(frame.id)
         if (!p) return
@@ -376,8 +384,8 @@ export class ChatClient {
    *  in the browser and kept for any retry, so the durable receipt answers a
    *  resend instead of preparing a second change. The ack carries the new
    *  dedicated session and the change record; anything else is an error. */
-  async startPoiseChange(sessionId: string, text: string, changeId: string, context?: Pick<import('../server/chat/protocol').PromptInput, 'attachments' | 'mentions'>): Promise<PoiseChangeAck> {
-    const result = await this.send({ type: 'poise.change', sessionId, text, changeId, ...(context?.attachments.length || context?.mentions.length ? context : {}) }) as { session?: unknown, change?: unknown } | null
+  async startPoiseChange(sessionId: string, text: string, changeId: string, context?: Pick<import('../server/chat/protocol').PromptInput, 'attachments' | 'mentions'> & { switches?: string[] }): Promise<PoiseChangeAck> {
+    const result = await this.send({ type: 'poise.change', sessionId, text, changeId, ...(context?.attachments.length || context?.mentions.length || context?.switches?.length ? context : {}) }) as { session?: unknown, change?: unknown } | null
     const change = parseChange(result?.change)
     const session = result?.session && typeof result.session === 'object' ? result.session as SessionRecord : null
     if (!session || typeof session.id !== 'string' || !change) {
@@ -422,6 +430,20 @@ export class ChatClient {
   }
 
   // ── REST ───────────────────────────────────────────────────────────────
+
+  async listSwitches(): Promise<ChatSwitches> {
+    const catalogue = parseChatSwitches(await jsonFetch('/api/chat/switches'))
+    if (!catalogue) throw new ChatCommandError('Saved switches could not be loaded.')
+    return catalogue
+  }
+
+  async createSwitch(input: { name: string, content: string, revision: number }): Promise<ChatSwitches> {
+    const answer = await this.send({ type: 'switch.create', ...input }) as { catalogue?: unknown } | null
+    const catalogue = parseChatSwitches(answer?.catalogue)
+    const saved = catalogue?.switches.find(item => item.name === input.name.replace(/^\//, '').toLowerCase())
+    if (!catalogue || !saved || saved.content !== input.content || saved.revision < Math.max(1, input.revision)) throw new ChatCommandError('The switch was not acknowledged. Your definition has been kept.', 'command_in_doubt')
+    return catalogue
+  }
 
   listSessions(): Promise<{ sessions: SessionRecord[], instance: string }> {
     return jsonFetch('/api/chat/sessions')

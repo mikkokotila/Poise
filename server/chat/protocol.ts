@@ -9,6 +9,7 @@
 // everything after the last `seq` it acknowledged and renders the transcript
 // from the mirror alone — the agent is never woken to show history.
 
+import type { ChatSwitches } from '../../src/chat-switches'
 import type { SelfChange } from '../../src/self-update-types'
 
 export type AgentId = 'claude' | 'codex' | 'grok' | 'muse'
@@ -340,6 +341,7 @@ export interface NewSessionRequest {
 }
 
 export type ChatCommand =
+  | { type: 'switch.create', name: string, content: string, revision: number }
   | { type: 'subscribe', sessionId: string, afterSeq: number }
   | { type: 'unsubscribe', sessionId: string }
   | { type: 'session.list' }
@@ -367,7 +369,7 @@ export type ChatCommand =
    *  browser for a typed `/poise …` message; `changeId` is minted once per
    *  request so a resend after an in-doubt answer never starts a second
    *  change. The ack is a `PoiseChangeAck`. */
-  | { type: 'poise.change', sessionId: string, text: string, changeId: string, attachments?: Attachment[], mentions?: Mention[] }
+  | { type: 'poise.change', sessionId: string, text: string, changeId: string, attachments?: Attachment[], mentions?: Mention[], switches?: string[] }
 
 export interface SafeModeAck { session: SessionRecord, applies: 'current_turn' | 'next_turn', warning?: string }
 
@@ -389,6 +391,7 @@ export interface ClientFrame {
 
 /** Server → client frames. */
 export type ServerFrame =
+  | { kind: 'switches.updated', catalogue: ChatSwitches }
   | { kind: 'ack', id: string, ok: true, result?: unknown }
   | { kind: 'ack', id: string, ok: false, error: string, code?: string }
   | { kind: 'event', envelope: ChatEnvelope }
