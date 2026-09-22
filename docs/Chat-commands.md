@@ -82,3 +82,10 @@ are scripted; they do not contact live model accounts.
 
 `/compact` and `/reset` are Poise-owned context switches across the native agents.
 See [Chat context controls](Chat-context.md) for completion, reset and queue behavior.
+
+## User-created switches
+
+`/create /your-name` followed by reusable text saves a custom skill without
+starting or interrupting an agent. The name is yours to choose. Saved switches
+appear in the palette, work across chats and can be combined with model,
+queue, context and review switches. See [Create reusable Chat switches](Chat-switches.md).

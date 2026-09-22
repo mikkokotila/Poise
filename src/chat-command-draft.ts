@@ -12,7 +12,8 @@ export function commandDraftText(draft: ComposerDraft): string {
   if (model && startsWithCommand(text, model)) text = text.slice(model.length).trimStart()
   const mode = draft.mode ? `/${draft.mode}` : ''
   if (mode && !startsWithCommand(text, mode)) text = `${mode} ${text}`
-  return `${model}${model && text ? ' ' : ''}${text}`.trim()
+  const serialized = `${model}${model && text ? ' ' : ''}${text}`
+  return /^\s*\/create(?:\s|$)/i.test(serialized) ? serialized.trimStart() : serialized.trim()
 }
 
 export function editableCommandDraft(draft: ComposerDraft): ComposerDraft {

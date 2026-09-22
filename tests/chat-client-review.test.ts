@@ -155,3 +155,13 @@ it('context: reset crosses a deleted history gap and discards an older refill', 
   latest().close(); await vi.advanceTimersByTimeAsync(500); latest().open(); hello()
   expect(latest().sent[0].command.afterSeq).toBe(13)
 })
+
+it.each([{ switches: [] }, { switches: [{ name: 'requested-skill', content: 'Different content', revision: 1, updatedAt: 'now' }] }])(
+  'saved switches: an acknowledgement must confirm the requested definition (%j)', async ({ switches }) => {
+    const saved = client.createSwitch({ name: 'requested-skill', content: 'Requested content', revision: 0 })
+    latest().open(); hello()
+    const id = latest().sent.find(frame => frame.command.type === 'switch.create')!.id
+    latest().receive({ kind: 'ack', id, ok: true, result: { catalogue: { revision: 1, switches } } })
+    await expect(saved).rejects.toMatchObject({ code: 'command_in_doubt' })
+  },
+)

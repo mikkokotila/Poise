@@ -5689,6 +5689,12 @@ body:has(#view-chat:not([hidden])) #app { padding-bottom: 0; }
 /* The chip lives inside the textarea's box; chat-composer.ts measures it and
    pads the text past it. */
 .chat-v-chip {
+  /* User-chosen names and chains must leave room for the actual message. */
+  max-width: 50%;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 20px;
   position: absolute;
   left: 10px;
   top: 5px;
@@ -5755,6 +5761,7 @@ body:has(#view-chat:not([hidden])) #app { padding-bottom: 0; }
 .chat-pop-item.active,
 .chat-pop-item:hover { background: var(--hover); }
 .chat-pop-label { font-family: 'SF Mono', 'JetBrains Mono', Menlo, monospace; white-space: nowrap; }
+.chat-v-composer .chat-pop-label { min-width: 0; max-width: 65%; overflow: hidden; text-overflow: ellipsis; }
 .chat-pop-hint { color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── New session dialog ── */

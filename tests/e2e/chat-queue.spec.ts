@@ -121,6 +121,14 @@ test('executes an idle five-item queue after the first task through real ACP, SQ
       await page.screenshot({ path: info.outputPath(`qc-steering-${theme}.png`), animations: 'disabled' })
     }
     await expect(page.locator('.chat-h-status')).toHaveText('idle')
+    // /create is a local library edit: no native prompt, checkout action or turn.
+    await input.fill('/create /release-notes\nUse concrete outcomes, evidence and limitations.'); await input.press('Enter')
+    await expect(page.locator('.chat-notice')).toContainText('Saved /release-notes')
+    const library = await (await page.request.get(`${origin}/api/chat/switches`)).json()
+    expect(library.switches).toHaveLength(1)
+    expect(library.switches[0]).toMatchObject({ name: 'release-notes', revision: 1, content: 'Use concrete outcomes, evidence and limitations.' })
+    const created = await (await page.request.get(`${origin}/__test__/timings`)).json()
+    expect(created.nativeInputs).toHaveLength(8); expect(created.spawnCount).toBe(1)
     const nativeBefore = steered.session.nativeSessionId
     await input.fill('/compact'); await input.press('Space'); await input.press('Enter')
     await expect(page.locator('.chat-note')).toContainText('native compaction command')
@@ -148,6 +156,25 @@ test('executes an idle five-item queue after the first task through real ACP, SQ
     expect(fresh.session.nativeSessionId).not.toBe(nativeBefore)
     expect(fresh.nativeInputs.at(-1)[0].text).toBe('A wholly fresh task')
     expect(fresh.nativeInputs.at(-1).at(-1).text).toBe('\n\n[Memories]\nRemember this on every queued task: äö.')
+    // The library survives reset/reload. Queue expansion uses the last saved body.
+    await expect(page.locator('.chat-h-status')).toHaveText('idle')
+    await input.fill('/queue /release-notes Describe the result'); await input.press('Enter')
+    await expect(page.locator('.chat-message-queue')).toContainText('/release-notes Describe the result')
+    await input.fill('/create /release-notes\nUpdated reusable instructions: concrete outcomes only.'); await input.press('Enter')
+    await expect(page.locator('.chat-notice')).toContainText('Updated /release-notes')
+    await input.fill('Initial task for the saved-switch queue'); await input.press('Enter')
+    await expect(page.locator('.chat-msg-agent').last()).toContainText('DONE: Describe the result')
+    await expect(page.locator('.chat-h-status')).toHaveText('idle')
+    const reused = await (await page.request.get(`${origin}/__test__/timings`)).json()
+    expect(reused.nativeInputs).toHaveLength(12)
+    expect(reused.nativeInputs.at(-1)[0].text).toBe('Describe the result\n\n[Saved switch: /release-notes]\nUpdated reusable instructions: concrete outcomes only.\n[End saved switch: /release-notes]')
+    expect(reused.nativeInputs.at(-1).at(-1).text).toBe('\n\n[Memories]\nRemember this on every queued task: äö.')
+    await page.reload(); await input.fill('/release')
+    await expect(page.locator('.chat-pop-label')).toHaveText('/release-notes')
+    for (const theme of ['light', 'dark']) {
+      await page.evaluate(value => { document.documentElement.dataset.theme = value }, theme)
+      await page.screenshot({ path: info.outputPath(`saved-switch-${theme}.png`), animations: 'disabled' })
+    }
   } finally {
     await stop(child)
   }

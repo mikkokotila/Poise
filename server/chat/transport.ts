@@ -1,3 +1,5 @@
+import { readSwitches } from './custom-switches'
+import type { ChatSwitches } from '../../src/chat-switches'
 import { readChatFile } from './file-preview'
 import { readMemories, saveMemories } from './memories'
 // The browser-facing side of Chat v1: the WebSocket at /ws/chat (events
@@ -64,6 +66,9 @@ export class ChatSocketServer {
   private readonly serverStartedAt = `${new Date().toISOString()}:${randomUUID()}`
   private closing: Promise<void> | null = null
   private readonly upgrades = new Map<Server, (req: IncomingMessage, socket: Duplex, head: Buffer) => void>()
+  private readonly onSwitches = (catalogue: ChatSwitches) => {
+    for (const connection of this.connections) this.send(connection, { kind: 'switches.updated', catalogue })
+  }
   private readonly onEvent = (envelope: ChatEnvelope) => this.broadcast(envelope)
   private readonly onDeleted = (sessionId: string) => {
     for (const connection of this.connections) {
@@ -74,6 +79,7 @@ export class ChatSocketServer {
 
   constructor(private readonly runtime: ChatRuntime, private readonly policy: ApiRequestPolicy = {}) {
     this.wss = new WebSocketServer({ noServer: true, maxPayload: CHAT_LIMITS.frameBytes, perMessageDeflate: false })
+    runtime.on('switches', this.onSwitches)
     runtime.on('event', this.onEvent)
     runtime.on('deleted', this.onDeleted)
   }
@@ -177,6 +183,8 @@ export class ChatSocketServer {
   private async execute(connection: Connection, command: ChatCommand): Promise<unknown> {
     const runtime = this.runtime
     switch (command.type) {
+      case 'switch.create':
+        return { catalogue: runtime.createSwitch(command) }
       case 'subscribe': {
         const sessionId = String(command.sessionId || '')
         const afterSeq = Number.isSafeInteger(command.afterSeq) && command.afterSeq >= 0 ? command.afterSeq : 0
@@ -277,7 +285,7 @@ export class ChatSocketServer {
         const changeId = String(command.changeId || '')
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(changeId)) throw new ChatError(400, 'changeId must be a UUID', 'invalid')
         const result: import('./protocol').PoiseChangeAck = await runtime.startPoiseChange(String(command.sessionId || ''), String(command.text || ''), changeId, {
-          attachments: validAttachments(command.attachments),
+          switches: command.switches, attachments: validAttachments(command.attachments),
           mentions: Array.isArray(command.mentions) ? command.mentions.filter(m => m && typeof m.path === 'string').slice(0, 50) : [],
         })
         return result
@@ -289,6 +297,7 @@ export class ChatSocketServer {
 
   close(): Promise<void> {
     if (this.closing) return this.closing
+    this.runtime.off('switches', this.onSwitches)
     this.runtime.off('event', this.onEvent)
     this.runtime.off('deleted', this.onDeleted)
     for (const [server, listener] of this.upgrades) server.off('upgrade', listener)
@@ -349,6 +358,10 @@ export async function handleChatApi(req: IncomingMessage, res: ServerResponse, u
   const query = new URLSearchParams(url.split('?')[1] || '')
   if (!path.startsWith('/api/chat/')) return false
   try {
+    if (path === '/api/chat/switches') {
+      if (req.method === 'GET') return json(res, 200, readSwitches()), true
+      return json(res, 405, { error: 'Use GET to read saved switches.' }), true
+    }
     if (path === '/api/chat/memories') {
       if (req.method === 'GET') return json(res, 200, readMemories()), true
       if (req.method === 'PUT') return json(res, 200, saveMemories(await readJson(req))), true

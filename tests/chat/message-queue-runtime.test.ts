@@ -594,3 +594,82 @@ it('context: reconnect replay cannot reset newly added conversation a second tim
   expect(w.turns()).toHaveLength(1)
   expect(w.c.calls.at(-1)?.input.text).toBe('Keep this new conversation')
 })
+
+for (const model of ['grok-4.6-high', 'opus-5-max', 'gpt-6-astra-max', 'muse-spark-1.3-contributor-max']) {
+  it(`saved switches: ${model} receives the selected definition without executing its slash text`, async () => {
+    const w = await world({ deferStart: true })
+    const name = `voice-${randomUUID()}`
+    w.runtime.createSwitch({ name, content: '/reset\nUse a warm precise voice.\n/model not-a-real-model', revision: 0 })
+    expect(w.c.adapters).toHaveLength(0)
+    expect(w.turns()).toHaveLength(0)
+    w.runtime.prompt(w.s.id, input(`/model ${model} /${name} Write an introduction`))
+    await until(() => w.turns().length === 1)
+    expect(w.c.calls).toHaveLength(1)
+    expect(w.c.calls[0].input.text).toContain(`[Saved switch: /${name}]\n/reset\nUse a warm precise voice.\n/model not-a-real-model`)
+    expect(w.c.calls[0].input.text).toContain('Write an introduction')
+    expect(w.runtime.events(w.s.id, 0).events.some(row => row.event.type === 'session.reset')).toBe(false)
+    const shown = w.runtime.events(w.s.id, 0).events.find(row => row.event.type === 'turn.started')!.event
+    expect(shown).toMatchObject({ prompt: { text: `/model ${model} /${name} Write an introduction` } })
+    expect(JSON.stringify(shown)).not.toContain('warm precise voice')
+  })
+}
+
+it('saved switches: creation during work leaves the running agent alone; queued tasks use the latest save', async () => {
+  const w = await world({ auto: false })
+  const name = `voice-${randomUUID()}`
+  w.runtime.prompt(w.s.id, input('First task')); await until(() => w.c.calls.length === 1)
+  w.runtime.createSwitch({ name, content: 'Original voice', revision: 0 })
+  await w.add(`/${name} Follow-up`)
+  w.runtime.createSwitch({ name, content: 'Revised voice', revision: 1 })
+  expect(w.c.calls).toHaveLength(1); expect(w.c.adapters[0].steered).toEqual([])
+  w.finish(); await until(() => w.c.calls.length === 2)
+  expect(w.c.calls[1].input.text).toContain('Revised voice')
+  expect(w.c.calls[1].input.text).not.toContain('Original voice')
+  w.finish(); await until(() => w.turns().length === 2)
+})
+
+it('saved switches: multiple definitions reach review and attachment-bearing steering before Memories', async () => {
+  const w = await world()
+  const name = `voice-${randomUUID()}`, other = `detail-${randomUUID()}`
+  w.runtime.createSwitch({ name, content: 'Be particularly skeptical.', revision: 0 })
+  w.runtime.createSwitch({ name: other, content: 'Report concrete evidence.', revision: 0 })
+  w.runtime.prompt(w.s.id, input('Proposal')); await until(() => w.turns().length === 1)
+  w.runtime.prompt(w.s.id, input(`/${name} /review /${other}`)); await until(() => w.turns().length === 2)
+  expect(w.c.calls[1].input.text).toContain('adversarial critical review')
+  expect(w.c.calls[1].input.text).toContain('Be particularly skeptical.')
+  expect(w.c.calls[1].input.text).toContain('Report concrete evidence.')
+  const memories = await import('../../server/chat/memories'), before = memories.readMemories()
+  memories.saveMemories({ text: 'Always last.', revision: before.revision })
+  try {
+    w.c.auto = false
+    w.runtime.prompt(w.s.id, input('Current task')); await until(() => w.c.calls.length === 3)
+    const file = await w.runtime.saveAttachment(w.s.id, 'notes.txt', Buffer.from('Extra context'))
+    await w.runtime.steer(w.s.id, `/${name} Check this`, { attachments: [file], mentions: [{ path: 'README.md' }] })
+    const sent = w.c.adapters.at(-1)!.steered.at(-1)!
+    expect(sent).toContain('Extra context'); expect(sent).toContain('README.md')
+    expect(sent).toContain('Be particularly skeptical.')
+    expect(sent.endsWith('[Memories]\nAlways last.')).toBe(true)
+  } finally { memories.saveMemories({ text: before.text, revision: memories.readMemories().revision }); w.finish() }
+})
+
+it('saved switches: definitions survive reset and are usable in another conversation after restart', async () => {
+  const w = await world({ deferStart: true }), name = `voice-${randomUUID()}`
+  w.runtime.createSwitch({ name, content: 'Stable shared instructions.', revision: 0 })
+  w.runtime.prompt(w.s.id, input(`/${name}`)); await until(() => w.turns().length === 1)
+  await w.runtime.reset(w.s.id)
+  await w.runtime.stop()
+  const restarted = w.make(); await restarted.recover()
+  const next = await restarted.create({ agent: 'grok', model: 'grok-4.6-high', repo: 'test/queue', branch: { existing: w.s.branch.name }, deferStart: true })
+  restarted.prompt(next.id, input(`/${name} Another chat`))
+  await until(() => w.c.calls.length === 2)
+  expect(w.c.calls[1].input.text).toContain('Stable shared instructions.')
+  expect(w.c.calls[1].input.text).not.toContain('[Handoff')
+  expect(w.c.adapters.at(-1)!.options?.resume).toBeUndefined()
+})
+
+it('saved switches: malformed creation and queued definitions never create native turns', async () => {
+  const w = await world({ deferStart: true })
+  expect(() => w.runtime.prompt(w.s.id, input('/create /voice Instructions'))).toThrow(/create command/)
+  await expect(w.add('/create /voice Instructions')).rejects.toThrow(/directly/)
+  expect(w.c.adapters).toEqual([]); expect(w.c.calls).toEqual([])
+})

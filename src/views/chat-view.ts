@@ -1,3 +1,4 @@
+import { parseSwitchCreation, RESERVED_SWITCHES, type ChatSwitches } from '../chat-switches'
 // Chat — one view for a full coding-agent conversation with any installed
 // agent, running as itself under a Poise-native interface. Sessions live on
 // the Poise server (server/chat/); this view is the window: a sidebar of
@@ -22,7 +23,7 @@ import { AGENT_LABELS } from '../../server/chat/protocol'
 import { chatClient, ChatCommandError, ChatHttpError, type AgentsResponse, type AgentInfo } from '../chat-client'
 import { escapeHtml } from '../markdown'
 import { recoverDraft } from '../chat-draft-recovery'
-import { parseChatCommandChain, commandBody } from '../../server/chat/commands'
+import { parseChatCommandChain as parseChain, commandBody } from '../../server/chat/commands'
 import { commandDraftText } from '../chat-command-draft'
 import { recentMessages } from '../chat-message-history'
 import { reconcileSession } from '../chat-session-state'
@@ -195,6 +196,35 @@ function agentFor(id: string): AgentInfo | undefined {
   return agentsInfo?.agents.find((a) => a.id === id)
 }
 
+let savedSwitches: ChatSwitches = { revision: 0, switches: [] }
+let switchNames = new Set<string>()
+let switchesLoaded = false
+let switchesLoading: Promise<void> | null = null
+let switchLoadGeneration = 0
+let switchSave: Promise<void> | null = null
+const pendingSwitchDrafts = new Map<symbol, { origin: string | null, draft: ComposerDraft }>()
+const parseChatCommandChain = (text: string) => parseChain(text, switchNames)
+function acceptSwitches(catalogue: ChatSwitches): void {
+  if (switchesLoaded && catalogue.revision < savedSwitches.revision) return
+  savedSwitches = catalogue; switchesLoaded = true
+  switchNames = new Set(catalogue.switches.map(item => item.name))
+  composer?.setSwitches(catalogue.switches)
+}
+function loadSwitches(refresh = false): Promise<void> {
+  if (switchesLoading) return switchesLoading
+  if (switchesLoaded && !refresh) return Promise.resolve()
+  const generation = switchLoadGeneration
+  const request = chatClient.listSwitches().then(catalogue => {
+    if (generation !== switchLoadGeneration) return loadSwitches()
+    acceptSwitches(catalogue)
+  }, error => {
+    if (generation !== switchLoadGeneration) return loadSwitches()
+    throw error
+  }).finally(() => { if (switchesLoading === request) switchesLoading = null })
+  switchesLoading = request
+  return request
+}
+
 function loadAgents(force = false): Promise<AgentsResponse | null> {
   if (agentsPromise && !force) return agentsPromise
   agentsPromise = chatClient.agents().then((a) => { agentsInfo = a; return a }).catch((err) => {
@@ -288,11 +318,13 @@ function renderShell(): void {
       return { entries: e ? recentMessages(e.model, e.record.context) : [], loading: !!e?.loading, error: e?.error }
     },
     onSend: (draft) => {
-      if (parseChatCommandChain(commandDraftText(draft)).context === 'reset') void sendPrompt(draft)
+      if (parseChatCommandChain(commandDraftText(draft)).create || parseChatCommandChain(commandDraftText(draft)).context === 'reset') void sendPrompt(draft)
       else void withSavedMemories(draft, () => sendPrompt(draft))
     },
     onQueue: (draft) => { void withSavedMemories(draft, async () => {
       const origin = activeId
+      if (!await waitForSwitchSave(draft, origin)) return
+      if (activeId !== origin) { restoreDraftTo(origin, draft); return }
       const update = modelUpdates.get(origin)
       if (update) {
         try { await update }
@@ -373,7 +405,7 @@ function attachReloadGuards(): void {
     const blockers: string[] = []
     if (memories.editor.state.dirty) blockers.push('unsaved:memories')
     if (memories.editor.state.saving || memorySubmissions) blockers.push('saving:memories')
-    if (chatClient.pendingCount() > 0 || modelUpdates.size) blockers.push('command')
+    if (chatClient.pendingCount() > 0 || modelUpdates.size || pendingSwitchDrafts.size) blockers.push('command')
     if (composer.isUploading()) blockers.push('upload')
     if (quickSessionPromise || firstPromptPending) blockers.push('session-create')
     for (const e of sessions.values()) if (e.pending) { blockers.push('session-create'); break }
@@ -389,11 +421,18 @@ function attachReloadGuards(): void {
 }
 
 function captureDrafts() {
-  const drafts: [string, ComposerDraft | null][] = []
-  for (const [id, e] of sessions) drafts.push([id, id === activeId ? composer.getDraft() : e.draft])
+  const drafts = new Map<string, ComposerDraft | null>()
+  for (const [id, e] of sessions) drafts.set(id, id === activeId ? composer.getDraft() : e.draft)
+  let fresh = activeId ? freshDraft : composer.getDraft()
+  // A refresh during the catalogue read/save must not lose a cleared definition.
+  // Restore intent as a draft only; an uncertain save is never replayed on load.
+  for (const { origin, draft } of [...pendingSwitchDrafts.values()].reverse()) {
+    if (origin && drafts.has(origin)) drafts.set(origin, recoverDraft(draft, drafts.get(origin)))
+    else fresh = recoverDraft(draft, fresh)
+  }
   return {
     fromSha: BUILD_SHA, activeSessionId: activeId,
-    fresh: { draft: activeId ? freshDraft : composer.getDraft(), modelIdentity: freshModelIdentity }, sessions: drafts,
+    fresh: { draft: fresh, modelIdentity: freshModelIdentity }, sessions: [...drafts],
   }
 }
 
@@ -916,8 +955,9 @@ async function startPoiseChange(cmd: PoiseCommand, draft: ComposerDraft): Promis
       freshDraft = null
     }
     const sessionId = source.record.id
-    const context = { attachments: draft.attachments, mentions: draft.mentions }
-    const contextKey = context.attachments.length || context.mentions.length ? JSON.stringify(context) : ''
+    const names = parseChatCommandChain(commandDraftText(draft)).switches
+    const context = { attachments: draft.attachments, mentions: draft.mentions, ...(names?.length ? { switches: names } : {}) }
+    const contextKey = context.attachments.length || context.mentions.length || context.switches?.length ? JSON.stringify(context) : ''
     changeId = reserveChangeId(pendingStore, sessionId, cmd.request, Date.now(), contextKey)
     localChanges.set(sessionId, { id: changeId, request: cmd.request, sessionId, startedAt: Date.now() })
     setNotice(null)
@@ -1107,6 +1147,55 @@ async function applyCommandModelNow(identity: string, origin: string | null, eff
   queueRender()
 }
 
+async function createSavedSwitch(draft: ComposerDraft, origin: string | null): Promise<void> {
+  const token = Symbol('switch-save')
+  pendingSwitchDrafts.set(token, { origin, draft })
+  const previous = switchSave
+  const task = (async () => {
+    await previous?.catch(() => undefined)
+    const chain = parseChatCommandChain(commandDraftText(draft))
+    if (chain.model || chain.queue || chain.review || chain.context || chain.switches?.length) throw new Error('Use /create /name instructions on its own. The definition is saved without starting a task.')
+    if (draft.attachments.length || draft.mentions.length) throw new Error('A saved switch contains text. Paste its instructions into the console; attached files have been kept in your draft.')
+    const definition = parseSwitchCreation(commandDraftText(draft))
+    await loadSwitches()
+    const revision = savedSwitches.switches.find(item => item.name === definition.name)?.revision ?? 0
+    acceptSwitches(await chatClient.createSwitch({ ...definition, revision }))
+    if (activeId === origin) setNotice(`${revision ? 'Updated' : 'Saved'} /${definition.name}. Use it in any chat.`, 'info')
+  })()
+  switchSave = task
+  try { await task }
+  catch (error) {
+    pendingSwitchDrafts.delete(token)
+    restoreDraftTo(origin, draft)
+    if (activeId === origin) commandFailed(error, 'Save switch')
+    // A conflict response leaves the definition untouched. Refresh the palette,
+    // but retain the person's exact text for a deliberate subsequent edit.
+    void loadSwitches(true).catch(() => undefined)
+  } finally { pendingSwitchDrafts.delete(token); if (switchSave === task) switchSave = null; queueRender() }
+}
+
+async function waitForSwitchSave(draft: ComposerDraft, origin: string | null): Promise<boolean> {
+  const token = Symbol('switch-message')
+  const waiting = !!switchSave || (!switchesLoaded && /^\s*\//.test(commandDraftText(draft)))
+  if (waiting) pendingSwitchDrafts.set(token, { origin, draft })
+  try {
+    await switchSave
+    const text = commandDraftText(draft)
+    if (!switchesLoaded && /^\s*\//.test(text)) {
+      try { await loadSwitches() }
+      catch (error) {
+        const remaining = parseChain(text).text
+        const name = /^\/([a-z][a-z0-9_-]*)/i.exec(remaining)?.[1]?.toLowerCase()
+        const native = entry(origin)?.record.commands?.some(command => command.name.replace(/^\//, '').toLowerCase() === name)
+        if (name && !RESERVED_SWITCHES.has(name) && !native) throw error
+      }
+    }
+    return true
+  }
+  catch (error) { pendingSwitchDrafts.delete(token); restoreDraftTo(origin, draft); if (activeId === origin) commandFailed(error, 'Saved switches'); return false }
+  finally { if (pendingSwitchDrafts.delete(token)) queueRender() }
+}
+
 async function resetPrompt(draft: ComposerDraft, origin: string | null): Promise<void> {
   const chain = parseChatCommandChain(commandDraftText(draft))
   if (chain.review) { restoreDraftTo(origin, draft); setNotice('A reset removes the reply to review. Review first or start a new task after resetting.'); return }
@@ -1121,7 +1210,7 @@ async function resetPrompt(draft: ComposerDraft, origin: string | null): Promise
       applyResetRecord(sessions.get(origin)!, result.session)
     }, false)
     resetAcknowledged = true
-    remaining = { ...draft, text: chain.text, mode: null, ...(chain.model ? { model: chain.model } : {}) }
+    remaining = { ...draft, text: [...(chain.switches || []).map(name => `/${name}`), chain.text].filter(Boolean).join(' '), mode: null, ...(chain.model ? { model: chain.model } : {}) }
     if (activeId !== origin) { if (remaining.text || remaining.attachments.length) restoreDraftTo(origin, remaining); return }
     if (chain.model) await applyCommandModel(chain.model, origin)
     setNotice('Chat reset. Previous conversation context cleared.', 'info')
@@ -1130,7 +1219,7 @@ async function resetPrompt(draft: ComposerDraft, origin: string | null): Promise
     if (resetAcknowledged || (entry(origin)?.record.contextResetSeq || 0) > resetBefore) {
       // The durable reset event can beat a lost acknowledgement. Never put
       // /reset back into the editor where it could erase subsequent work.
-      remaining = { ...draft, text: chain.text, mode: null, ...(chain.model ? { model: chain.model } : {}) }
+      remaining = { ...draft, text: [...(chain.switches || []).map(name => `/${name}`), chain.text].filter(Boolean).join(' '), mode: null, ...(chain.model ? { model: chain.model } : {}) }
       if (remaining.text || remaining.attachments.length || remaining.model) restoreDraftTo(origin, remaining)
       if (activeId === origin) setNotice(resetAcknowledged ? `Chat was reset. The follow-up was not sent — ${(error as Error).message}` : 'Chat reset was recorded. Its acknowledgement was unavailable; any follow-up remains unsent.', 'info')
     } else {
@@ -1158,6 +1247,10 @@ async function sendPrompt(draft: ComposerDraft): Promise<void> {
   await Promise.resolve() // The composer clears after passing us the immutable draft.
   if (activeId !== origin) { restoreDraftTo(origin, draft); return }
   draft = { ...draft, text: commandDraftText(draft) }
+  if (parseChatCommandChain(draft.text).create) { await createSavedSwitch(draft, origin); return }
+  if (!await waitForSwitchSave(draft, origin)) return
+  if (activeId !== origin) { restoreDraftTo(origin, draft); return }
+  if (parseChatCommandChain(draft.text).create) { await createSavedSwitch(draft, origin); return }
   if (parseChatCommandChain(draft.text).context === 'reset') { await resetPrompt(draft, origin); return }
   const pendingModel = modelUpdates.get(origin)
   if (pendingModel) {
@@ -1168,15 +1261,15 @@ async function sendPrompt(draft: ComposerDraft): Promise<void> {
   const chain = parseChatCommandChain(draft.text)
   if (chain.missingModel) { restoreDraftTo(origin, draft); setNotice('Choose a model from /model first.'); return }
   if (chain.review && !entry()) { restoreDraftTo(origin, draft); setNotice('There is no reply to review yet.'); return }
-  if (chain.context === 'compact' && !entry() && !chain.review && !chain.text && !draft.attachments.length) {
+  if (chain.context === 'compact' && !entry() && !chain.review && !chain.text && !chain.switches?.length && !draft.attachments.length) {
     try {
       if (chain.model) await applyCommandModel(chain.model, origin)
       if (activeId === origin) setNotice('No conversation history to compact yet.', 'info')
     } catch (error) { restoreDraftTo(origin, draft); if (activeId === origin) commandFailed(error, 'Model choice') }
     return
   }
-  const own = !chain.review && /^\/(mode|fork)(?:\s+(.*))?$/s.exec(chain.text)
-  if ((chain.model && !chain.text && !chain.review && !chain.context && !draft.attachments.length) || (own && !chain.context)) {
+  const own = !chain.switches?.length && !chain.review && /^\/(mode|fork)(?:\s+(.*))?$/s.exec(chain.text)
+  if ((chain.model && !chain.text && !chain.switches?.length && !chain.review && !chain.context && !draft.attachments.length) || (own && !chain.context)) {
     try {
       if (chain.model) await applyCommandModel(chain.model, origin)
       if (activeId !== origin) { restoreDraftTo(origin, draft); return }
@@ -1277,6 +1370,12 @@ async function sendPrompt(draft: ComposerDraft): Promise<void> {
 async function steer(draft: ComposerDraft): Promise<void> {
   const e = entry()
   if (!e) return
+  if (!await waitForSwitchSave(draft, e.record.id)) return
+  if (activeId !== e.record.id) { restoreDraftTo(e.record.id, draft); return }
+  const chain = parseChatCommandChain(commandDraftText(draft))
+  if (chain.create) { await createSavedSwitch(draft, e.record.id); return }
+  if (chain.context === 'reset' && !chain.queue) { await resetPrompt(draft, e.record.id); return }
+  if (chain.queue || chain.context || chain.review || chain.model) { queueDraft(draft); return }
   try {
     await chatClient.send({ type: 'steer', sessionId: e.record.id, text: draft.text,
       ...(draft.attachments.length ? { attachments: draft.attachments } : {}), ...(draft.mentions.length ? { mentions: draft.mentions } : {}) })
@@ -1917,14 +2016,21 @@ export async function initChatView(): Promise<void> {
     // Events keep folding into the per-session models while the view is
     // hidden — that is what lets a running turn be re-joined on return
     // without a refetch — so these listeners live for the app's lifetime.
+    chatClient.on('switches', acceptSwitches)
     chatClient.on('event', onEvent)
     chatClient.on('connection', (state) => {
+      if (state === 'open') void loadSwitches(true).catch(() => undefined)
       const el = viewEl.querySelector<HTMLElement>('.chat-conn')
       if (!el) return
       el.hidden = state === 'open'
       el.textContent = state === 'connecting' ? 'Connecting…' : 'Reconnecting…'
     })
     chatClient.on('restart', () => {
+      switchLoadGeneration++; switchesLoading = null
+      switchesLoaded = false
+      savedSwitches = { revision: 0, switches: [] }; switchNames.clear()
+      composer.setSwitches([])
+      void loadSwitches(true).catch(() => undefined)
       // Sessions may have been interrupted or cleaned up; re-read them and
       // re-subscribe from what each transcript already holds.
       chatClient.resetSubscriptions()
@@ -1940,6 +2046,7 @@ export async function initChatView(): Promise<void> {
   if (!tickTimer) tickTimer = setInterval(() => { if (!viewEl.hidden) transcript.tick() }, 1000)
   chatClient.start()
   void loadAgents()
+  void loadSwitches().catch(() => undefined)
   await loadSessions()
   const restoreActive = restoredSnapshot?.activeSessionId ?? null
   applyRestoredSnapshot()
