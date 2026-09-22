@@ -2915,3 +2915,44 @@ test('saved switches: catalogue updates do not replace the Send click target', a
   await expect(page.locator('.chat-pop-label')).toHaveText('/brand-new-skill')
   await expect(page.locator('.chat-send svg[data-preserved-click-target="yes"]')).toHaveCount(1)
 })
+
+for (const stage of ['catalogue', 'ack'] as const) test(`saved switches: refresh preserves a creation waiting for ${stage} without replaying it`, async ({ page }) => {
+  const state = makeState([]); await installRoutes(page, state)
+  const sock = await installSocket(page, state)
+  let release!: () => void, reads = 0
+  const held = new Promise<void>(resolve => { release = resolve })
+  if (stage === 'catalogue') await page.route('**/api/chat/switches', async route => {
+    if (++reads === 1) await held
+    await route.fulfill({ json: { revision: 0, switches: [] } })
+  })
+  try {
+    await page.goto('/'); await sock.ready(); sock.autoAck = false
+    await input(page).fill('/create'); await input(page).press('Space')
+    await input(page).fill('/reload-skill\nKeep this reusable definition.'); await input(page).press('Enter')
+    await expect(input(page)).toHaveValue('')
+    if (stage === 'ack') await expect.poll(() => sock.framesOf('switch.create').length).toBe(1)
+    else expect(sock.framesOf('switch.create')).toHaveLength(0)
+    const before = sock.framesOf('switch.create').length
+    await page.reload()
+    await expect(page.locator('.chat-v-chip')).toHaveText('/create')
+    await expect(input(page)).toHaveValue('/reload-skill\nKeep this reusable definition.')
+    expect(sock.framesOf('switch.create')).toHaveLength(before)
+    expect(sock.framesOf('prompt')).toHaveLength(0)
+    expect(state.calls.filter(call => call.path === '/api/chat/sessions' && call.method === 'POST')).toEqual([])
+  } finally { release() }
+})
+
+test('saved switches: refresh also keeps a task waiting behind its new definition', async ({ page }) => {
+  const state = makeState([]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.ready(); sock.autoAck = false
+  await input(page).fill('/create'); await input(page).press('Space')
+  await input(page).fill('/reload-skill\nKeep this definition.'); await input(page).press('Enter')
+  await expect.poll(() => sock.framesOf('switch.create').length).toBe(1)
+  await input(page).fill('/reload-skill Keep this subsequent task too.'); await input(page).press('Enter')
+  await expect(input(page)).toHaveValue('')
+  await page.reload()
+  await expect.poll(() => input(page).inputValue()).toContain('Keep this definition.')
+  await expect.poll(() => input(page).inputValue()).toContain('Keep this subsequent task too.')
+  expect(sock.framesOf('switch.create')).toHaveLength(1)
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})

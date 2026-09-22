@@ -43,6 +43,9 @@ are revision-checked so a stale tab cannot silently overwrite a newer edit.
 Other open tabs receive the updated catalogue. Failed saves retain the
 submitted definition alongside any newer draft. A message submitted while
 a definition is saving waits for that save instead of racing ahead of it.
+Application updates wait for these operations to settle. A manual refresh
+restores pending definitions and dependent messages as unsent drafts; it never
+automatically repeats an uncertain save.
 
 Use `/create` on its own: everything after the name belongs to the definition,
 not to a chain of actions to execute now. Stored text is never parsed for

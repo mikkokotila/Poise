@@ -202,6 +202,7 @@ let switchesLoaded = false
 let switchesLoading: Promise<void> | null = null
 let switchLoadGeneration = 0
 let switchSave: Promise<void> | null = null
+const pendingSwitchDrafts = new Map<symbol, { origin: string | null, draft: ComposerDraft }>()
 const parseChatCommandChain = (text: string) => parseChain(text, switchNames)
 function acceptSwitches(catalogue: ChatSwitches): void {
   if (switchesLoaded && catalogue.revision < savedSwitches.revision) return
@@ -404,7 +405,7 @@ function attachReloadGuards(): void {
     const blockers: string[] = []
     if (memories.editor.state.dirty) blockers.push('unsaved:memories')
     if (memories.editor.state.saving || memorySubmissions) blockers.push('saving:memories')
-    if (chatClient.pendingCount() > 0 || modelUpdates.size) blockers.push('command')
+    if (chatClient.pendingCount() > 0 || modelUpdates.size || pendingSwitchDrafts.size) blockers.push('command')
     if (composer.isUploading()) blockers.push('upload')
     if (quickSessionPromise || firstPromptPending) blockers.push('session-create')
     for (const e of sessions.values()) if (e.pending) { blockers.push('session-create'); break }
@@ -420,11 +421,18 @@ function attachReloadGuards(): void {
 }
 
 function captureDrafts() {
-  const drafts: [string, ComposerDraft | null][] = []
-  for (const [id, e] of sessions) drafts.push([id, id === activeId ? composer.getDraft() : e.draft])
+  const drafts = new Map<string, ComposerDraft | null>()
+  for (const [id, e] of sessions) drafts.set(id, id === activeId ? composer.getDraft() : e.draft)
+  let fresh = activeId ? freshDraft : composer.getDraft()
+  // A refresh during the catalogue read/save must not lose a cleared definition.
+  // Restore intent as a draft only; an uncertain save is never replayed on load.
+  for (const { origin, draft } of [...pendingSwitchDrafts.values()].reverse()) {
+    if (origin && drafts.has(origin)) drafts.set(origin, recoverDraft(draft, drafts.get(origin)))
+    else fresh = recoverDraft(draft, fresh)
+  }
   return {
     fromSha: BUILD_SHA, activeSessionId: activeId,
-    fresh: { draft: activeId ? freshDraft : composer.getDraft(), modelIdentity: freshModelIdentity }, sessions: drafts,
+    fresh: { draft: fresh, modelIdentity: freshModelIdentity }, sessions: [...drafts],
   }
 }
 
@@ -1140,6 +1148,8 @@ async function applyCommandModelNow(identity: string, origin: string | null, eff
 }
 
 async function createSavedSwitch(draft: ComposerDraft, origin: string | null): Promise<void> {
+  const token = Symbol('switch-save')
+  pendingSwitchDrafts.set(token, { origin, draft })
   const previous = switchSave
   const task = (async () => {
     await previous?.catch(() => undefined)
@@ -1155,15 +1165,19 @@ async function createSavedSwitch(draft: ComposerDraft, origin: string | null): P
   switchSave = task
   try { await task }
   catch (error) {
+    pendingSwitchDrafts.delete(token)
     restoreDraftTo(origin, draft)
     if (activeId === origin) commandFailed(error, 'Save switch')
     // A conflict response leaves the definition untouched. Refresh the palette,
     // but retain the person's exact text for a deliberate subsequent edit.
     void loadSwitches(true).catch(() => undefined)
-  } finally { if (switchSave === task) switchSave = null; queueRender() }
+  } finally { pendingSwitchDrafts.delete(token); if (switchSave === task) switchSave = null; queueRender() }
 }
 
 async function waitForSwitchSave(draft: ComposerDraft, origin: string | null): Promise<boolean> {
+  const token = Symbol('switch-message')
+  const waiting = !!switchSave || (!switchesLoaded && /^\s*\//.test(commandDraftText(draft)))
+  if (waiting) pendingSwitchDrafts.set(token, { origin, draft })
   try {
     await switchSave
     const text = commandDraftText(draft)
@@ -1178,7 +1192,8 @@ async function waitForSwitchSave(draft: ComposerDraft, origin: string | null): P
     }
     return true
   }
-  catch (error) { restoreDraftTo(origin, draft); if (activeId === origin) commandFailed(error, 'Save switch'); return false }
+  catch (error) { pendingSwitchDrafts.delete(token); restoreDraftTo(origin, draft); if (activeId === origin) commandFailed(error, 'Saved switches'); return false }
+  finally { if (pendingSwitchDrafts.delete(token)) queueRender() }
 }
 
 async function resetPrompt(draft: ComposerDraft, origin: string | null): Promise<void> {
