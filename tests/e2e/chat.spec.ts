@@ -3074,3 +3074,42 @@ test('CLI refresh: an unavailable latest version stays visible independently of 
   await expect(page.locator('.chat-cli-warning')).toBeVisible()
   await page.reload(); await expect(page.locator('.chat-cli-warning')).toHaveText(warning)
 })
+
+test('CLI refresh: a fast catalogue cannot accept text into the wrong conversation during reload', async ({ page }) => {
+  const state = makeState([session()]); await installRoutes(page, state)
+  const sock = await installSocket(page, state); await page.goto('/'); await sock.subscribed('s1')
+  await input(page).fill('Keep this conversation draft')
+  let release!: () => void, loading = false
+  const gate = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/chat/sessions', async route => {
+    if (route.request().method() === 'GET') { loading = true; await gate }
+    await route.fallback()
+  })
+  try {
+    await page.reload(); await expect.poll(() => loading).toBe(true)
+    await expect(input(page)).toBeDisabled()
+    await expect(input(page)).toHaveAttribute('placeholder', 'Loading your conversation…')
+    release()
+    await expect(page.locator('.chat-session-item.active')).toHaveAttribute('data-id', 's1')
+    await expect(input(page)).toBeEnabled()
+    await expect(input(page)).toHaveValue('Keep this conversation draft')
+    await input(page).fill('New text goes to this conversation')
+    await expect(input(page)).toHaveValue('New text goes to this conversation')
+    expect(sock.framesOf('prompt')).toHaveLength(0)
+  } finally { release() }
+})
+
+for (const explicit of [false, true]) test(`CLI refresh: ${explicit ? 'explicit model choice is preserved' : 'legacy pinned default follows the discovered successor'} after an update`, async ({ page }) => {
+  const state = makeState([]); state.agents = structuredClone(AGENTS)
+  const claude = state.agents.agents[0] as { models: Array<{ identity: string, selector: string, effort: string }> }
+  claude.models.push(...claude.models.map(model => ({ ...model, identity: model.identity.replace('opus-5-', 'opus-5.5-'), selector: 'claude-opus-5-5' })))
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.addInitScript(explicit => {
+    sessionStorage.setItem('poise-chat-draft-snapshot', JSON.stringify({ version: 1, savedAt: Date.now(), fromSha: null, activeSessionId: null,
+      fresh: { draft: { text: 'Keep this unsent draft', attachments: [], mentions: [], mode: null }, modelIdentity: 'opus-5-high', ...(explicit ? { modelSelection: 'explicit' } : {}) }, sessions: {} }))
+  }, explicit)
+  await page.goto('/')
+  await expect(page.locator('.chat-default-model')).toHaveText(explicit ? 'Opus 5 · High' : 'Opus 5.5 · High')
+  await expect(input(page)).toHaveValue('Keep this unsent draft')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+})

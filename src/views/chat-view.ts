@@ -433,7 +433,7 @@ function captureDrafts() {
   }
   return {
     fromSha: BUILD_SHA, activeSessionId: activeId,
-    fresh: { draft: fresh, modelIdentity: freshModelIdentity }, sessions: [...drafts],
+    fresh: { draft: fresh, modelIdentity: freshModelIdentity, modelSelection: freshModelIdentity ? 'explicit' as const : 'automatic' as const }, sessions: [...drafts],
   }
 }
 
@@ -458,7 +458,10 @@ function applyRestoredSnapshot(): void {
     const e = sessions.get(id)
     if (e) e.draft = { text: draft.text, attachments: draft.attachments, mentions: draft.mentions, mode: draft.mode, ...(draft.model ? { model: draft.model } : {}) }
   }
-  if (snap.fresh.modelIdentity) freshModelIdentity = snap.fresh.modelIdentity
+  // Older builds wrote their fixed Opus 5 High default as if it were a choice.
+  // New snapshots distinguish automatic defaults from explicit model selections.
+  if (snap.fresh.modelIdentity) freshModelIdentity = !snap.fresh.modelSelection && snap.fresh.modelIdentity === 'opus-5-high'
+    ? null : snap.fresh.modelIdentity
   if (snap.fresh.draft) freshDraft = { text: snap.fresh.draft.text, attachments: snap.fresh.draft.attachments, mentions: snap.fresh.draft.mentions, mode: snap.fresh.draft.mode, ...(snap.fresh.draft.model ? { model: snap.fresh.draft.model } : {}) }
   if (!activeId && freshDraft) composer.setDraft(freshDraft)
 }
@@ -1795,7 +1798,8 @@ function composerStateFor(e: SessionEntry | null): void {
   if (!e) {
     composer.setCommands([], { model: true, modes: false, fork: false })
     const model = freshModelIdentity || quickSessionModel(agentsInfo?.agents || [])?.identity
-    composer.setState({ running: false, disabled: !!quickSessionPromise, placeholder: quickSessionPromise ? 'Starting the session…' : undefined, modelLabel: model ? consoleModelLabel(model) : 'Opus · High', modelIdentity: model, sessionId: null })
+    const restoring = !!restoredSnapshot?.activeSessionId
+    composer.setState({ running: false, disabled: !!quickSessionPromise || restoring, placeholder: restoring ? 'Loading your conversation…' : quickSessionPromise ? 'Starting the session…' : undefined, modelLabel: model ? consoleModelLabel(model) : 'Opus · High', modelIdentity: model, sessionId: null })
     return
   }
   const s = e.record
@@ -2018,6 +2022,9 @@ export async function initChatView(): Promise<void> {
       // the initiating tab. Only that marked tab may consume the legacy file.
       try { if (sessionStorage.getItem(RELOADED_RELEASE_KEY)) restoredSnapshot = takeDraftSnapshot(localStorage) } catch { /* optional recovery */ }
     }
+    // A fast catalogue response must not expose a writable fresh console
+    // while this tab is still restoring a different conversation and draft.
+    composerStateFor(null)
     // Events keep folding into the per-session models while the view is
     // hidden — that is what lets a running turn be re-joined on return
     // without a refetch — so these listeners live for the app's lifetime.

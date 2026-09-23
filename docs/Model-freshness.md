@@ -59,3 +59,9 @@ Tests use isolated executables and version files, never the user's installations
 They cover updater ordering, shared checks, npm prefixes, Muse release builds,
 failed discovery receipts, retry, cancellation/cleanup, native resume between
 turns, catalogue invalidation, new-model defaults and browser timeout recovery.
+
+Upgrade compatibility: older pages stored the fixed `opus-5-high` fresh-console
+default without recording whether it was explicitly chosen. That legacy value
+now restores as automatic Opus High, with draft text preserved. New snapshots
+record automatic versus explicit selection, so future reloads preserve a
+person's intentional model choice. Existing sessions retain their selected model.
