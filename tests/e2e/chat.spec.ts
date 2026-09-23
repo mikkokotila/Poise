@@ -3113,3 +3113,16 @@ for (const explicit of [false, true]) test(`CLI refresh: ${explicit ? 'explicit 
   await expect(input(page)).toHaveValue('Keep this unsent draft')
   expect(sock.framesOf('prompt')).toHaveLength(0)
 })
+
+test('CLI refresh: the model menu follows a moving console without another resize event', async ({ page }) => {
+  const state = makeState([]); await installRoutes(page, state); await installSocket(page, state)
+  await page.setViewportSize({ width: 600, height: 500 }); await page.goto('/')
+  await page.locator('.chat-default-model').click()
+  const picker = consolePicker(page)
+  await expect(picker.getByRole('option')).toHaveCount(10)
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+  await page.locator('.chat-dock').evaluate(el => { el.style.transition = 'none'; el.style.transform = 'translateY(0)' })
+  await expect.poll(async () => { const box = await picker.boundingBox(); return box ? box.y >= 0 && box.y + box.height <= 500 : false }).toBe(true)
+  await expect(picker).toHaveAttribute('data-side', 'above')
+  await page.keyboard.press('Escape'); await expect(picker).toBeHidden()
+})

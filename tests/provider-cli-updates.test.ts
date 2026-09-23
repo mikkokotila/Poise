@@ -103,9 +103,10 @@ it('updates the existing npm Codex prefix, including optional native packages', 
   await mkdir(bin, { recursive: true }); await writeFile(join(bin, 'codex.js'), '#!/bin/sh\nexit 0\n', { mode: 0o700 })
   await rm(join(root, 'bin/codex')); await symlink(join(bin, 'codex.js'), join(root, 'bin/codex'))
   await writeFile(join(root, 'bin/npm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 })
-  const run = fakeRunner()
+  const native = fakeRunner()
+  const run = vi.fn<typeof runUpdateCommand>((command, args, options) => args[0] === 'view' ? Promise.resolve({ stdout: JSON.stringify('1.1.0'), stderr: '' }) : native(command, args, options))
   expect((await ensureProviderCli('codex', { root, env, run })).status).toBe('updated')
-  expect(run.mock.calls[1][1]).toEqual(['install', '--global', '--prefix', await realpath(prefix), '--include=optional', '--prefer-online', '@openai/codex@latest'])
+  expect(run.mock.calls.find(call => call[1][0] === 'install')?.[1]).toEqual(['install', '--global', '--prefix', await realpath(prefix), '--include=optional', '--prefer-online', '@openai/codex@latest'])
 })
 it('detects Muse release changes even when the reported semantic version is unchanged', async () => {
   const state = join(root, 'bin/.muse-version')
@@ -115,4 +116,22 @@ it('detects Muse release changes even when the reported semantic version is unch
     return { stdout: 'Muse Code 1.3.0', stderr: '' }
   })
   expect(await ensureProviderCli('muse', { root, env, run })).toMatchObject({ status: 'updated', before: '1.3.0-R3401.1', after: '1.3.0-R3402.1' })
+})
+
+it('checks npm for the latest Codex on each launch without reinstalling a current binary', async () => {
+  const { symlink } = await import('node:fs/promises')
+  const bin = join(root, 'prefix/lib/node_modules/@openai/codex/bin')
+  await mkdir(bin, { recursive: true }); await writeFile(join(bin, 'codex.js'), '#!/bin/sh\nexit 0\n', { mode: 0o700 })
+  await rm(join(root, 'bin/codex')); await symlink(join(bin, 'codex.js'), join(root, 'bin/codex'))
+  await writeFile(join(root, 'bin/npm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 })
+  const run = vi.fn<typeof runUpdateCommand>(async (_command, args) => {
+    if (args[0] === 'view') return { stdout: JSON.stringify('1.0.0'), stderr: '' }
+    if (args[0] === '--version') return { stdout: 'codex-cli 1.0.0', stderr: '' }
+    throw new Error('A current working CLI should not be reinstalled')
+  })
+  expect((await ensureProviderCli('codex', { root, env, run })).status).toBe('current')
+  await new Promise(resolve => setTimeout(resolve, 5))
+  expect((await ensureProviderCli('codex', { root, env, run })).status).toBe('current')
+  expect(run.mock.calls.filter(call => call[1][0] === 'view')).toHaveLength(2)
+  expect(run.mock.calls.some(call => call[1][0] === 'install')).toBe(false)
 })

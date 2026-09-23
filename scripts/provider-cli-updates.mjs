@@ -132,12 +132,21 @@ async function update(provider, options, requestedAt) {
     if (prior?.provider === provider && prior.path === path && Date.parse(prior.checkedAt) >= requestedAt && Date.parse(prior.checkedAt) <= Date.now() && prior.after === before && ['current', 'updated'].includes(prior.status)) return prior
     let plan = updatePlan(provider, path)
     const npmSuffix = '/lib/node_modules/@openai/codex/bin/codex.js'
-    if (provider === 'codex' && resolved.endsWith(npmSuffix)) plan = {
-      command: await executable('npm', env), args: ['install', '--global', '--prefix', resolved.slice(0, -npmSuffix.length), '--include=optional', '--prefer-online', '@openai/codex@latest'], env: {},
+    let registryVersion
+    if (provider === 'codex' && resolved.endsWith(npmSuffix)) {
+      const npm = await executable('npm', env)
+      const latest = await run(npm, ['view', '@openai/codex@latest', 'version', '--json', '--prefer-online'], { env, cwd: root, timeoutMs: remaining(15_000) })
+      registryVersion = JSON.parse(latest.stdout)
+      if (typeof registryVersion !== 'string' || versionOf(registryVersion) !== registryVersion) throw new Error('npm did not return a valid latest Codex version')
+      // Check the registry on every launch without reinstalling a large native
+      // package when it is already current. A broken version probe still repairs.
+      plan = before === registryVersion ? null : {
+        command: npm, args: ['install', '--global', '--prefix', resolved.slice(0, -npmSuffix.length), '--include=optional', '--prefer-online', '@openai/codex@latest'], env: {},
+      }
     }
-    const output = await run(plan.command, plan.args, { env: { ...env, ...plan.env }, cwd: root, timeoutMs: remaining() })
+    const output = plan ? await run(plan.command, plan.args, { env: { ...env, ...plan.env }, cwd: root, timeoutMs: remaining() }) : { stdout: '', stderr: '' }
     after = await version(); result.after = after
-    const advertised = /(?:Version:|updated[^\n]*?to(?: version)?)[ \t]+(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)/i.exec(output.stdout + '\n' + output.stderr)?.[1]
+    const advertised = registryVersion || /(?:Version:|updated[^\n]*?to(?: version)?)[ \t]+(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)/i.exec(output.stdout + '\n' + output.stderr)?.[1]
     if (advertised && advertised !== after && !(provider === 'muse' && after.startsWith(advertised + '-R'))) throw new Error(`The updater installed ${advertised}, but Poise's launcher still reports ${after}; check duplicate CLI installations on PATH`)
     result.status = before === after ? 'current' : 'updated'
     result.checkedAt = new Date().toISOString()

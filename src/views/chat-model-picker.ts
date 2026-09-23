@@ -13,10 +13,13 @@ export function attachModelPicker(container: HTMLElement, handlers: PickerHandle
   let state: PickerState = { identity: '', label: '', visible: false, disabled: true }
   let generation = 0
   let agents: AgentInfo[] = []
+  let positionFrame: number | null = null
 
   function close(restoreFocus = false): void {
     generation++ // A late catalogue response must not reopen a dismissed picker.
     menu.hidden = true
+    if (positionFrame !== null) cancelAnimationFrame(positionFrame)
+    positionFrame = null
     trigger.setAttribute('aria-expanded', 'false')
     if (restoreFocus && !trigger.disabled && !container.hidden) trigger.focus()
   }
@@ -36,6 +39,14 @@ export function attachModelPicker(container: HTMLElement, handlers: PickerHandle
     menu.style.left = `${Math.min(0, bounds.right - 12 - anchor.left - width)}px`
   }
 
+  function followAnchor(): void {
+    positionFrame = null
+    if (menu.hidden) return
+    // Follow the animated fresh console after viewport or catalogue changes.
+    position()
+    positionFrame = requestAnimationFrame(followAnchor)
+  }
+
   function options(): HTMLButtonElement[] {
     return [...menu.querySelectorAll<HTMLButtonElement>('[role="option"][aria-disabled="false"]')]
   }
@@ -49,6 +60,7 @@ export function attachModelPicker(container: HTMLElement, handlers: PickerHandle
   async function open(): Promise<void> {
     if (state.disabled || !state.visible) return
     menu.hidden = false
+    if (positionFrame === null) positionFrame = requestAnimationFrame(followAnchor)
     // Move focus off Retry before removing it: removing a focused child can
     // emit focusout with no relatedTarget and otherwise dismiss this request.
     menu.focus({ preventScroll: true })

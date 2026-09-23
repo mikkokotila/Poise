@@ -21,9 +21,9 @@ Settings → Models → **Check now** and the existing scheduled model check run
 4. Atomically record the CLI results and per-provider discovery results, then
    invalidate Poise's model cache.
 
-Claude uses `claude install latest`. npm-installed Codex is updated with
-`@openai/codex@latest` in its existing global prefix, including optional native
-packages; other Codex installations use `codex update`. Grok and Antigravity
+Claude uses `claude install latest`. npm-installed Codex checks the latest registry version first and, when needed,
+updates `@openai/codex@latest` in its existing global prefix, including optional
+native packages; other Codex installations use `codex update`. Grok and Antigravity
 use their update commands. Muse's launcher performs a synchronous update; its
 release build is checked as well as its semantic version.
 
