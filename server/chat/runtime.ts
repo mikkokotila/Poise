@@ -1,3 +1,4 @@
+import { prepareProviderCli } from '../provider-clis'
 // The Chat v1 session runtime: the session table, one native agent process
 // per session, the checkout it runs in, and the transcript mirror.
 //
@@ -142,6 +143,8 @@ interface LiveSession {
   adapter: Adapter | null
   /** Cancellation of native startup is independent of a running turn. */
   startup: AbortController | null
+  nativeCliVersion?: string
+  cliCheck?: { agent: AgentId, turnId?: string, result: Awaited<ReturnType<typeof prepareProviderCli>> }
   nativeSafeMode?: boolean
   worker: WorkerHandle | null
   lease: CheckoutLease | null
@@ -177,6 +180,7 @@ export interface RuntimeOptions {
   branchPrefix?: () => string
   requireClaudeReady?: () => Promise<void>
   /** Whether an agent's CLI is launchable; replaced in tests. */
+  prepareCli?: typeof prepareProviderCli
   probeAgent?: (agent: AgentId) => Promise<{ ok: boolean, reason?: string }>
   /** Lease liveness probes; tests use them to make this host look dead. */
   leaseProbes?: CheckoutLeaseOptions
@@ -649,6 +653,32 @@ export class ChatRuntime extends EventEmitter {
     return live.record
   }
 
+  /** Update between turns; never replace a process while it is answering. */
+  private async checkSessionCli(session: LiveSession, signal: AbortSignal) {
+    const agent = session.record.agent
+    if (this.options.adapters?.[agent] && !this.options.prepareCli) return undefined
+    const turnId = session.turn?.id
+    if (turnId && session.cliCheck?.agent === agent && session.cliCheck.turnId === turnId) return session.cliCheck.result
+    session.record.cliChecking = true
+    this.saveRecord(session); this.emit_(session.record.id, { type: 'session.updated', session: session.record })
+    this.setStatus(session, 'starting', `Checking the latest ${agent} CLI…`)
+    try {
+      const result = await (this.options.prepareCli ?? prepareProviderCli)(agent, signal)
+      signal.throwIfAborted()
+      session.cliCheck = { agent, turnId, result }
+      session.record.cliVersion = result.after || result.before
+      session.record.cliWarning = result.status === 'unavailable'
+        ? `Latest ${agent} CLI could not be verified: ${result.error}. Trying the installed CLI${result.before ? ` (${result.before})` : ''}.` : undefined
+      if (session.record.cliWarning) this.setStatus(session, 'starting', session.record.cliWarning)
+      return result
+    } finally {
+      session.record.cliChecking = false
+      if (this.ownsSession(session.record.id)) {
+        this.saveRecord(session); this.emit_(session.record.id, { type: 'session.updated', session: session.record })
+      }
+    }
+  }
+
   /** Bring the native process up under the checkout lease: prepare the
    *  branch (fresh sessions), switch the checkout to it, register the gate,
    *  then create/resume/fork the native session. Failures become a readable
@@ -667,6 +697,7 @@ export class ChatRuntime extends EventEmitter {
     const lease = options.lease ?? this.leaseFor(session)
     let freed = true
     try {
+      const cli = await this.checkSessionCli(session, signal)
       if (!options.lease) await lease.acquire({ signal, onBusy: (busy) => this.reportBusy(session, busy) })
       else if (!lease.held) throw new Error('the checkout lease was lost before native startup')
       signal.throwIfAborted()
@@ -697,6 +728,7 @@ export class ChatRuntime extends EventEmitter {
       }
       const started = await adapter.start(startOptions)
       signal.throwIfAborted()
+      session.nativeCliVersion = cli?.after || cli?.before
       session.nativeSafeMode = startOptions.safeMode
       record.safeModePending = session.nativeSafeMode !== (record.safeMode === true)
       record.nativeSessionId = started.nativeSessionId
@@ -1613,6 +1645,12 @@ export class ChatRuntime extends EventEmitter {
         started = true
         this.emit_(record.id, { type: 'context.compacted', turnId: turn.id, detail: 'No native conversation history to compact yet.' })
         stopReason = 'end_turn'; return
+      }
+      if (session.adapter?.alive) {
+        const cli = await this.checkSessionCli(session, turn.abort.signal)
+        // A newer installation does not alter the running process's version.
+        // At this idle boundary, resume the same native session on the new CLI.
+        if (cli?.after && cli.status !== 'unavailable' && cli.after !== session.nativeCliVersion) await this.stopProcess(session)
       }
       if (!session.adapter?.alive) await this.startSession(session, { fresh: !record.nativeSessionId && !record.branch.baseSha && record.branch.provisional, ...(lease ? { lease } : {}) })
       let adapter = session.adapter!

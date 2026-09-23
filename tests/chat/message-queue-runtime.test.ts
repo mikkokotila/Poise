@@ -62,7 +62,7 @@ class Fake implements Adapter {
   async fork() { return randomUUID() }
   onExit() {}
 }
-async function world(options: { auto?: boolean, deferStart?: boolean, autoMerge?: boolean } = {}) {
+async function world(options: { auto?: boolean, deferStart?: boolean, autoMerge?: boolean, prepareCli?: import('../../server/chat/runtime').RuntimeOptions['prepareCli'] } = {}) {
   const repo = join(root, randomUUID()); await mkdir(repo)
   git(repo, 'init', '-q', '-b', 'main'); git(repo, 'config', 'user.name', 'Queue test'); git(repo, 'config', 'user.email', 'queue@example.invalid')
   git(repo, 'config', 'commit.gpgSign', 'false'); git(repo, 'config', 'core.hooksPath', '/dev/null')
@@ -70,7 +70,7 @@ async function world(options: { auto?: boolean, deferStart?: boolean, autoMerge?
   const instance = `queue-test:${randomUUID()}`
   const c: Controls = { auto: options.auto ?? true, calls: [], adapters: [], active: 0, maximum: 0 }
   function make() {
-    const runtime = new Runtime({ instance, instanceLabel: 'queue-test', callerTurns: null, idleTimeoutMinutes: () => 0,
+    const runtime = new Runtime({ instance, instanceLabel: 'queue-test', prepareCli: options.prepareCli, callerTurns: null, idleTimeoutMinutes: () => 0,
       catalog: async () => CATALOG, resolveCheckout: async () => repo, requireClaudeReady: async () => {},
       adapters: Object.fromEntries((['grok', 'claude', 'codex', 'muse'] as AgentId[]).map(agent => [agent, (host: AdapterHost) => new Fake(agent, host, c)])),
     })
@@ -688,4 +688,57 @@ it('shared library: removing a queued skill in Snippets preserves the queue and 
   expect(w.runtime.get(w.s.id)?.queue?.items.map(item => item.state)).toEqual(['failed', 'waiting'])
   expect(w.runtime.get(w.s.id)?.queue?.items[0].error).toContain('unavailable')
   expect(w.runtime.get(w.s.id)?.queue?.ready).toBe(false)
+})
+
+it('CLI updates: waits before native startup, leaves active work alone, and resumes on a newer CLI between turns', async () => {
+  let release!: () => void, version = '1.0.0'
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const prepareCli = vi.fn(async (provider: import('../../scripts/provider-cli-updates.mjs').Provider) => {
+    await gate
+    return { provider, status: 'current' as const, after: version, checkedAt: new Date().toISOString() }
+  })
+  const w = await world({ deferStart: true, auto: false, prepareCli })
+  w.runtime.prompt(w.s.id, input('First task'))
+  await until(() => prepareCli.mock.calls.length === 1)
+  expect(w.c.adapters).toHaveLength(0); expect(w.c.calls).toHaveLength(0)
+  release(); await until(() => w.c.calls.length === 1)
+  const native = w.c.adapters[0].nativeSessionId
+  version = '1.1.0'
+  await w.add('Second task'); await w.runtime.steer(w.s.id, 'Finish the current task')
+  expect(prepareCli).toHaveBeenCalledTimes(1); expect(w.c.adapters[0].alive).toBe(true)
+  w.finish(); await until(() => w.c.calls.length === 2)
+  expect(prepareCli).toHaveBeenCalledTimes(2); expect(w.c.adapters).toHaveLength(2)
+  expect(w.c.adapters[0].alive).toBe(false)
+  expect(w.c.adapters[1].options?.resume).toBe(native)
+  expect(w.c.maximum).toBe(1)
+  w.finish(); await until(() => w.turns().length === 2)
+  w.runtime.prompt(w.s.id, input('Third task on the same CLI'))
+  await until(() => w.c.calls.length === 3)
+  expect(prepareCli).toHaveBeenCalledTimes(3); expect(w.c.adapters).toHaveLength(2)
+  w.finish(); await until(() => w.turns().length === 3)
+}, 20_000)
+
+it('CLI updates: Stop cancels a waiting startup without launching the agent later', async () => {
+  let release!: () => void
+  const prepareCli = vi.fn((provider: import('../../scripts/provider-cli-updates.mjs').Provider, signal?: AbortSignal) => new Promise<import('../../scripts/provider-cli-updates.mjs').CliUpdate>((resolve, reject) => {
+    release = () => resolve({ provider, status: 'current', after: '1.0.0', checkedAt: new Date().toISOString() })
+    signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+  }))
+  const w = await world({ deferStart: true, prepareCli })
+  w.runtime.prompt(w.s.id, input('Do not start after Stop'))
+  await until(() => prepareCli.mock.calls.length === 1)
+  await w.runtime.cancel(w.s.id)
+  await until(() => w.runtime.busy() === 0)
+  release(); await pause(50)
+  expect(w.c.adapters).toHaveLength(0); expect(w.c.calls).toHaveLength(0)
+  expect(w.turns()).toHaveLength(1)
+})
+
+it('CLI updates: a failed latest check is visible and does not discard the task', async () => {
+  const prepareCli = vi.fn(async (provider: import('../../scripts/provider-cli-updates.mjs').Provider) => ({ provider, status: 'unavailable' as const, before: '1.0.0', checkedAt: new Date().toISOString(), error: 'download unavailable' }))
+  const w = await world({ deferStart: true, prepareCli })
+  w.runtime.prompt(w.s.id, input('Keep my task'))
+  await until(() => w.turns().length === 1)
+  expect(w.c.calls[0].input.text).toBe('Keep my task')
+  expect(w.events.some(row => row.event.type === 'status.changed' && row.event.detail?.includes('download unavailable'))).toBe(true)
 })

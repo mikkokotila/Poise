@@ -1,57 +1,49 @@
 #!/usr/bin/env node
-
-// Daily model catalog check, run by launchd (com.vaquum.poise.model-catalog)
-// at 07:00: ask Caller to check every model family against its CLI, keep the
-// runtime catalog current, and leave the report where the settings pane reads
-// it (~/.poise/model-catalog.json). Same environment as the service, so the
-// Claude probes go through the subscription wrapper like every other launch.
-
-import { spawn } from 'node:child_process'
-import { mkdir, rename, writeFile } from 'node:fs/promises'
+// Shared by the daily job and Settings: update real CLIs before discovery.
+import { readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+import { ensureProviderClis, runUpdateCommand, withModelRefreshLock, terminateUpdateChildren } from './provider-cli-updates.mjs'
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url))
 const reportPath = process.env.POISE_MODEL_CATALOG_REPORT || join(homedir(), '.poise', 'model-catalog.json')
-const timeoutMs = 10 * 60_000
+for (const [signal, code] of [['SIGTERM', 143], ['SIGINT', 130]]) process.once(signal, () => { terminateUpdateChildren(); process.exit(code) })
 
-function refresh() {
-  return new Promise((resolve, reject) => {
-    const child = spawn('agent-interface', ['--refresh-models'], {
-      cwd: process.env.AGENT_INTERFACE_ROOT || join(homedir(), 'dev', 'caller', 'agent_interface'),
-      env: {
-        ...process.env,
-        ANTHROPIC_API_KEY: undefined,
-        ANTHROPIC_AUTH_TOKEN: undefined,
-        ANTHROPIC_BASE_URL: undefined,
-        CLAUDE_CODE_OAUTH_TOKEN: undefined,
-        CLAUDE_CLI: join(projectRoot, 'scripts', 'claude-subscription.mjs'),
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
+const requestedAt = Date.now()
+const report = await withModelRefreshLock(reportPath, async () => {
+  // Reuse only a check which completed while this invocation waited for it.
+  try {
+    const prior = JSON.parse(await readFile(reportPath, 'utf8'))
+    if (Date.parse(prior.completed_at) >= requestedAt && prior.cli_updates && prior.families) return prior
+  } catch { /* no completed overlapping check */ }
+  const cliUpdates = await ensureProviderClis()
+  const env = { ...process.env, CLAUDE_CLI: join(projectRoot, 'scripts', 'claude-subscription.mjs') }
+  for (const key of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN']) delete env[key]
+  let result
+  try {
+    const { stdout } = await runUpdateCommand('agent-interface', ['--refresh-models'], {
+      cwd: process.env.AGENT_INTERFACE_ROOT || join(homedir(), 'dev', 'caller', 'agent_interface'), env, timeoutMs: 10 * 60_000,
     })
-    let stdout = ''
-    let stderr = ''
-    child.stdout.setEncoding('utf8')
-    child.stderr.setEncoding('utf8')
-    child.stdout.on('data', (chunk) => { stdout += chunk })
-    child.stderr.on('data', (chunk) => { stderr += chunk })
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs)
-    child.once('error', (error) => { clearTimeout(timer); reject(error) })
-    child.once('close', (code) => {
-      clearTimeout(timer)
-      if (code === 0) resolve(stdout)
-      else reject(new Error(stderr.trim() || `agent-interface --refresh-models exited ${code}`))
-    })
-  })
+    result = JSON.parse(stdout)
+    if (!result || !result.families || typeof result.families !== 'object' || Array.isArray(result.families) || !Object.keys(result.families).length) throw new Error('Caller returned an invalid model discovery report')
+    for (const provider of Object.keys(cliUpdates)) if (!result.families[provider]) result.families[provider] = { status: 'unavailable', error: 'Caller did not report discovery results' }
+  } catch (error) {
+    // A failed run must replace an old green check, not leave “nothing new”.
+    result = { checked_at: new Date().toISOString(), families: {}, error: error instanceof Error ? error.message : String(error) }
+  }
+  result.cli_updates = cliUpdates
+  result.completed_at = new Date().toISOString()
+  const staged = `${reportPath}.${randomUUID()}.tmp`
+  await writeFile(staged, JSON.stringify(result, null, 2) + '\n', { mode: 0o600 })
+  await rename(staged, reportPath)
+  return result
+})
+if (process.argv.includes('--json')) console.log(JSON.stringify(report))
+else {
+  const updates = Object.entries(report.cli_updates).map(([name, item]) => `${name} CLI: ${item.status}${item.after ? ` ${item.after}` : ''}${item.error ? ` (${item.error})` : ''}`).join('; ')
+  const families = Object.entries(report.families).map(([name, family]) => `${name}: ${family.status}`).join('; ')
+  console.log(`${report.completed_at} ${updates} — ${report.error || families}`)
 }
-
-const report = JSON.parse(await refresh())
-await mkdir(dirname(reportPath), { recursive: true, mode: 0o700 })
-const staged = `${reportPath}.${process.pid}.tmp`
-await writeFile(staged, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 })
-await rename(staged, reportPath)
-const families = Object.entries(report.families || {})
-  .map(([name, family]) => `${name}: ${family.status}${family.status === 'ok' ? '' : ` (${family.error})`}`)
-  .join('; ')
-console.log(`${report.checked_at} ${report.changed ? 'catalog updated' : 'catalog unchanged'} — ${families}`)
+if (report.error || Object.values(report.cli_updates).some(item => item.status === 'unavailable') || Object.values(report.families).some(item => item.status !== 'ok')) process.exitCode = 1

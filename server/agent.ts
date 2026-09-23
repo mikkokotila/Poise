@@ -1,3 +1,4 @@
+import { prepareModelClis } from './provider-clis'
 // Bridge to the local `agent-interface` CLI for Swarm's data source.
 //
 // Two operations:
@@ -274,6 +275,7 @@ export async function triggerPrReview(
   const { model, recovery, catalog } = await reviewChoice('pr_review')
   const claude = needsClaude(catalog, model)
   if (claude) await claudeAuth.requireReady()
+  await prepareModelClis(catalog, [model, recovery])
   const pwd = await localCheckoutPath(owner, repo)
   const expectedHead = await getHeadSha(repoFullName, Number(num))
   const source = 'poise:manual-review'
@@ -335,6 +337,7 @@ export async function replayAgentJob(input: {
   const claude = needsClaude(catalog, model)
   if (claude) await claudeAuth.requireReady()
   const [owner, repoName] = repo.split('/', 2)
+  await prepareModelClis(catalog, [model, recovery])
   const pwd = await localCheckoutPath(owner, repoName)
   const actor = getReviewAgentUsername()
   const expectedHead = await getHeadSha(repo, Number(prId))

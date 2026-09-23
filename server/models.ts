@@ -43,9 +43,12 @@ export function agentInterfaceCwd(): string {
 
 let cached: { at: number, catalog: Catalog } | null = null
 let pending: Promise<Catalog> | null = null
+let generation = 0
 
 export function invalidateCatalog(): void {
   cached = null
+  generation++
+  pending = null
 }
 
 function parseCatalog(stdout: string): Catalog {
@@ -66,6 +69,7 @@ function parseCatalog(stdout: string): Catalog {
 export async function loadCatalog(options: { fresh?: boolean } = {}): Promise<Catalog> {
   if (!options.fresh && cached && Date.now() - cached.at < CATALOG_TTL_MS) return cached.catalog
   if (pending) return pending
+  const epoch = generation
   pending = (async () => {
     try {
       const { stdout } = await runFile('agent-interface', ['--models'], {
@@ -73,10 +77,10 @@ export async function loadCatalog(options: { fresh?: boolean } = {}): Promise<Ca
         timeoutMs: CATALOG_PROBE_TIMEOUT_MS,
       })
       const catalog = parseCatalog(stdout)
-      cached = { at: Date.now(), catalog }
+      if (epoch === generation) cached = { at: Date.now(), catalog }
       return catalog
     } finally {
-      pending = null
+      if (epoch === generation) pending = null
     }
   })()
   return pending

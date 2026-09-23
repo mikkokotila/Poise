@@ -23,7 +23,7 @@ export interface DraftSnapshot {
   /** Build the page was running when it saved, for diagnostics only. */
   fromSha: string | null
   activeSessionId: string | null
-  fresh: { draft: DraftSnapshotDraft | null, modelIdentity: string | null }
+  fresh: { draft: DraftSnapshotDraft | null, modelIdentity: string | null, modelSelection?: 'automatic' | 'explicit' }
   sessions: Record<string, DraftSnapshotDraft>
 }
 
@@ -63,7 +63,7 @@ export function cleanDraft(v: unknown): DraftSnapshotDraft | null {
 export interface DraftSnapshotInput {
   fromSha: string | null
   activeSessionId: string | null
-  fresh: { draft: unknown, modelIdentity: string | null }
+  fresh: { draft: unknown, modelIdentity: string | null, modelSelection?: 'automatic' | 'explicit' }
   sessions: Iterable<[string, unknown]>
 }
 
@@ -79,7 +79,7 @@ export function buildDraftSnapshot(input: DraftSnapshotInput, now = Date.now()):
     savedAt: now,
     fromSha: input.fromSha,
     activeSessionId: input.activeSessionId && !input.activeSessionId.startsWith('pending-') ? input.activeSessionId : null,
-    fresh: { draft: cleanDraft(input.fresh.draft), modelIdentity: input.fresh.modelIdentity || null },
+    fresh: { draft: cleanDraft(input.fresh.draft), modelIdentity: input.fresh.modelIdentity || null, ...(input.fresh.modelSelection ? { modelSelection: input.fresh.modelSelection } : {}) },
     sessions,
   }
 }
@@ -103,7 +103,7 @@ export function parseDraftSnapshot(raw: string | null, now = Date.now()): DraftS
     savedAt: v.savedAt,
     fromSha: typeof v.fromSha === 'string' ? v.fromSha : null,
     activeSessionId: typeof v.activeSessionId === 'string' && v.activeSessionId ? v.activeSessionId : null,
-    fresh: { draft: cleanDraft(fresh.draft), modelIdentity: typeof fresh.modelIdentity === 'string' && fresh.modelIdentity ? fresh.modelIdentity : null },
+    fresh: { draft: cleanDraft(fresh.draft), modelIdentity: typeof fresh.modelIdentity === 'string' && fresh.modelIdentity ? fresh.modelIdentity : null, ...(fresh.modelSelection === 'automatic' || fresh.modelSelection === 'explicit' ? { modelSelection: fresh.modelSelection } : {}) },
     sessions,
   }
 }

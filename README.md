@@ -347,3 +347,10 @@ Use `/compact` to compact the native model context while keeping Chat history.
 Use `/reset` to clear conversation history and start a fresh native context in
 the same chat. They work with model selection and queued messages. Workspace
 files and shared Memories remain intact. See [Chat context controls](docs/Chat-context.md).
+
+## Model and CLI freshness
+
+Poise checks and updates installed provider CLIs before discovery and native
+Chat turns. Settings → Models → Check now shows progress and failures explicitly;
+fresh chats follow the latest discovered Opus High rather than a pinned version.
+See [Provider CLI and model freshness](docs/Model-freshness.md).

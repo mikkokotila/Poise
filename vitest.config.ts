@@ -3,7 +3,7 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
     environment: 'node',
-    setupFiles: ['tests/snippet-isolation.ts'],
+    setupFiles: ['tests/snippet-isolation.ts', 'tests/provider-cli-isolation.ts'],
     include: ['tests/**/*.test.{ts,mjs}'],
     clearMocks: true,
     restoreMocks: true,

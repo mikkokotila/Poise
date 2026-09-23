@@ -1,3 +1,4 @@
+import { prepareModelClis } from './provider-clis'
 // Bridge to `agent-interface --chat` for per-card long-lived chats.
 //
 // agent-interface exposes:
@@ -414,6 +415,7 @@ export async function sendChat(
   const claude = isClaudeModel(catalog, chosen)
   if (claude) await claudeAuth.requireReady()
 
+  await prepareModelClis(catalog, [chosen])
   await ensureLegacyAttachmentMigration()
   const pwd = chatPwd(sessionId)
   await ensurePrivateSessionDirectory(pwd)
@@ -562,6 +564,8 @@ export async function runDebate(topic: string, rounds: number = 1): Promise<Deba
   if (!t) throw new Error('topic is required')
   assertHttpArgumentSize(t, 'debate topic')
   await claudeAuth.requireReady()
+  const catalog = await loadCatalog()
+  await prepareModelClis(catalog, [catalog.behaviors.debate_moderator, ...catalog.debate_participants])
   const r = Math.min(Math.max(Number.isFinite(rounds) ? rounds : 1, 1), DEBATE_MAX_ROUNDS)
   let stdout: string
   try {
@@ -665,6 +669,8 @@ export async function startAuthorContent(topic: string, sessionId: string): Prom
   if (!normalizedSessionId) throw new HttpError(400, 'session is required')
   assertHttpArgumentSize(normalizedSessionId, 'session')
   await claudeAuth.requireReady()
+  const catalog = await loadCatalog()
+  await prepareModelClis(catalog, [catalog.behaviors.author_content])
   // Snapshot every existing id in this session. Exact topic matching prevents
   // an unrelated delayed call from being attributed to this launch.
   const beforeIds = new Set((await fetchAgentLogs())

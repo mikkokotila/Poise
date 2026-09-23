@@ -162,3 +162,21 @@ describe('validating what the settings pane saves', () => {
     expect(() => models.validateModelSettings(catalog, value)).toThrow(message)
   })
 })
+
+it('does not reuse an in-flight old catalogue after discovery invalidates it', async () => {
+  let release!: (value: { stdout: string, stderr: string }) => void
+  mocks.runFile.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+  const old = models.loadCatalog()
+  models.invalidateCatalog()
+  const next = { ...CATALOG, models: CATALOG.models.map(row => ({ ...row,
+    identity: row.identity.replace('opus-5-', 'opus-5.5-'),
+    selector: row.selector.replace(/^claude-opus-5$/, 'claude-opus-5-5'),
+  })) }
+  mocks.runFile.mockResolvedValueOnce({ stdout: JSON.stringify(next), stderr: '' })
+  const fresh = models.loadCatalog()
+  expect(mocks.runFile).toHaveBeenCalledTimes(2)
+  expect(await fresh).toEqual(next)
+  release({ stdout: CATALOG_STDOUT, stderr: '' })
+  await old
+  expect(await models.loadCatalog()).toEqual(next)
+})

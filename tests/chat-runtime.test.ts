@@ -128,7 +128,11 @@ describe('chat runtime hardening', () => {
 
   it('does not classify another debate provider\'s 401 as Claude auth failure', async () => {
     const failure = new Error('401 invalid API key')
-    mocks.runFile.mockRejectedValueOnce(failure)
+    // The CLI-maintenance preflight reads the catalogue first; fail the debate itself.
+    mocks.runFile.mockImplementation(async (_command, args) => {
+      if (args[0] === '--models') return { stdout: CATALOG_STDOUT, stderr: '' }
+      throw failure
+    })
     const chat = await import('../server/chat')
     database = await import('../server/db')
 

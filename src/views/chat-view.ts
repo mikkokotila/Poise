@@ -36,7 +36,7 @@ import {
   type TranscriptModel, type TranscriptView,
 } from './chat-transcript'
 import { createComposer, emptyDraft, type Composer, type ComposerDraft } from './chat-composer'
-import { quickSessionRequest, QUICK_SESSION_MODEL, consoleModelLabel } from '../chat-catalog'
+import { quickSessionRequest, quickSessionModel, consoleModelLabel } from '../chat-catalog'
 import { attachChatSidebar } from './chat-sidebar'
 import { createFilePreview } from './chat-file-preview'
 import { ICON_FORK, ICON_HANDOFF, ICON_ACTIVITY, ICON_AUTO_MERGE, ICON_MEMORIES, ICON_SAFE_MODE, ICON_REASONING } from './chat-icons'
@@ -98,7 +98,7 @@ let tickTimer: ReturnType<typeof setInterval> | null = null
 
 let splitPane: ReturnType<typeof attachChatSidebar>
 let freshDraft: ComposerDraft | null = null
-let freshModelIdentity = QUICK_SESSION_MODEL
+let freshModelIdentity: string | null = null
 let quickSessionPromise: Promise<SessionEntry> | null = null
 let firstPromptPending = false
 const AUTO_MERGE_DRAFT_KEY = 'poise-chat-fresh-auto-merge'
@@ -168,7 +168,7 @@ function sessionTitle(s: SessionRecord): string {
 
 function statusText(s: SessionRecord): string {
   switch (s.status) {
-    case 'starting': return 'starting…'
+    case 'starting': return s.cliChecking ? 'checking CLI…' : 'starting…'
     case 'idle': return 'idle'
     case 'queued': return `queued behind ${s.queuedBehind || 'another session'}`
     case 'running': return 'running'
@@ -227,11 +227,12 @@ function loadSwitches(refresh = false): Promise<void> {
 
 function loadAgents(force = false): Promise<AgentsResponse | null> {
   if (agentsPromise && !force) return agentsPromise
-  agentsPromise = chatClient.agents().then((a) => { agentsInfo = a; return a }).catch((err) => {
+  const request = chatClient.agents().then((a) => { if (agentsPromise === request) { agentsInfo = a; queueRender() }; return a }).catch((err) => {
     console.error('[chat] agents failed:', err)
     return null
   })
-  return agentsPromise
+  agentsPromise = request
+  return request
 }
 
 function entry(id: string | null = activeId): SessionEntry | null {
@@ -432,7 +433,7 @@ function captureDrafts() {
   }
   return {
     fromSha: BUILD_SHA, activeSessionId: activeId,
-    fresh: { draft: fresh, modelIdentity: freshModelIdentity }, sessions: [...drafts],
+    fresh: { draft: fresh, modelIdentity: freshModelIdentity, modelSelection: freshModelIdentity ? 'explicit' as const : 'automatic' as const }, sessions: [...drafts],
   }
 }
 
@@ -457,7 +458,10 @@ function applyRestoredSnapshot(): void {
     const e = sessions.get(id)
     if (e) e.draft = { text: draft.text, attachments: draft.attachments, mentions: draft.mentions, mode: draft.mode, ...(draft.model ? { model: draft.model } : {}) }
   }
-  if (snap.fresh.modelIdentity) freshModelIdentity = snap.fresh.modelIdentity
+  // Older builds wrote their fixed Opus 5 High default as if it were a choice.
+  // New snapshots distinguish automatic defaults from explicit model selections.
+  if (snap.fresh.modelIdentity) freshModelIdentity = !snap.fresh.modelSelection && snap.fresh.modelIdentity === 'opus-5-high'
+    ? null : snap.fresh.modelIdentity
   if (snap.fresh.draft) freshDraft = { text: snap.fresh.draft.text, attachments: snap.fresh.draft.attachments, mentions: snap.fresh.draft.mentions, mode: snap.fresh.draft.mode, ...(snap.fresh.draft.model ? { model: snap.fresh.draft.model } : {}) }
   if (!activeId && freshDraft) composer.setDraft(freshDraft)
 }
@@ -795,7 +799,7 @@ function ensureQuickSession(firstPrompt?: ComposerDraft, title?: string, deferSt
     if (firstPrompt?.text) request.title = firstPrompt.text.slice(0, 200)
     else if (title) request.title = title.slice(0, 200)
     const created = await createSessionEntry(request, draft, firstPrompt, null)
-    freshModelIdentity = QUICK_SESSION_MODEL
+    freshModelIdentity = null
     setFreshAutoMerge(false)
     setFreshSafeMode(false)
     return created
@@ -826,7 +830,8 @@ async function queueDraft(draft: ComposerDraft): Promise<void> {
   }
   const source = entry()
   const chain = parseChatCommandChain(draft.text)
-  const model = draft.model || chain.model || source?.record.model || freshModelIdentity
+  const requestedModel = draft.model || chain.model || source?.record.model || freshModelIdentity
+  const model = requestedModel || quickSessionModel(agentsInfo?.agents || [])?.identity || ''
   const agent = agentsInfo?.agents.find(agent => agent.models.some(option => option.identity === model))
   const effort = agent?.models.find(option => option.identity === model)?.effort || ''
   const id = crypto.randomUUID()
@@ -838,7 +843,7 @@ async function queueDraft(draft: ComposerDraft): Promise<void> {
   pendingQueueItems.set(id, pending)
   // Create idle session storage for a fresh queue, but do not start a native
   // agent or send any prompt. Every queued submission shares that creation.
-  const target = source && !source.pending ? Promise.resolve(source) : ensureQuickSession(undefined, undefined, true, model)
+  const target = source && !source.pending ? Promise.resolve(source) : ensureQuickSession(undefined, undefined, true, requestedModel || undefined)
   // Install a handler immediately so a failed creation cannot be unhandled
   // while an earlier queue acknowledgement is still outstanding.
   const captured = target.then(value => ({ value }), error => ({ error }))
@@ -848,6 +853,7 @@ async function queueDraft(draft: ComposerDraft): Promise<void> {
     const e = result.value
     pending.sessionId = e.record.id
     const prompt = pending.item.prompt
+    if (!requestedModel) { pending.item.model = e.record.model; pending.item.effort = e.record.effort }
     const receipt = reserveQueuedMessage(pendingStore, e.record.id, prompt, pending.item.model, pending.item.effort, id)
     if (receipt.id !== id) { pendingQueueItems.delete(id); pending.item.id = receipt.id; pendingQueueItems.set(receipt.id, pending) }
     if (!agent) pending.item.agent = e.record.agent
@@ -1685,6 +1691,7 @@ function headerHtml(): string {
       ${memoriesButton()}
     </div>
     ${s.safeModePending ? '<div id="chat-safe-mode-status" class="st-help chat-safe-mode-status" role="status">Permission change queued for the next turn; current native permissions are unchanged.</div>' : ''}
+    ${s.cliWarning ? `<div class="st-help st-help-error chat-cli-warning" role="status">${escapeHtml(s.cliWarning)}</div>` : ''}
     ${s.orphanNotice ? `<div class="st-help st-help-error">${escapeHtml(s.orphanNotice)}</div>` : ''}
   `
 }
@@ -1790,7 +1797,9 @@ function attachKeys(): void {
 function composerStateFor(e: SessionEntry | null): void {
   if (!e) {
     composer.setCommands([], { model: true, modes: false, fork: false })
-    composer.setState({ running: false, disabled: !!quickSessionPromise, placeholder: quickSessionPromise ? 'Starting the session…' : undefined, modelLabel: consoleModelLabel(freshModelIdentity), modelIdentity: freshModelIdentity, sessionId: null })
+    const model = freshModelIdentity || quickSessionModel(agentsInfo?.agents || [])?.identity
+    const restoring = !!restoredSnapshot?.activeSessionId
+    composer.setState({ running: false, disabled: !!quickSessionPromise || restoring, placeholder: restoring ? 'Loading your conversation…' : quickSessionPromise ? 'Starting the session…' : undefined, modelLabel: model ? consoleModelLabel(model) : 'Opus · High', modelIdentity: model, sessionId: null })
     return
   }
   const s = e.record
@@ -2013,9 +2022,13 @@ export async function initChatView(): Promise<void> {
       // the initiating tab. Only that marked tab may consume the legacy file.
       try { if (sessionStorage.getItem(RELOADED_RELEASE_KEY)) restoredSnapshot = takeDraftSnapshot(localStorage) } catch { /* optional recovery */ }
     }
+    // A fast catalogue response must not expose a writable fresh console
+    // while this tab is still restoring a different conversation and draft.
+    composerStateFor(null)
     // Events keep folding into the per-session models while the view is
     // hidden — that is what lets a running turn be re-joined on return
     // without a refetch — so these listeners live for the app's lifetime.
+    window.addEventListener('poise:models-updated', () => { void loadAgents(true) })
     chatClient.on('switches', acceptSwitches)
     chatClient.on('event', onEvent)
     chatClient.on('connection', (state) => {
