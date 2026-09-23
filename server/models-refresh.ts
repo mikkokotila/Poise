@@ -1,23 +1,30 @@
-// Ask Caller to check every model family against its CLI and rewrite the
-// runtime catalog when something changed. Claude and Muse answer with a short
-// model turn each, so this takes a minute or two and runs once a day from
-// launchd (scripts/refresh-models.mjs) or on demand from the settings pane.
+import { trackReleaseBackground } from './release-background'
+// The scheduled job and manual check share CLI updates, discovery and receipts.
+import { dirname, join } from 'node:path'
+import { agentInterfaceCwd, catalogReportPath, invalidateCatalog } from './models'
+import { CLAUDE_SUBSCRIPTION_CLI, claudeSubscriptionEnvironment, runFile, scrubbedChildEnvironment } from './process'
 
-import { agentInterfaceCwd } from './models'
-import { claudeSubscriptionEnvironment, runFile } from './process'
-
-const REFRESH_TIMEOUT_MS = 10 * 60_000
-
-export async function refreshModelCatalog(): Promise<Record<string, unknown>> {
-  const { stdout } = await runFile('agent-interface', ['--refresh-models'], {
-    cwd: agentInterfaceCwd(),
-    env: claudeSubscriptionEnvironment(),
-    timeoutMs: REFRESH_TIMEOUT_MS,
-  })
-  let report: unknown
-  try { report = JSON.parse(stdout) } catch { throw new Error('Update Caller: the model catalog refresh is unavailable') }
-  if (typeof report !== 'object' || report === null || typeof (report as any).families !== 'object') {
-    throw new Error('Update Caller: the model catalog refresh is unavailable')
-  }
-  return report as Record<string, unknown>
+let pending: Promise<Record<string, unknown>> | null = null
+export function refreshModelCatalog(): Promise<Record<string, unknown>> {
+  if (pending) return pending
+  const finished = trackReleaseBackground()
+  pending = (async () => {
+    let stdout: string
+    try { ({ stdout } = await runFile(process.execPath, [join(dirname(CLAUDE_SUBSCRIPTION_CLI), 'refresh-models.mjs'), '--json'], {
+      cwd: agentInterfaceCwd(),
+      env: { ...scrubbedChildEnvironment('agent-interface', claudeSubscriptionEnvironment()), POISE_MODEL_CATALOG_REPORT: catalogReportPath() },
+      timeoutMs: 15 * 60_000, killSignal: 'SIGTERM',
+    })) } catch (error) {
+      // The script emits a durable structured failure even on a nonzero exit.
+      // Return that diagnostic, not just the Node process's exit code.
+      const output = (error as { stdout?: unknown }).stdout
+      if (typeof output !== 'string' || !output.trim()) throw error
+      stdout = output
+    }
+    let report: unknown
+    try { report = JSON.parse(stdout) } catch { throw new Error('The model check returned an unreadable report') }
+    if (!report || typeof report !== 'object' || !('families' in report) || !report.families || typeof report.families !== 'object' || Array.isArray(report.families)) throw new Error('The model check returned an invalid report')
+    return report as Record<string, unknown>
+  })().finally(() => { invalidateCatalog(); pending = null; finished() })
+  return pending
 }

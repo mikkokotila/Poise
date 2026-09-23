@@ -1,3 +1,4 @@
+import { MODEL_CHECK_TIMEOUT_MS, modelRefreshSummary, type ModelRefreshReport } from './model-refresh'
 // Settings panel — two tabs: General (org, username, timezone, refresh rate,
 // theme) and Models (which model each place in Poise launches, with a
 // fallback). Slides in from the right, same pattern as the typography panel.
@@ -37,7 +38,7 @@ interface ModelsResponse {
   catalog: { models: CatalogModel[], review_providers: string[], path: string }
   places: ModelPlace[]
   fixed: FixedPlace[]
-  refresh: { checked_at?: string, changed?: boolean, added?: string[], removed?: string[], families?: Record<string, { status: string, error?: string }> } | null
+  refresh: ModelRefreshReport | null
 }
 
 let panelEl: HTMLElement | null = null
@@ -57,6 +58,9 @@ let focusTimer: ReturnType<typeof setTimeout> | null = null
 // A model select someone has changed keeps its value across background
 // reloads until Save, exactly like the text fields keep typed text.
 const dirtyModels = new Set<string>()
+let modelRefreshActive = false
+let modelsGeneration = 0
+let lastModels: ModelsResponse | null = null
 
 async function refreshStatus(): Promise<void> {
   await loadSettings()
@@ -204,36 +208,37 @@ function renderPlaces(data: ModelsResponse) {
 }
 
 function renderCatalogStatus(data: ModelsResponse) {
-  if (!catalogStatusEl) return
-  const count = data.catalog.models.length
+  if (!catalogStatusEl || modelRefreshActive) return
+  let line = `${data.catalog.models.length} models from Caller.`
   const report = data.refresh
-  let line = `${count} models from Caller.`
-  if (report?.checked_at) {
-    const when = new Date(report.checked_at)
-    const stamp = Number.isNaN(when.getTime()) ? report.checked_at : when.toLocaleString()
-    const outcome = report.changed
-      ? `updated: +${(report.added || []).join(', ') || '—'} −${(report.removed || []).join(', ') || '—'}`
-      : 'nothing new'
-    const down = Object.entries(report.families || {}).filter(([, f]) => f.status !== 'ok').map(([name, f]) => `${name} unavailable (${f.error || 'no answer'})`)
-    line += ` Last checked ${stamp}, ${outcome}.${down.length ? ' ' + down.join('; ') + '.' : ''}`
-  } else {
-    line += ' Not checked yet; the daily check runs at 07:00.'
-  }
+  if (report) {
+    const when = new Date(report.completed_at || report.checked_at || '')
+    const stamp = Number.isNaN(when.getTime()) ? '' : ` Last checked ${when.toLocaleString()}.`
+    const summary = modelRefreshSummary(report)
+    const versions = Object.entries(report.cli_updates || {}).filter(([, item]) => item.after).map(([name, item]) => `${name} ${item.after}`).join(', ')
+    line += `${stamp} ${summary.text}${versions ? ` CLI versions: ${versions}.` : ''}`
+  } else line += ' Not checked yet; the daily check runs at 07:00.'
   catalogStatusEl.textContent = line
 }
 
-async function loadModels(): Promise<void> {
-  if (!modelsEl) return
+async function loadModels(signal?: AbortSignal): Promise<boolean> {
+  if (!modelsEl) return false
+  const generation = ++modelsGeneration
   try {
-    const res = await fetch('/api/models')
+    const res = await fetch('/api/models', { signal })
     const data = await res.json()
-    if (!res.ok) {
-      modelsEl.innerHTML = `<div class="st-help st-help-error">${escapeHtml(data.error || 'Model catalog unavailable')}</div>`
-      return
-    }
-    renderPlaces(data as ModelsResponse)
+    if (generation !== modelsGeneration) return false
+    if (!res.ok) throw new Error(data.error || 'Model catalog unavailable')
+    if (!data.catalog || !Array.isArray(data.catalog.models) || !Array.isArray(data.places) || !Array.isArray(data.fixed)) throw new Error('The model catalogue response is unreadable')
+    lastModels = data as ModelsResponse
+    renderPlaces(lastModels)
+    return true
   } catch (err) {
-    modelsEl.innerHTML = `<div class="st-help st-help-error">Network error: ${escapeHtml((err as Error).message)}</div>`
+    if (generation !== modelsGeneration) return false
+    const message = (err as Error).message
+    if (!lastModels) modelsEl.innerHTML = `<div class="st-help st-help-error">${escapeHtml(message)}</div>`
+    else setHelp(message + '; your model selections are kept.', 'error')
+    return false
   }
 }
 
@@ -250,25 +255,41 @@ function collectModels(): Record<string, ModelChoice> | null {
 }
 
 async function refreshModels(): Promise<void> {
-  if (!refreshBtn) return
+  if (!refreshBtn || modelRefreshActive) return
+  modelRefreshActive = true
+  modelsGeneration++
   refreshBtn.disabled = true
   refreshBtn.textContent = 'Checking…'
-  if (catalogStatusEl) catalogStatusEl.textContent = 'Asking each CLI what it offers today; this takes a minute or two.'
+  const started = Date.now()
+  const controller = new AbortController()
+  const progress = () => {
+    const seconds = Math.floor((Date.now() - started) / 1000)
+    if (catalogStatusEl) catalogStatusEl.textContent = `Updating provider CLIs, then checking models — ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} elapsed. Existing chats can continue.`
+  }
+  progress()
+  const ticker = setInterval(progress, 1000)
+  const deadline = setTimeout(() => controller.abort(), MODEL_CHECK_TIMEOUT_MS)
+  let summary: { text: string, level: 'ok' | 'error' }
   try {
-    const res = await fetch('/api/models/refresh', { method: 'POST' })
+    const res = await fetch('/api/models/refresh', { method: 'POST', signal: controller.signal })
     const data = await res.json()
-    if (!res.ok) {
-      setHelp(data.error || 'Model check failed', 'error')
-      return
-    }
-    await loadModels()
-    setHelp(data.changed ? 'Catalog updated.' : 'Catalog checked; nothing new.', 'ok')
+    if (!res.ok) throw new Error(data.error || 'Model check failed')
+    if (!data || typeof data !== 'object') throw new Error('The model check returned an unreadable report')
+    if (!await loadModels(controller.signal)) throw new Error('The check finished, but the updated catalogue could not be loaded. Your selections are kept.')
+    if (lastModels) lastModels.refresh = data as ModelRefreshReport
+    summary = modelRefreshSummary(data as ModelRefreshReport)
+    window.dispatchEvent(new Event('poise:models-updated'))
   } catch (err) {
-    setHelp('Network error: ' + (err as Error).message, 'error')
+    summary = { text: controller.signal.aborted ? 'Model check timed out. Latest CLI and model versions could not be confirmed; your selections are kept. Check now is available to retry.' : `Model check failed: ${(err as Error).message}`, level: 'error' }
   } finally {
+    clearInterval(ticker); clearTimeout(deadline)
+    modelRefreshActive = false
     refreshBtn.disabled = false
     refreshBtn.textContent = 'Check now'
   }
+  if (lastModels) renderCatalogStatus(lastModels)
+  if (summary.level === 'error' && catalogStatusEl) catalogStatusEl.textContent = summary.text
+  setHelp(summary.text, summary.level)
 }
 
 // ── Save ────────────────────────────────────────────────────────────────
@@ -477,7 +498,7 @@ function buildPanel(): HTMLElement {
           <div class="st-row st-row-tight">
             <button type="button" class="st-clear st-refresh-models">Check now</button>
           </div>
-          <div class="st-help st-help-info">Each family's CLI is asked for its latest model and top two efforts every morning at 07:00; a model that disappears is replaced by its successor and noted above.</div>
+          <div class="st-help st-help-info">Provider CLIs are updated and verified before model discovery, automatically at 07:00 and whenever you choose Check now. New agent processes also check their CLI before starting.</div>
         </div>
       </section>
 

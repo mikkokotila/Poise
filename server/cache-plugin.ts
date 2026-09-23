@@ -1,7 +1,7 @@
 import type { Plugin, Connect } from 'vite'
 import type { ServerResponse } from 'node:http'
 import { getModelSettings, getSettings, setSettings } from './settings'
-import { MODEL_PLACES, invalidateCatalog, loadCatalog, readCatalogReport, resolveChoice, writeCatalogReport } from './models'
+import { MODEL_PLACES, loadCatalog, readCatalogReport, resolveChoice } from './models'
 import { refreshModelCatalog } from './models-refresh'
 import { claudeAuth, type ClaudeAuthSnapshot } from './claude-auth'
 import { getCallerReleaseHealth } from './caller-release'
@@ -252,8 +252,6 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
         if (url === '/api/models/refresh' && req.method === 'POST') {
           try {
             const report = await refreshModelCatalog()
-            await writeCatalogReport(report)
-            invalidateCatalog()
             return json(res, 200, report)
           } catch (err: any) {
             return json(res, httpStatus(err, 502), { error: err.message || String(err) })

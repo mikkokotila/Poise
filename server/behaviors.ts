@@ -1,3 +1,4 @@
+import { prepareModelClis } from './provider-clis'
 import { releaseBackgroundPaused, trackReleaseBackground } from './release-background'
 // Server-side behavior runtime. Lives with the Poise HTTP server
 // so the toggle keeps working when the browser tab is closed,
@@ -936,6 +937,7 @@ async function fireReview(
   const claude = needsClaude(catalog, model)
   const actor = configuredReviewer()
   if (claude) await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
+  await waitForBehavior(prepareModelClis(catalog, [model, recovery]))
   const pwd = await localCheckoutPath(owner, repo)
   // mkdir the cwd hack dir — agent-interface needs it to exist for
   // --pwd resolution behavior identical to triggerPrReview in agent.ts.
@@ -1544,6 +1546,7 @@ async function fireApprove(
   const claude = needsClaude(catalog, model)
   const actor = configuredReviewer()
   if (claude) await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
+  await waitForBehavior(prepareModelClis(catalog, [model, recovery]))
   const pwd = await localCheckoutPath(owner, repo)
   await mkdir(join(GH_INTERFACE_CWD_ROOT, owner, repo), { recursive: true })
   if (!isEnabled('approve-prs')) return false

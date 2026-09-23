@@ -130,6 +130,10 @@ export interface SessionRecord {
   createdAt: string
   updatedAt: string
   status: SessionStatus
+  /** Native CLI maintenance is separate from the selected model identity. */
+  cliChecking?: boolean
+  cliVersion?: string
+  cliWarning?: string
   /** Who holds the checkout while this session is `queued`. */
   queuedBehind?: string
   /** Native session/thread id kept for resume. Absent until the adapter created one. */

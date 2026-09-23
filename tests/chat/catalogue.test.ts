@@ -70,3 +70,18 @@ describe('Console model selection', () => {
     expect(consoleModelLabel('muse-spark-1.3-contributor-xhigh')).toBe('Muse Spark 1.3 Contributor · Extra high')
   })
 })
+
+// New CLI releases retire yesterday's concrete default, not the Opus/High policy.
+it('follows the latest discovered Opus High without rewriting explicit choices', async () => {
+  const models = [
+    { identity: 'opus-5-high', provider: 'claude', selector: 'claude-opus-5', effort: 'high' },
+    { identity: 'opus-5.5-high', provider: 'claude', selector: 'claude-opus-5-5', effort: 'high' },
+    { identity: 'opus-5.10-high', provider: 'claude', selector: 'claude-opus-5-10', effort: 'high' },
+  ]
+  const agents = await catalogueAgents({ ...CATALOG, models }, true, async () => ({ ok: true }))
+  expect(quickSessionRequest(agents)).toMatchObject({ model: 'opus-5.10-high', effort: 'high' })
+  expect(quickSessionRequest(agents, 'opus-5-high')).toMatchObject({ model: 'opus-5-high' })
+  agents.find(a => a.id === 'claude')!.models = models.slice(1)
+  expect(() => quickSessionRequest(agents, 'opus-5-high')).toThrow(/not in the current catalogue/)
+  expect(consoleModelLabel('opus-5.5-high')).toBe('Opus 5.5 · High')
+})

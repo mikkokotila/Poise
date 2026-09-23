@@ -158,7 +158,7 @@ async function installSocket(page: Page, state?: ServerState): Promise<Socket> {
         if (cmd.type === 'queue.remove') queue.items = queue.items.filter(item => item.id !== cmd.itemId)
         else {
           const model = cmd.model || s.model
-          const agent = (AGENTS.agents as Array<{ id: SessionRecord['agent'], models: Array<{ identity: string, effort: string }> }>).find(agent => agent.models.some(m => m.identity === model))!
+          const agent = ((state.agents || AGENTS).agents as Array<{ id: SessionRecord['agent'], models: Array<{ identity: string, effort: string }> }>).find(agent => agent.models.some(m => m.identity === model))!
           const effort = cmd.effort || agent.models.find(m => m.identity === model)!.effort
           if (cmd.type === 'queue.add') queue.items.push({ id: cmd.itemId, prompt: { text: cmd.text, attachments: cmd.attachments || [], mentions: cmd.mentions || [] },
             agent: agent.id, model, effort, state: 'waiting', createdAt: NOW })
@@ -2974,4 +2974,103 @@ test('settings: opening autofocus never steals a field the person already chose'
   await prefix.fill('agent/')
   await expect(page.locator('.st-input-org')).toHaveValue('acme')
   await expect(prefix).toHaveValue('agent/')
+})
+
+for (const queued of [false, true]) test(`CLI refresh: a fresh ${queued ? 'queued task' : 'message'} uses discovered Opus 5.5 High`, async ({ page }) => {
+  const state = makeState([])
+  state.agents = structuredClone(AGENTS)
+  const claude = state.agents.agents[0] as { models: Array<{ identity: string, selector: string, effort: string }> }
+  claude.models = claude.models.map(model => ({ ...model, identity: model.identity.replace('opus-5-', 'opus-5.5-'), selector: 'claude-opus-5-5' }))
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/')
+  await expect(page.locator('.chat-default-model')).toHaveText('Opus 5.5 · High')
+  await input(page).fill(queued ? '/queue Later task' : 'Start with the current model')
+  await input(page).press('Enter')
+  await expect.poll(() => state.calls.filter(c => c.method === 'POST' && c.path === '/api/chat/sessions').length).toBe(1)
+  expect(state.calls.find(c => c.method === 'POST' && c.path === '/api/chat/sessions')!.body).toMatchObject({ model: 'opus-5.5-high', effort: 'high' })
+  await expect.poll(() => sock.framesOf(queued ? 'queue.add' : 'prompt').length).toBe(1)
+  if (queued) {
+    expect(sock.framesOf('queue.add')[0].command).toMatchObject({ model: 'opus-5.5-high', effort: 'high' })
+    expect(sock.framesOf('prompt')).toHaveLength(0)
+  }
+})
+
+async function openModelSettings(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Menu', exact: true }).click()
+  await page.locator('[data-action="settings"]').click()
+  await page.getByRole('tab', { name: 'Models', exact: true }).click()
+  await expect(page.locator('.st-catalog-status')).toContainText('models from Caller')
+}
+
+test('CLI refresh: slow checks show elapsed progress and a CLI failure is not nothing new', async ({ page }) => {
+  const state = makeState([]); await installRoutes(page, state); await installSocket(page, state)
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const report = { changed: false, families: { claude: { status: 'ok' } }, cli_updates: { claude: { status: 'unavailable', error: 'download timed out', before: '2.1.274' } } }
+  await page.route('**/api/models/refresh', async route => { await gate; await route.fulfill({ json: report }) })
+  await page.goto('/'); await openModelSettings(page); await page.clock.install()
+  await page.getByRole('button', { name: 'Check now', exact: true }).click()
+  await expect(page.locator('.st-refresh-models')).toBeDisabled()
+  await expect(page.locator('.st-catalog-status')).toContainText('Updating provider CLIs')
+  await page.clock.fastForward(31_000)
+  await expect(page.locator('.st-catalog-status')).toContainText('0:31 elapsed')
+  release()
+  await expect(page.locator('.st-refresh-models')).toBeEnabled()
+  await expect(page.locator('.st-catalog-status')).toContainText('Model check incomplete')
+  await expect(page.locator('.st-status')).toContainText('download timed out')
+  await expect(page.locator('.st-status')).not.toContainText('nothing new')
+})
+
+test('CLI refresh: a failed request clears checking text and permits retry', async ({ page }) => {
+  const state = makeState([]); await installRoutes(page, state); await installSocket(page, state)
+  await page.route('**/api/models/refresh', route => route.fulfill({ status: 502, json: { error: 'Provider update unavailable' } }))
+  await page.goto('/'); await openModelSettings(page)
+  await page.getByRole('button', { name: 'Check now', exact: true }).click()
+  await expect(page.locator('.st-refresh-models')).toBeEnabled()
+  await expect(page.locator('.st-catalog-status')).toContainText('Provider update unavailable')
+})
+
+test('CLI refresh: a request which never answers has a deadline and cannot leave Check now disabled', async ({ page }) => {
+  const state = makeState([]); await installRoutes(page, state); await installSocket(page, state)
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/models/refresh', async route => { await gate; await route.fulfill({ json: { families: { claude: { status: 'ok' } } } }).catch(() => undefined) })
+  try {
+    await page.goto('/'); await openModelSettings(page); await page.clock.install()
+    await page.getByRole('button', { name: 'Check now', exact: true }).click()
+    await expect(page.locator('.st-refresh-models')).toBeDisabled()
+    await page.clock.fastForward(16 * 60_000)
+    await expect(page.locator('.st-refresh-models')).toBeEnabled()
+    await expect(page.locator('.st-catalog-status')).toContainText('Model check timed out')
+  } finally { release() }
+})
+
+test('CLI refresh: a completed Settings check updates the fresh console without starting a chat', async ({ page }) => {
+  const state = makeState([]); state.agents = structuredClone(AGENTS)
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.route('**/api/models/refresh', async route => {
+    const claude = state.agents!.agents[0] as { models: Array<{ identity: string, selector: string, effort: string }> }
+    claude.models = claude.models.map(model => ({ ...model, identity: model.identity.replace('opus-5-', 'opus-5.5-'), selector: 'claude-opus-5-5' }))
+    await route.fulfill({ json: { changed: true, families: { claude: { status: 'ok' } }, cli_updates: { claude: { status: 'updated', before: '2.1.274', after: '2.1.280' } } } })
+  })
+  await page.goto('/'); await expect(page.locator('.chat-default-model')).toHaveText('Opus 5 · High')
+  await openModelSettings(page)
+  await page.getByRole('button', { name: 'Check now', exact: true }).click()
+  await expect(page.locator('.st-status')).toContainText('Catalog updated.')
+  await expect(page.locator('.st-catalog-status')).toContainText('2.1.280')
+  await page.keyboard.press('Escape')
+  await expect(page.locator('.chat-default-model')).toHaveText('Opus 5.5 · High')
+  expect(sock.framesOf('prompt')).toHaveLength(0)
+  expect(state.calls.filter(call => call.method === 'POST' && call.path === '/api/chat/sessions')).toHaveLength(0)
+})
+
+test('CLI refresh: an unavailable latest version stays visible independently of activity and reasoning', async ({ page }) => {
+  const warning = 'Latest claude CLI could not be verified: download unavailable. Trying the installed CLI (2.1.274).'
+  const state = makeState([session({ cliVersion: '2.1.274', cliWarning: warning })])
+  await installRoutes(page, state); const sock = await installSocket(page, state)
+  await page.goto('/'); await sock.subscribed('s1')
+  await expect(page.locator('.chat-cli-warning')).toHaveText(warning)
+  await page.getByRole('button', { name: 'Hide activity', exact: true }).click()
+  await expect(page.locator('.chat-cli-warning')).toBeVisible()
+  await page.reload(); await expect(page.locator('.chat-cli-warning')).toHaveText(warning)
 })
