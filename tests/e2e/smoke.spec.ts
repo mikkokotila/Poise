@@ -361,6 +361,9 @@ test('opts repositories and trusted authors into Review New Issues from Behavior
   await expect(dialog).toBeHidden()
   await expect(pill).toHaveText('1 repo')
   await expect(pill).toBeFocused()
+  // The refresh tick repaints the pill without taking focus from it.
+  await page.evaluate(() => window.dispatchEvent(new Event('poise:refresh-tick')))
+  await expect.poll(() => page.evaluate(() => document.activeElement?.classList.contains('behavior-triggers-btn'))).toBe(true)
 
   // A name GitHub would not accept keeps the dropdown open, with the reason.
   await pill.click()
@@ -383,6 +386,13 @@ test('opts repositories and trusted authors into Review New Issues from Behavior
   await page.getByLabel('Reviewers for review-new-issues').selectOption('2')
   await expect.poll(() => writes.length).toBe(3)
   expect(writes[2]).toEqual({ reviewers: 2 })
+
+  // With the state unreadable, what the pill shows may be a guess: it cannot be
+  // opened, so nothing can be saved over the stored list.
+  await page.unroute('**/api/behaviors')
+  await page.route('**/api/behaviors', (route) => route.fulfill({ status: 500, json: { error: 'down' } }))
+  await page.evaluate(() => window.dispatchEvent(new Event('poise:refresh-tick')))
+  await expect(pill).toBeDisabled()
 })
 
 test('stops a running run from Swarm after a second click, and settles the row', async ({ page }) => {

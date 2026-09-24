@@ -112,8 +112,9 @@ credential is reachable — `gh`'s accounts, SSH keys, provider logins.
 Reviewers are told not to post; Caller posts their comments through
 github-interface as the review agent and only on the issue and its
 sub-issues, but "comments only" is an instruction to the agent, not a limit
-it cannot break. Processes a reviewer leaves running are killed with its
-process group when it exits.
+it cannot break. When a reviewer exits, its process group is killed, and so
+is any process still running in its checkout — including one that detached
+into its own session; a process that also left the checkout is not found.
 
 ## Poise self-improvement releases
 

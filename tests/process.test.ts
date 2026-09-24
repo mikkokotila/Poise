@@ -809,6 +809,49 @@ if (args.includes('auth') && args.includes('status')) {
     }
   })
 
+  // An issue review keeps Claude Code's own system prompt and appends to it,
+  // with its --settings earlier on the line. The wrapper once took the final
+  // value for a typed prompt and blocked every such launch as a missing
+  // settings value.
+  it('streams an issue review prompt through the wrapper with an appended system prompt', async () => {
+    if (process.platform === 'win32') return
+    const root = await mkdtemp(join(tmpdir(), 'poise-claude-append-'))
+    const rawClaude = join(root, 'claude')
+    const source = `#!/usr/bin/env node
+const args = process.argv.slice(2)
+if (args.includes('auth') && args.includes('status')) {
+  process.stdout.write(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }))
+} else {
+  let input = ''
+  process.stdin.setEncoding('utf8')
+  process.stdin.on('data', (chunk) => { input += chunk })
+  process.stdin.on('end', () => process.stdout.write(JSON.stringify({ args, input })))
+}
+`
+    try {
+      await writeFile(rawClaude, source, { mode: 0o700 })
+      const result = await runWithInput(
+        CLAUDE_SUBSCRIPTION_CLI,
+        ['--print', '--output-format', 'stream-json', '--model', 'claude-opus-5', '--effort', 'max',
+          '--dangerously-skip-permissions', '--setting-sources', '', '--no-session-persistence',
+          '--add-dir', root, '--settings', JSON.stringify({ env: { CLAUDE_CODE_MAX_OUTPUT_TOKENS: '64000' } }),
+          '--append-system-prompt', 'You run unattended.'],
+        'Provide an adversarial review of o/r#1.',
+        { ...process.env, PATH: `${root}${delimiter}${process.env.PATH || ''}` },
+      )
+      expect(result).toMatchObject({ code: 0, stderr: '' })
+      const observed = JSON.parse(result.stdout)
+      expect(observed.input).toBe('Provide an adversarial review of o/r#1.')
+      expect(observed.args.slice(-2)).toEqual(['--append-system-prompt', 'You run unattended.'])
+      // The caller's settings survive, merged into the wrapper's one overlay.
+      const settings = JSON.parse(observed.args[observed.args.indexOf('--settings') + 1])
+      expect(settings.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe('64000')
+      expect(observed.args.filter((arg: string) => arg === '--settings')).toHaveLength(1)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   // The Claude Agent SDK (Chat sessions) never passes --print: it drives the
   // CLI with --input-format/--output-format stream-json over stdin/stdout.
   // The wrapper used to treat that as a non-model invocation and skip the

@@ -773,6 +773,17 @@ export function completeIssueReviewLaunchOwned(input: {
   return info.changes === 1
 }
 
+// A claim taken but never launched — its process died before recording the
+// launch — whose lease has run out, so a new claim may take the target over.
+export function hasExpiredPreLaunchClaim(key: string, target: string): boolean {
+  return !!db.prepare(`
+    SELECT 1 FROM behavior_seen
+    WHERE key = ? AND target = ? AND claim_id <> ''
+      AND launch_requested_at IS NULL
+      AND lease_until IS NOT NULL AND lease_until <= ?
+  `).get(key, target, Date.now())
+}
+
 // How many times a target's launch has already been given up on.
 export function countBehaviorDeadLetters(behavior: string, target: string): number {
   const row = db.prepare(
@@ -896,6 +907,9 @@ function readBehaviorDeadLetters(limit: number, grouped: boolean): BehaviorDeadL
         AND recovered.launch_pr = dead.pr
         AND recovered.launch_outcome IS NOT NULL
         AND julianday(recovered.launch_completed_at) > julianday(dead.created_at)
+        -- Each issue reviewer is its own launch: another reviewer of the same
+        -- issue finishing does not settle this one's incident.
+        AND (dead.behavior <> 'review-new-issues' OR recovered.target = dead.target)
     )
     ), ranked AS (
       SELECT *,

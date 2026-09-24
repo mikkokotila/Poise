@@ -380,6 +380,26 @@ describe('behavior database lifecycle', () => {
     expect(countBehaviorDeadLetters('review-new-issues', 'Vaquum/Origo#452')).toBe(1)
   })
 
+  it('keeps a held issue reviewer listed when another reviewer of the issue finishes', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'poise-db-test-'))
+    const db = await loadIsolatedDb(join(tempRoot, 'cache.db'))
+    const launch = (target: string) => {
+      const claimId = db.claimSeenOwned('review-new-issues', target)!
+      db.markBehaviorLaunchIntentOwned({
+        key: 'review-new-issues', target, claimId, launchBehavior: 'issue_review', repo: 'Vaquum/Origo', pr: 452,
+        requestedAt: new Date(Date.now() - 60_000).toISOString(), expectedHead: '', actor: 'bit-mis',
+        source: 'poise:review-new-issues', correlationId: claimId,
+      })
+      return claimId
+    }
+    launch('Vaquum/Origo#452:secondary')
+    db.recordBehaviorDeadLetter(db.listBehaviorLaunchClaims('review-new-issues')[0], 'posted 1 of 2 comment(s)')
+    const primary = launch('Vaquum/Origo#452')
+    expect(db.completeIssueReviewLaunchOwned({ key: 'review-new-issues', target: 'Vaquum/Origo#452', claimId: primary, completedAt: new Date().toISOString() })).toBe(true)
+    expect(db.listBehaviorIncidents().map((letter) => letter.target)).toEqual(['Vaquum/Origo#452'])
+    expect(db.listBehaviorDeadLetters().map((letter) => letter.target)).toEqual(['Vaquum/Origo#452:secondary'])
+  })
+
   it('records an issue review launch without a head and completes it as commented', async () => {
     tempRoot = await mkdtemp(join(tmpdir(), 'poise-db-test-'))
     const {

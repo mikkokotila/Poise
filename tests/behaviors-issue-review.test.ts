@@ -357,6 +357,45 @@ describe('Review New Issues', () => {
   })
 })
 
+describe('Review New Issues launch safety', () => {
+  it('passes a memory that opens with a Markdown rule without it reading as a flag', async () => {
+    const { behaviors } = await start({ note: '---\nCheck the charts.' })
+    issues = [issue(452)]
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(flag(launches()[0], '--note')).toBe(' ---\nCheck the charts.')
+  })
+
+  it('takes back an issue whose claim was never launched once its short lease runs out', async () => {
+    const { behaviors, database } = await start()
+    issues = [issue(452)]
+    // A process that died between claiming and launching.
+    expect(database.claimSeenOwned(KEY, `${REPO}#452`, 1)).toBeTruthy()
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches()).toHaveLength(1)
+    expect(database.listBehaviorLaunchClaims(KEY)).toHaveLength(1)
+  })
+
+  it('does not launch again while an unregistered worker is still alive, and does once it has exited', async () => {
+    const { behaviors, database } = await start()
+    issues = [issue(452)]
+    let exit: ((result: { code: number | null, signal: null }) => void) | undefined
+    mocks.spawnDetached.mockImplementation(async (_command: string, _args: string[], options: { onExit: typeof exit }) => { exit = options.onExit })
+    await behaviors.runEnabledBehaviorsOnce()
+    // The machine slept: Caller has not registered the run past the grace.
+    database.db.prepare(`UPDATE behavior_seen SET launch_requested_at = ? WHERE key = ?`).run(ago(10 * MINUTE), KEY)
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(database.listBehaviorLaunchClaims(KEY)[0].launchError).toBe('worker still running; awaiting agent call registration')
+    expect(launches()).toHaveLength(1)
+
+    exit!({ code: 1, signal: null })
+    await behaviors.runEnabledBehaviorsOnce()
+    skipBackoff()
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches()).toHaveLength(2)
+  })
+})
+
 describe('Review New Issues settings', () => {
   it('dates each repository from when it was selected and keeps that date', async () => {
     const { behaviors } = await start({ repos: [{ repo: REPO, since: '2026-09-01T00:00:00.000Z' }] })

@@ -3120,6 +3120,7 @@ tr:hover .stop-btn { opacity: 1; }
   outline-offset: 2px;
 }
 .behavior-triggers-btn.is-empty { color: var(--a4); }
+.behavior-triggers-btn:disabled { opacity: 0.55; cursor: default; }
 
 /* The dropdown the pill opens: anchored under it, fixed so it stays with
    the pill while the page scrolls, and inert while closed. */

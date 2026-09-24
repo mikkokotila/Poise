@@ -177,7 +177,10 @@ try {
   // Poise's print-mode callers place the raw user/model prompt last. Never
   // reinterpret that positional value as a trusted command option.
   const printMode = rawArgs.includes('--print') || rawArgs.includes('-p')
-  const promptIsStdin = rawArgs.at(-2) === '--system-prompt'
+  // A caller that sends the prompt on stdin ends with a system prompt of its
+  // own: replacing Claude Code's (PR review) or appended to it (issue review,
+  // which keeps Claude Code's agentic system prompt).
+  const promptIsStdin = ['--system-prompt', '--append-system-prompt'].includes(rawArgs.at(-2))
   const hasPositionalPrompt = printMode && !promptIsStdin
   command = extractSettings(rawArgs, hasPositionalPrompt)
 } catch {

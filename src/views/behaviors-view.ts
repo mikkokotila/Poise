@@ -285,25 +285,52 @@ function shortRepo(repo: string): string {
   return repo.includes('/') ? repo.split('/')[1] : repo
 }
 
-function triggersCell(key: BehaviorKey): string {
+function triggersPresentation(key: BehaviorKey) {
   const repos = getRepos(key)
   const authors = getAuthors(key)
   const none = repos.length === 0
-  const label = none ? 'No repos' : `${repos.length} repo${repos.length === 1 ? '' : 's'}`
-  const title = none
-    ? 'Choose the repositories whose new issues are reviewed'
-    : `Repositories: ${repos.map(shortRepo).join(', ')} · Authors: ${authors.join(', ') || 'none'}`
-  const open = triggersKey === key && !!triggersPanelEl?.classList.contains('open')
+  // What is on screen may not be what is stored; saving from it would replace
+  // the stored list with a guess.
+  const unknown = stateUnknown()
+  return {
+    none,
+    unknown,
+    label: none ? 'No repos' : `${repos.length} repo${repos.length === 1 ? '' : 's'}`,
+    title: unknown
+      ? 'The repositories could not be read from the server.'
+      : none
+        ? 'Choose the repositories whose new issues are reviewed'
+        : `Repositories: ${repos.map(shortRepo).join(', ')} · Authors: ${authors.join(', ') || 'none'}`,
+    open: triggersKey === key && !!triggersPanelEl?.classList.contains('open'),
+  }
+}
+
+function triggersCell(key: BehaviorKey): string {
+  const { none, unknown, label, title, open } = triggersPresentation(key)
   return `
-    <button type="button" class="behavior-triggers-btn${none ? ' is-empty' : ''}" data-behavior="${escapeHtml(key)}" aria-haspopup="dialog" aria-expanded="${open}" title="${escapeHtml(title)}">
+    <button type="button" class="behavior-triggers-btn${none ? ' is-empty' : ''}" data-behavior="${escapeHtml(key)}" aria-haspopup="dialog" aria-expanded="${open}" title="${escapeHtml(title)}"${unknown ? ' disabled' : ''}>
       <span class="behavior-triggers-label">${escapeHtml(label)}</span>
     </button>
   `
 }
 
+// Updated in place: replacing the button every tick took keyboard focus away
+// from it, and could swallow a click that landed during the repaint.
 function refreshTriggersCell(key: BehaviorKey) {
   const cell = viewEl?.querySelector<HTMLElement>(`tr[data-behavior="${key}"] .behavior-setting-cell`)
-  if (cell) cell.innerHTML = triggersCell(key)
+  if (!cell) return
+  const button = cell.querySelector<HTMLButtonElement>('.behavior-triggers-btn')
+  const label = button?.querySelector<HTMLElement>('.behavior-triggers-label')
+  if (!button || !label) {
+    cell.innerHTML = triggersCell(key)
+    return
+  }
+  const view = triggersPresentation(key)
+  label.textContent = view.label
+  button.title = view.title
+  button.classList.toggle('is-empty', view.none)
+  button.setAttribute('aria-expanded', String(view.open))
+  button.disabled = view.unknown
 }
 
 function loadOrgRepos(): Promise<void> {
@@ -469,6 +496,15 @@ function closeTriggersPanel(force = false): Promise<boolean> {
     delete changes.authors
   }
   if (!changes.repos && !changes.authors) {
+    finishClosingTriggersPanel()
+    return Promise.resolve(true)
+  }
+  if (stateUnknown()) {
+    if (!force) {
+      setTriggersStatus('Not saved — the current repositories could not be read from the server.', 'error')
+      return Promise.resolve(false)
+    }
+    alert('The Review New Issues repositories were not saved: the current ones could not be read from the server.')
     finishClosingTriggersPanel()
     return Promise.resolve(true)
   }

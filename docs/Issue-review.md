@@ -58,8 +58,11 @@ level deep, in either of the two ways GitHub work here does it:
   makes its Slices part of it.
 
 A mention elsewhere in the text, a `Depends on`/`Unlocks` line or a Slice's
-`Parent issue:` line does not make one. Sub-issues can live in other
-repositories; reviewers comment on them wherever they are.
+`Parent issue:` line does not make one, nor does anything inside a code block
+or an HTML comment. The heading may read `Work Slices`, `Work Slices:` or
+`5. Work Slices`. A linked sub-issue must belong to the same owner as the
+issue, as GitHub's own sub-issues do; it can live in another of that owner's
+repositories, and reviewers comment on it there.
 
 ## What a reviewer does
 
@@ -71,8 +74,9 @@ sandbox. The mirror (`~/.cache/github-interface/mirrors`) and the checkout
 (`~/.cache/agent-interface/issue-review`) are outside `~/dev`; the checkout
 is deleted when the reviewer finishes. The reviewer does not post. It writes its
 comments to a file; Caller posts them through github-interface as the review
-agent — one comment per issue per reviewer, only on the issue and its
-readable sub-issues, each signed with the reviewer's model:
+agent — one comment per issue per reviewer (in parts when it is longer than
+GitHub takes in one), only on the issue and its readable sub-issues, each
+signed with the reviewer's model:
 
 ```
 ---
@@ -80,7 +84,14 @@ Issue review · `opus-5.5-max`
 ```
 
 Reviewers work independently, so the same finding can appear twice, as with
-the PR review panel.
+the PR review panel. When a reviewer finishes, anything still running in its
+checkout — a dev server, a watcher, a process that detached — is stopped
+before the checkout is deleted.
+
+Comments are posted as the account github-interface comments with (bit-mis);
+Caller refuses a run whose actor is any other account before it reads or posts
+anything. A Claude reviewer runs through Poise's Claude subscription wrapper,
+like every other Claude launch, keeping Claude Code's own system prompt.
 
 ## In Swarm
 
@@ -97,9 +108,13 @@ checkout* and *Posting review comments*.
   holds it.
 - Began posting, then failed: held, never relaunched — it may already have
   commented. Caller records every comment the moment it is posted, and records
-  that posting began before the first.
-- Stopped, out of time (one hour, including the one recovery), recovery
-  failed, or an issue too large to review: held.
+  that posting began before the first. An issue that refuses a comment (locked,
+  deleted) does not stop the others from getting theirs.
+- Stopped, out of time (one hour of wall-clock time, sleep included, with
+  the one recovery), recovery failed, or an issue too large to review: held.
+- A worker whose launch was never recorded — the process died in between — is
+  taken over by a later scan after five minutes. One that has not yet
+  registered its run is not relaunched while it is still alive.
 
 A held reviewer is listed in the Behaviors diagnostics until the issue closes
 or its repository is unticked; Replay in Swarm runs it again on purpose.

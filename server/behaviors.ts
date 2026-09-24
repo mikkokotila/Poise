@@ -32,6 +32,7 @@ import {
   completeBehaviorLaunchOwned,
   completeIssueReviewLaunchOwned,
   countBehaviorDeadLetters,
+  hasExpiredPreLaunchClaim,
   completeSeenOwned,
   getFailedBehaviorLaunch,
   getMeta,
@@ -339,7 +340,9 @@ export function setScratchpad(key: BehaviorKey, text: string): void {
 // the behavior prompt.
 function noteArgs(key: BehaviorKey): string[] {
   const note = getScratchpad(key).trim()
-  return note ? ['--note', note] : []
+  // Caller reads a flag value that starts with "--" as the next flag, so a
+  // note opening with a Markdown rule stopped every launch before it ran.
+  return note ? ['--note', note.startsWith('-') ? ` ${note}` : note] : []
 }
 
 // Last-fired info is intentionally NOT persisted here — agent-interface
@@ -1973,6 +1976,9 @@ export const ISSUE_SETTLE_MS = 10 * 60_000
 export const MAX_ISSUE_REVIEW_RUNS = 3
 // The first launch and one relaunch after a failure that posted nothing.
 const ISSUE_REVIEW_ATTEMPTS = 2
+// How long a claim may sit between being taken and its launch being recorded;
+// a process that dies in between leaves the target free again after this.
+const ISSUE_PRE_LAUNCH_LEASE_MS = 5 * 60_000
 // Failures that are held for a person rather than relaunched: a time limit or
 // failed recovery would repeat as expensively, a stop was the user's decision,
 // and a run that began posting may already have commented.
@@ -2124,11 +2130,12 @@ async function fireIssueReview(
   const actor = configuredReviewer()
   if (claude) await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   await waitForBehavior(prepareModelClis(catalog, [model, recovery]))
-  // The CLI check can take a while; turning the behavior off, deselecting the
-  // repository or changing the panel meanwhile must stop this launch.
+  // The CLI check and the model read can each take a while; turning the
+  // behavior off, deselecting the repository or changing the panel meanwhile
+  // must stop this launch, so these are the last checks before it.
+  if ((await waitForBehavior(issueSlotModel(slot)))?.model !== model) return false
   if (!isEnabled(ISSUES_KEY) || behaviorAborted()) return false
   if (!getIssueRepositories().some((entry) => entry.repo === issue.repo)) return false
-  if ((await issueSlotModel(slot))?.model !== model) return false
   if (!markBehaviorLaunchIntentOwned({
     key: ISSUES_KEY,
     target,
@@ -2194,10 +2201,10 @@ async function launchIssueReview(
   logs: () => Promise<LogEntry[]>,
 ): Promise<void> {
   if (countBehaviorDeadLetters(ISSUES_KEY, target) >= ISSUE_REVIEW_ATTEMPTS && !hasSeen(ISSUES_KEY, target)) return
-  let claimId = claimSeenOwned(ISSUES_KEY, target)
+  let claimId = claimSeenOwned(ISSUES_KEY, target, ISSUE_PRE_LAUNCH_LEASE_MS)
   if (!claimId) {
     if (!await releaseFailedIssueReviewIfSafe(target, logs)) return
-    claimId = claimSeenOwned(ISSUES_KEY, target)
+    claimId = claimSeenOwned(ISSUES_KEY, target, ISSUE_PRE_LAUNCH_LEASE_MS)
     if (!claimId) return
   }
   trackClaim(ISSUES_KEY, target, claimId)
@@ -2234,7 +2241,9 @@ async function tickReviewNewIssues(): Promise<void> {
         const joined = slot === 'primary' ? undefined : slotSince[slot]
         if (joined && created < Date.parse(joined)) return
         const target = reviewSlotTarget(key, slot)
-        if (hasSeen(ISSUES_KEY, target) && !getFailedBehaviorLaunch(ISSUES_KEY, target)) return
+        if (hasSeen(ISSUES_KEY, target)
+          && !getFailedBehaviorLaunch(ISSUES_KEY, target)
+          && !hasExpiredPreLaunchClaim(ISSUES_KEY, target)) return
         candidates.push({ issue, slot, target, order: created * REVIEWER_SLOTS.length + index })
       })
     }
@@ -2335,6 +2344,10 @@ async function reconcileIssueReviewClaims(): Promise<void> {
       if (candidates.length === 0) {
         if (Date.now() - requestedAtMs < BEHAVIOR_REGISTRATION_GRACE_MS) {
           retainClaimSafely(claim, 'awaiting agent call registration')
+        } else if (activeClaims.get(claim.claimId)?.launched) {
+          // The worker has not exited — a machine that slept can delay its
+          // registration past the grace. Launching another now could post twice.
+          retainClaimSafely(claim, 'worker still running; awaiting agent call registration')
         } else {
           // Nothing ran, so nothing was posted; the next scan may launch it
           // again, once.
