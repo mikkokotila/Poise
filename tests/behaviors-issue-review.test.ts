@@ -34,6 +34,10 @@ let database: typeof import('../server/db') | null = null
 let behaviors: typeof import('../server/behaviors') | null = null
 let issues: Array<Record<string, unknown>> = []
 let agentLogs: Array<Record<string, unknown>> = []
+// Each issue's sub-issues, as github-interface --sub-issues reports them.
+let subIssues: Record<string, string[]> = {}
+// Issues whose sub-issues cannot be read, with the error.
+let subIssueFailures: Record<string, string> = {}
 let catalogStdout = CATALOG_STDOUT
 let callCounter = 0
 
@@ -73,6 +77,20 @@ function arrangeCli(): void {
       // Deliberately not filtered by date: Poise must hold its own line.
       const repo = args[args.indexOf('--repo') + 1]
       return { stdout: JSON.stringify(issues.filter((row) => row.repo === repo)), stderr: '' }
+    }
+    if (command === 'github-interface' && args[0] === '--sub-issues') {
+      const repository = args[args.indexOf('--repository') + 1]
+      const number = Number(args[1].replace('#', ''))
+      const failure = subIssueFailures[`${repository}#${number}`]
+      if (failure) throw new Error(failure)
+      const rows = (subIssues[`${repository}#${number}`] ?? []).map((ref) => {
+        const [repo, child] = ref.split('#')
+        return { repository: repo, issue_number: Number(child), via: ['work_slices'] }
+      })
+      return {
+        stdout: JSON.stringify({ action: 'sub_issues', repository, issue_number: number, sub_issues: rows }),
+        stderr: '',
+      }
     }
     if (command === 'agent-interface' && args[0] === '--models') return { stdout: catalogStdout, stderr: '' }
     if (command === 'agent-interface' && args[0] === '--logs') return { stdout: JSON.stringify(agentLogs), stderr: '' }
@@ -165,6 +183,8 @@ beforeEach(async () => {
   mocks.observeAuthFailure.mockReset()
   issues = []
   agentLogs = []
+  subIssues = {}
+  subIssueFailures = {}
   catalogStdout = CATALOG_STDOUT
   vi.spyOn(console, 'error').mockImplementation(() => undefined)
   vi.spyOn(console, 'log').mockImplementation(() => undefined)
@@ -354,6 +374,244 @@ describe('Review New Issues', () => {
     expect(launches()).toEqual([])
     expect(database.listBehaviorLaunchClaims(KEY)).toEqual([])
     expect(database.hasSeen(KEY, `${REPO}#452`)).toBe(false)
+  })
+})
+
+describe('Review New Issues sub-issues', () => {
+  const ref = (number: number, repo = REPO) => `${repo}#${number}`
+  let commentId = 0
+  const commentedOn = (...refs: string[]) => refs.map((issue) => ({ issue, comment_id: ++commentId, url: null, author: 'bit-mis' }))
+  const reviewed = (target: string, ...refs: string[]) =>
+    finished(target, { status: 'completed', action: 'commented', outcome: 'commented', receipts: commentedOn(...refs) })
+  const settle = (...numbers: number[]) => {
+    issues = issues.map((row) => numbers.includes(row.number as number) ? { ...row, created_at: ago(11 * MINUTE) } : row)
+  }
+
+  it('reviews slices once, inside their PRD\'s review, when they follow the PRD', async () => {
+    const { behaviors, database } = await start({ reviewers: 2 })
+    issues = [issue(500, { created_at: ago(20 * MINUTE) }), issue(501, { created_at: ago(8 * MINUTE) }), issue(502, { created_at: ago(8 * MINUTE) })]
+    subIssues = { [ref(500)]: [ref(501), ref(502)] }
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches().map((args) => args[1])).toEqual([ref(500), ref(500)])
+    for (const claim of database.listBehaviorLaunchClaims(KEY)) expect(claim.launchCovers).toEqual([ref(501), ref(502)])
+
+    // The slices settle while the PRD's reviewers are still at work.
+    settle(501, 502)
+    agentLogs = [callFor(ref(500)), callFor(`${ref(500)}:secondary`)]
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches()).toHaveLength(2)
+
+    // Once a reviewer has commented on them, they are done for good.
+    agentLogs[0] = reviewed(ref(500), ref(500), ref(501), ref(502))
+    await behaviors.runEnabledBehaviorsOnce()
+    agentLogs[1] = reviewed(`${ref(500)}:secondary`, ref(500), ref(501), ref(502))
+    await behaviors.runEnabledBehaviorsOnce()
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches()).toHaveLength(2)
+    for (const target of [ref(501), `${ref(501)}:secondary`, ref(502), `${ref(502)}:secondary`]) {
+      expect(database.hasSeen(KEY, target)).toBe(true)
+    }
+    expect(console.log).toHaveBeenCalledWith(`[behaviors] review-new-issues: ${ref(501)} was reviewed as a sub-issue of ${ref(500)}`)
+    expect(behaviors.getBehaviorsRuntimeHealth().failures).toEqual([])
+  })
+
+  it('holds a slice for a PRD that is still settling, then lets the PRD\'s review cover it', async () => {
+    const { behaviors } = await start()
+    issues = [issue(501, { created_at: ago(20 * MINUTE) }), issue(500, { created_at: ago(5 * MINUTE) })]
+    subIssues = { [ref(500)]: [ref(501)] }
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches()).toEqual([])
+
+    settle(500)
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches().map((args) => args[1])).toEqual([ref(500)])
+  })
+
+  it('reviews a slice on its own when it joined the PRD after the PRD\'s review began', async () => {
+    const { behaviors } = await start()
+    issues = [issue(500, { created_at: ago(30 * MINUTE) })]
+    await behaviors.runEnabledBehaviorsOnce()
+    agentLogs = [reviewed(ref(500), ref(500))]
+    await behaviors.runEnabledBehaviorsOnce()
+
+    issues.push(issue(503, { created_at: ago(12 * MINUTE) }))
+    subIssues = { [ref(500)]: [ref(503)] }
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches().map((args) => args[1])).toEqual([ref(500), ref(503)])
+  })
+
+  it('reviews a slice on its own when its PRD\'s review left it without a comment', async () => {
+    const { behaviors } = await start()
+    issues = [issue(500, { created_at: ago(30 * MINUTE) }), issue(501, { created_at: ago(12 * MINUTE) })]
+    subIssues = { [ref(500)]: [ref(501)] }
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches().map((args) => args[1])).toEqual([ref(500)])
+
+    agentLogs = [reviewed(ref(500), ref(500))]
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches().map((args) => args[1])).toEqual([ref(500), ref(501)])
+  })
+
+  it('reviews a slice on its own when its PRD\'s review is held without commenting', async () => {
+    const { behaviors } = await start()
+    issues = [issue(500, { created_at: ago(30 * MINUTE) }), issue(501, { created_at: ago(12 * MINUTE) })]
+    subIssues = { [ref(500)]: [ref(501)] }
+    await behaviors.runEnabledBehaviorsOnce()
+    agentLogs = [finished(ref(500), { status: 'failed', error: 'stopped', error_code: 'stopped' })]
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches().map((args) => args[1])).toEqual([ref(500), ref(501)])
+  })
+
+  it('keeps a slice waiting while its PRD is relaunched after a failure that posted nothing', async () => {
+    const { behaviors } = await start()
+    issues = [issue(500, { created_at: ago(30 * MINUTE) }), issue(501, { created_at: ago(12 * MINUTE) })]
+    subIssues = { [ref(500)]: [ref(501)] }
+    await behaviors.runEnabledBehaviorsOnce()
+    agentLogs = [finished(ref(500), { status: 'failed', error: 'provider exited 1' })]
+    await behaviors.runEnabledBehaviorsOnce()
+    skipBackoff()
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches().map((args) => args[1])).toEqual([ref(500), ref(500)])
+  })
+
+  it('reviews the sub-issue of a covered slice on its own, since a review reaches one level', async () => {
+    const { behaviors } = await start()
+    issues = [
+      issue(500, { created_at: ago(30 * MINUTE) }),
+      issue(501, { created_at: ago(25 * MINUTE) }),
+      issue(502, { created_at: ago(20 * MINUTE) }),
+    ]
+    subIssues = { [ref(500)]: [ref(501)], [ref(501)]: [ref(502)] }
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches().map((args) => args[1])).toEqual([ref(500), ref(502)])
+  })
+
+  it('reviews the oldest issue of a loop of sub-issues and lets it cover the rest', async () => {
+    const { behaviors } = await start()
+    issues = [issue(500, { created_at: ago(30 * MINUTE) }), issue(501, { created_at: ago(20 * MINUTE) })]
+    subIssues = { [ref(500)]: [ref(501)], [ref(501)]: [ref(500)] }
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches().map((args) => args[1])).toEqual([ref(500)])
+  })
+
+  it('covers a slice in another selected repository, however its name is cased', async () => {
+    const limen = 'Vaquum/Limen'
+    const hourAgo = ago(60 * MINUTE)
+    const { behaviors } = await start({ repos: [{ repo: REPO, since: hourAgo }, { repo: limen, since: hourAgo }] })
+    issues = [
+      issue(500, { created_at: ago(30 * MINUTE) }),
+      issue(7, { repo: limen, url: `https://github.com/${limen}/issues/7`, created_at: ago(12 * MINUTE) }),
+    ]
+    subIssues = { [ref(500)]: ['vaquum/limen#7'] }
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches().map((args) => args[1])).toEqual([ref(500)])
+  })
+
+  it('asks GitHub nothing for an issue held after a failure', async () => {
+    const { behaviors } = await start()
+    issues = [issue(500, { created_at: ago(30 * MINUTE) })]
+    await behaviors.runEnabledBehaviorsOnce()
+    agentLogs = [finished(ref(500), { status: 'failed', error: 'stopped', error_code: 'stopped' })]
+    await behaviors.runEnabledBehaviorsOnce()
+    // Another issue is still settling, so only the held one is due.
+    issues.push(issue(501, { created_at: ago(5 * MINUTE) }))
+    mocks.runFile.mockClear()
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(mocks.runFile.mock.calls.some(([command, args]) => command === 'github-interface' && (args as string[])[0] === '--sub-issues')).toBe(false)
+    expect(launches()).toHaveLength(1)
+  })
+
+  it('launches nothing while no sub-issues can be read at all, and says why', async () => {
+    const { behaviors, database } = await start()
+    issues = [issue(500, { created_at: ago(30 * MINUTE) }), issue(501, { created_at: ago(20 * MINUTE) })]
+    subIssueFailures = { [ref(500)]: 'GitHub 502 reading sub-issues', [ref(501)]: 'GitHub 502 reading sub-issues' }
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches()).toEqual([])
+    expect(database.hasSeen(KEY, ref(500))).toBe(false)
+    expect(behaviors.getBehaviorsRuntimeHealth().failures[0]).toMatchObject({ behavior: KEY, error: 'GitHub 502 reading sub-issues' })
+  })
+
+  it('keeps one issue whose sub-issues cannot be read from holding back the rest', async () => {
+    const limen = 'Vaquum/Limen'
+    const hourAgo = ago(60 * MINUTE)
+    const { behaviors } = await start({ repos: [{ repo: REPO, since: hourAgo }, { repo: limen, since: hourAgo }] })
+    // Deleted while settling: the datastore still lists it for a while.
+    issues = [
+      issue(500, { created_at: ago(30 * MINUTE) }),
+      issue(7, { repo: limen, url: `https://github.com/${limen}/issues/7`, created_at: ago(20 * MINUTE) }),
+    ]
+    subIssueFailures = { [ref(500)]: 'GitHub 404: Not Found' }
+    await behaviors.runEnabledBehaviorsOnce()
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches().map((args) => args[1])).toEqual([ref(7, limen)])
+    expect(behaviors.getBehaviorsRuntimeHealth().failures).toEqual([])
+    // Said once, not every minute.
+    const said = vi.mocked(console.error).mock.calls.filter(([line]) => String(line).includes(`sub-issues of ${ref(500)}`))
+    expect(said).toHaveLength(1)
+  })
+
+  it('drops a sub-issue link that no issue answers to, such as a #0 placeholder', async () => {
+    const { behaviors, database } = await start()
+    issues = [issue(500, { created_at: ago(30 * MINUTE) })]
+    subIssues = { [ref(500)]: [ref(0), ref(501)] }
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches().map((args) => args[1])).toEqual([ref(500)])
+    expect(database.listBehaviorLaunchClaims(KEY)[0].launchCovers).toEqual([ref(501)])
+  })
+
+  it('asks GitHub nothing while every reviewer is busy', async () => {
+    const { behaviors } = await start({ reviewers: 3 })
+    issues = [issue(500, { created_at: ago(30 * MINUTE) })]
+    await behaviors.runEnabledBehaviorsOnce()
+    agentLogs = [callFor(ref(500)), callFor(`${ref(500)}:secondary`), callFor(`${ref(500)}:tertiary`)]
+    issues.push(issue(501, { created_at: ago(20 * MINUTE) }))
+    mocks.runFile.mockClear()
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(mocks.runFile.mock.calls.some(([command, args]) => command === 'github-interface' && (args as string[])[0] === '--sub-issues')).toBe(false)
+    expect(launches()).toHaveLength(3)
+  })
+
+  it('settles a covered issue\'s own failed review and a claim that never launched', async () => {
+    const { behaviors, database } = await start()
+    issues = [issue(501, { created_at: ago(30 * MINUTE) }), issue(502, { created_at: ago(30 * MINUTE) })]
+    // 501 was reviewed on its own and failed; 502's claim died before launching.
+    await behaviors.runEnabledBehaviorsOnce()
+    agentLogs = [finished(ref(501), { status: 'failed', error: 'provider exited 1' }), finished(ref(502), { status: 'failed', error: 'provider exited 1' })]
+    await behaviors.runEnabledBehaviorsOnce()
+    database.releaseSeen(KEY, ref(502))
+    expect(database.claimSeenOwned(KEY, ref(502), 1)).toBeTruthy()
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(database.listBehaviorIncidents().map((letter) => letter.target).sort()).toEqual([ref(501), ref(502)])
+
+    // A replay of their PRD's review has commented on both.
+    agentLogs.push({
+      ...agentLogs[0], id: 'f'.repeat(32), pr_id: '500', correlation_id: 'replay-1', source: 'poise:replay',
+      status: 'completed', action: 'commented', outcome: 'commented', error: '', receipts: commentedOn(ref(500), ref(501), ref(502)),
+    })
+    skipBackoff()
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches()).toHaveLength(2)
+    expect(database.listBehaviorIncidents()).toEqual([])
+    expect(database.hasExpiredPreLaunchClaim(KEY, ref(502))).toBe(false)
+    expect(database.hasSeen(KEY, ref(502))).toBe(true)
+  })
+})
+
+describe('reviewRoots', () => {
+  it('reviews each issue once however often it is listed, and settles loops', async () => {
+    const { behaviors } = await start()
+    const roots = (order: string[], links: Record<string, string[]>) => [...behaviors.reviewRoots(order, new Map(Object.entries(links)))].sort()
+    expect(roots([], {})).toEqual([])
+    expect(roots(['a', 'b', 'a', 'b'], { a: ['b'] })).toEqual(['a'])
+    expect(roots(['p', 'x', 'y'], { p: ['x'], x: ['y'] })).toEqual(['p', 'y'])
+    // Every issue of a loop is either reviewed or covered by an issue that is.
+    const links = { a: ['b'], b: ['c'], c: ['a'] }
+    const loop = roots(['a', 'b', 'c'], links)
+    expect(loop[0]).toBe('a')
+    for (const issue of ['a', 'b', 'c']) {
+      const parents = Object.entries(links).filter(([, children]) => children.includes(issue)).map(([parent]) => parent)
+      expect(loop.includes(issue) || parents.some((parent) => loop.includes(parent))).toBe(true)
+    }
   })
 })
 

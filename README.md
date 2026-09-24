@@ -126,6 +126,7 @@ input/model; new commits, new approval input, or a model change can be retried.
 Behaviors → Review New Issues gives each new issue in the repositories you opt
 in — and every sub-issue it makes part of itself — an adversarial review by
 one to three reviewers at once, the Issue review models in Settings → Models.
+A sub-issue that its parent's review covers gets no review of its own.
 Each reviewer is its provider's own CLI with full access to a fresh checkout,
 so it can read the whole repository and run the tests; Caller posts its
 comments as the review agent. Nothing is reviewed until a repository is ticked

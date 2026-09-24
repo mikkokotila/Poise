@@ -437,4 +437,50 @@ describe('behavior database lifecycle', () => {
     expect(db.prepare(`SELECT launch_outcome, launch_action, launch_head_sha FROM behavior_seen WHERE key = 'review-new-issues'`).get())
       .toEqual({ launch_outcome: 'commented', launch_action: 'commented', launch_head_sha: null })
   })
+
+  it('records the sub-issues an issue review covers, through failure too', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'poise-db-test-'))
+    const {
+      claimSeenOwned,
+      completeSeenOwned,
+      getFailedBehaviorLaunch,
+      linkBehaviorLaunchCallOwned,
+      listBehaviorLaunchClaims,
+      markBehaviorLaunchIntentOwned,
+      setBehaviorLaunchErrorOwned,
+    } = await loadIsolatedDb(join(tempRoot, 'cache.db'))
+    const target = 'Vaquum/Origo#500'
+    const claimId = claimSeenOwned('review-new-issues', target)!
+    const intent = {
+      key: 'review-new-issues',
+      target,
+      claimId,
+      launchBehavior: 'issue_review' as const,
+      repo: 'Vaquum/Origo',
+      pr: 500,
+      requestedAt: '2026-09-24T07:00:00.000Z',
+      expectedHead: '',
+      actor: 'bit-mis',
+      source: 'poise:review-new-issues',
+      correlationId: claimId,
+    }
+    expect(() => markBehaviorLaunchIntentOwned({
+      ...intent, launchBehavior: 'pr_review', expectedHead: 'a'.repeat(40), covers: ['Vaquum/Origo#501'],
+    })).toThrow(/only an issue review/)
+    // What a launch covers only holds others back: a bad entry is dropped, not fatal.
+    expect(markBehaviorLaunchIntentOwned({
+      ...intent, covers: ['Vaquum/Origo#501', 'not an issue', 'Vaquum/Origo#0', 'Vaquum/Limen#7', 'Vaquum/Origo#501'],
+    })).toBe(true)
+    expect(listBehaviorLaunchClaims('review-new-issues')[0].launchCovers).toEqual(['Vaquum/Origo#501', 'Vaquum/Limen#7'])
+
+    expect(linkBehaviorLaunchCallOwned('review-new-issues', target, claimId, 'b'.repeat(32))).toBe(true)
+    expect(setBehaviorLaunchErrorOwned('review-new-issues', target, claimId, 'provider exited 1')).toBe(true)
+    expect(completeSeenOwned('review-new-issues', target, claimId)).toBe(true)
+    expect(getFailedBehaviorLaunch('review-new-issues', target)?.launchCovers).toEqual(['Vaquum/Origo#501', 'Vaquum/Limen#7'])
+
+    // Any other launch covers nothing.
+    const other = claimSeenOwned('review-new-issues', 'Vaquum/Origo#502')!
+    expect(markBehaviorLaunchIntentOwned({ ...intent, target: 'Vaquum/Origo#502', claimId: other, pr: 502, correlationId: other })).toBe(true)
+    expect(listBehaviorLaunchClaims('review-new-issues').find((claim) => claim.target === 'Vaquum/Origo#502')!.launchCovers).toEqual([])
+  })
 })
