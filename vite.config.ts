@@ -3,7 +3,9 @@ import { resolve } from 'node:path'
 import { buildSourceSha } from './scripts/build-identity.mjs'
 import { validateConfabUrl } from './server/runtime-config'
 
+// Used only by the development server, never a client-side define.
 const RUNTIME_ENV_KEYS = [
+  'JEV_API_KEY',
   'AGENT_INTERFACE_ROOT',
   'POISE_CHAT_ATTACHMENTS_DIR',
   'POISE_DB',

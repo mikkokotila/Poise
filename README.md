@@ -366,3 +366,11 @@ Poise checks and updates installed provider CLIs before discovery and native
 Chat turns. Settings → Models → Check now shows progress and failures explicitly;
 fresh chats follow the latest discovered Opus High rather than a pinned version.
 See [Provider CLI and model freshness](docs/Model-freshness.md).
+
+## JEV typed primitives
+
+Select **JEV · Primitive builder** in New session to evaluate explicit state
+with Noul, Choice and Score questions, rather than send chat messages. The
+builder supports mixed question batches, typed result cards, request JSON,
+reusable Snippets templates and saved evaluation history. Configure the
+server-only `JEV_API_KEY` in `.env`. See [JEV primitive workspaces](docs/Jev-primitives.md).

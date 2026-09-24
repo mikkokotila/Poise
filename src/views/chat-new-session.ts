@@ -5,7 +5,7 @@ import { escapeHtml } from '../markdown'
 
 export function renderNewSessionDialog(
   container: HTMLElement, info: AgentsResponse, context: SessionContext | undefined,
-  onCreate: (request: NewSessionRequest, error: HTMLElement) => void, onCancel: () => void,
+  onCreate: (request: NewSessionRequest, error: HTMLElement) => void, onCancel: () => void, onJev?: () => void,
 ): void {
   const families = catalogueFamilies(info.agents)
   const initial = familyForIdentity(families, info.defaults.model) ?? families.find(f => f.agent.available) ?? families[0]
@@ -18,7 +18,7 @@ export function renderNewSessionDialog(
     <div class="chat-dialog-title">New session</div>
     ${context ? `<div class="chat-dialog-context"><span class="chat-pill">${escapeHtml(context.kind)}</span> ${escapeHtml(context.title)}</div>` : ''}
     <div class="chat-dialog-row">
-      <label class="chat-dialog-field">Model<select class="st-select chat-d-model" aria-label="Model">${options}</select></label>
+      <label class="chat-dialog-field">Model<select class="st-select chat-d-model" aria-label="Model">${options}${onJev ? '<optgroup label="Typed evaluations"><option value="jev-primitives">JEV · Primitive builder</option></optgroup>' : ''}</select></label>
       <label class="chat-dialog-field">Effort<select class="st-select chat-d-effort" aria-label="Effort"></select></label>
     </div>
     <div class="st-help chat-dialog-model-state" role="status"></div>${fallback}
@@ -34,6 +34,12 @@ export function renderNewSessionDialog(
   const status = form.querySelector<HTMLElement>('.chat-dialog-model-state')!
   const error = form.querySelector<HTMLElement>('.chat-dialog-error')!
   function fillEfforts(wanted?: string): void {
+    const jev = model.value === 'jev-primitives'
+    effort.closest<HTMLElement>('label')!.hidden = jev
+    container.querySelector<HTMLElement>('.chat-dialog-context')?.toggleAttribute('hidden', jev)
+    form.querySelector<HTMLElement>('.chat-dialog-fallback')?.toggleAttribute('hidden', jev)
+    if (jev) { status.textContent = 'Build Choice, Score and Noul questions; get typed results, not chat replies.'; status.classList.remove('st-help-error'); create.disabled = false; create.textContent = 'Open builder'; return }
+    create.textContent = 'Create'
     const family = families.find(f => f.key === model.value)
     const variants = family?.models ?? []
     effort.innerHTML = variants.map(row => `<option value="${escapeHtml(row.effort)}"${row.identity === wanted ? ' selected' : ''}>${escapeHtml(row.effort)}</option>`).join('')
@@ -55,6 +61,7 @@ export function renderNewSessionDialog(
   form.querySelector('.chat-dialog-cancel')!.addEventListener('click', onCancel)
   form.addEventListener('submit', event => {
     event.preventDefault()
+    if (model.value === 'jev-primitives' && onJev) { onJev(); return }
     const family = families.find(f => f.key === model.value)
     const selected = family?.models.find(row => row.effort === effort.value)
     if (!family?.agent.available || !selected) {

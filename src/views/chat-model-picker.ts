@@ -3,7 +3,7 @@ import { consoleModelLabel } from '../chat-catalog'
 import { escapeHtml } from '../markdown'
 
 interface PickerState { identity: string, label: string, visible: boolean, disabled: boolean }
-interface PickerHandlers { loadModels(): Promise<AgentInfo[]>, onSelect(identity: string): void }
+interface PickerHandlers { onJev?(): void; jevAvailable?(): boolean; loadModels(): Promise<AgentInfo[]>, onSelect(identity: string): void }
 
 /** A draft-only choice: opening or choosing never creates a native session. */
 export function attachModelPicker(container: HTMLElement, handlers: PickerHandlers) {
@@ -47,6 +47,9 @@ export function attachModelPicker(container: HTMLElement, handlers: PickerHandle
     positionFrame = requestAnimationFrame(followAnchor)
   }
 
+  function jevOption(): string {
+    return handlers.onJev && handlers.jevAvailable?.() ? '<button type="button" role="option" tabindex="-1" aria-selected="false" aria-disabled="false" class="chat-model-option jev-picker-option">JEV · Primitive builder</button>' : ''
+  }
   function options(): HTMLButtonElement[] {
     return [...menu.querySelectorAll<HTMLButtonElement>('[role="option"][aria-disabled="false"]')]
   }
@@ -84,6 +87,7 @@ export function attachModelPicker(container: HTMLElement, handlers: PickerHandle
             <span class="chat-model-check" aria-hidden="true">${model.identity === state.identity ? '✓' : ''}</span>
           </button>`).join('')}
         </div>`).join('') || '<div class="chat-model-status" role="status">No catalogue models are available.</div>'
+      menu.insertAdjacentHTML('beforeend', jevOption())
       position()
       focusOption(options().find(option => option.dataset.identity === state.identity) ?? options()[0])
     } catch {
@@ -101,6 +105,7 @@ export function attachModelPicker(container: HTMLElement, handlers: PickerHandle
   })
   menu.addEventListener('click', event => {
     const target = event.target as HTMLElement
+    if (target.closest('.jev-picker-option')) { close(); handlers.onJev?.(); return }
     if (target.closest('.chat-model-retry')) { void open(); return }
     const option = target.closest<HTMLButtonElement>('[data-identity]')
     if (!option || state.disabled || option.getAttribute('aria-disabled') === 'true') return

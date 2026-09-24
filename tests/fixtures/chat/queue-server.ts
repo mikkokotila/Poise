@@ -1,3 +1,6 @@
+import { JevRuntime } from '../../../server/jev/runtime'
+import { handleJevApi } from '../../../server/jev/api'
+import { jevFixture } from '../jev-provider'
 // Test-only server: the production ChatRuntime, ACP adapter, SQLite and WS.
 // The native executable is always a scripted ACP peer, never a live model.
 // All repository/database state stays under the test root.
@@ -9,13 +12,16 @@ import { ChatRuntime } from '../../../server/chat/runtime'
 import { ChatSocketServer, handleChatApi } from '../../../server/chat/transport'
 import { createGrokAdapter } from '../../../server/chat/adapters/grok'
 import { handleSnippetApi } from '../../../server/snippet-api'
-import { enforceApiRequest } from '../../../server/http'
+import { enforceApiRequest, httpStatus } from '../../../server/http'
 import { CATALOG } from '../../model-catalog-fixture'
 
 const root = process.env.LATENCY_ROOT!
 const checkout = join(root, 'repo')
 const sourceRoot = process.env.LATENCY_SOURCE_ROOT!
 const live = false
+const jevTest = process.env.JEV_TEST_FIXTURE === '1'
+const jevProvider = jevFixture()
+const jev = jevTest ? new JevRuntime({ key: () => 'test-jev-key', fetch: jevProvider.fetcher }) : null
 await mkdir(checkout, { recursive: true })
 const git = (...args: string[]) => execFileSync('git', args, { cwd: checkout, stdio: 'pipe' })
 git('init', '-q', '-b', 'main')
@@ -79,6 +85,8 @@ const server = createServer((req, res) => {
   void (async () => {
     enforceApiRequest(req)
     const path = (req.url || '/').split('?')[0]
+    if (jev && path === '/__test__/jev') return json(res, { calls: jevProvider.calls })
+    if (jev && await handleJevApi(req, res, req.url || '', jev)) return
     if (path === '/__test__/timings') return json(res, { nativeFrames, nativeInputs, nativeSteers, spawnCount, live, sessionId: record.id, session: runtime.get(record.id), events: runtime.events(record.id, 0).events })
     if (path === '/api/settings') return json(res, { org: 'fixture', me: 'test', timezone: 'UTC', models: {}, chat: { branchPrefix: 'chat/', idleTimeoutMinutes: 0 } })
     if (path === '/api/claude-auth') return json(res, { status: 'authenticated', reason: null, loginInProgress: false })
@@ -93,7 +101,7 @@ const server = createServer((req, res) => {
     res.statusCode = response.status
     res.setHeader('Content-Type', response.headers.get('content-type') || 'application/octet-stream')
     res.end(Buffer.from(await response.arrayBuffer()))
-  })().catch(error => { res.statusCode = 500; json(res, { error: error instanceof Error ? error.message : String(error) }) })
+  })().catch(error => { res.statusCode = httpStatus(error, 500); json(res, { error: error instanceof Error ? error.message : String(error) }) })
 })
 sockets.attach(server)
 await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -102,7 +110,7 @@ let stopping = false
 async function stop() {
   if (stopping) return
   stopping = true
-  await sockets.close(); await runtime.stop(); server.close(); process.exit(0)
+  await sockets.close(); await runtime.stop(); await jev?.stop(); server.close(); process.exit(0)
 }
 process.on('SIGTERM', () => { void stop() })
 process.on('SIGINT', () => { void stop() })
