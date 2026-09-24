@@ -6165,3 +6165,6 @@ body:has(#view-chat:not([hidden])) #app { padding-bottom: 0; }
 
 .jev-shape { margin: 0 0 12px; font-size: .75rem; color: var(--text-tertiary); }
 .jev-result-card .jev-result-question { margin: 10px 0; font-size: .75rem; overflow-wrap: anywhere; }
+
+/* Short rubrics stay compact, but preserve line breaks from Request JSON. */
+.jev-field textarea[rows="2"] { min-height: 52px; }

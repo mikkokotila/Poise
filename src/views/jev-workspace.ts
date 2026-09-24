@@ -103,7 +103,7 @@ export function createJevWorkspace(parent: HTMLElement, sidebar: HTMLElement, ha
   async function create(seed = emptyJevDraft()) {
     const session: JevSession = { id: crypto.randomUUID(), title: 'Untitled primitives', revision: 0, draft: JSON.stringify(seed), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
     const e: Entry = { session, title: session.title, draft: seed, dirty: true, created: false }
-    entries.set(session.id, e); persist(e); activate(session.id)
+    entries.set(session.id, e); persist(e); activate(session.id); builder.focusState()
     await save(e)
     if (current() === e && e.created) await loadRuns()
   }
@@ -132,7 +132,8 @@ export function createJevWorkspace(parent: HTMLElement, sidebar: HTMLElement, ha
     try {
       const response = await jevApi<{ runs: JevRun[]; next?: number }>(`sessions/${origin}/runs${earlier && nextPage ? `?before=${nextPage}` : ''}`)
       if (active !== origin || generation !== navigation || requestGeneration !== runLoadGeneration) return
-      runs = earlier ? [...runs, ...response.runs.filter(run => !runs.some(old => old.id === run.id))] : [...response.runs, ...runs.filter(run => !response.runs.some(newer => newer.id === run.id))]
+      const incoming = response.runs.map(run => keepSettledRun(runs.find(old => old.id === run.id), run))
+      runs = earlier ? [...runs, ...incoming.filter(run => !runs.some(old => old.id === run.id))] : [...incoming, ...runs.filter(run => !incoming.some(newer => newer.id === run.id))]
       if (earlier || runs.length <= 20) nextPage = response.next
       if (!selectedRun || !runs.some(run => run.id === selectedRun)) selectedRun = runs[0]?.id || ''
       const e = current()!
@@ -140,6 +141,10 @@ export function createJevWorkspace(parent: HTMLElement, sidebar: HTMLElement, ha
       renderRuns(); controls()
     } catch (error) { if (active === origin && generation === navigation && requestGeneration === runLoadGeneration) message((error as Error).message, true) }
     finally { if (active === origin && generation === navigation && requestGeneration === runLoadGeneration && visible && !pollingPaused) { clearTimeout(pollTimer); pollTimer = setTimeout(() => { if (!document.hidden) void loadRuns(); else pollTimer = setTimeout(() => { void loadRuns() }, 2000) }, runs.some(run => run.status === 'running') ? 800 : 5000) } }
+  }
+  function keepSettledRun(previous: JevRun | undefined, incoming: JevRun): JevRun {
+    // A delayed 202 receipt or history response can predate an already observed result.
+    return previous && previous.status !== 'running' && incoming.status === 'running' ? previous : incoming
   }
   let resultsFingerprint = ''
   function renderRuns() {
@@ -160,27 +165,37 @@ export function createJevWorkspace(parent: HTMLElement, sidebar: HTMLElement, ha
     const e = current(); if (!e || !configured || submitting || e.pendingId || runs.some(run => run.status === 'running')) return
     let request: JevRequest
     try { request = requestFromDraft(e.draft) } catch (error) { builder.error((error as Error).message); return }
+    const generation = navigation, draftSnapshot = JSON.stringify(e.draft)
     submitting = true; controls(); message('')
     try {
       await handlers.flushMemories()
       await save(e)
       if (!e.created || e.dirty || e.error) throw new Error(e.error || 'Could not save the workspace.')
-      e.pendingId = crypto.randomUUID(); e.pendingRequest = request; persist(e)
-      const { run } = await jevApi<{ run: JevRun }>(`sessions/${e.session.id}/runs`, 'POST', { id: e.pendingId, request })
-      if (run.id !== e.pendingId || run.sessionId !== e.session.id) throw new Error('The evaluation receipt did not match this request. Check pending run before trying again.')
-      e.pendingId = undefined; e.pendingRequest = undefined; persist(e)
-      if (current() === e && visible) { runs.unshift(run); selectedRun = run.id; renderRuns(); void loadRuns() }
+      const runId = crypto.randomUUID()
+      e.pendingId = runId; e.pendingRequest = request; persist(e)
+      const { run } = await jevApi<{ run: JevRun }>(`sessions/${e.session.id}/runs`, 'POST', { id: runId, request })
+      if (run.id !== runId || run.sessionId !== e.session.id) throw new Error('The evaluation receipt did not match this request. Check pending run before trying again.')
+      if (e.pendingId === runId) { e.pendingId = undefined; e.pendingRequest = undefined; persist(e) }
+      if (current() === e && visible) {
+        const confirmed = keepSettledRun(runs.find(old => old.id === run.id), run)
+        runs = [confirmed, ...runs.filter(old => old.id !== run.id)]; selectedRun = run.id; renderRuns()
+        // Reveal the evaluation the person just requested, but never pull them
+        // away from newer edits or a workspace they have since navigated to.
+        if (navigation === generation && JSON.stringify(e.draft) === draftSnapshot) el.querySelector<HTMLElement>('.jev-run-view')!.scrollIntoView({ block: 'start' })
+        void loadRuns()
+      }
     } catch (error) {
       if (error instanceof JevHttpError && [400, 401, 403, 404, 409, 413, 422, 503].includes(error.status)) { e.pendingId = undefined; e.pendingRequest = undefined; persist(e) }
       if (current() === e) { message((error as Error).message, true); if (e.pendingId) void reconcilePending(e) }
     } finally { submitting = false; controls() }
   }
   async function reconcilePending(e: Entry) {
-    if (!e.pendingId) return
+    const runId = e.pendingId
+    if (!runId) return
     try {
-      const { run } = await jevApi<{ run: JevRun }>(`runs/${e.pendingId}`)
-      if (run.id !== e.pendingId || run.sessionId !== e.session.id) throw new Error('The evaluation receipt does not match this workspace.')
-      e.pendingId = undefined; e.pendingRequest = undefined; persist(e)
+      const { run } = await jevApi<{ run: JevRun }>(`runs/${runId}`)
+      if (run.id !== runId || run.sessionId !== e.session.id) throw new Error('The evaluation receipt does not match this workspace.')
+      if (e.pendingId === runId) { e.pendingId = undefined; e.pendingRequest = undefined; persist(e) }
       if (current() === e) { selectedRun = run.id; await loadRuns() }
     } catch (error) {
       if (current() === e) message('The evaluation is not confirmed yet. Check again, or Retry submission using the same request ID. Your builder is preserved.', true)
@@ -215,7 +230,7 @@ export function createJevWorkspace(parent: HTMLElement, sidebar: HTMLElement, ha
   }
   title.addEventListener('input', () => {
     const e = current(); if (!e) return
-    e.title = title.value; e.dirty = true; persist(e); scheduleSave(e); renderList()
+    e.title = title.value; e.dirty = true; persist(e); scheduleSave(e); renderList(); controls()
   })
   list.addEventListener('click', event => {
     const button = (event.target as HTMLElement).closest<HTMLElement>('[data-jev-id]')

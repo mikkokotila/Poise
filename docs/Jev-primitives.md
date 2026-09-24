@@ -111,3 +111,21 @@ provider responses; they never read the developer's key for evaluations.
 Poise reads `.env` from its configured runtime environment root. Development
 and a separately installed production checkout can have different `.env`
 files; set `JEV_API_KEY` in the environment used by the running server.
+
+## Final interaction checks
+
+New builders focus State so you can paste immediately. **Load text file**
+opens the system file picker with either a click or keyboard activation, and
+selecting the same file again is supported. Choice descriptions, Score levels,
+and Noul rubrics use multiline editors; leading and embedded newlines survive
+switching between Build and Request JSON.
+
+Evaluate reveals the requested result above the builder, even when you were
+editing its bottom row. It does not pull you away from a newer draft or another
+workspace while the submission was pending. A result arriving through history
+polling before its submission acknowledgement remains one completed result,
+not a duplicate, a false receipt error or a return to the running state.
+
+These interaction regressions use the actual browser/API/SQLite journey with
+a scripted JEV provider. The file-picker, multiline-rubric, result-visibility
+and late-acknowledgement tests each reproduced their failure before the fix.

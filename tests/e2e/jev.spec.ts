@@ -281,3 +281,89 @@ test('JEV: a delayed history poll cannot bring a stopped evaluation back to runn
     expect(await w.calls()).toHaveLength(1)
   } finally { release(); await stop(w.child) }
 })
+
+test('JEV: Load text file opens the real file picker by mouse and keyboard', async ({ page, baseURL }, info) => {
+  test.setTimeout(60_000)
+  const w = await start(page, info, baseURL!)
+  try {
+    await openBuilder(page)
+    const load = page.getByRole('button', { name: 'Load text file', exact: true })
+    for (const keyboard of [false, true]) {
+      if (keyboard) await load.focus()
+      const [chooser] = await Promise.all([
+        page.waitForEvent('filechooser', { timeout: 5000 }),
+        keyboard ? load.press('Enter') : load.click(),
+      ])
+      await chooser.setFiles({ name: keyboard ? 'state.json' : 'state.txt', mimeType: 'text/plain', buffer: Buffer.from(keyboard ? '{"ticket":"Refund requested"}' : 'Please refund the duplicate charge.') })
+      await expect(page.getByRole('textbox', { name: 'State', exact: true })).toHaveValue(keyboard ? '{"ticket":"Refund requested"}' : 'Please refund the duplicate charge.')
+    }
+    expect(await w.calls()).toHaveLength(0)
+  } finally { await stop(w.child) }
+})
+
+test('JEV: multiline rubric descriptions remain visibly editable when returning from JSON', async ({ page, baseURL }, info) => {
+  test.setTimeout(60_000)
+  const w = await start(page, info, baseURL!)
+  try {
+    await openBuilder(page)
+    await page.getByRole('button', { name: 'Request JSON', exact: true }).click()
+    const request = { model: 'jev-latest', state: 'An explicit refund request.', questions: {
+      decision: { type: 'noul', instructions: 'Is a refund requested?', criteria: { true: '\nExplicit request\nfor money back', false: 'No request\nfor a refund' } },
+      route: { type: 'choice', instructions: 'Which team?', criteria: { billing: '\nCharges\nand refunds', other: null } },
+      priority: { type: 'score', instructions: 'How urgent?', criteria: ['No deadline\nmentioned', '\nNeeded today\nwith consequences'] },
+    } }
+    await page.getByRole('textbox', { name: 'Request JSON', exact: true }).fill(JSON.stringify(request))
+    await page.getByRole('button', { name: 'Build', exact: true }).click()
+    await page.locator('.jev-rubric > summary').click()
+    await expect(page.getByRole('textbox', { name: 'Yes means', exact: true })).toHaveValue(request.questions.decision.criteria.true)
+    await expect(page.getByRole('textbox', { name: 'No means', exact: true })).toHaveValue(request.questions.decision.criteria.false)
+    await expect(page.getByRole('textbox', { name: 'Option description', exact: true }).first()).toHaveValue(request.questions.route.criteria.billing)
+    await expect(page.getByRole('textbox', { name: 'Level description', exact: true }).last()).toHaveValue(request.questions.priority.criteria[1])
+    await page.getByRole('button', { name: 'Request JSON', exact: true }).click()
+    expect(JSON.parse(await page.getByRole('textbox', { name: 'Request JSON', exact: true }).inputValue())).toEqual(request)
+    expect(await w.calls()).toHaveLength(0)
+  } finally { await stop(w.child) }
+})
+
+test('JEV: Evaluate reveals the typed result even from the bottom of a long builder', async ({ page, baseURL }, info) => {
+  test.setTimeout(60_000)
+  const w = await start(page, info, baseURL!)
+  try {
+    await openBuilder(page)
+    await page.getByRole('button', { name: 'Try an example', exact: true }).click()
+    await page.locator('.jev-advanced > summary').scrollIntoViewIfNeeded()
+    await expect.poll(() => page.locator('.jev-scroll').evaluate(el => el.scrollTop)).toBeGreaterThan(200)
+    await page.locator('.jev-evaluate').click()
+    await expect(page.locator('.jev-result-card')).toHaveCount(3)
+    await expect(page.locator('.jev-run-view h3')).toBeInViewport()
+    expect(await w.calls()).toHaveLength(1)
+  } finally { await stop(w.child) }
+})
+
+test('JEV: a completed poll can beat the submission receipt without duplicating or regressing results', async ({ page, baseURL }, info) => {
+  test.setTimeout(60_000)
+  const w = await start(page, info, baseURL!)
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  try {
+    await openBuilder(page)
+    await page.getByRole('button', { name: 'Try an example', exact: true }).click()
+    await page.route('**/api/jev/sessions/*/runs', async route => {
+      if (route.request().method() !== 'POST') { await route.continue(); return }
+      const response = await route.fetch()
+      await held; await route.fulfill({ response })
+    })
+    await page.locator('.jev-evaluate').click()
+    await expect.poll(w.calls).toHaveLength(1)
+    const state = page.getByRole('textbox', { name: 'State', exact: true })
+    await state.fill('A newer draft, not part of that evaluation.')
+    await expect(page.locator('.jev-result-card')).toHaveCount(3, { timeout: 10_000 })
+    release()
+    await expect(page.locator('.jev-evaluate')).toBeEnabled()
+    await expect(page.locator('.jev-notice')).toBeHidden()
+    await expect(page.locator('.jev-run-select option')).toHaveCount(1)
+    await expect(page.locator('.jev-result-card')).toHaveCount(3)
+    await expect(state).toHaveValue('A newer draft, not part of that evaluation.')
+    expect(await w.calls()).toHaveLength(1)
+  } finally { release(); await stop(w.child) }
+})
