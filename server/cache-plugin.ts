@@ -1,3 +1,4 @@
+import { handleJevApi, stopJev } from './jev/api'
 import type { Plugin, Connect } from 'vite'
 import type { ServerResponse } from 'node:http'
 import { getModelSettings, getSettings, setSettings } from './settings'
@@ -118,7 +119,7 @@ export async function stopPoiseRuntime(): Promise<void> {
   chatRuntime = null
   chatSockets = null
   selfUpdate = null
-  await Promise.all([stopBehaviorsRuntime(), stopContentFinalizer(), chatStop, socketStop, ...authStops])
+  await Promise.all([stopBehaviorsRuntime(), stopContentFinalizer(), stopJev(), chatStop, socketStop, ...authStops])
 }
 
 export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.NextHandleFunction {
@@ -165,6 +166,8 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
         if (selfUpdate && mutating && selfUpdate.draining && !drainAllowsPath(path)) {
           return json(res, 503, { error: 'Poise is installing an update; try again after it restarts', code: 'draining' })
         }
+
+        if (await handleJevApi(req, res, url)) return
 
         if (url === '/api/health' && req.method === 'GET') {
           const scheduler = getBehaviorsRuntimeHealth()

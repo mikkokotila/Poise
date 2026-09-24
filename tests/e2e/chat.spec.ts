@@ -772,9 +772,9 @@ test('shows all five catalogue providers and keeps efforts specific to each mode
   const dialog = page.getByRole('dialog', { name: 'New session' })
   const model = dialog.getByLabel('Model'), effort = dialog.getByLabel('Effort')
   // The dialog opens before its asynchronous catalogue request completes.
-  await expect(model.locator('optgroup')).toHaveCount(5)
+  await expect(model.locator('optgroup')).toHaveCount(6)
   expect(await model.locator('optgroup').evaluateAll(groups => groups.map(group => group.getAttribute('label'))))
-    .toEqual(['Claude Code', 'Codex', 'Grok Build', 'Antigravity (Google)', 'Muse'])
+    .toEqual(['Claude Code', 'Codex', 'Grok Build', 'Antigravity (Google)', 'Muse', 'Typed evaluations'])
   await model.selectOption('gemini-3.8-flash-high')
   await expect(effort.locator('option')).toHaveText(['high', 'medium'])
   await effort.selectOption('medium')

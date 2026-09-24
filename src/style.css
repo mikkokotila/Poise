@@ -6067,3 +6067,101 @@ body:has(#view-chat:not([hidden])) #app { padding-bottom: 0; }
 /* One library: show the Chat invocation beside the text-expansion trigger. */
 .snip-skill-name { display: block; color: var(--text-tertiary); font-size: .6875rem; overflow-wrap: anywhere; }
 .snip-skill-help { margin-top: var(--sp-3); }
+
+/* JEV is a typed evaluation workspace, not a conversational agent. */
+.chat-main.jev-mode > .chat-session-header,
+.chat-main.jev-mode > .chat-notice,
+.chat-main.jev-mode > .chat-transcript-scroll,
+.chat-main.jev-mode > .chat-dock { display: none; }
+.jev-workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.jev-workspace[hidden], .jev-workspace [hidden], .jev-session-list[hidden] { display: none; }
+.jev-header { display: flex; gap: 12px; align-items: center; padding: 12px 20px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.jev-title { flex: 1; min-width: 110px; width: 160px; border: 0; background: transparent; color: var(--text); font: inherit; font-size: .875rem; padding: 6px; }
+.jev-scroll { flex: 1; min-height: 0; overflow: auto; padding: 24px clamp(12px, 3vw, 40px) 32px; overscroll-behavior: contain; }
+.jev-scroll > * { max-width: 1000px; margin-left: auto; margin-right: auto; }
+.jev-intro { margin-bottom: 24px; }
+.jev-intro h2 { font-size: 1.35rem; font-weight: 500; letter-spacing: -.025em; margin: 0 0 8px; }
+.jev-intro p, .jev-section-heading > span, .jev-rubric summary span { color: var(--text-secondary); font-size: .8rem; }
+.jev-builder-tabs, .jev-section-heading, .jev-add-questions, .jev-result-meta, .jev-result-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.jev-builder-tabs button[aria-pressed="true"] { background: var(--hover); color: var(--text); box-shadow: inset 0 0 0 1px var(--border); }
+.jev-spacer { flex: 1; }
+.jev-state-card, .jev-question, .jev-result-card { border: 1px solid var(--hairline); border-radius: 12px; background: var(--bg); padding: 16px; margin-bottom: 12px; min-width: 0; }
+.jev-section-heading h3 { font-size: .875rem; font-weight: 600; margin: 0; }
+.jev-field { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; min-width: 0; font-size: .75rem; color: var(--text-secondary); }
+.jev-field .st-input { width: 100%; min-width: 0; color: var(--text); }
+.jev-field textarea { min-height: 76px; resize: vertical; font: inherit; font-size: .875rem; line-height: 1.6; }
+.jev-state-card textarea { min-height: 130px; }
+.jev-field [data-field="raw"] { min-height: 360px; font-family: 'SF Mono', Menlo, monospace; tab-size: 2; }
+.jev-question > summary { cursor: pointer; font-size: .85rem; overflow-wrap: anywhere; }
+.jev-question-top { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.jev-question-top .jev-field { flex: 1 1 140px; }
+.jev-option { display: flex; align-items: center; gap: 8px; }
+.jev-option .jev-field { flex: 1; }
+.jev-rubric, .jev-bulk, .jev-advanced, .jev-run-json, .jev-request-preview { margin-top: 12px; font-size: .75rem; }
+.jev-workspace summary { cursor: pointer; }
+.jev-workspace pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: var(--surface); border-radius: 8px; max-height: 360px; overflow: auto; font: .75rem/1.55 'SF Mono', Menlo, monospace; }
+.jev-bulk textarea { width: 100%; min-height: 100px; margin: 8px 0; }
+.jev-results-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 12px; }
+.jev-result-card header { display: flex; justify-content: space-between; gap: 12px; font-size: .8rem; overflow-wrap: anywhere; }
+.jev-result-card p { font-size: .75rem; margin: 8px 0 16px; color: var(--text-secondary); }
+.jev-result-value { font-size: 2rem; font-weight: 500; letter-spacing: -.035em; margin-top: 14px; overflow-wrap: anywhere; }
+.jev-result-value small { font-size: 1rem; font-weight: 400; }
+.jev-result-card small, .jev-result-meta { font-size: .6875rem; color: var(--text-secondary); }
+.jev-result-meta { margin: 12px 0; gap: 12px; }
+.jev-workspace meter { width: 100%; height: 6px; appearance: none; display: block; border: 0; background: var(--hairline); border-radius: 6px; margin: 7px 0; }
+.jev-workspace meter::-webkit-meter-bar { background: var(--hairline); border: 0; border-radius: 6px; }
+.jev-workspace meter::-webkit-meter-optimum-value { background: var(--a2); border-radius: 6px; }
+.jev-workspace meter::-moz-meter-bar { background: var(--a2); border-radius: 6px; }
+.jev-probability { margin-top: 12px; font-size: .75rem; }
+.jev-probability > div { display: flex; gap: 8px; justify-content: space-between; overflow-wrap: anywhere; }
+.jev-confidence { border-top: 1px solid var(--hairline); margin-top: 16px; padding-top: 10px; font-size: .75rem; }
+.jev-confidence strong { float: right; }
+.jev-confidence small { display: block; margin-top: 6px; }
+.jev-footer { display: flex; flex: 0 0 auto; align-items: center; gap: 12px; padding: 12px 20px; background: var(--bg); border-top: 1px solid var(--hairline); }
+.jev-footer > div { flex: 1; min-width: 0; }
+.jev-save-status { font-size: .75rem; }
+.jev-evaluate { white-space: nowrap; }
+.jev-session-list { padding: 8px; border-bottom: 1px solid var(--hairline); max-height: 35%; overflow: auto; }
+.jev-session-item { width: 100%; text-align: left; padding: 10px; border: 1px solid transparent; background: none; color: var(--text); border-radius: 6px; cursor: pointer; font: inherit; font-size: .8rem; }
+.jev-session-item span, .jev-session-item small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jev-session-item small { color: var(--text-tertiary); margin-top: 5px; font-size: .6875rem; }
+.jev-session-item.active { border-color: var(--border); background: var(--surface); }
+.jev-session-item:hover { background: var(--surface); }
+.jev-notice { margin: 12px auto; padding: 12px; background: var(--surface); border-radius: 8px; }
+.jev-run-status { padding: 18px; border: 1px solid var(--hairline); border-radius: 10px; font-size: .85rem; }
+.jev-run-status p { margin-top: 8px; color: var(--text-secondary); }
+.jev-workspace button, .jev-workspace input, .jev-workspace textarea, .jev-workspace select { max-width: 100%; }
+.jev-template { padding: 16px; background: var(--surface); border-radius: 12px; }
+.jev-state-card > .jev-field > textarea { background: transparent; border-color: var(--hairline); }
+@media (max-width: 700px) {
+  .jev-header, .jev-footer { padding: 10px 12px; gap: 8px; }
+  .jev-header .chat-pill { flex-shrink: 0; }
+  .jev-footer { flex-wrap: wrap; }
+  .jev-footer > div { flex-basis: 100%; }
+  .jev-evaluate { margin-left: auto; }
+  .jev-option { flex-wrap: wrap; }
+  .jev-option .jev-field { flex-basis: 110px; }
+  .jev-section-heading > span:not(.jev-spacer) { flex-basis: 100%; }
+}
+
+.chat-dialog-field[hidden], .chat-dialog-fallback[hidden] { display: none; }
+
+.jev-workspace { container-type: inline-size; }
+.jev-question-column { min-width: 0; }
+.jev-build-canvas { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
+.jev-state-card { margin-top: 12px; }
+.jev-question summary > span:last-child { font-weight: 500; }
+.jev-question-body { padding-top: 10px; }
+.jev-questions .st-clear { font-size: .6875rem; }
+.jev-builder-tabs { padding-bottom: 6px; }
+.jev-result-card { animation: chat-model-enter 160ms ease-out; }
+.jev-workspace :focus-visible { outline: 2px solid var(--a2); outline-offset: 3px; }
+@container (min-width: 850px) {
+  .jev-build-canvas { grid-template-columns: minmax(260px, .8fr) minmax(0, 1.2fr); gap: 24px; }
+  .jev-state-card { position: sticky; top: 0; }
+  .jev-state-card textarea { min-height: 250px; max-height: 55vh; }
+}
+@media (prefers-reduced-motion: reduce) { .jev-result-card { animation: none; } }
+
+.jev-shape { margin: 0 0 12px; font-size: .75rem; color: var(--text-tertiary); }
+.jev-result-card .jev-result-question { margin: 10px 0; font-size: .75rem; overflow-wrap: anywhere; }

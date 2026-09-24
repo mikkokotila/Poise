@@ -53,6 +53,7 @@ export function isSelfUpdateControlRoute(path: string): boolean {
 }
 
 export function drainAllowsPath(path: string): boolean {
+  if (/^\/api\/jev\/runs\/[^/]+\/cancel$/.test(path)) return true
   return CONTROL_ROUTES.has(path) || DRAIN_ALLOWED.some((pattern) => pattern.test(path))
 }
 

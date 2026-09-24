@@ -45,6 +45,7 @@ export default defineConfig({
   webServer: {
     command: 'npm run preview',
     env: {
+      JEV_API_KEY: '', // Live account is never used by the automated preview.
       POISE_DB: resolve(e2eRoot, 'cache.db'),
       POISE_PORT: String(port),
       POISE_EDITOR_DIR: resolve(e2eRoot, 'editor'),

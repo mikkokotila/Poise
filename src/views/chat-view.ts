@@ -1,3 +1,4 @@
+import { createJevWorkspace } from './jev-workspace'
 import { parseSwitchCreation, RESERVED_SWITCHES, type ChatSwitches } from '../chat-switches'
 // Chat — one view for a full coding-agent conversation with any installed
 // agent, running as itself under a Poise-native interface. Sessions live on
@@ -79,6 +80,8 @@ let dialogEl: HTMLElement
 let noticeEl: HTMLElement
 let transcript: TranscriptView
 let composer: Composer
+let jev: ReturnType<typeof createJevWorkspace>
+let beforeJev: string | null = null
 let filePreview: ReturnType<typeof createFilePreview>
 let memories: ReturnType<typeof createMemoriesPane>
 let memorySubmissions = 0
@@ -314,6 +317,8 @@ function renderShell(): void {
   transcriptEl.addEventListener('chat:rerender', () => queueRender())
 
   composer = createComposer({
+    onJev: () => { openPrimitiveWorkspace() },
+    jevAvailable: () => jev?.configured === true,
     history: () => {
       const e = entry()
       return { entries: e ? recentMessages(e.model, e.record.context) : [], loading: !!e?.loading, error: e?.error }
@@ -390,6 +395,27 @@ function renderShell(): void {
   viewEl.querySelector('.chat-layout')!.append(memories.el)
   splitPane = attachChatSidebar(viewEl, () => { composer.layout(); queueRender() })
   memories.mount()
+  jev = createJevWorkspace(mainEl, viewEl.querySelector<HTMLElement>('.chat-sidebar')!, {
+    activate(id) {
+      if (!activeId?.startsWith('jev:')) {
+        beforeJev = activeId
+        const previous = entry()
+        if (previous) previous.draft = composer.getDraft()
+        else freshDraft = composer.getDraft()
+      }
+      activeId = `jev:${id}`
+      composer.history.close(); composer.models.close(); filePreview.close()
+      mainEl.classList.add('jev-mode'); mainEl.classList.remove('chat-empty-session')
+      queueRender()
+    },
+    close() {
+      mainEl.classList.remove('jev-mode')
+      if (beforeJev && sessions.has(beforeJev)) void selectSession(beforeJev)
+      else { activeId = null; composer.setDraft(freshDraft); composerStateFor(null); queueRender() }
+    },
+    memories() { memories.toggle() },
+    async flushMemories() { await memories.editor.flush() },
+  })
   attachSidebar()
   attachHeader()
   attachKeys()
@@ -432,7 +458,7 @@ function captureDrafts() {
     else fresh = recoverDraft(draft, fresh)
   }
   return {
-    fromSha: BUILD_SHA, activeSessionId: activeId,
+    fromSha: BUILD_SHA, activeSessionId: activeId?.startsWith('jev:') ? beforeJev : activeId,
     fresh: { draft: fresh, modelIdentity: freshModelIdentity, modelSelection: freshModelIdentity ? 'explicit' as const : 'automatic' as const }, sessions: [...drafts],
   }
 }
@@ -662,7 +688,8 @@ async function deleteSession(id: string): Promise<void> {
 
 // ── Selecting and loading a session ────────────────────────────────────────
 
-async function selectSession(id: string): Promise<void> {
+async function selectSession(id: string, restoring = false): Promise<void> {
+  if (!restoring) jev?.leave(); mainEl?.classList.remove('jev-mode')
   const e = sessions.get(id)
   if (!e) return
   if (!activeId) freshDraft = composer.getDraft()
@@ -1838,6 +1865,7 @@ let lastEmpty: boolean | null = null
 function render(): void {
   if (!viewEl || viewEl.hidden) return
   renderSidebar()
+  if (jev?.visible) return
   renderHeader()
   const e = entry()
   composerStateFor(e)
@@ -1897,22 +1925,26 @@ export interface NewSessionPrefill { context?: SessionContext }
 let dialogGeneration = 0
 let dialogOpener: HTMLElement | null = null
 
+function openPrimitiveWorkspace(): void { closeDialog(); void jev.create() }
+
 async function openNewSessionDialog(prefill: NewSessionPrefill = {}): Promise<void> {
   const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
   closeDialog()
   dialogOpener = opener
   const generation = ++dialogGeneration
   dialogEl.hidden = false
-  dialogEl.innerHTML = '<div class="chat-dialog-body"><div class="chat-empty" role="status">Loading models…</div></div>'
+  dialogEl.innerHTML = '<div class="chat-dialog-body"><div class="chat-empty" role="status">Loading agent models…</div><button type="button" class="st-clear chat-dialog-jev">JEV · Primitive builder</button></div>'
+  dialogEl.querySelector('.chat-dialog-jev')!.addEventListener('click', openPrimitiveWorkspace)
   dialogEl.focus({ preventScroll: true })
   const agents = await loadAgents(true)
   if (dialogEl.hidden || generation !== dialogGeneration) return
   if (!agents) {
-    dialogEl.innerHTML = '<div class="chat-dialog-body"><div class="st-help st-help-error">Could not load the model catalogue.</div><button type="button" class="st-clear chat-dialog-cancel">Close</button></div>'
+    dialogEl.innerHTML = '<div class="chat-dialog-body"><div class="st-help st-help-error">Could not load the model catalogue.</div><button type="button" class="st-clear chat-dialog-jev">JEV · Primitive builder</button><button type="button" class="st-clear chat-dialog-cancel">Close</button></div>'
+    dialogEl.querySelector('.chat-dialog-jev')!.addEventListener('click', openPrimitiveWorkspace)
     dialogEl.querySelector('.chat-dialog-cancel')!.addEventListener('click', closeDialog)
     return
   }
-  renderNewSessionDialog(dialogEl, agents, prefill.context, (request, error) => { void createSession(request, error) }, closeDialog)
+  renderNewSessionDialog(dialogEl, agents, prefill.context, (request, error) => { void createSession(request, error) }, closeDialog, openPrimitiveWorkspace)
 }
 
 function closeDialog(): void {
@@ -2064,10 +2096,11 @@ export async function initChatView(): Promise<void> {
   const restoreActive = restoredSnapshot?.activeSessionId ?? null
   applyRestoredSnapshot()
   // The session that was on screen before a safe reload comes back first.
-  if (restoreActive && !activeId && sessions.has(restoreActive) && dialogEl.hidden) await selectSession(restoreActive)
+  if (restoreActive && !activeId && sessions.has(restoreActive) && dialogEl.hidden) await selectSession(restoreActive, true)
   // A handoff may have opened the New session dialog while the list loaded;
   // auto-selecting would close it.
-  if (!activeId && !quickSessionPromise && !composer.getDraft().text && order.length && dialogEl.hidden) await selectSession(order[0])
+  if (!activeId && !quickSessionPromise && !composer.getDraft().text && order.length && dialogEl.hidden) await selectSession(order[0], true)
+  void jev.init(); jev.resume()
   scheduleSelfPoll(0)
   queueRender()
 }
@@ -2076,6 +2109,7 @@ export async function initChatView(): Promise<void> {
 // and its subscriptions stay so a running turn keeps being mirrored and the
 // sidebar is current when the view comes back.
 export function stopChatRefresh(): void {
+  jev?.pause()
   composer?.history.close()
   composer?.models.close()
   filePreview?.close()

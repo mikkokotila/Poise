@@ -47,6 +47,8 @@ export interface ComposerState {
 }
 
 export interface ComposerHandlers {
+  onJev?(): void
+  jevAvailable?(): boolean
   history(): MessageHistorySnapshot
   onSend(draft: ComposerDraft): void
   onQueue(draft: ComposerDraft): void
@@ -146,6 +148,7 @@ export function createComposer(handlers: ComposerHandlers): Composer {
   const fileInput = el.querySelector<HTMLInputElement>('.chat-file-input')!
   const steerHint = el.querySelector<HTMLElement>('.chat-steer-hint')!
   const modelPicker = attachModelPicker(el.querySelector<HTMLElement>('.chat-model-control')!, {
+    onJev: handlers.onJev, jevAvailable: handlers.jevAvailable,
     loadModels: handlers.loadModels, onSelect: identity => { selectedModel = undefined; renderSelectedModel(); handlers.onModelSelect(identity); changed() },
   })
   const popover = el.querySelector<HTMLElement>('.chat-popover')!
