@@ -19,16 +19,20 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { mkdir } from 'node:fs/promises'
-import { fetchAgentLogs, type LogEntry } from './agent'
+import { ISSUE_REVIEW_BEHAVIOR, fetchAgentLogs, type LogEntry } from './agent'
 import { claudeAuth } from './claude-auth'
-import { REVIEW_POLICY, needsClaude, reviewChoice, reviewPanel } from './review-model'
-import { type Catalog, type ReviewerSlot, loadCatalog } from './models'
+import { REVIEW_POLICY, needsClaude, reviewChoice, reviewPanel, type ReviewPlace } from './review-model'
+import { type Catalog, type ReviewerSlot, REVIEWER_SLOTS, loadCatalog } from './models'
 import {
   db,
   claimPrOperationOwned,
+  claimSeenOwned,
   claimSeenOwnedAs,
   clearSeenExceptLaunched,
   completeBehaviorLaunchOwned,
+  completeIssueReviewLaunchOwned,
+  countBehaviorDeadLetters,
+  hasExpiredPreLaunchClaim,
   completeSeenOwned,
   getFailedBehaviorLaunch,
   getMeta,
@@ -111,8 +115,8 @@ async function withBehaviorProcessLock<T>(
   }, operation)
 }
 
-export type BehaviorKey = 'review-new-prs' | 'approve-prs' | 'resolve-unblocking'
-export const BEHAVIOR_KEYS: BehaviorKey[] = ['review-new-prs', 'approve-prs', 'resolve-unblocking']
+export type BehaviorKey = 'review-new-prs' | 'approve-prs' | 'resolve-unblocking' | 'review-new-issues'
+export const BEHAVIOR_KEYS: BehaviorKey[] = ['review-new-prs', 'approve-prs', 'resolve-unblocking', 'review-new-issues']
 
 let behaviorAbortController: AbortController | null = null
 const behaviorOperationSignal = new AsyncLocalStorage<AbortSignal>()
@@ -175,6 +179,8 @@ interface PersistedBehaviorFailure {
   consecutiveFailures: number
   lastFailureAtMs: number
   nextRetryAtMs: number
+  // What failed last, so the view can say why rather than only how often.
+  error?: string
 }
 
 function failureKey(key: BehaviorKey): string {
@@ -200,13 +206,14 @@ function readBehaviorFailure(key: BehaviorKey): PersistedBehaviorFailure | null 
       consecutiveFailures: Math.min(Number(value.consecutiveFailures), 31),
       lastFailureAtMs: Number(value.lastFailureAtMs),
       nextRetryAtMs: Number(value.nextRetryAtMs),
+      ...(typeof value.error === 'string' && value.error ? { error: value.error.slice(0, 300) } : {}),
     }
   } catch {
     return null
   }
 }
 
-function recordBehaviorFailure(key: BehaviorKey, kind: BehaviorFailureKind): void {
+function recordBehaviorFailure(key: BehaviorKey, kind: BehaviorFailureKind, cause?: unknown): void {
   if (!isEnabled(key)) return
   const previous = readBehaviorFailure(key)
   const consecutiveFailures = Math.min((previous?.consecutiveFailures ?? 0) + 1, 31)
@@ -215,11 +222,13 @@ function recordBehaviorFailure(key: BehaviorKey, kind: BehaviorFailureKind): voi
     BEHAVIOR_RETRY_MAX_MS,
   )
   const now = Date.now()
+  const error = cause === undefined ? undefined : (cause instanceof Error ? cause.message : String(cause)).slice(0, 300)
   setMeta(failureKey(key), JSON.stringify({
     kind,
     consecutiveFailures,
     lastFailureAtMs: now,
     nextRetryAtMs: now + delayMs,
+    ...(error ? { error } : {}),
   } satisfies PersistedBehaviorFailure))
 }
 
@@ -256,15 +265,24 @@ export function isValidSetting(v: unknown): v is BehaviorSetting {
   return typeof v === 'string' && (VALID_SETTINGS as string[]).includes(v)
 }
 
-// How many of the PR review place's reviewers (default, secondary, tertiary)
-// review each new pull request — at the same time, each as its own launch.
-// One by default; a wider panel is a deliberate choice in the Behaviors view.
+// How many of a review place's reviewers (default, secondary, tertiary)
+// review each new pull request or issue — at the same time, each as its own
+// launch. One by default; a wider panel is a deliberate choice in Behaviors.
 export type ReviewerCount = 1 | 2 | 3
 const DEFAULT_REVIEWERS: ReviewerCount = 1
-const reviewersKey = `${META_PREFIX}review_new_prs_reviewers`
+export type PanelBehavior = 'review-new-prs' | 'review-new-issues'
+export const PANEL_BEHAVIORS: readonly PanelBehavior[] = ['review-new-prs', 'review-new-issues']
 
-export function getReviewers(): ReviewerCount {
-  const value = Number(getMeta(reviewersKey) || '')
+function reviewersKey(key: PanelBehavior): string {
+  return `${META_PREFIX}${key.replace(/-/g, '_')}_reviewers`
+}
+
+export function isPanelBehavior(key: string): key is PanelBehavior {
+  return (PANEL_BEHAVIORS as readonly string[]).includes(key)
+}
+
+export function getReviewers(key: PanelBehavior = 'review-new-prs'): ReviewerCount {
+  const value = Number(getMeta(reviewersKey(key)) || '')
   return value === 2 || value === 3 ? value : DEFAULT_REVIEWERS
 }
 
@@ -272,8 +290,9 @@ export function isValidReviewers(v: unknown): v is ReviewerCount {
   return v === 1 || v === 2 || v === 3
 }
 
-export function setReviewers(count: ReviewerCount): void {
-  setMeta(reviewersKey, String(count))
+export function setReviewers(count: ReviewerCount, key: PanelBehavior = 'review-new-prs'): void {
+  if (key === 'review-new-issues') setIssueSlotSince(getReviewers(key), count)
+  setMeta(reviewersKey(key), String(count))
 }
 
 // The primary reviewer keeps the pull request's own claim key, so ledgers
@@ -321,7 +340,9 @@ export function setScratchpad(key: BehaviorKey, text: string): void {
 // the behavior prompt.
 function noteArgs(key: BehaviorKey): string[] {
   const note = getScratchpad(key).trim()
-  return note ? ['--note', note] : []
+  // Caller reads a flag value that starts with "--" as the next flag, so a
+  // note opening with a Markdown rule stopped every launch before it ran.
+  return note ? ['--note', note.startsWith('-') ? ` ${note}` : note] : []
 }
 
 // Last-fired info is intentionally NOT persisted here — agent-interface
@@ -339,7 +360,7 @@ function noteArgs(key: BehaviorKey): string[] {
 // statement — exactly one caller wins, the rest skip.
 
 interface ActiveClaim {
-  behavior: 'review-new-prs' | 'approve-prs'
+  behavior: 'review-new-prs' | 'approve-prs' | 'review-new-issues'
   target: string
   launched: boolean
 }
@@ -386,7 +407,7 @@ const FAILED_AGENT_STATUSES = new Set([
 const SUPERSEDED_AGENT_ERROR = 'pull-request head changed during behavior execution'
 
 function upstreamBehavior(behavior: ActiveClaim['behavior']): BehaviorAgentLaunch {
-  return behavior === 'review-new-prs' ? 'pr_review' : 'pr_approve'
+  return behavior === 'review-new-prs' ? 'pr_review' : behavior === 'review-new-issues' ? 'issue_review' : 'pr_approve'
 }
 
 async function claimEligiblePrOperation(behavior: ActiveClaim['behavior'], target: string): Promise<string | null> {
@@ -461,7 +482,7 @@ function agentCallStartedAt(call: Awaited<ReturnType<typeof fetchAgentLogs>>[num
 }
 
 async function reconcileBehaviorLaunchClaims(
-  behavior: ActiveClaim['behavior'],
+  behavior: 'review-new-prs' | 'approve-prs',
 ): Promise<void> {
   const claims = listBehaviorLaunchClaims(behavior)
   const deadLetters = listBehaviorDeadLetters(500).filter(
@@ -882,7 +903,7 @@ async function currentHeadSha(
 }
 
 function settleClaimAfterExit(
-  behavior: 'review-new-prs' | 'approve-prs',
+  behavior: ActiveClaim['behavior'],
   target: string,
   claimId: string,
 ): (result: { code: number | null, signal: NodeJS.Signals | null, error?: Error }) => void {
@@ -916,7 +937,7 @@ function settleClaimAfterExit(
 // The model a reviewer slot launches right now, or null when the panel no
 // longer has that slot — the count was lowered while this tick was waiting.
 async function slotModel(slot: ReviewerSlot): Promise<{ model: string, recovery: string, catalog: Catalog } | null> {
-  const panel = await reviewPanel(getReviewers())
+  const panel = await reviewPanel(getReviewers('review-new-prs'))
   const reviewer = panel.reviewers.find((entry) => entry.slot === slot)
   return reviewer ? { model: reviewer.model, recovery: panel.recovery, catalog: panel.catalog } : null
 }
@@ -1110,7 +1131,7 @@ async function tickReviewNewPrs(): Promise<void> {
   try {
     const prs = await listOpenPrsByAuthor(author)
     await recoverSnapshotReviews(prs, reviewer)
-    const slots = (await reviewPanel(getReviewers())).reviewers.map((entry) => entry.slot)
+    const slots = (await reviewPanel(getReviewers('review-new-prs'))).reviewers.map((entry) => entry.slot)
     let failure: unknown
     await Promise.all(prs.flatMap((pr) => {
       const key = `${pr.repo}#${pr.number}`
@@ -1935,6 +1956,467 @@ async function tickResolveUnblocking(): Promise<void> {
   }
 }
 
+// ── review-new-issues implementation ────────────────────────────────────
+//
+// Opt-in per repository. A new issue in a selected repository, opened by a
+// trusted author, gets an adversarial review from each reviewer of the Issue
+// review place (Settings → Models) that Behaviors asks for. Caller runs every
+// reviewer as its provider's own CLI with full access in a fresh checkout and
+// posts the comments as the review agent, on the issue and its sub-issues.
+//
+// Each issue is reviewed once. A repository's backlog is never reviewed: an
+// issue counts only when it was opened after its repository was selected, and
+// an extra reviewer only for issues opened after the panel grew to include it.
+
+const ISSUES_KEY = 'review-new-issues' as const
+export const ISSUE_REVIEW_SOURCE = 'poise:review-new-issues'
+// Authors often add sub-issues and links right after opening an issue.
+export const ISSUE_SETTLE_MS = 10 * 60_000
+// Full-access reviewers build and run test suites on this machine.
+export const MAX_ISSUE_REVIEW_RUNS = 3
+// The first launch and one relaunch after a failure that posted nothing.
+const ISSUE_REVIEW_ATTEMPTS = 2
+// How long a claim may sit between being taken and its launch being recorded;
+// a process that dies in between leaves the target free again after this.
+const ISSUE_PRE_LAUNCH_LEASE_MS = 5 * 60_000
+// Failures that are held for a person rather than relaunched: a time limit or
+// failed recovery would repeat as expensively, a stop was the user's decision,
+// and a run that began posting may already have commented.
+const HELD_ISSUE_REVIEW_ERRORS = new Set([
+  'review_budget_exhausted',
+  'review_recovery_failed',
+  'stopped',
+  'review_packet_too_large',
+  'posting_failed',
+])
+export const DEFAULT_ISSUE_AUTHORS = ['mikkokotila', 'zero-bang', 'bit-mis']
+const MAX_ISSUE_AUTHORS = 20
+const REPOSITORY_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/
+const ISSUE_REPOS_KEY = `${META_PREFIX}review_new_issues_repos`
+const ISSUE_AUTHORS_KEY = `${META_PREFIX}review_new_issues_authors`
+const ISSUE_SLOT_SINCE_KEY = `${META_PREFIX}review_new_issues_slot_since`
+
+export interface IssueRepository {
+  repo: string
+  // When it was selected: only issues opened from then on are reviewed.
+  since: string
+}
+
+function parseJsonMeta(key: string): unknown {
+  const raw = getMeta(key)
+  if (!raw) return null
+  try { return JSON.parse(raw) } catch { return null }
+}
+
+export function isValidRepository(value: unknown): value is string {
+  return typeof value === 'string' && REPOSITORY_PATTERN.test(value)
+}
+
+export function getIssueRepositories(): IssueRepository[] {
+  const value = parseJsonMeta(ISSUE_REPOS_KEY)
+  if (!Array.isArray(value)) return []
+  return value.filter((entry): entry is IssueRepository =>
+    !!entry && isValidRepository(entry.repo) && typeof entry.since === 'string' && Number.isFinite(Date.parse(entry.since)))
+}
+
+// A repository that stays selected keeps its date; a newly selected one starts
+// now, so selecting it never reviews what was already open.
+export function setIssueRepositories(repos: readonly string[]): IssueRepository[] {
+  const current = new Map(getIssueRepositories().map((entry) => [entry.repo, entry.since]))
+  const now = new Date().toISOString()
+  const next = [...new Set(repos)].sort((a, b) => a.localeCompare(b))
+    .map((repo) => ({ repo, since: current.get(repo) ?? now }))
+  setMeta(ISSUE_REPOS_KEY, JSON.stringify(next))
+  return next
+}
+
+export function isValidAuthorList(value: unknown): value is string[] {
+  return Array.isArray(value)
+    && value.length <= MAX_ISSUE_AUTHORS
+    && value.every((author) => typeof author === 'string' && GITHUB_USERNAME_PATTERN.test(author))
+}
+
+export function getIssueAuthors(): string[] {
+  const value = parseJsonMeta(ISSUE_AUTHORS_KEY)
+  return isValidAuthorList(value) ? value : [...DEFAULT_ISSUE_AUTHORS]
+}
+
+export function setIssueAuthors(authors: readonly string[]): string[] {
+  const seen = new Set<string>()
+  const next = authors.filter((author) => {
+    const lower = author.toLowerCase()
+    if (seen.has(lower)) return false
+    seen.add(lower)
+    return true
+  })
+  setMeta(ISSUE_AUTHORS_KEY, JSON.stringify(next))
+  return next
+}
+
+// When each extra reviewer joined the panel. Raising the count gives the new
+// reviewers a start date; lowering it forgets theirs.
+function getIssueSlotSince(): Partial<Record<ReviewerSlot, string>> {
+  const value = parseJsonMeta(ISSUE_SLOT_SINCE_KEY)
+  const out: Partial<Record<ReviewerSlot, string>> = {}
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    for (const slot of ['secondary', 'tertiary'] as const) {
+      const since = (value as Record<string, unknown>)[slot]
+      if (typeof since === 'string' && Number.isFinite(Date.parse(since))) out[slot] = since
+    }
+  }
+  return out
+}
+
+function setIssueSlotSince(previous: ReviewerCount, next: ReviewerCount): void {
+  const since = getIssueSlotSince()
+  const now = new Date().toISOString()
+  REVIEWER_SLOTS.forEach((slot, index) => {
+    if (slot === 'primary') return
+    if (index >= next) delete since[slot]
+    else if (index >= previous) since[slot] = now
+  })
+  setMeta(ISSUE_SLOT_SINCE_KEY, JSON.stringify(since))
+}
+
+interface DatastoreIssue {
+  repo: string
+  number: number
+  author: string
+  createdAt: string
+}
+
+async function listOpenIssues(repo: string, since: string): Promise<DatastoreIssue[]> {
+  const { stdout } = await runFile(
+    DATASTORE,
+    ['view', 'issue', '--repo', repo, '--status', 'open', '--created-since-datetime', since, '--limit', '500', '--format', 'json'],
+    { timeoutMs: 30_000, maxOutputBytes: 32 * 1024 * 1024, signal: behaviorSignal() },
+  )
+  const parsed = parseJson(stdout, 'github-datastore view issue')
+  if (!Array.isArray(parsed)) throw new Error('github-datastore view issue returned a non-array')
+  return parsed.map((row, index) => {
+    const value = objectValue(row, `github-datastore issue row ${index}`)
+    const number = safeInteger(value.number, `github-datastore issue row ${index} number`)
+    const author = String(value.author || '')
+    const createdAt = String(value.created_at || '')
+    if (value.repo !== repo
+      || number < 1
+      || value.status !== 'open'
+      || !author
+      || !Number.isFinite(Date.parse(createdAt))
+      || value.url !== `https://github.com/${repo}/issues/${number}`) {
+      throw new Error(`github-datastore issue row ${index} violates the candidate contract`)
+    }
+    return { repo, number, author, createdAt }
+  })
+}
+
+async function issueSlotModel(slot: ReviewerSlot): Promise<{ model: string, recovery: string, catalog: Catalog } | null> {
+  const panel = await reviewPanel(getReviewers(ISSUES_KEY), 'issue_review')
+  const reviewer = panel.reviewers.find((entry) => entry.slot === slot)
+  return reviewer ? { model: reviewer.model, recovery: panel.recovery, catalog: panel.catalog } : null
+}
+
+async function fireIssueReview(
+  issue: DatastoreIssue,
+  target: string,
+  claimId: string,
+  slot: ReviewerSlot,
+): Promise<boolean> {
+  if (!isEnabled(ISSUES_KEY)) return false
+  const resolved = await waitForBehavior(issueSlotModel(slot))
+  if (!resolved) return false
+  const { model, recovery, catalog } = resolved
+  const claude = needsClaude(catalog, model)
+  const actor = configuredReviewer()
+  if (claude) await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
+  await waitForBehavior(prepareModelClis(catalog, [model, recovery]))
+  // The CLI check and the model read can each take a while; turning the
+  // behavior off, deselecting the repository or changing the panel meanwhile
+  // must stop this launch, so these are the last checks before it.
+  if ((await waitForBehavior(issueSlotModel(slot)))?.model !== model) return false
+  if (!isEnabled(ISSUES_KEY) || behaviorAborted()) return false
+  if (!getIssueRepositories().some((entry) => entry.repo === issue.repo)) return false
+  if (!markBehaviorLaunchIntentOwned({
+    key: ISSUES_KEY,
+    target,
+    claimId,
+    launchBehavior: 'issue_review',
+    repo: issue.repo,
+    pr: issue.number,
+    requestedAt: new Date().toISOString(),
+    expectedHead: '',
+    actor,
+    source: ISSUE_REVIEW_SOURCE,
+    correlationId: claimId,
+  })) return false
+  await spawnDetached(AGENT_INTERFACE, [
+    '--issue-review',
+    `${issue.repo}#${issue.number}`,
+    '--model',
+    model,
+    '--recovery-model',
+    recovery,
+    '--actor',
+    actor,
+    '--source',
+    ISSUE_REVIEW_SOURCE,
+    '--correlation-id',
+    claimId,
+    ...noteArgs(ISSUES_KEY),
+  ], {
+    cwd: agentInterfaceCwd(),
+    env: claudeSubscriptionEnvironment(),
+    onExit: settleClaimAfterExit(ISSUES_KEY, target, claimId),
+  })
+  markClaimLaunched(claimId)
+  return true
+}
+
+// A failed reviewer runs again only when it provably posted nothing, the
+// failure is not one held for a person, and it has not already had its retry.
+// `logs` is shared by the whole scan: a held reviewer is looked at every
+// tick, and each read of the agent log is a subprocess.
+async function releaseFailedIssueReviewIfSafe(target: string, logs: () => Promise<LogEntry[]>): Promise<boolean> {
+  const failed = getFailedBehaviorLaunch(ISSUES_KEY, target)
+  if (!failed?.launchCallId
+    || failed.launchBehavior !== 'issue_review'
+    || failed.launchSource !== ISSUE_REVIEW_SOURCE
+    || countBehaviorDeadLetters(ISSUES_KEY, target) >= ISSUE_REVIEW_ATTEMPTS) return false
+  const call = (await logs()).find((row) => row.id === failed.launchCallId)
+  if (!call
+    || !FAILED_AGENT_STATUSES.has(call.status.toLowerCase())
+    || call.behavior !== ISSUE_REVIEW_BEHAVIOR
+    || call.correlation_id !== failed.launchCorrelationId
+    || (call.receipts !== null && call.receipts !== undefined)
+    || HELD_ISSUE_REVIEW_ERRORS.has(call.error_code || '')) return false
+  const released = releaseFailedBehaviorLaunch(ISSUES_KEY, target, failed.launchCallId, failed.launchExpectedHead)
+  if (released) console.log(`[behaviors] review-new-issues relaunching ${target} after a failure that posted nothing`)
+  return released
+}
+
+async function launchIssueReview(
+  issue: DatastoreIssue,
+  slot: ReviewerSlot,
+  target: string,
+  logs: () => Promise<LogEntry[]>,
+): Promise<void> {
+  if (countBehaviorDeadLetters(ISSUES_KEY, target) >= ISSUE_REVIEW_ATTEMPTS && !hasSeen(ISSUES_KEY, target)) return
+  let claimId = claimSeenOwned(ISSUES_KEY, target, ISSUE_PRE_LAUNCH_LEASE_MS)
+  if (!claimId) {
+    if (!await releaseFailedIssueReviewIfSafe(target, logs)) return
+    claimId = claimSeenOwned(ISSUES_KEY, target, ISSUE_PRE_LAUNCH_LEASE_MS)
+    if (!claimId) return
+  }
+  trackClaim(ISSUES_KEY, target, claimId)
+  try {
+    if (!await fireIssueReview(issue, target, claimId, slot)) {
+      releaseOwnedClaim(ISSUES_KEY, target, claimId)
+      return
+    }
+  } catch (error) {
+    releaseOwnedClaim(ISSUES_KEY, target, claimId)
+    throw error
+  }
+  console.log(`[behaviors] review-new-issues fired for ${issue.repo}#${issue.number} (${slot})`)
+}
+
+async function tickReviewNewIssues(): Promise<void> {
+  if (!isEnabled(ISSUES_KEY)) return
+  const repositories = getIssueRepositories()
+  if (repositories.length === 0) return
+  const authors = new Set(getIssueAuthors().map((author) => author.toLowerCase()))
+  const slots = (await reviewPanel(getReviewers(ISSUES_KEY), 'issue_review')).reviewers.map((entry) => entry.slot)
+  const slotSince = getIssueSlotSince()
+  await requireFreshDatastore()
+  const open = new Set<string>()
+  const candidates: Array<{ issue: DatastoreIssue, slot: ReviewerSlot, target: string, order: number }> = []
+  const now = Date.now()
+  for (const { repo, since } of repositories) {
+    for (const issue of await listOpenIssues(repo, since)) {
+      const key = `${issue.repo}#${issue.number}`
+      open.add(key)
+      const created = Date.parse(issue.createdAt)
+      if (!authors.has(issue.author.toLowerCase()) || created < Date.parse(since) || now - created < ISSUE_SETTLE_MS) continue
+      slots.forEach((slot, index) => {
+        const joined = slot === 'primary' ? undefined : slotSince[slot]
+        if (joined && created < Date.parse(joined)) return
+        const target = reviewSlotTarget(key, slot)
+        if (hasSeen(ISSUES_KEY, target)
+          && !getFailedBehaviorLaunch(ISSUES_KEY, target)
+          && !hasExpiredPreLaunchClaim(ISSUES_KEY, target)) return
+        candidates.push({ issue, slot, target, order: created * REVIEWER_SLOTS.length + index })
+      })
+    }
+  }
+  // Every selected repository was read, so what is not open is closed or no
+  // longer selected; its incidents are settled.
+  retireBehaviorDeadLettersForClosedPrs(open, [ISSUES_KEY])
+  candidates.sort((a, b) => a.order - b.order)
+  let logs: Promise<LogEntry[]> | null = null
+  const readLogs = () => (logs ??= fetchAgentLogs({ signal: behaviorSignal() }))
+  let failure: unknown
+  for (const { issue, slot, target } of candidates) {
+    if (!isEnabled(ISSUES_KEY) || behaviorAborted()) return
+    if (listBehaviorLaunchClaims(ISSUES_KEY).length >= MAX_ISSUE_REVIEW_RUNS) break
+    try {
+      await launchIssueReview(issue, slot, target, readLogs)
+    } catch (error) {
+      if (behaviorAborted()) return
+      console.error(`[behaviors] review-new-issues step failed for ${target}:`, error)
+      failure ??= error
+    }
+  }
+  if (failure) throw failure
+}
+
+async function reconcileIssueReviewClaims(): Promise<void> {
+  const claims = listBehaviorLaunchClaims(ISSUES_KEY)
+  const deadLetters = listBehaviorDeadLetters(500).filter(
+    (letter) => letter.behavior === ISSUES_KEY && letter.callId !== null,
+  )
+  if (claims.length === 0 && deadLetters.length === 0) return
+
+  let logs: LogEntry[]
+  try {
+    logs = await fetchAgentLogs({ signal: behaviorSignal() })
+  } catch (error) {
+    const message = `agent log reconciliation unavailable: ${error instanceof Error ? error.message : String(error)}`
+    for (const claim of claims) retainClaimSafely(claim, message)
+    throw error
+  }
+  const catalogForCalls: Catalog | null = await loadCatalog().catch(() => null)
+  const commented = (call: LogEntry | undefined) => call?.status.toLowerCase() === 'completed'
+    && call.behavior === ISSUE_REVIEW_BEHAVIOR
+    && call.action === 'commented'
+    && call.outcome === 'commented'
+    && Number.isFinite(Date.parse(String(call.completed_at || '')))
+
+  // A dead letter whose exact call finished after all was a false alarm.
+  let recoveredDeadLetter = false
+  for (const letter of deadLetters) {
+    const call = logs.find((row) => row.id === letter.callId)
+    if (commented(call)
+      && call!.repo === letter.repo
+      && String(call!.pr_id || '') === String(letter.pr)
+      && call!.correlation_id === letter.correlationId) {
+      recoveredDeadLetter = retireBehaviorDeadLetter(letter.id) || recoveredDeadLetter
+    }
+  }
+  if (recoveredDeadLetter && !listBehaviorDeadLetters(500).some((letter) => letter.behavior === ISSUES_KEY)) {
+    clearBehaviorFailure(ISSUES_KEY)
+  }
+
+  for (const claim of claims) {
+    if (claim.launchBehavior !== 'issue_review'
+      || !claim.launchRepo
+      || !Number.isSafeInteger(claim.launchPr)
+      || claim.launchPr <= 0
+      || claim.launchExpectedHead !== ''
+      || !GITHUB_USERNAME_PATTERN.test(claim.launchActor)
+      || claim.launchSource !== ISSUE_REVIEW_SOURCE
+      || claim.launchCorrelationId !== claim.claimId
+      || (claim.launchCallId !== null && !/^[0-9a-f]{32}$/.test(claim.launchCallId))) {
+      deadLetterClaim(claim, 'launch correlation metadata is invalid; retained to prevent duplicate launch')
+      continue
+    }
+    const requestedAtMs = Date.parse(claim.launchRequestedAt)
+    if (!Number.isFinite(requestedAtMs)) {
+      deadLetterClaim(claim, 'launch watermark is invalid; retained to prevent duplicate launch')
+      continue
+    }
+    const candidates = logs.filter((row) => row.correlation_id === claim.launchCorrelationId)
+    let call = claim.launchCallId
+      ? candidates.find((row) => row.id.toLowerCase() === claim.launchCallId)
+      : undefined
+    if (!call) {
+      if (claim.launchCallId) {
+        if (Date.now() - requestedAtMs < BEHAVIOR_CLAIM_RENEWAL_MS) {
+          retainClaimSafely(claim, 'awaiting linked agent call visibility')
+        } else {
+          deadLetterClaim(claim, 'linked agent call remained missing for the full launch lease; retained to prevent duplicate launch')
+        }
+        continue
+      }
+      if (candidates.length > 1) {
+        deadLetterClaim(claim, `ambiguous correlation id matched ${candidates.length} agent calls; retained to prevent duplicate launch`)
+        continue
+      }
+      if (candidates.length === 0) {
+        if (Date.now() - requestedAtMs < BEHAVIOR_REGISTRATION_GRACE_MS) {
+          retainClaimSafely(claim, 'awaiting agent call registration')
+        } else if (activeClaims.get(claim.claimId)?.launched) {
+          // The worker has not exited — a machine that slept can delay its
+          // registration past the grace. Launching another now could post twice.
+          retainClaimSafely(claim, 'worker still running; awaiting agent call registration')
+        } else {
+          // Nothing ran, so nothing was posted; the next scan may launch it
+          // again, once.
+          recordBehaviorDeadLetter(claim, 'agent call did not register before the launch deadline')
+          if (releaseOwnedClaim(ISSUES_KEY, claim.target, claim.claimId)) {
+            recordBehaviorFailure(ISSUES_KEY, 'worker', 'agent call did not register before the launch deadline')
+          }
+        }
+        continue
+      }
+      call = candidates[0]
+      if (!linkBehaviorLaunchCallOwned(claim.key, claim.target, claim.claimId, call.id)) continue
+    }
+
+    const startedAtMs = Date.parse(agentCallStartedAt(call))
+    if (call.behavior !== ISSUE_REVIEW_BEHAVIOR
+      || call.repo !== claim.launchRepo
+      || String(call.pr_id || '') !== String(claim.launchPr)
+      || String(call.actor || '').toLowerCase() !== claim.launchActor.toLowerCase()
+      || call.source !== claim.launchSource
+      || call.correlation_id !== claim.launchCorrelationId
+      || !Number.isFinite(startedAtMs)
+      || startedAtMs < requestedAtMs) {
+      deadLetterClaim(claim, 'linked agent call does not match the persisted launch contract; retained to prevent duplicate launch')
+      continue
+    }
+
+    const status = call.status.toLowerCase()
+    if (status === 'completed') {
+      if (!commented(call)) {
+        const error = 'completed agent call is missing its commented outcome'
+        if (deadLetterClaim(claim, error)) recordBehaviorFailure(ISSUES_KEY, 'worker', error)
+        continue
+      }
+      activeClaims.delete(claim.claimId)
+      if (completeIssueReviewLaunchOwned({
+        key: claim.key,
+        target: claim.target,
+        claimId: claim.claimId,
+        completedAt: String(call.completed_at),
+      })) clearBehaviorFailure(ISSUES_KEY)
+      continue
+    }
+    if (FAILED_AGENT_STATUSES.has(status)) {
+      const message = call.error || `agent call terminated with status ${status}`
+      if (deadLetterClaim(claim, message)) {
+        const posted = call.receipts !== null && call.receipts !== undefined
+        if (call.error_code !== 'stopped' && (posted || !HELD_ISSUE_REVIEW_ERRORS.has(call.error_code || ''))) {
+          recordBehaviorFailure(ISSUES_KEY, 'worker', message)
+        }
+        if (call.error_code !== 'stopped' && needsClaude(catalogForCalls, call.model)) claudeAuth.observeProcessFailure(message)
+      }
+      continue
+    }
+    if (RUNNING_AGENT_STATUSES.has(status)) {
+      if (Date.now() - requestedAtMs >= BEHAVIOR_CLAIM_RENEWAL_MS) {
+        const message = `behavior launch exceeded ${BEHAVIOR_CLAIM_RENEWAL_MS}ms running limit`
+        if (deadLetterClaim(claim, message)) recordBehaviorFailure(ISSUES_KEY, 'worker', message)
+        continue
+      }
+      setBehaviorLaunchErrorOwned(claim.key, claim.target, claim.claimId, null)
+      renewSeenOwned(claim.key, claim.target, claim.claimId, BEHAVIOR_CLAIM_RENEWAL_MS)
+      continue
+    }
+    const message = `unrecognized agent call status "${status || 'missing'}"`
+    if (deadLetterClaim(claim, message)) recordBehaviorFailure(ISSUES_KEY, 'worker', message)
+  }
+}
+
 // ── Public API ──────────────────────────────────────────────────────────
 
 export async function setEnabled(key: BehaviorKey, enabled: boolean): Promise<void> {
@@ -1961,6 +2443,9 @@ export async function setEnabled(key: BehaviorKey, enabled: boolean): Promise<vo
         } else if (key === 'approve-prs') {
           if (enabled) await reconcileBehaviorLaunchClaims(key)
           else clearSeenExceptLaunched(key)
+        } else if (key === 'review-new-issues') {
+          // No snapshot: each repository's selection date is the baseline.
+          if (enabled) await reconcileIssueReviewClaims()
         }
         // resolve-unblocking has no seen ledger — github-interface is
         // idempotent so the tick handler can safely fire every minute.
@@ -1971,7 +2456,7 @@ export async function setEnabled(key: BehaviorKey, enabled: boolean): Promise<vo
     if (lifecycle?.aborted === true) throw error
     if (error instanceof BehaviorProcessLockContentionError) throw error
     if (!enabled || !isEnabled(key)) throw error
-    recordBehaviorFailure(key, 'operation')
+    recordBehaviorFailure(key, 'operation', error)
     console.error(`[behaviors] ${key} enable reconciliation failed:`, error)
   }
 }
@@ -2050,7 +2535,7 @@ async function runBehaviorCycle(
   } catch (error) {
     if (error instanceof BehaviorProcessLockContentionError) return
     if (lifecycle?.aborted !== true) {
-      recordBehaviorFailure(key, 'operation')
+      recordBehaviorFailure(key, 'operation', error)
       console.error(`[behaviors] ${key} operation failed:`, error)
     }
   }
@@ -2082,6 +2567,18 @@ export async function runEnabledBehaviorsOnce(
         if (await reviewHeldByClaudeAuth('pr_approve')) return false
         await tickApprovePrs()
         return listBehaviorLaunchClaims('approve-prs').length === 0
+      })
+    }))
+  }
+  if (isEnabled('review-new-issues')
+    && (!options.skipBusy || !behaviorOperationTails.has('review-new-issues'))) {
+    operations.push(runBehaviorCycle('review-new-issues', async () => {
+      return await withBehaviorProcessLock('review-new-issues', async () => {
+        await reconcileIssueReviewClaims()
+        if (!behaviorRetryDue('review-new-issues')) return false
+        if (await reviewHeldByClaudeAuth('issue_review')) return false
+        await tickReviewNewIssues()
+        return listBehaviorLaunchClaims('review-new-issues').length === 0
       })
     }))
   }
@@ -2138,6 +2635,7 @@ export interface BehaviorsRuntimeHealth {
     consecutiveFailures: number
     lastFailureAt: string
     nextRetryAt: string
+    error?: string
   }>
   datastore: DatastoreFreshness
   identity: {
@@ -2168,6 +2666,7 @@ export function getBehaviorsRuntimeHealth(): BehaviorsRuntimeHealth {
       consecutiveFailures: failure.consecutiveFailures,
       lastFailureAt: new Date(failure.lastFailureAtMs).toISOString(),
       nextRetryAt: new Date(failure.nextRetryAtMs).toISOString(),
+      ...(failure.error ? { error: failure.error } : {}),
     }] : []
   })
   const anyEnabled = BEHAVIOR_KEYS.some(isEnabled)
@@ -2188,10 +2687,12 @@ export function getBehaviorsRuntimeHealth(): BehaviorsRuntimeHealth {
   // it, but leave the overall status alone: the runtime itself is healthy, and
   // the production monitor alerts on that field.
   const author = getMeta('me') || ''
+  // Review New Issues is scoped by repository and author list, not by `me`.
+  const needsMe = BEHAVIOR_KEYS.some((key) => key !== 'review-new-issues' && isEnabled(key))
   const identityValid = reviewer !== null
   const identityError = reviewer === null
     ? 'REVIEW_AGENT_USERNAME is missing or invalid'
-    : (anyEnabled && author === ''
+    : (needsMe && author === ''
       ? 'No GitHub username set in Settings — enabled behaviours cannot act until it is'
       : null)
   const identity = {
@@ -2265,6 +2766,14 @@ export function startBehaviorsRuntime(config: BehaviorsRuntimeConfig = {}): void
       })
     })
   }
+  if (isEnabled('review-new-issues')) {
+    void runBehaviorCycle('review-new-issues', async () => {
+      return await withBehaviorProcessLock('review-new-issues', async () => {
+        await reconcileIssueReviewClaims()
+        return false
+      })
+    })
+  }
   scheduleNextTick(generation)
 }
 
@@ -2310,7 +2819,7 @@ export function getScratchpadMap(): Record<BehaviorKey, string> {
 
 // A review tick is held only while its resolved model needs the Claude.ai
 // sign-in and that sign-in is not there; a fallback on another provider runs.
-async function reviewHeldByClaudeAuth(place: 'pr_review' | 'pr_approve'): Promise<boolean> {
+async function reviewHeldByClaudeAuth(place: ReviewPlace): Promise<boolean> {
   try {
     const { model, catalog } = await reviewChoice(place)
     return needsClaude(catalog, model) && claudeAuth.snapshot().status !== 'authenticated'

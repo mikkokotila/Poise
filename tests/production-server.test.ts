@@ -6,6 +6,13 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import release from '../config/caller-release.json'
 import { createAuthenticatedClaudeAuth } from './claude-auth-fixture'
 
+// Choosing a repository for Review New Issues checks it against the
+// organization's list; the test organization has two.
+vi.mock('../server/gh', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../server/gh')>()),
+  listOrgRepos: vi.fn(async () => ['Vaquum/Limen', 'Vaquum/Origo']),
+}))
+
 const EXPECTED_CALLER_COMMIT = 'a'.repeat(40)
 let root = ''
 let staticDir = ''
@@ -360,6 +367,43 @@ describe('production server', () => {
     const state = await (await fetch(`${baseUrl}/api/behaviors`)).json() as Record<string, { reviewers: number | null }>
     expect(state['review-new-prs'].reviewers).toBe(3)
     expect(state['approve-prs'].reviewers).toBeNull()
+  })
+
+  it('opts repositories and trusted authors into Review New Issues, validated', async () => {
+    const url = `${baseUrl}/api/behaviors/review-new-issues`
+    const headers = { 'Content-Type': 'application/json' }
+    const read = async () => (await (await fetch(`${baseUrl}/api/behaviors`)).json() as Record<string, Record<string, unknown>>)['review-new-issues']
+    expect(await read()).toMatchObject({
+      owner: 'bit-mis', enabled: false, setting: null, reviewers: 1,
+      repos: [], authors: ['mikkokotila', 'zero-bang', 'bit-mis'], lastTriggered: null,
+    })
+    for (const body of [
+      { repos: 'Vaquum/Origo' },
+      { repos: ['not a repository'] },
+      { repos: ['Vaquum/Unknown'] },
+      { authors: ['not a name'] },
+      { authors: 'mikkokotila' },
+      { reviewers: 4 },
+      { enabled: true, repos: ['Vaquum/Unknown'] },
+    ]) {
+      const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
+      expect(response.status, JSON.stringify(body)).toBe(400)
+    }
+    expect((await (await fetch(url, { method: 'POST', headers, body: JSON.stringify({ repos: ['Vaquum/Unknown'] }) })).json()).error)
+      .toBe('not a repository of the organization: Vaquum/Unknown')
+    // Repositories and authors belong to this behavior only.
+    expect((await fetch(`${baseUrl}/api/behaviors/review-new-prs`, { method: 'POST', headers, body: JSON.stringify({ repos: ['Vaquum/Origo'] }) })).status).toBe(400)
+    expect(await read()).toMatchObject({ enabled: false, repos: [] })
+
+    const ok = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ repos: ['Vaquum/Origo'], authors: ['mikkokotila'], reviewers: 2 }) })
+    expect(ok.status).toBe(200)
+    expect(await ok.json()).toMatchObject({ repos: ['Vaquum/Origo'], authors: ['mikkokotila'], reviewers: 2 })
+    expect(await read()).toMatchObject({ repos: ['Vaquum/Origo'], authors: ['mikkokotila'], reviewers: 2 })
+    // The pull-request panel keeps its own count.
+    expect((await (await fetch(`${baseUrl}/api/behaviors`)).json() as Record<string, { reviewers: number }>)['review-new-prs'].reviewers).not.toBe(2)
+
+    const cleared = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ repos: [] }) })
+    expect(await cleared.json()).toMatchObject({ repos: [] })
   })
 
   // Two Poise windows open on the same behavior used to mean the later save

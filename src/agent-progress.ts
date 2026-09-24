@@ -2,6 +2,9 @@
 export const PHASE_LABELS = {
   preflight: 'Checking PR state',
   preparing_packet: 'Preparing PR packet',
+  // Issue review: the issue and its sub-issues, then a fresh checkout.
+  preparing_issue: 'Reading the issue',
+  checking_out: 'Preparing a fresh checkout',
   waiting_provider: 'Waiting for provider',
   reasoning: 'Reasoning reported',
   responding: 'Receiving response',
@@ -14,6 +17,7 @@ export const PHASE_LABELS = {
   provider_finished: 'Provider returned a result',
   validating: 'Validating result',
   submitting: 'GitHub command in progress',
+  posting: 'Posting review comments',
   verifying: 'Verifying GitHub outcome',
   completed: 'Completed',
   superseded: 'Superseded',

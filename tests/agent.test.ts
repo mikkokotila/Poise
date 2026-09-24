@@ -281,3 +281,76 @@ describe('review policy compatibility', () => {
     await expect(reviewChoice('pr_review')).rejects.toThrow('Update Caller')
   })
 })
+
+// An issue review has no pull-request head: its Poise rows carry none, finish
+// as `commented`, and say which comments they posted. Before Poise knew the
+// shape, one such row rejected the whole log — Swarm blank, reconciliation
+// stalled for every behavior.
+describe('issue review rows', () => {
+  beforeEach(() => mocks.runFile.mockReset())
+
+  function issueRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return logRow({
+      behavior: 'issue_review',
+      repo: 'Vaquum/Origo',
+      pr_id: '452',
+      source: 'poise:review-new-issues',
+      correlation_id: 'claim-1',
+      expected_head: null,
+      head_sha: null,
+      ...overrides,
+    })
+  }
+
+  it('reads running, commented and failed issue reviews with their receipts', async () => {
+    const receipt = { issue: 'Vaquum/Origo#452', comment_id: 9, url: 'https://github.com/Vaquum/Origo/issues/452#issuecomment-9', author: 'bit-mis' }
+    mocks.runFile.mockResolvedValue({
+      stdout: JSON.stringify([
+        issueRow({ id: 'a'.repeat(32), status: 'running', completed_at: null }),
+        issueRow({ id: 'b'.repeat(32), status: 'completed', action: 'commented', outcome: 'commented', receipts: [receipt] }),
+        issueRow({ id: 'c'.repeat(32), status: 'failed', error: 'GitHub 502', error_code: 'posting_failed', receipts: [receipt, { broken: true }] }),
+        issueRow({ id: 'd'.repeat(32), status: 'failed', error: 'provider failed' }),
+        issueRow({ id: 'e'.repeat(32), status: 'failed', error: 'crashed while posting', receipts: 'garbled' }),
+      ]),
+      stderr: '',
+    })
+    const rows = await fetchAgentLogs()
+    const byId = (letter: string) => rows.find((row) => row.id === letter.repeat(32))!
+    expect(byId('a').status).toBe('running')
+    expect(byId('b')).toMatchObject({ action: 'commented', outcome: 'commented', receipts: [receipt] })
+    // A receipt it cannot read is dropped, but posting still counts as begun.
+    expect(byId('c').receipts).toEqual([receipt])
+    expect(byId('d').receipts).toBeNull()
+    expect(byId('e').receipts).toEqual([])
+  })
+
+  it('keeps the commented outcome to issue reviews and requires a terminal outcome', async () => {
+    mocks.runFile.mockResolvedValue({
+      stdout: JSON.stringify([logRow({ action: 'commented', outcome: 'commented' })]),
+      stderr: '',
+    })
+    await expect(fetchAgentLogs()).rejects.toThrow(/violates the schema/)
+    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([issueRow({ status: 'completed' })]), stderr: '' })
+    await expect(fetchAgentLogs()).rejects.toThrow(/incomplete terminal outcome/)
+  })
+
+  it('replays an issue review with the Issue review default and no head or checkout', async () => {
+    mocks.models = { issue_review: { default: 'gpt-6-astra-ultra', fallback: 'opus-5-xhigh' } }
+    mocks.runFile.mockResolvedValue({ stdout: CATALOG_STDOUT, stderr: '' })
+    const { invalidateCatalog } = await import('../server/models')
+    invalidateCatalog()
+    const gh = await import('../server/gh')
+    vi.mocked(gh.getReviewAgentUsername).mockReturnValue('bit-mis')
+    const { spawnDetached } = await import('../server/process')
+    vi.mocked(spawnDetached).mockReset().mockResolvedValue(undefined)
+    const { replayAgentJob } = await import('../server/agent')
+    const result = await replayAgentJob({ behavior: 'issue_review', repo: 'Vaquum/Origo', pr_id: '452' })
+    expect(result.source).toBe('poise:replay')
+    const [command, args] = vi.mocked(spawnDetached).mock.calls[0]
+    expect(command).toBe('agent-interface')
+    expect(args).toEqual(['--issue-review', 'Vaquum/Origo#452', '--model', 'gpt-6-astra-ultra', '--recovery-model', 'opus-5-xhigh',
+      '--actor', 'bit-mis', '--source', 'poise:replay', '--correlation-id', result.correlationId])
+    expect(gh.getHeadSha).not.toHaveBeenCalled()
+    expect(gh.localCheckoutPath).not.toHaveBeenCalled()
+  })
+})

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { CATALOG, CATALOG_STDOUT, NARROW_CATALOG } from './model-catalog-fixture'
+import { CATALOG, CATALOG_STDOUT, NARROW_CATALOG, PRE_ISSUE_REVIEW_CATALOG } from './model-catalog-fixture'
 
 const mocks = vi.hoisted(() => ({ runFile: vi.fn() }))
 vi.mock('../server/process', () => ({ runFile: mocks.runFile }))
@@ -160,6 +160,45 @@ describe('validating what the settings pane saves', () => {
     ['opus-5-max', /object of places/],
   ])('rejects %j', (value, message) => {
     expect(() => models.validateModelSettings(catalog, value)).toThrow(message)
+  })
+})
+
+describe('the Issue review place', () => {
+  const issueOnly = { ...catalog, issue_review_providers: ['claude', 'grok'] }
+
+  it('seeds from the PR review default and draws its panel from the issue review providers', () => {
+    expect(models.placeProviders(catalog, 'issue_review')).toEqual(['antigravity', 'claude', 'codex', 'grok', 'muse'])
+    expect(models.resolveChoice(catalog, 'issue_review', undefined)).toEqual({
+      default: 'opus-5-xhigh',
+      fallback: 'gpt-6-astra-ultra',
+      secondary: 'gpt-6-astra-ultra',
+      tertiary: 'grok-4.6-xhigh',
+      notes: [],
+    })
+    // Only the providers Caller can run an issue review with.
+    const narrowed = models.resolveChoice(issueOnly, 'issue_review', { default: 'opus-5-max', fallback: 'gpt-6-astra-ultra', secondary: 'muse-spark-1.3-contributor-max' })
+    expect(narrowed.secondary).toBe('grok-4.6-xhigh')
+    expect(narrowed.notes).toContain('muse-spark-1.3-contributor-max is no longer in the catalog; using grok-4.6-xhigh.')
+  })
+
+  it('says Caller must be updated, and keeps the choice, when Caller has no issue review', () => {
+    const stored = { default: 'grok-4.6-xhigh', fallback: 'opus-5-max', secondary: 'muse-spark-1.3-contributor-max' }
+    const resolved = models.resolveChoice(PRE_ISSUE_REVIEW_CATALOG as any, 'issue_review', stored)
+    expect(resolved).toMatchObject({ default: 'grok-4.6-xhigh', fallback: 'opus-5-max', secondary: 'muse-spark-1.3-contributor-max' })
+    expect(resolved.notes).toEqual(['Update Caller: Issue review is unavailable.'])
+    expect(() => models.validateModelSettings(PRE_ISSUE_REVIEW_CATALOG as any, { issue_review: stored }))
+      .toThrow(/Update Caller: Issue review is unavailable/)
+  })
+
+  it('saves a panel of different models from the issue review providers', () => {
+    const saved = models.validateModelSettings(issueOnly, {
+      issue_review: { default: 'grok-4.6-xhigh', fallback: 'opus-5-max', secondary: 'opus-5-xhigh', tertiary: 'fable-5.1-max' },
+    })
+    expect(saved.issue_review).toEqual({ default: 'grok-4.6-xhigh', fallback: 'opus-5-max', secondary: 'opus-5-xhigh', tertiary: 'fable-5.1-max' })
+    expect(() => models.validateModelSettings(issueOnly, { issue_review: { default: 'gpt-6-astra-ultra', fallback: 'opus-5-max' } }))
+      .toThrow(/Issue review default must be a claude or grok model/)
+    expect(() => models.validateModelSettings(issueOnly, { issue_review: { default: 'grok-4.6-xhigh', fallback: 'opus-5-max', secondary: 'grok-4.6-xhigh' } }))
+      .toThrow(/secondary reviewer must differ/)
   })
 })
 

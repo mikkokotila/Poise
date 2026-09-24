@@ -9,7 +9,7 @@
 // runtime — the view is just a UI for state, not the place where
 // agent automations actually run.
 
-import { BEHAVIORS, isEnabled, setEnabled, getSetting, setSetting, getReviewers, setReviewers, isReviewerCount, getScratchpad, setScratchpad, getLastTriggered, getBehaviorDiagnostics, refreshState, BehaviorConflictError, type BehaviorKey, type BehaviorSetting, type ReviewerCount, isBehaviorStateLoaded, getBehaviorOwner } from '../behaviors'
+import { BEHAVIORS, isEnabled, setEnabled, getSetting, setSetting, getReviewers, setReviewers, isReviewerCount, getScratchpad, setScratchpad, getRepos, getAuthors, setTriggers, getLastTriggered, getBehaviorDiagnostics, refreshState, BehaviorConflictError, type BehaviorKey, type BehaviorSetting, type ReviewerCount, isBehaviorStateLoaded, getBehaviorOwner } from '../behaviors'
 
 let viewEl: HTMLElement
 let initialized = false
@@ -214,6 +214,7 @@ function lastTriggeredCell(key: BehaviorKey): string {
 }
 
 function settingCell(meta: typeof BEHAVIORS[number]): string {
+  if (meta.hasTriggers) return triggersCell(meta.key)
   // Behaviors that don't take a priority ceiling render a dash so the
   // column still aligns visually but doesn't offer a control the
   // server would ignore anyway.
@@ -241,8 +242,10 @@ function reviewersCell(meta: typeof BEHAVIORS[number]): string {
   const opts = REVIEWER_OPTIONS.map((count) =>
     `<option value="${count}"${count === current ? ' selected' : ''}>${count}</option>`
   ).join('')
+  const reviews = meta.reviews ?? { place: 'PR review', item: 'pull request' }
+  const title = `How many of the ${reviews.place} models (Settings → Models) review each new ${reviews.item}, at the same time`
   return `
-    <select class="behavior-reviewers" data-behavior="${escapeHtml(meta.key)}" aria-label="Reviewers for ${escapeHtml(meta.key)}" title="How many of the PR review models (Settings → Models) review each new pull request, at the same time">
+    <select class="behavior-reviewers" data-behavior="${escapeHtml(meta.key)}" aria-label="Reviewers for ${escapeHtml(meta.key)}" title="${escapeHtml(title)}">
       ${opts}
     </select>
   `
@@ -259,6 +262,296 @@ function writeReviewers(key: BehaviorKey, value: ReviewerCount): void {
     )
     if (current) current.value = String(getReviewers(key))
   })
+}
+
+// ── Triggers (Review New Issues) ────────────────────────────────────────
+// Review New Issues is opt-in per repository. Its Setting cell is one pill
+// that opens a dropdown: a filterable checkbox list of the organization's
+// repositories and, below it, the trusted authors whose new issues count.
+// Like the memory panel, every way of closing it — Done, Escape, a click
+// outside, leaving the view — saves what changed; a save that fails keeps it
+// open next to the error rather than closing over the choice.
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?$/
+let orgRepos: string[] | null = null
+let orgReposError = ''
+let orgReposLoading: Promise<void> | null = null
+let triggersPanelEl: HTMLElement | null = null
+let triggersKey: BehaviorKey | null = null
+let triggersDraft = new Set<string>()
+let triggersLoaded = { repos: [] as string[], authors: [] as string[] }
+let triggersSaving: Promise<boolean> | null = null
+
+function shortRepo(repo: string): string {
+  return repo.includes('/') ? repo.split('/')[1] : repo
+}
+
+function triggersPresentation(key: BehaviorKey) {
+  const repos = getRepos(key)
+  const authors = getAuthors(key)
+  const none = repos.length === 0
+  // What is on screen may not be what is stored; saving from it would replace
+  // the stored list with a guess.
+  const unknown = stateUnknown()
+  return {
+    none,
+    unknown,
+    label: none ? 'No repos' : `${repos.length} repo${repos.length === 1 ? '' : 's'}`,
+    title: unknown
+      ? 'The repositories could not be read from the server.'
+      : none
+        ? 'Choose the repositories whose new issues are reviewed'
+        : `Repositories: ${repos.map(shortRepo).join(', ')} · Authors: ${authors.join(', ') || 'none'}`,
+    open: triggersKey === key && !!triggersPanelEl?.classList.contains('open'),
+  }
+}
+
+function triggersCell(key: BehaviorKey): string {
+  const { none, unknown, label, title, open } = triggersPresentation(key)
+  return `
+    <button type="button" class="behavior-triggers-btn${none ? ' is-empty' : ''}" data-behavior="${escapeHtml(key)}" aria-haspopup="dialog" aria-expanded="${open}" title="${escapeHtml(title)}"${unknown ? ' disabled' : ''}>
+      <span class="behavior-triggers-label">${escapeHtml(label)}</span>
+    </button>
+  `
+}
+
+// Updated in place: replacing the button every tick took keyboard focus away
+// from it, and could swallow a click that landed during the repaint.
+function refreshTriggersCell(key: BehaviorKey) {
+  const cell = viewEl?.querySelector<HTMLElement>(`tr[data-behavior="${key}"] .behavior-setting-cell`)
+  if (!cell) return
+  const button = cell.querySelector<HTMLButtonElement>('.behavior-triggers-btn')
+  const label = button?.querySelector<HTMLElement>('.behavior-triggers-label')
+  if (!button || !label) {
+    cell.innerHTML = triggersCell(key)
+    return
+  }
+  const view = triggersPresentation(key)
+  label.textContent = view.label
+  button.title = view.title
+  button.classList.toggle('is-empty', view.none)
+  button.setAttribute('aria-expanded', String(view.open))
+  button.disabled = view.unknown
+}
+
+function loadOrgRepos(): Promise<void> {
+  orgReposLoading ??= fetch('/api/repos')
+    .then(async (res) => {
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || !Array.isArray(data.repos)) throw new Error(data?.error || `HTTP ${res.status}`)
+      orgRepos = data.repos.filter((repo: unknown): repo is string => typeof repo === 'string')
+      orgReposError = ''
+    })
+    .catch((err: unknown) => { orgReposError = (err as Error).message || 'unavailable' })
+    .finally(() => { orgReposLoading = null })
+  return orgReposLoading
+}
+
+function setTriggersStatus(text: string, cls: 'info' | 'error' = 'info') {
+  const el = triggersPanelEl?.querySelector<HTMLElement>('.bt-status')
+  if (!el) return
+  el.textContent = text
+  el.className = `st-help st-help-${cls} bt-status`
+}
+
+function renderTriggerRepos() {
+  const list = triggersPanelEl?.querySelector<HTMLElement>('.bt-repos')
+  if (!list) return
+  const filter = (triggersPanelEl!.querySelector<HTMLInputElement>('.bt-filter')?.value || '').trim().toLowerCase()
+  if (!orgRepos && orgReposLoading) {
+    list.innerHTML = '<div class="st-help st-help-info">Loading repositories…</div>'
+    return
+  }
+  // A selected repository the organization no longer lists stays visible, so
+  // it can still be turned off.
+  const all = [...new Set([...(orgRepos ?? []), ...triggersDraft])]
+    .sort((a, b) => shortRepo(a).localeCompare(shortRepo(b)))
+  const shown = all.filter((repo) => !filter || repo.toLowerCase().includes(filter))
+  const error = orgReposError
+    ? `<div class="st-help st-help-error">Could not list the repositories: ${escapeHtml(orgReposError)} <button type="button" class="bt-retry">Retry</button></div>`
+    : ''
+  list.innerHTML = error + (shown.length
+    ? shown.map((repo) => `
+        <label class="bt-repo" title="${escapeHtml(repo)}">
+          <input type="checkbox" value="${escapeHtml(repo)}"${triggersDraft.has(repo) ? ' checked' : ''} />
+          <span>${escapeHtml(shortRepo(repo))}</span>
+        </label>`).join('')
+    : `<div class="st-help st-help-info">${filter ? 'No repository matches.' : 'No repositories.'}</div>`)
+}
+
+function buildTriggersPanel(): HTMLElement {
+  const panel = document.createElement('div')
+  panel.id = 'behavior-triggers-panel'
+  panel.setAttribute('role', 'dialog')
+  panel.setAttribute('aria-label', 'Repositories and authors that trigger Review New Issues')
+  panel.innerHTML = `
+    <div class="bt-section">
+      <label class="bt-label" for="bt-filter">Repositories</label>
+      <input id="bt-filter" class="st-input bt-filter" type="search" placeholder="Filter" autocomplete="off" spellcheck="false" />
+      <div class="bt-repos" role="group" aria-label="Repositories"></div>
+    </div>
+    <div class="bt-section">
+      <label class="bt-label" for="bt-authors">Trusted authors</label>
+      <input id="bt-authors" class="st-input bt-authors" type="text" autocomplete="off" spellcheck="false" placeholder="mikkokotila, zero-bang" />
+      <div class="st-help st-help-info">Only their new issues are reviewed. Reviewers run with full access on this machine.</div>
+    </div>
+    <div class="bt-footer">
+      <span class="st-help st-help-info bt-status" role="status"></span>
+      <button type="button" class="st-save bt-done">Done</button>
+    </div>
+  `
+  const filter = panel.querySelector<HTMLInputElement>('.bt-filter')!
+  filter.addEventListener('input', () => renderTriggerRepos())
+  filter.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowDown') return
+    const first = panel.querySelector<HTMLInputElement>('.bt-repo input')
+    if (first) { e.preventDefault(); first.focus() }
+  })
+  panel.querySelector('.bt-repos')!.addEventListener('change', (e) => {
+    const box = e.target as HTMLInputElement
+    if (!box.matches('input[type="checkbox"]')) return
+    if (box.checked) triggersDraft.add(box.value)
+    else triggersDraft.delete(box.value)
+  })
+  panel.querySelector('.bt-repos')!.addEventListener('click', (e) => {
+    if (!(e.target as HTMLElement).closest('.bt-retry')) return
+    void loadOrgRepos().then(() => renderTriggerRepos())
+    renderTriggerRepos()
+  })
+  // Arrow keys walk the visible checkboxes; Up from the first returns to the filter.
+  panel.querySelector('.bt-repos')!.addEventListener('keydown', (e) => {
+    const event = e as KeyboardEvent
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+    const boxes = [...panel.querySelectorAll<HTMLInputElement>('.bt-repo input')]
+    const index = boxes.indexOf(document.activeElement as HTMLInputElement)
+    if (index < 0) return
+    event.preventDefault()
+    const next = index + (event.key === 'ArrowDown' ? 1 : -1)
+    if (next < 0) filter.focus()
+    else boxes[Math.min(next, boxes.length - 1)]?.focus()
+  })
+  panel.querySelector('.bt-done')!.addEventListener('click', () => { void closeTriggersPanel() })
+  return panel
+}
+
+function positionTriggersPanel() {
+  if (!triggersPanelEl || !triggersKey) return
+  const button = viewEl?.querySelector<HTMLElement>(`.behavior-triggers-btn[data-behavior="${triggersKey}"]`)
+  if (!button) return
+  const rect = button.getBoundingClientRect()
+  const width = triggersPanelEl.offsetWidth || 300
+  triggersPanelEl.style.top = `${Math.round(rect.bottom + 6)}px`
+  triggersPanelEl.style.left = `${Math.round(Math.max(16, Math.min(rect.right - width, window.innerWidth - width - 16)))}px`
+}
+
+function openTriggersPanel(key: BehaviorKey) {
+  if (!triggersPanelEl) {
+    triggersPanelEl = buildTriggersPanel()
+    document.body.appendChild(triggersPanelEl)
+  }
+  triggersKey = key
+  triggersLoaded = { repos: getRepos(key), authors: getAuthors(key) }
+  triggersDraft = new Set(triggersLoaded.repos)
+  triggersPanelEl.querySelector<HTMLInputElement>('.bt-filter')!.value = ''
+  triggersPanelEl.querySelector<HTMLInputElement>('.bt-authors')!.value = triggersLoaded.authors.join(', ')
+  setTriggersStatus('')
+  if (!orgRepos) void loadOrgRepos().then(() => { if (triggersKey === key) renderTriggerRepos() })
+  renderTriggerRepos()
+  triggersPanelEl.classList.add('open')
+  triggersPanelEl.removeAttribute('inert')
+  refreshTriggersCell(key)
+  positionTriggersPanel()
+  window.addEventListener('resize', positionTriggersPanel)
+  window.addEventListener('scroll', positionTriggersPanel, true)
+  setTimeout(() => {
+    document.addEventListener('mousedown', onTriggersOutside)
+    document.addEventListener('keydown', onTriggersKeydown)
+    triggersPanelEl?.querySelector<HTMLInputElement>('.bt-filter')?.focus()
+  }, 0)
+}
+
+function parseAuthors(text: string): string[] {
+  return text.split(/[\s,]+/).map((name) => name.trim().replace(/^@/, '')).filter(Boolean)
+}
+
+// Returns whether the panel is now closed. `force` is for leaving the view:
+// the panel cannot outlive it, so a change that cannot be saved is reported
+// and dropped rather than kept on screen.
+function closeTriggersPanel(force = false): Promise<boolean> {
+  if (triggersSaving) return triggersSaving.then((closed) => closed || closeTriggersPanel(force))
+  if (!triggersPanelEl || !triggersKey || !triggersPanelEl.classList.contains('open')) return Promise.resolve(true)
+  const key = triggersKey
+  const repos = [...triggersDraft].sort()
+  const authors = parseAuthors(triggersPanelEl.querySelector<HTMLInputElement>('.bt-authors')!.value)
+  const invalid = authors.filter((name) => !GITHUB_LOGIN.test(name))
+  const same = (a: string[], b: string[]) => a.length === b.length && a.every((value, index) => value === b[index])
+  const changes: { repos?: string[], authors?: string[] } = {}
+  if (!same(repos, [...triggersLoaded.repos].sort())) changes.repos = repos
+  if (!same(authors, triggersLoaded.authors)) changes.authors = authors
+  if (invalid.length) {
+    if (!force) {
+      setTriggersStatus(`Not a GitHub username: ${invalid.join(', ')}`, 'error')
+      return Promise.resolve(false)
+    }
+    alert(`The trusted authors were not saved — not a GitHub username: ${invalid.join(', ')}`)
+    delete changes.authors
+  }
+  if (!changes.repos && !changes.authors) {
+    finishClosingTriggersPanel()
+    return Promise.resolve(true)
+  }
+  if (stateUnknown()) {
+    if (!force) {
+      setTriggersStatus('Not saved — the current repositories could not be read from the server.', 'error')
+      return Promise.resolve(false)
+    }
+    alert('The Review New Issues repositories were not saved: the current ones could not be read from the server.')
+    finishClosingTriggersPanel()
+    return Promise.resolve(true)
+  }
+  setTriggersStatus('Saving…')
+  triggersSaving = setTriggers(key, changes).then(() => {
+    finishClosingTriggersPanel()
+    return true
+  }, (err: unknown) => {
+    if (force) {
+      alert(`Could not save the Review New Issues triggers: ${(err as Error).message}`)
+      finishClosingTriggersPanel()
+      return true
+    }
+    setTriggersStatus(`Not saved: ${(err as Error).message}`, 'error')
+    return false
+  }).finally(() => { triggersSaving = null })
+  return triggersSaving
+}
+
+function finishClosingTriggersPanel() {
+  const key = triggersKey
+  const hadFocus = !!triggersPanelEl?.contains(document.activeElement)
+  triggersPanelEl?.classList.remove('open')
+  triggersPanelEl?.setAttribute('inert', '')
+  triggersKey = null
+  document.removeEventListener('mousedown', onTriggersOutside)
+  document.removeEventListener('keydown', onTriggersKeydown)
+  window.removeEventListener('resize', positionTriggersPanel)
+  window.removeEventListener('scroll', positionTriggersPanel, true)
+  // Repaint first: the repaint replaces the pill, so focusing the old one
+  // would drop focus with the element it was on.
+  if (key) refreshTriggersCell(key)
+  if (hadFocus) {
+    const opener = key ? viewEl?.querySelector<HTMLButtonElement>(`.behavior-triggers-btn[data-behavior="${key}"]`) : null
+    if (opener) opener.focus()
+    else (document.activeElement as HTMLElement | null)?.blur()
+  }
+}
+
+function onTriggersKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') { e.preventDefault(); void closeTriggersPanel() }
+}
+
+function onTriggersOutside(e: MouseEvent) {
+  const target = e.target as HTMLElement
+  if (triggersPanelEl?.contains(target) || target.closest('.behavior-triggers-btn')) return
+  void closeTriggersPanel()
 }
 
 // Memory cell — a pill button that opens the per-behavior scratchpad
@@ -626,14 +919,14 @@ function renderDiagnostics() {
     diagnostics.datastore.error ? `Datastore: ${diagnostics.datastore.error}` : '',
     diagnostics.identity.error ? `Identity: ${diagnostics.identity.error}` : '',
     ...diagnostics.failures.map((failure) =>
-      `${failure.behavior}: ${failure.consecutiveFailures} consecutive ${failure.kind} failure(s)`),
+      `${failure.behavior}: ${failure.consecutiveFailures} consecutive ${failure.kind} failure(s)${failure.error ? ` — ${diagnosticCause(failure.error)}` : ''}`),
     ...diagnostics.deadLetters.slice(0, DEAD_LETTERS_SHOWN).map((letter) =>
       `${letter.behavior} ${letter.target}: ${diagnosticCause(letter.error)}${(letter.attemptCount ?? 1) > 1 ? ` (${letter.attemptCount} attempts)` : ''}`),
     // A dead letter is a target the behaviour permanently gave up on. Showing
     // the newest few and nothing else made an older one drop off the only
     // surface that names it, with the panel reading as if it were complete.
     diagnostics.deadLetters.length > DEAD_LETTERS_SHOWN
-      ? `${diagnostics.deadLetters.length - DEAD_LETTERS_SHOWN} more affected PR(s) not shown`
+      ? `${diagnostics.deadLetters.length - DEAD_LETTERS_SHOWN} more affected pull request(s) or issue(s) not shown`
       : '',
   ].filter(Boolean)
   if (messages.length === 0) {
@@ -706,6 +999,15 @@ function attachHandlers() {
     }
   })
   tbody.addEventListener('click', (e) => {
+    // Triggers pill → open or close the Review New Issues dropdown.
+    const triggersBtn = (e.target as HTMLElement).closest<HTMLButtonElement>('.behavior-triggers-btn')
+    if (triggersBtn) {
+      e.preventDefault()
+      const key = triggersBtn.dataset.behavior as BehaviorKey
+      if (triggersKey === key && triggersPanelEl?.classList.contains('open')) void closeTriggersPanel()
+      else void closeTriggersPanel().then((closed) => { if (closed) openTriggersPanel(key) })
+      return
+    }
     // Memory button → toggle the per-behavior scratchpad panel.
     const memBtn = (e.target as HTMLElement).closest<HTMLButtonElement>('.behavior-memory-btn')
     if (memBtn) {
@@ -753,12 +1055,15 @@ async function tickRefresh() {
     if (setting && !settingWrites.has(meta.key)) setting.value = getSetting(meta.key)
     const reviewers = tr.querySelector<HTMLSelectElement>('select.behavior-reviewers[data-behavior]')
     if (reviewers && !reviewersInFlight.has(meta.key)) reviewers.value = String(getReviewers(meta.key))
+    // An open dropdown holds the person's draft; the pill repaints once it closes.
+    if (meta.hasTriggers && triggersKey !== meta.key) refreshTriggersCell(meta.key)
   }
 }
 
 export function stopBehaviorsRefresh() {
   // The view is going away, so the panel cannot stay open over what replaces it.
   closeMemoryPanel(true)
+  void closeTriggersPanel(true)
   flushSettingWrites()
   if (!tickListening) return
   window.removeEventListener('poise:refresh-tick', onTick)

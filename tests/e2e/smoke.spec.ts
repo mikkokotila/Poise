@@ -308,6 +308,93 @@ test('chooses how many reviewers each new pull request gets from Behaviors', asy
   await expect(page.getByLabel('Reviewers for review-new-prs')).toHaveValue('3')
 })
 
+test('opts repositories and trusted authors into Review New Issues from Behaviors', async ({ page }) => {
+  let state: Record<string, unknown> = { repos: [], authors: ['mikkokotila', 'zero-bang', 'bit-mis'], reviewers: 1 }
+  const writes: Array<Record<string, unknown>> = []
+  const behavior = (extra: Record<string, unknown>) => ({
+    owner: 'bit-mis', enabled: false, setting: null, reviewers: null, scratchpad: '', lastTriggered: null, ...extra,
+  })
+  await page.route('**/api/behaviors', async (route) => {
+    await route.fulfill({ json: {
+      'review-new-prs': behavior({ setting: 'p2', reviewers: 1 }),
+      'approve-prs': behavior({}),
+      'resolve-unblocking': behavior({ scratchpad: null }),
+      'review-new-issues': behavior({ ...state }),
+      diagnostics: { status: 'ok', agentLogsError: null, datastore: { status: 'healthy', checkedAt: new Date().toISOString(), ageSeconds: 1, lastSuccessAt: null, error: null }, identity: { status: 'valid', actor: 'bit-mis', error: null }, failures: [], deadLetters: [] },
+    } })
+  })
+  await page.route('**/api/behaviors/review-new-issues', async (route) => {
+    const body = route.request().postDataJSON() as Record<string, unknown>
+    writes.push(body)
+    state = { ...state, ...body }
+    await route.fulfill({ json: { ok: true, enabled: false, setting: null, scratchpad: '', ...state } })
+  })
+  await page.route('**/api/repos', async (route) => {
+    await route.fulfill({ json: { repos: ['Vaquum/Limen', 'Vaquum/Origo', 'Vaquum/Praxis'] } })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Behaviors', exact: true }).click()
+  const row = page.locator('tr[data-behavior="review-new-issues"]')
+  await expect(row).toContainText('Review New Issues')
+  await expect(row).toContainText('bit-mis')
+  const pill = row.locator('.behavior-triggers-btn')
+  await expect(pill).toHaveText('No repos')
+
+  await pill.click()
+  const dialog = page.getByRole('dialog', { name: /Review New Issues/ })
+  await expect(dialog).toBeVisible()
+  await expect(pill).toHaveAttribute('aria-expanded', 'true')
+  await expect(dialog.locator('.bt-repo')).toHaveCount(3)
+  const filter = dialog.locator('.bt-filter')
+  await expect(filter).toBeFocused()
+  await filter.fill('ori')
+  await expect(dialog.locator('.bt-repo')).toHaveCount(1)
+  // The keyboard reaches the list from the filter.
+  await filter.press('ArrowDown')
+  const origo = dialog.getByRole('checkbox', { name: 'Origo' })
+  await expect(origo).toBeFocused()
+  await origo.press('Space')
+  await expect(origo).toBeChecked()
+  await dialog.getByLabel('Trusted authors').fill('mikkokotila, zero-bang')
+  await dialog.getByRole('button', { name: 'Done' }).click()
+  await expect.poll(() => writes).toEqual([{ repos: ['Vaquum/Origo'], authors: ['mikkokotila', 'zero-bang'] }])
+  await expect(dialog).toBeHidden()
+  await expect(pill).toHaveText('1 repo')
+  await expect(pill).toBeFocused()
+  // The refresh tick repaints the pill without taking focus from it.
+  await page.evaluate(() => window.dispatchEvent(new Event('poise:refresh-tick')))
+  await expect.poll(() => page.evaluate(() => document.activeElement?.classList.contains('behavior-triggers-btn'))).toBe(true)
+
+  // A name GitHub would not accept keeps the dropdown open, with the reason.
+  await pill.click()
+  await expect(dialog).toBeVisible()
+  await expect(dialog.locator('.bt-repo')).toHaveCount(3)
+  await dialog.getByLabel('Trusted authors').fill('mikkokotila name!')
+  await page.keyboard.press('Escape')
+  await expect(dialog.locator('.bt-status')).toContainText('Not a GitHub username: name!')
+  await expect(dialog).toBeVisible()
+  // Escape saves as well, like every other way of closing.
+  await dialog.getByLabel('Trusted authors').fill('mikkokotila')
+  await dialog.getByRole('checkbox', { name: 'Origo' }).uncheck()
+  await page.keyboard.press('Escape')
+  await expect.poll(() => writes.length).toBe(2)
+  expect(writes[1]).toEqual({ repos: [], authors: ['mikkokotila'] })
+  await expect(dialog).toBeHidden()
+  await expect(pill).toHaveText('No repos')
+
+  // The issue review keeps its own reviewer count.
+  await page.getByLabel('Reviewers for review-new-issues').selectOption('2')
+  await expect.poll(() => writes.length).toBe(3)
+  expect(writes[2]).toEqual({ reviewers: 2 })
+
+  // With the state unreadable, what the pill shows may be a guess: it cannot be
+  // opened, so nothing can be saved over the stored list.
+  await page.unroute('**/api/behaviors')
+  await page.route('**/api/behaviors', (route) => route.fulfill({ status: 500, json: { error: 'down' } }))
+  await page.evaluate(() => window.dispatchEvent(new Event('poise:refresh-tick')))
+  await expect(pill).toBeDisabled()
+})
+
 test('stops a running run from Swarm after a second click, and settles the row', async ({ page }) => {
   const ago = (ms: number) => new Date(Date.now() - ms).toISOString()
   const id = 'c'.repeat(32)

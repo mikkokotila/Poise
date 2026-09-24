@@ -38,7 +38,7 @@ interface LogEntry {
   progress?: ModelProgress | null
   // The verdict of a finished review. 'completed' alone does not say whether
   // the agent approved or demanded changes.
-  outcome: 'clean' | 'changes_requested' | 'approved' | 'superseded' | 'preflight_failed' | null
+  outcome: 'clean' | 'changes_requested' | 'approved' | 'superseded' | 'preflight_failed' | 'commented' | null
   response: string        // upstream availability marker; fetch body by full id
   error: string
 }
@@ -139,6 +139,8 @@ const OUTCOME_LABEL: Record<string, { text: string, cls: string }> = {
   changes_requested: { text: 'changes', cls: 'warn' },
   superseded: { text: 'superseded', cls: 'flat' },
   preflight_failed: { text: 'preflight', cls: 'bad' },
+  // An issue review ends with its comments posted.
+  commented: { text: 'posted', cls: 'ok' },
 }
 
 function statusCell(e: LogEntry): string {
@@ -310,7 +312,9 @@ function targetCell(e: LogEntry): string {
     // a 404 — render it as text rather than sending the person somewhere wrong.
     if (repo.includes('/') && pr) {
       const safeRepo = repo.split('/').map(encodeURIComponent).join('/')
-      const href = `https://github.com/${safeRepo}/pull/${encodeURIComponent(pr)}`
+      // An issue review's target is an issue; GitHub serves it under /issues.
+      const kind = e.behavior === 'issue_review' ? 'issues' : 'pull'
+      const href = `https://github.com/${safeRepo}/${kind}/${encodeURIComponent(pr)}`
       return `<a class="agent-target" href="${href}" target="_blank" rel="noopener">${escapeHtml(label)}</a>`
     }
     return `<span class="agent-target" title="${escapeHtml(repo && pr ? `${repo}#${pr}` : label)}">${escapeHtml(label)}</span>`
@@ -362,7 +366,7 @@ function stopCell(e: LogEntry): string {
 }
 
 function isReplayable(e: LogEntry): boolean {
-  return (e.behavior === 'pr_review' || e.behavior === 'pr_approve')
+  return (e.behavior === 'pr_review' || e.behavior === 'pr_approve' || e.behavior === 'issue_review')
       && !!e.repo && !!e.pr_id
 }
 

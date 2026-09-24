@@ -34,6 +34,8 @@ export const CATALOG = {
   },
   debate_participants: ['opus-5-max', 'gpt-6-astra-ultra', 'grok-4.6-xhigh', 'gemini-3.8-flash-high', 'muse-spark-1.3-contributor-max'],
   review_providers: ['antigravity', 'claude', 'codex', 'grok', 'muse'],
+  // Every provider runs an issue review with full access (Caller's --issue-review).
+  issue_review_providers: ['antigravity', 'claude', 'codex', 'grok', 'muse'],
   policy: 'bounded-v1',
 }
 
@@ -42,3 +44,9 @@ export const CATALOG_STDOUT = JSON.stringify(CATALOG)
 // An older Caller that reviews with Claude and Codex only; Poise reads the
 // list rather than assuming it, so the narrowing still has to hold.
 export const NARROW_CATALOG = { ...CATALOG, review_providers: ['claude', 'codex'] }
+
+// A Caller from before --issue-review: it names no issue review providers.
+export const PRE_ISSUE_REVIEW_CATALOG = (() => {
+  const { issue_review_providers: _omitted, ...rest } = CATALOG
+  return rest
+})()

@@ -339,4 +339,102 @@ describe('behavior database lifecycle', () => {
       SELECT count(*) FROM behavior_dead_letters WHERE retired_at IS NOT NULL
     `).pluck().get()).toBe(1)
   })
+
+  // An issue review's dead letter names an issue. A pull-request scan lists
+  // only open pull requests, so without the scope the next scan retired every
+  // issue-review incident — gone from diagnostics before anyone saw it.
+  it('retires a behavior\'s dead letters only against what that behavior lists', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'poise-db-test-'))
+    const {
+      claimSeenOwned,
+      listBehaviorDeadLetters,
+      listBehaviorLaunchClaims,
+      markBehaviorLaunchIntentOwned,
+      recordBehaviorDeadLetter,
+      retireBehaviorDeadLettersForClosedPrs,
+      countBehaviorDeadLetters,
+    } = await loadIsolatedDb(join(tempRoot, 'cache.db'))
+    const claimId = claimSeenOwned('review-new-issues', 'Vaquum/Origo#452')!
+    expect(markBehaviorLaunchIntentOwned({
+      key: 'review-new-issues',
+      target: 'Vaquum/Origo#452',
+      claimId,
+      launchBehavior: 'issue_review',
+      repo: 'Vaquum/Origo',
+      pr: 452,
+      requestedAt: '2026-09-24T07:00:00.000Z',
+      expectedHead: '',
+      actor: 'bit-mis',
+      source: 'poise:review-new-issues',
+      correlationId: claimId,
+    })).toBe(true)
+    recordBehaviorDeadLetter(listBehaviorLaunchClaims('review-new-issues')[0], 'provider exited 1')
+    expect(countBehaviorDeadLetters('review-new-issues', 'Vaquum/Origo#452')).toBe(1)
+
+    expect(retireBehaviorDeadLettersForClosedPrs(new Set())).toBe(0)
+    expect(listBehaviorDeadLetters().map((letter) => letter.behavior)).toEqual(['review-new-issues'])
+    expect(retireBehaviorDeadLettersForClosedPrs(new Set(['Vaquum/Origo#452']), ['review-new-issues'])).toBe(0)
+    expect(retireBehaviorDeadLettersForClosedPrs(new Set(), ['review-new-issues'])).toBe(1)
+    expect(listBehaviorDeadLetters()).toEqual([])
+    // Retiring keeps the count a relaunch decision is made from.
+    expect(countBehaviorDeadLetters('review-new-issues', 'Vaquum/Origo#452')).toBe(1)
+  })
+
+  it('keeps a held issue reviewer listed when another reviewer of the issue finishes', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'poise-db-test-'))
+    const db = await loadIsolatedDb(join(tempRoot, 'cache.db'))
+    const launch = (target: string) => {
+      const claimId = db.claimSeenOwned('review-new-issues', target)!
+      db.markBehaviorLaunchIntentOwned({
+        key: 'review-new-issues', target, claimId, launchBehavior: 'issue_review', repo: 'Vaquum/Origo', pr: 452,
+        requestedAt: new Date(Date.now() - 60_000).toISOString(), expectedHead: '', actor: 'bit-mis',
+        source: 'poise:review-new-issues', correlationId: claimId,
+      })
+      return claimId
+    }
+    launch('Vaquum/Origo#452:secondary')
+    db.recordBehaviorDeadLetter(db.listBehaviorLaunchClaims('review-new-issues')[0], 'posted 1 of 2 comment(s)')
+    const primary = launch('Vaquum/Origo#452')
+    expect(db.completeIssueReviewLaunchOwned({ key: 'review-new-issues', target: 'Vaquum/Origo#452', claimId: primary, completedAt: new Date().toISOString() })).toBe(true)
+    expect(db.listBehaviorIncidents().map((letter) => letter.target)).toEqual(['Vaquum/Origo#452'])
+    expect(db.listBehaviorDeadLetters().map((letter) => letter.target)).toEqual(['Vaquum/Origo#452:secondary'])
+  })
+
+  it('records an issue review launch without a head and completes it as commented', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'poise-db-test-'))
+    const {
+      claimSeenOwned,
+      completeIssueReviewLaunchOwned,
+      hasSeen,
+      listBehaviorLaunchClaims,
+      markBehaviorLaunchIntentOwned,
+      db,
+    } = await loadIsolatedDb(join(tempRoot, 'cache.db'))
+    const claimId = claimSeenOwned('review-new-issues', 'Vaquum/Origo#452:secondary')!
+    const intent = {
+      key: 'review-new-issues',
+      target: 'Vaquum/Origo#452:secondary',
+      claimId,
+      launchBehavior: 'issue_review' as const,
+      repo: 'Vaquum/Origo',
+      pr: 452,
+      requestedAt: '2026-09-24T07:00:00.000Z',
+      expectedHead: '',
+      actor: 'bit-mis',
+      source: 'poise:review-new-issues',
+      correlationId: claimId,
+    }
+    // A pull-request launch needs its head; an issue review must not carry one.
+    expect(() => markBehaviorLaunchIntentOwned({ ...intent, expectedHead: 'a'.repeat(40) })).toThrow(/expected head/)
+    expect(() => markBehaviorLaunchIntentOwned({ ...intent, launchBehavior: 'pr_review' })).toThrow(/expected head/)
+    expect(markBehaviorLaunchIntentOwned(intent)).toBe(true)
+    expect(listBehaviorLaunchClaims('review-new-issues')[0]).toMatchObject({ launchBehavior: 'issue_review', launchExpectedHead: '' })
+
+    expect(completeIssueReviewLaunchOwned({ key: 'review-new-issues', target: 'Vaquum/Origo#452:secondary', claimId: 'someone-else', completedAt: '2026-09-24T07:30:00.000Z' })).toBe(false)
+    expect(completeIssueReviewLaunchOwned({ key: 'review-new-issues', target: 'Vaquum/Origo#452:secondary', claimId, completedAt: '2026-09-24T07:30:00.000Z' })).toBe(true)
+    expect(listBehaviorLaunchClaims('review-new-issues')).toEqual([])
+    expect(hasSeen('review-new-issues', 'Vaquum/Origo#452:secondary')).toBe(true)
+    expect(db.prepare(`SELECT launch_outcome, launch_action, launch_head_sha FROM behavior_seen WHERE key = 'review-new-issues'`).get())
+      .toEqual({ launch_outcome: 'commented', launch_action: 'commented', launch_head_sha: null })
+  })
 })

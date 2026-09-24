@@ -355,7 +355,7 @@ export function claimSeen(key: string, target: string): boolean {
 // prevents an old worker from deleting a newer claim after disable/re-enable.
 const DEFAULT_CLAIM_LEASE_MS = 2 * 60 * 60 * 1000
 
-export type BehaviorAgentLaunch = 'pr_review' | 'pr_approve'
+export type BehaviorAgentLaunch = 'pr_review' | 'pr_approve' | 'issue_review'
 
 export interface BehaviorLaunchClaim {
   key: string
@@ -369,6 +369,8 @@ export interface BehaviorLaunchClaim {
   launchRequestedAt: string
   launchCallId: string | null
   launchError: string | null
+  // A pull-request launch pins the head it reviews; an issue review has none
+  // and stores the empty string.
   launchExpectedHead: string
   launchActor: string
   launchSource: string
@@ -461,13 +463,15 @@ export function markBehaviorLaunchIntentOwned(input: {
 }): boolean {
   const leaseMs = input.leaseMs ?? DEFAULT_CLAIM_LEASE_MS
   if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0) throw new Error('leaseMs must be a positive integer')
-  if (!['pr_review', 'pr_approve'].includes(input.launchBehavior)) {
+  if (!['pr_review', 'pr_approve', 'issue_review'].includes(input.launchBehavior)) {
     throw new Error('invalid behavior launch type')
   }
   if (!input.repo || input.repo.length > 512) throw new Error('invalid behavior launch repo')
   if (!Number.isSafeInteger(input.pr) || input.pr <= 0) throw new Error('invalid behavior launch PR')
   if (!Number.isFinite(Date.parse(input.requestedAt))) throw new Error('invalid behavior launch timestamp')
-  if (!/^[0-9a-f]{40}$/.test(input.expectedHead)) throw new Error('invalid behavior expected head')
+  if (input.launchBehavior === 'issue_review' ? input.expectedHead !== '' : !/^[0-9a-f]{40}$/.test(input.expectedHead)) {
+    throw new Error('invalid behavior expected head')
+  }
   if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?$/.test(input.actor)) {
     throw new Error('invalid behavior actor')
   }
@@ -748,6 +752,46 @@ export function completeBehaviorLaunchOwned(input: {
   })()
 }
 
+// An issue review ends in comments rather than a review on a head.
+export function completeIssueReviewLaunchOwned(input: {
+  key: string
+  target: string
+  claimId: string
+  completedAt: string
+}): boolean {
+  if (!Number.isFinite(Date.parse(input.completedAt))) {
+    throw new Error('invalid issue review completion timestamp')
+  }
+  const info = db.prepare(`
+    UPDATE behavior_seen
+    SET claim_id = '', lease_until = NULL, seen_at = ?, launch_error = NULL,
+        launch_outcome = 'commented', launch_completed_at = ?, launch_head_sha = NULL,
+        launch_action = 'commented'
+    WHERE key = ? AND target = ? AND claim_id = ? AND claim_id <> ''
+      AND launch_behavior = 'issue_review'
+  `).run(new Date().toISOString(), input.completedAt, input.key, input.target, input.claimId)
+  return info.changes === 1
+}
+
+// A claim taken but never launched — its process died before recording the
+// launch — whose lease has run out, so a new claim may take the target over.
+export function hasExpiredPreLaunchClaim(key: string, target: string): boolean {
+  return !!db.prepare(`
+    SELECT 1 FROM behavior_seen
+    WHERE key = ? AND target = ? AND claim_id <> ''
+      AND launch_requested_at IS NULL
+      AND lease_until IS NOT NULL AND lease_until <= ?
+  `).get(key, target, Date.now())
+}
+
+// How many times a target's launch has already been given up on.
+export function countBehaviorDeadLetters(behavior: string, target: string): number {
+  const row = db.prepare(
+    'SELECT COUNT(*) AS n FROM behavior_dead_letters WHERE behavior = ? AND target = ?',
+  ).get(behavior, target) as { n: number }
+  return row.n
+}
+
 export function completeReviewLaunchOwned(input: {
   key: string
   target: string
@@ -814,14 +858,19 @@ export function retireBehaviorDeadLetter(id: string): boolean {
   `).run(new Date().toISOString(), id).changes === 1
 }
 
+// Retires the dead letters of the given behaviors whose target is no longer
+// open. Each behavior passes only what it lists: an open pull request says
+// nothing about an issue, and the reverse.
 export function retireBehaviorDeadLettersForClosedPrs(
   openTargets: ReadonlySet<string>,
+  behaviors: readonly string[] = ['review-new-prs', 'approve-prs'],
 ): number {
-  const rows = db.prepare(`
-    SELECT id, repo, pr
+  const rows = (db.prepare(`
+    SELECT id, behavior, repo, pr
     FROM behavior_dead_letters
     WHERE retired_at IS NULL AND repo IS NOT NULL AND pr IS NOT NULL
-  `).all() as Array<{ id: string, repo: string, pr: number }>
+  `).all() as Array<{ id: string, behavior: string, repo: string, pr: number }>)
+    .filter((row) => behaviors.includes(row.behavior))
   const retire = db.prepare(`
     UPDATE behavior_dead_letters SET retired_at = ?
     WHERE id = ? AND retired_at IS NULL
@@ -858,6 +907,9 @@ function readBehaviorDeadLetters(limit: number, grouped: boolean): BehaviorDeadL
         AND recovered.launch_pr = dead.pr
         AND recovered.launch_outcome IS NOT NULL
         AND julianday(recovered.launch_completed_at) > julianday(dead.created_at)
+        -- Each issue reviewer is its own launch: another reviewer of the same
+        -- issue finishing does not settle this one's incident.
+        AND (dead.behavior <> 'review-new-issues' OR recovered.target = dead.target)
     )
     ), ranked AS (
       SELECT *,
