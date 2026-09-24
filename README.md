@@ -10,7 +10,7 @@ with a framework-free browser client, a Node server, and a small SQLite store.
 - **Swarm** — agent run status, live review activity, responses, and safe replay controls.
 - **Chat** — native coding-agent sessions with streaming, tools, permissions and checkout-bound work.
 - **Archive** — searchable GitHub issue and PR history.
-- **Behaviors** — scheduled review, approval, and unblocking automations.
+- **Behaviors** — scheduled review, approval, unblocking, and issue-review automations.
 - **Snippets** — simple Espanso trigger management.
 - **Editor** — atomic Markdown storage, annotations, and agent-backed chat.
 
@@ -84,7 +84,7 @@ timezone, refresh interval, and theme in Settings.
 Models have one name everywhere: the identity `<family>-<version>-<effort>`
 from Caller's catalog (`opus-5-max`, `gpt-6-astra-ultra`, …), the same string
 the Swarm log records. Settings → Models lists every place Poise launches a
-model — Chat, Editor chat, PR review, PR approval — with a default and a
+model — Chat, Editor chat, PR review, PR approval, Issue review — with a default and a
 fallback each, plus the places Caller decides on its own (`/content`,
 `/consensus`, fix failing CI, simplify issue, the sign-in check). Every place
 offers every catalog model; review places follow the providers Caller lists as
@@ -120,6 +120,18 @@ shows the last report. Reviews need Caller 0.3.0 or newer (`agent-interface
 review policy is `bounded-v1`: reviews have a total 23m33s budget. Timeouts and
 failed recovery remain visible and are held across restarts for the same
 input/model; new commits, new approval input, or a model change can be retried.
+
+## Review New Issues
+
+Behaviors → Review New Issues gives each new issue in the repositories you opt
+in — and every sub-issue it makes part of itself — an adversarial review by
+one to three reviewers at once, the Issue review models in Settings → Models.
+Each reviewer is its provider's own CLI with full access to a fresh checkout,
+so it can read the whole repository and run the tests; Caller posts its
+comments as the review agent. Nothing is reviewed until a repository is ticked
+in the row's Setting dropdown, and only issues by the trusted authors listed
+there count. Swarm shows every reviewer like a PR review. See
+[Review New Issues](docs/Issue-review.md).
 
 ## Production
 

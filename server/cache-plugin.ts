@@ -1,7 +1,7 @@
 import type { Plugin, Connect } from 'vite'
 import type { ServerResponse } from 'node:http'
 import { getModelSettings, getSettings, setSettings } from './settings'
-import { MODEL_PLACES, loadCatalog, readCatalogReport, resolveChoice } from './models'
+import { MODEL_PLACES, loadCatalog, placeProviders, readCatalogReport, resolveChoice } from './models'
 import { refreshModelCatalog } from './models-refresh'
 import { claudeAuth, type ClaudeAuthSnapshot } from './claude-auth'
 import { getCallerReleaseHealth } from './caller-release'
@@ -12,7 +12,7 @@ import { fetchAgentLogs, fetchAgentResponse, fetchAgentReasoning, triggerPrRevie
 import { listChatHistory, sendChat, saveAttachment, runDebate } from './chat'
 import { listDocs, readDoc, writeDoc, deleteDoc, newSlug, readAnnotations, writeAnnotations, getOrCreateChatSession, MAX_DOC_BYTES, MAX_ANNOTATIONS_BYTES, EditorConflictError } from './editor'
 import { handleSnippetApi } from './snippet-api'
-import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, setScratchpad as setBehaviorScratchpad, setReviewers as setBehaviorReviewers, getEnabledMap, getSettingMap, getScratchpadMap, getReviewers, getBehaviorsRuntimeHealth, isValidSetting, isValidReviewers, startBehaviorsRuntime, stopBehaviorsRuntime, getResolveUnblockingLastFired, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
+import { setEnabled as setBehaviorEnabled, setSetting as setBehaviorSetting, setScratchpad as setBehaviorScratchpad, setReviewers as setBehaviorReviewers, getEnabledMap, getSettingMap, getScratchpadMap, getReviewers, getBehaviorsRuntimeHealth, isValidSetting, isValidReviewers, isPanelBehavior, getIssueRepositories, setIssueRepositories, isValidRepository, getIssueAuthors, setIssueAuthors, isValidAuthorList, startBehaviorsRuntime, stopBehaviorsRuntime, getResolveUnblockingLastFired, BEHAVIOR_KEYS, type BehaviorKey } from './behaviors'
 import { ContentLaunchPendingError, getContentJobResponse, launchAndEnqueueContentJob, startContentFinalizer, stopContentFinalizer } from './content-jobs'
 import { ProcessLockError } from './process-lock'
 import { ATTACHMENT_MAX_BYTES, enforceApiRequest, httpStatus, readBuffer, readJson, setApiHeaders } from './http'
@@ -174,7 +174,7 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
             getProductionUpdateHealth(),
           ])
           const enabled = getEnabledMap()
-          const claudeBackedEnabled = enabled['review-new-prs'] || enabled['approve-prs']
+          const claudeBackedEnabled = enabled['review-new-prs'] || enabled['approve-prs'] || enabled['review-new-issues']
           const healthy = scheduler.status === 'ok'
             && (!claudeBackedEnabled || claudeAuthState.status === 'authenticated')
             && callerRelease.status !== 'invalid'
@@ -236,6 +236,8 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
               ...place,
               ...resolveChoice(catalog, place.key, stored[place.key]),
               stored: stored[place.key] || null,
+              // Which providers this place may launch; null means all of them.
+              providers: placeProviders(catalog, place.key),
             }))
             const fixed = [
               { key: 'content', label: '/content', model: catalog.behaviors.author_content, why: 'Authors content in your voice; set by the Caller catalog.' },
@@ -334,7 +336,7 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
               setting: settings['review-new-prs'],
               // How many of the PR review place's reviewers (Settings →
               // Models) review each new pull request, in parallel.
-              reviewers: getReviewers(),
+              reviewers: getReviewers('review-new-prs'),
               scratchpad: scratch['review-new-prs'],
               lastTriggered: lastFor('pr_review', 'poise:review-new-prs'),
             },
@@ -364,6 +366,19 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
               scratchpad: null,
               lastTriggered: getResolveUnblockingLastFired(),
             },
+            // Review New Issues is opt-in per repository: nothing triggers
+            // until `repos` names one. `authors` are the trusted accounts
+            // whose issues it reviews.
+            'review-new-issues': {
+              owner: opts.reviewAgentUsername || null,
+              enabled: enabled['review-new-issues'],
+              setting: null,
+              reviewers: getReviewers('review-new-issues'),
+              repos: getIssueRepositories().map((entry) => entry.repo),
+              authors: getIssueAuthors(),
+              scratchpad: scratch['review-new-issues'],
+              lastTriggered: lastFor('issue_review', 'poise:review-new-issues'),
+            },
             diagnostics: {
               status: runtime.status,
               agentLogsError,
@@ -375,7 +390,7 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
           })
         }
 
-        // POST /api/behaviors/<key> { enabled?: bool, setting?: 'p0'|'p1'|'p2', reviewers?: 1|2|3 }
+        // POST /api/behaviors/<key> { enabled?, setting?, reviewers?: 1|2|3, repos?: string[], authors?: string[], scratchpad? }
         // — every field optional; several can be sent in one call.
         const behaviorMatch = url.match(/^\/api\/behaviors\/([a-z0-9-]+)(?:\?|$)/)
         if (behaviorMatch && req.method === 'POST') {
@@ -400,12 +415,37 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
               }
             }
             if ('reviewers' in body) {
-              if (key !== 'review-new-prs') {
-                return json(res, 400, { error: 'only review-new-prs has a reviewer count' })
+              if (!isPanelBehavior(key)) {
+                return json(res, 400, { error: 'only the review behaviors have a reviewer count' })
               }
               if (!isValidReviewers(body.reviewers)) {
                 return json(res, 400, { error: 'reviewers must be 1, 2 or 3' })
               }
+            }
+            if (('repos' in body || 'authors' in body) && key !== 'review-new-issues') {
+              return json(res, 400, { error: 'only review-new-issues takes repositories and authors' })
+            }
+            if ('repos' in body) {
+              if (!Array.isArray(body.repos) || body.repos.length > 200 || !body.repos.every(isValidRepository)) {
+                return json(res, 400, { error: 'repos must be a list of owner/name repositories' })
+              }
+              // Only a repository being added needs proving: it must be one
+              // the configured organization has.
+              const selected = new Set(getIssueRepositories().map((entry) => entry.repo))
+              const added = (body.repos as string[]).filter((repo) => !selected.has(repo))
+              if (added.length) {
+                let known: Set<string>
+                try {
+                  known = new Set(await listOrgRepos())
+                } catch (err: any) {
+                  return json(res, 502, { error: 'could not list the organization repositories: ' + (err.message || String(err)) })
+                }
+                const unknown = added.filter((repo) => !known.has(repo))
+                if (unknown.length) return json(res, 400, { error: 'not a repository of the organization: ' + unknown.join(', ') })
+              }
+            }
+            if ('authors' in body && !isValidAuthorList(body.authors)) {
+              return json(res, 400, { error: 'authors must be up to 20 GitHub usernames' })
             }
             if ('scratchpad' in body) {
               if (typeof body.scratchpad !== 'string') {
@@ -426,14 +466,20 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
             // Persist passive configuration first; enabling last guarantees
             // the first tick observes the submitted setting and memory.
             if ('setting' in body) setBehaviorSetting(key, body.setting)
-            if ('reviewers' in body) setBehaviorReviewers(body.reviewers)
+            if ('reviewers' in body && isPanelBehavior(key)) setBehaviorReviewers(body.reviewers, key)
+            if ('repos' in body) setIssueRepositories(body.repos)
+            if ('authors' in body) setIssueAuthors(body.authors)
             if ('scratchpad' in body) setBehaviorScratchpad(key, body.scratchpad)
             if ('enabled' in body) await setBehaviorEnabled(key, body.enabled)
             return json(res, 200, {
               ok: true,
               enabled: getEnabledMap()[key],
               setting: getSettingMap()[key],
-              reviewers: key === 'review-new-prs' ? getReviewers() : null,
+              reviewers: isPanelBehavior(key) ? getReviewers(key) : null,
+              ...(key === 'review-new-issues' ? {
+                repos: getIssueRepositories().map((entry) => entry.repo),
+                authors: getIssueAuthors(),
+              } : {}),
               scratchpad: getScratchpadMap()[key],
             })
           } catch (err: any) {

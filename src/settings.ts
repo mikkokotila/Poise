@@ -21,8 +21,11 @@ interface ModelPlace {
   label: string
   why: string
   review: boolean
-  // The PR review place also names a secondary and a tertiary reviewer;
-  // Behaviors decides how many of the three review each new pull request.
+  // The providers this place may launch; null for all of them.
+  providers?: string[] | null
+  // The PR review and Issue review places also name a secondary and a
+  // tertiary reviewer; Behaviors decides how many of the three review each
+  // new pull request or issue.
   reviewers: boolean
   default: string
   fallback: string
@@ -148,7 +151,10 @@ async function loadProduction(): Promise<void> {
 // ── Models tab ──────────────────────────────────────────────────────────
 
 function modelOptions(models: CatalogModel[], place: ModelPlace, reviewProviders: string[], selected: string): string {
-  const eligible = place.review ? models.filter((m) => reviewProviders.includes(m.provider)) : models
+  // The server names the providers a place may launch; older servers only
+  // said whether it reviews.
+  const providers = place.providers !== undefined ? place.providers : place.review ? reviewProviders : null
+  const eligible = providers ? models.filter((m) => providers.includes(m.provider)) : models
   return eligible
     .map((m) => `<option value="${escapeHtml(m.identity)}"${m.identity === selected ? ' selected' : ''}>${escapeHtml(m.identity)}</option>`)
     .join('')

@@ -1,5 +1,5 @@
 import { claudeAuth } from './claude-auth'
-import { REVIEW_POLICY, type Catalog, type ReviewerSlot, isClaudeModel, loadCatalog, resolveChoice, reviewerModels } from './models'
+import { REVIEW_POLICY, type Catalog, type ReviewerSlot, isClaudeModel, loadCatalog, placeProviders, resolveChoice, reviewerModels } from './models'
 import { getModelSettings } from './settings'
 
 export { REVIEW_POLICY }
@@ -10,12 +10,24 @@ export interface ReviewChoice {
   catalog: Catalog
 }
 
+export type ReviewPlace = 'pr_review' | 'pr_approve' | 'issue_review'
+
 // Older Caller versions silently ignore --model on PR behaviors and know
-// nothing of identities. Prove support before launching so the selected model
-// can never silently become another one.
-export async function reviewChoice(place: 'pr_review' | 'pr_approve'): Promise<ReviewChoice> {
+// nothing of identities, and a Caller without --issue-review lists no issue
+// review providers. Prove support before launching so the selected model can
+// never silently become another one.
+async function supportedCatalog(place: ReviewPlace): Promise<Catalog> {
   const catalog = await loadCatalog()
-  if (catalog.policy !== REVIEW_POLICY) throw new Error('Update Caller: PR review model selection is unavailable')
+  if (place === 'issue_review') {
+    if (!placeProviders(catalog, place)?.length) throw new Error('Update Caller: issue review is unavailable')
+  } else if (catalog.policy !== REVIEW_POLICY) {
+    throw new Error('Update Caller: PR review model selection is unavailable')
+  }
+  return catalog
+}
+
+export async function reviewChoice(place: ReviewPlace): Promise<ReviewChoice> {
+  const catalog = await supportedCatalog(place)
   const choice = resolveChoice(catalog, place, getModelSettings()[place])
   return { model: choice.default, recovery: choice.fallback, catalog }
 }
@@ -26,12 +38,11 @@ export interface ReviewPanel {
   catalog: Catalog
 }
 
-// The reviewers of a new pull request, primary first: as many of the PR
-// review place's default, secondary and tertiary as Behaviors asks for.
-export async function reviewPanel(count: number): Promise<ReviewPanel> {
-  const catalog = await loadCatalog()
-  if (catalog.policy !== REVIEW_POLICY) throw new Error('Update Caller: PR review model selection is unavailable')
-  const choice = resolveChoice(catalog, 'pr_review', getModelSettings().pr_review)
+// The reviewers of a new pull request or issue, primary first: as many of
+// the place's default, secondary and tertiary as Behaviors asks for.
+export async function reviewPanel(count: number, place: 'pr_review' | 'issue_review' = 'pr_review'): Promise<ReviewPanel> {
+  const catalog = await supportedCatalog(place)
+  const choice = resolveChoice(catalog, place, getModelSettings()[place])
   return { reviewers: reviewerModels(choice, count), recovery: choice.fallback, catalog }
 }
 

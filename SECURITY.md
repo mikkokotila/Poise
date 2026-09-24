@@ -94,6 +94,27 @@ Reads use a no-follow file descriptor, a 512 KiB byte ceiling and a 5,000-line
 presentation limit. Contents render as text, never active HTML. Previews do
 not launch an agent or switch checkouts; they describe the current file only.
 
+## Review New Issues
+
+Issue reviewers are unattended coding agents with full access: each runs its
+provider's own CLI without tool restrictions or a sandbox, as the local user,
+in a fresh checkout of the issue's repository. Unlike a Chat session, the text
+steering them was written by whoever opened the issue, its sub-issues and
+their comments. The behavior is off until a repository is ticked, and only
+issues opened by the trusted authors listed beside it are reviewed; keep that
+list to accounts you trust. Sub-issues and comments by others remain part of
+what a reviewer reads.
+
+The checkout is a disposable clone outside `~/dev`, made from a local mirror
+with the token passed per git command and stored in neither repository; it
+is not a filesystem boundary. From a reviewer's shell every same-user
+credential is reachable — `gh`'s accounts, SSH keys, provider logins.
+Reviewers are told not to post; Caller posts their comments through
+github-interface as the review agent and only on the issue and its
+sub-issues, but "comments only" is an instruction to the agent, not a limit
+it cannot break. Processes a reviewer leaves running are killed with its
+process group when it exits.
+
 ## Poise self-improvement releases
 
 Self-improvement authority is limited to a user-authored Poise change request.

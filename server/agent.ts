@@ -46,12 +46,12 @@ export interface LogEntry {
   time_elapsed: string
   status: string
   progress?: ModelProgress | null
-  outcome: 'clean' | 'changes_requested' | 'approved' | 'superseded' | 'preflight_failed' | null
+  outcome: 'clean' | 'changes_requested' | 'approved' | 'superseded' | 'preflight_failed' | 'commented' | null
   head_sha: string | null
   expected_head: string | null
   source: string | null
   correlation_id: string | null
-  action: 'reviewed_clean' | 'requested_changes' | 'approved' | 'not_started' | null
+  action: 'reviewed_clean' | 'requested_changes' | 'approved' | 'not_started' | 'commented' | null
   response: string | null // upstream 8-char availability marker; read by full `id`
   error: string
   review_policy?: string | null
@@ -60,10 +60,39 @@ export interface LogEntry {
   // The GitHub review this run submitted (Caller's receipt); tells a
   // reviewer's review apart from a sibling's on the same pull request.
   review_id?: number | null
+  // Issue review only: null until the run starts posting; from then on the
+  // comments it knows it posted. A failed run with receipts must never be
+  // relaunched on its own — it may already have commented.
+  receipts?: IssueCommentReceipt[] | null
   // `external` for a Chat turn Poise recorded through `--record-turn`: no
   // Caller process ran, so `--stop` refuses it and Poise routes it to its
   // own runtime.
   runner?: 'external' | null
+}
+
+export interface IssueCommentReceipt {
+  issue: string
+  comment_id: number
+  url: string | null
+  author: string
+}
+
+// An issue review runs against the issue, not a pull-request head, so its
+// rows carry no expected or terminal head.
+export const ISSUE_REVIEW_BEHAVIOR = 'issue_review'
+
+function parseReceipts(value: unknown): IssueCommentReceipt[] | null {
+  if (value === null || value === undefined) return null
+  // Anything else that is present means posting began; keep what can be read.
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    const receipt = item as Record<string, unknown> | null
+    return receipt && typeof receipt.issue === 'string' && Number.isSafeInteger(receipt.comment_id)
+      && (receipt.url === null || receipt.url === undefined || typeof receipt.url === 'string')
+      && typeof receipt.author === 'string'
+      ? [{ issue: receipt.issue, comment_id: Number(receipt.comment_id), url: (receipt.url as string | undefined) ?? null, author: receipt.author }]
+      : []
+  })
 }
 
 export async function fetchAgentLogs(
@@ -136,6 +165,7 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
     && action === 'not_started'
     && outcome === 'preflight_failed'
     && headSha === null
+  const issueReview = behavior === ISSUE_REVIEW_BEHAVIOR
   if (!/^[0-9a-f]{32}$/.test(id)
     || (prId !== null && !/^[1-9][0-9]*$/.test(prId))
     || (repo !== null && !/^[^/\s]+(?:\/[^/\s]+)?$/.test(repo))
@@ -144,10 +174,11 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
     || !Number.isFinite(Date.parse(startedAt))
     || (startedAtPrecise !== null && !Number.isFinite(Date.parse(startedAtPrecise)))
     || (completedAt !== null && !Number.isFinite(Date.parse(completedAt)))
-    || !['clean', 'changes_requested', 'approved', 'superseded', 'preflight_failed', null].includes(outcome)
+    || !['clean', 'changes_requested', 'approved', 'superseded', 'preflight_failed', 'commented', null].includes(outcome)
     || (headSha !== null && !/^[0-9a-f]{40}$/.test(headSha))
     || (expectedHead !== null && !/^[0-9a-f]{40}$/.test(expectedHead))
-    || !['reviewed_clean', 'requested_changes', 'approved', 'not_started', null].includes(action)
+    || !['reviewed_clean', 'requested_changes', 'approved', 'not_started', 'commented', null].includes(action)
+    || ((action === 'commented' || outcome === 'commented') && !issueReview)
     || ((action === 'not_started' || outcome === 'preflight_failed') && !preflightFailed)
     || (source !== null && !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(source))
     || (correlationId !== null && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(correlationId))) {
@@ -172,11 +203,11 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
     throw new Error(`agent-interface log row ${index} is externally recorded but not a chat turn`)
   }
   if (source?.startsWith('poise:') && !externalChatTurn) {
-    if (!actor || !expectedHead || !correlationId || !behavior
+    if (!actor || (!expectedHead && !issueReview) || !correlationId || !behavior
       || !repo || !/^[^/\s]+\/[^/\s]+$/.test(repo) || !prId) {
       throw new Error(`agent-interface log row ${index} has incomplete Poise provenance`)
     }
-    if (status === 'completed' && (!completedAt || !action || !outcome || !headSha)) {
+    if (status === 'completed' && (!completedAt || !action || !outcome || (!headSha && !issueReview))) {
       throw new Error(`agent-interface log row ${index} has incomplete terminal outcome`)
     }
     if (status === 'failed' && !error) {
@@ -214,6 +245,7 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
     review_policy: optionalString('review_policy'),
     recovery_model: optionalString('recovery_model'),
     review_id: Number.isSafeInteger(row.review_id) && Number(row.review_id) > 0 ? Number(row.review_id) : null,
+    receipts: parseReceipts(row.receipts),
     runner: runner as LogEntry['runner'],
   }
 }
@@ -313,8 +345,8 @@ export async function triggerPrReview(
 // `pr_id`; we map behavior → CLI flag and re-spawn the same command
 // with the repo's local checkout as --pwd. A new row will appear in
 // `agent-interface --logs` for the new run; the existing row is
-// untouched. Only pr_review and pr_approve are replayable through
-// this path — other behaviors aren't exposed as standalone CLI
+// untouched. pr_review, pr_approve and issue_review are replayable
+// through this path — other behaviors aren't exposed as standalone CLI
 // invocations today.
 export async function replayAgentJob(input: {
   behavior?: string,
@@ -324,8 +356,10 @@ export async function replayAgentJob(input: {
   const behavior = String(input.behavior || '')
   const repo = String(input.repo || '')
   const prId = String(input.pr_id || '')
-  if (!repo.includes('/'))   throw new Error('repo must be owner/name')
-  if (!/^\d+$/.test(prId))   throw new Error('pr_id must be a positive integer')
+  if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) throw new Error('repo must be owner/name')
+  if (!/^[1-9]\d*$/.test(prId))          throw new Error('pr_id must be a positive integer')
+
+  if (behavior === ISSUE_REVIEW_BEHAVIOR) return replayIssueReview(repo, prId)
 
   let flag: string
   if (behavior === 'pr_review')       flag = '--pr-review'
@@ -362,6 +396,40 @@ export async function replayAgentJob(input: {
     correlationId,
     '--pwd',
     pwd,
+  ], {
+    cwd: agentCwd(),
+    env: claudeSubscriptionEnvironment(),
+    onExit: (result) => { if (claude) claudeAuth.observeProcessFailure(result) },
+  })
+  return { ok: true, source, correlationId }
+}
+
+// A replayed issue review is one fresh full-access run by the Issue review
+// default, commenting again as the review agent. It needs no head and no
+// local checkout: Caller prepares its own.
+async function replayIssueReview(repo: string, issue: string): Promise<{ ok: true, source: string, correlationId: string }> {
+  const { model, recovery, catalog } = await reviewChoice('issue_review')
+  const claude = needsClaude(catalog, model)
+  if (claude) await claudeAuth.requireReady()
+  await prepareModelClis(catalog, [model, recovery])
+  const actor = getReviewAgentUsername()
+  const source = 'poise:replay'
+  const correlationId = randomUUID()
+  if (claude) await claudeAuth.requireReady()
+  if ((await reviewChoice('issue_review')).model !== model) throw new Error('Review model changed; retry the request')
+  await spawnDetached(CLI, [
+    '--issue-review',
+    `${repo}#${issue}`,
+    '--model',
+    model,
+    '--recovery-model',
+    recovery,
+    '--actor',
+    actor,
+    '--source',
+    source,
+    '--correlation-id',
+    correlationId,
   ], {
     cwd: agentCwd(),
     env: claudeSubscriptionEnvironment(),

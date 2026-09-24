@@ -26,6 +26,9 @@ export interface Catalog {
   behaviors: Record<string, string>
   debate_participants: string[]
   review_providers: string[]
+  // Providers Caller can run with full access for an issue review; absent
+  // from a Caller that has no issue review.
+  issue_review_providers?: string[]
   policy: string
 }
 
@@ -101,6 +104,18 @@ export function isReviewModel(catalog: Catalog, identity: string): boolean {
   return !!row && catalog.review_providers.includes(row.provider)
 }
 
+// The providers a place can launch; null when every catalog provider can.
+export function placeProviders(catalog: Catalog, place: ModelPlace): string[] | null {
+  if (place === 'issue_review') return catalog.issue_review_providers ?? []
+  return MODEL_PLACES.find((p) => p.key === place)!.review ? catalog.review_providers : null
+}
+
+export function isPlaceModel(catalog: Catalog, place: ModelPlace, identity: string): boolean {
+  const row = catalogModel(catalog, identity)
+  const providers = placeProviders(catalog, place)
+  return !!row && (providers === null || providers.includes(row.provider))
+}
+
 // Every place in Poise that launches a model, with the Caller behavior whose
 // catalog default seeds it. `review` places follow the providers the catalog
 // lists as reviewing (every one of them since Caller #39) and their fallback
@@ -142,6 +157,14 @@ export const MODEL_PLACES = [
     reviewers: false,
     seed: 'pr_approve',
   },
+  {
+    key: 'issue_review',
+    label: 'Issue review',
+    why: 'Review New Issues and its replays. Each reviewer runs its own CLI with full access in a fresh checkout and comments as the review agent. When Behaviors asks for more than one reviewer, the secondary and tertiary review each new issue alongside the default, at the same time. The fallback takes over once if Claude hits its output limit.',
+    review: true,
+    reviewers: true,
+    seed: 'pr_review',
+  },
 ] as const
 
 export type ReviewerSlot = 'primary' | 'secondary' | 'tertiary'
@@ -174,9 +197,9 @@ export interface ResolvedChoice extends ModelChoice {
 // participants are one top-effort model per family, so walking them from the
 // default's family outward gives a panel of different families. Never the
 // default itself; a family already on the panel only when nothing else is left.
-export function seedReviewers(catalog: Catalog, primary: string): { secondary: string, tertiary: string } {
+export function seedReviewers(catalog: Catalog, primary: string, place: ModelPlace = 'pr_review'): { secondary: string, tertiary: string } {
   const candidates = [...catalog.debate_participants, ...catalog.models.map((m) => m.identity)]
-    .filter((identity, index, all) => all.indexOf(identity) === index && identity !== primary && isReviewModel(catalog, identity))
+    .filter((identity, index, all) => all.indexOf(identity) === index && identity !== primary && isPlaceModel(catalog, place, identity))
   const chosen: string[] = []
   const providers = new Set([catalogModel(catalog, primary)?.provider])
   for (const identity of candidates) {
@@ -198,8 +221,17 @@ export function resolveChoice(catalog: Catalog, place: ModelPlace, stored: Model
   const seedDefault = catalog.behaviors[spec.seed]
   const seedFallback = catalog.behaviors.review_recovery
   const notes: string[] = []
-  const usable = (identity: string | undefined) => !!identity && catalogModel(catalog, identity) !== null
-    && (!spec.review || isReviewModel(catalog, identity))
+  // A Caller without the place's capability can launch none of its models;
+  // keep what was chosen for when it can, and say why nothing runs meanwhile.
+  if (placeProviders(catalog, place)?.length === 0) {
+    const kept = {
+      default: stored?.default ?? seedDefault,
+      fallback: stored?.fallback ?? seedFallback,
+      ...(spec.reviewers ? { secondary: stored?.secondary ?? seedDefault, tertiary: stored?.tertiary ?? seedDefault } : {}),
+    }
+    return { ...kept, notes: [`Update Caller: ${spec.label} is unavailable.`] }
+  }
+  const usable = (identity: string | undefined) => !!identity && isPlaceModel(catalog, place, identity)
   let chosen = stored?.default
   if (!usable(chosen)) {
     if (chosen) notes.push(`${chosen} is no longer in the catalog; using ${seedDefault}.`)
@@ -211,7 +243,7 @@ export function resolveChoice(catalog: Catalog, place: ModelPlace, stored: Model
     fallback = seedFallback
   }
   if (!spec.reviewers) return { default: chosen!, fallback: fallback!, notes }
-  const seeds = seedReviewers(catalog, chosen!)
+  const seeds = seedReviewers(catalog, chosen!, place)
   const panel: Pick<ModelChoice, 'secondary' | 'tertiary'> = {}
   for (const slot of ['secondary', 'tertiary'] as const) {
     let reviewer = stored?.[slot]
@@ -247,13 +279,16 @@ export function validateModelSettings(catalog: Catalog, models: unknown): ModelS
     if (spec.reviewers) {
       for (const slot of ['secondary', 'tertiary'] as const) if (choice?.[slot] !== undefined) fields.push(slot)
     }
+    const providers = placeProviders(catalog, place)
     for (const field of fields) {
       const identity = choice?.[field]
       if (typeof identity !== 'string' || !catalogModel(catalog, identity)) {
         throw new Error(`${spec.label} ${field} must be a model from the catalog`)
       }
-      if (spec.review && !isReviewModel(catalog, identity)) {
-        throw new Error(`${spec.label} ${field} must be a ${catalog.review_providers.join(' or ')} model`)
+      if (!isPlaceModel(catalog, place, identity)) {
+        throw new Error(providers?.length
+          ? `${spec.label} ${field} must be a ${providers.join(' or ')} model`
+          : `Update Caller: ${spec.label} is unavailable`)
       }
     }
     if (choice.default === choice.fallback) {

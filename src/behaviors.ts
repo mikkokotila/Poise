@@ -5,7 +5,7 @@
 // reliably (browser tabs close, reload, get backgrounded). This
 // module is just labels + an HTTP client for the toggle.
 
-export type BehaviorKey = 'review-new-prs' | 'approve-prs' | 'resolve-unblocking'
+export type BehaviorKey = 'review-new-prs' | 'approve-prs' | 'resolve-unblocking' | 'review-new-issues'
 
 export interface BehaviorMeta {
   key: BehaviorKey
@@ -23,15 +23,22 @@ export interface BehaviorMeta {
   // resolve-unblocking calls github-interface directly with no agent,
   // so it has nothing to receive a note; the Memory cell shows a dash.
   hasMemory: boolean
+  // Whether the Setting cell chooses which repositories trigger it and whose
+  // issues count — Review New Issues is opt-in per repository.
+  hasTriggers: boolean
+  // What one review is of, for the Reviewers tooltip.
+  reviews?: { place: string, item: string }
 }
 
 // The trilogy: initial review → follow-up review/approval → final
-// gate-clearing so a human can merge. Order matters for display since
-// the view renders rows in the listed sequence.
+// gate-clearing so a human can merge, then the issue review that stands
+// apart from it. Order matters for display since the view renders rows in
+// the listed sequence.
 export const BEHAVIORS: BehaviorMeta[] = [
-  { key: 'review-new-prs',     label: 'Review New Pull Requests',      hasSetting: true,  hasReviewers: true,  hasMemory: true  },
-  { key: 'approve-prs',        label: 'Approve Pull Requests',         hasSetting: false, hasReviewers: false, hasMemory: true  },
-  { key: 'resolve-unblocking', label: 'Resolve Unblocking Conversations', hasSetting: false, hasReviewers: false, hasMemory: false },
+  { key: 'review-new-prs',     label: 'Review New Pull Requests',      hasSetting: true,  hasReviewers: true,  hasMemory: true,  hasTriggers: false, reviews: { place: 'PR review', item: 'pull request' } },
+  { key: 'approve-prs',        label: 'Approve Pull Requests',         hasSetting: false, hasReviewers: false, hasMemory: true,  hasTriggers: false },
+  { key: 'resolve-unblocking', label: 'Resolve Unblocking Conversations', hasSetting: false, hasReviewers: false, hasMemory: false, hasTriggers: false },
+  { key: 'review-new-issues',  label: 'Review New Issues',             hasSetting: false, hasReviewers: true,  hasMemory: true,  hasTriggers: true,  reviews: { place: 'Issue review', item: 'issue' } },
 ]
 
 export type BehaviorSetting = 'p0' | 'p1' | 'p2' | 'p3' | 'p4'
@@ -58,6 +65,7 @@ export interface BehaviorDiagnostics {
     consecutiveFailures: number
     lastFailureAt: string
     nextRetryAt: string
+    error?: string
   }>
   deadLetters: Array<{
     id: string
@@ -76,6 +84,9 @@ const settingByKey: Partial<Record<BehaviorKey, BehaviorSetting>> = {}
 const reviewersByKey: Partial<Record<BehaviorKey, ReviewerCount>> = {}
 const lastByKey: Partial<Record<BehaviorKey, LastTriggered | null>> = {}
 const scratchpadByKey: Partial<Record<BehaviorKey, string>> = {}
+// Review New Issues: the repositories that trigger it and the trusted authors.
+const reposByKey: Partial<Record<BehaviorKey, string[]>> = {}
+const authorsByKey: Partial<Record<BehaviorKey, string[]>> = {}
 let diagnostics: BehaviorDiagnostics | null = null
 
 export function isEnabled(key: BehaviorKey): boolean {
@@ -102,6 +113,18 @@ export function getScratchpad(key: BehaviorKey): string {
   return scratchpadByKey[key] || ''
 }
 
+export function getRepos(key: BehaviorKey): string[] {
+  return reposByKey[key] ?? []
+}
+
+export function getAuthors(key: BehaviorKey): string[] {
+  return authorsByKey[key] ?? []
+}
+
+function stringList(value: unknown): string[] | null {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string') ? value : null
+}
+
 export function getBehaviorDiagnostics(): BehaviorDiagnostics | null {
   return diagnostics
 }
@@ -112,12 +135,18 @@ export class BehaviorConflictError extends Error {
   constructor(message: string, readonly current: string) { super(message) }
 }
 
-async function postBehavior(key: BehaviorKey, body: { enabled?: boolean, setting?: BehaviorSetting, reviewers?: ReviewerCount, scratchpad?: string, scratchpadPrevious?: string }) {
+async function postBehavior(key: BehaviorKey, body: { enabled?: boolean, setting?: BehaviorSetting, reviewers?: ReviewerCount, repos?: string[], authors?: string[], scratchpad?: string, scratchpadPrevious?: string }) {
   const res = await fetch(`/api/behaviors/${encodeURIComponent(key)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
+  if (!res.ok && res.status !== 409) {
+    // The server says why a change was refused (an unknown repository, a
+    // malformed username); that is the message worth showing.
+    const data = await res.json().catch(() => ({}))
+    throw new Error(typeof data?.error === 'string' ? data.error : `HTTP ${res.status}`)
+  }
   if (res.status === 409) {
     const data = await res.json().catch(() => ({}))
     throw new BehaviorConflictError(
@@ -125,7 +154,6 @@ async function postBehavior(key: BehaviorKey, body: { enabled?: boolean, setting
       typeof data?.scratchpad === 'string' ? data.scratchpad : '',
     )
   }
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
 }
 
@@ -227,6 +255,33 @@ export function setReviewers(key: BehaviorKey, reviewers: ReviewerCount): Promis
   return chained
 }
 
+// Repositories and authors are written together, serialized per behaviour
+// for the same reason as the ceiling: the last request to arrive is kept.
+const triggersWriteChain: Partial<Record<BehaviorKey, Promise<void>>> = {}
+
+export function setTriggers(key: BehaviorKey, triggers: { repos?: string[], authors?: string[] }): Promise<void> {
+  const run = async () => {
+    const previous = { repos: reposByKey[key], authors: authorsByKey[key] }
+    if (triggers.repos) reposByKey[key] = [...triggers.repos]
+    if (triggers.authors) authorsByKey[key] = [...triggers.authors]
+    beginWrite(key)
+    try {
+      const data = await postBehavior(key, triggers)
+      reposByKey[key] = stringList(data.repos) ?? reposByKey[key]
+      authorsByKey[key] = stringList(data.authors) ?? authorsByKey[key]
+    } catch (err) {
+      reposByKey[key] = previous.repos
+      authorsByKey[key] = previous.authors
+      throw err
+    } finally {
+      endWrite(key)
+    }
+  }
+  const chained = (triggersWriteChain[key] ?? Promise.resolve()).then(run, run)
+  triggersWriteChain[key] = chained.catch(() => {})
+  return chained
+}
+
 // `loaded` is what the caller believed was stored when it began editing. The
 // server refuses the write if that no longer matches, so a second window
 // cannot silently overwrite the first one's memory.
@@ -297,6 +352,10 @@ export async function refreshState(): Promise<void> {
       enabledByKey[k] = !!data[k]?.enabled
       if (data[k]?.setting) settingByKey[k] = data[k].setting
       if (isReviewerCount(data[k]?.reviewers)) reviewersByKey[k] = data[k].reviewers
+      const repos = stringList(data[k]?.repos)
+      if (repos) reposByKey[k] = repos
+      const authors = stringList(data[k]?.authors)
+      if (authors) authorsByKey[k] = authors
       scratchpadByKey[k] = typeof data[k]?.scratchpad === 'string' ? data[k].scratchpad : ''
     }
     for (const k of keys) {

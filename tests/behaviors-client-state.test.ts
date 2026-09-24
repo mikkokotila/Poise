@@ -172,3 +172,43 @@ describe('setting writes are serialized per behaviour', () => {
     expect(behaviors.getSetting('review-new-prs')).toBe('p4')
   })
 })
+
+describe('Review New Issues triggers', () => {
+  it('mirrors the repositories and authors and keeps a saved change over an older read', async () => {
+    const posted: unknown[] = []
+    vi.stubGlobal('fetch', (_url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        posted.push(JSON.parse(String(init.body)))
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, repos: ['Vaquum/Origo'], authors: ['mikkokotila'] }) })
+      }
+      return deferGet().then((body) => ({ ok: true, status: 200, json: async () => body }))
+    })
+    const first = behaviors.refreshState()
+    respond(payload({ 'review-new-issues': { enabled: true, repos: ['Vaquum/Limen'], authors: ['zero-bang'], reviewers: 2 } }))
+    await first
+    expect(behaviors.getRepos('review-new-issues')).toEqual(['Vaquum/Limen'])
+    expect(behaviors.getAuthors('review-new-issues')).toEqual(['zero-bang'])
+    expect(behaviors.getReviewers('review-new-issues')).toBe(2)
+
+    const stale = behaviors.refreshState()
+    await behaviors.setTriggers('review-new-issues', { repos: ['Vaquum/Origo'], authors: ['mikkokotila'] })
+    expect(posted).toEqual([{ repos: ['Vaquum/Origo'], authors: ['mikkokotila'] }])
+    respond(payload({ 'review-new-issues': { repos: ['Vaquum/Limen'], authors: ['zero-bang'] } }))
+    await stale
+    expect(behaviors.getRepos('review-new-issues')).toEqual(['Vaquum/Origo'])
+    expect(behaviors.getAuthors('review-new-issues')).toEqual(['mikkokotila'])
+  })
+
+  it('restores the previous choice and passes the server\'s reason on when a save is refused', async () => {
+    vi.stubGlobal('fetch', (_url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        return Promise.resolve({ ok: false, status: 400, json: async () => ({ error: 'not a repository of the organization: Vaquum/Nope' }) })
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => payload({ 'review-new-issues': { repos: ['Vaquum/Origo'], authors: ['mikkokotila'] } }) })
+    })
+    await behaviors.refreshState()
+    await expect(behaviors.setTriggers('review-new-issues', { repos: ['Vaquum/Nope'] }))
+      .rejects.toThrow('not a repository of the organization: Vaquum/Nope')
+    expect(behaviors.getRepos('review-new-issues')).toEqual(['Vaquum/Origo'])
+  })
+})
