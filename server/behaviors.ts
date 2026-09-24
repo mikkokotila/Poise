@@ -48,6 +48,7 @@ import {
   recordBehaviorDeadLetter,
   retireBehaviorDeadLetter,
   retireBehaviorDeadLettersForClosedPrs,
+  retireBehaviorDeadLettersForTarget,
   recordSeen,
   releaseSeen,
   releaseSeenOwned,
@@ -1967,6 +1968,7 @@ async function tickResolveUnblocking(): Promise<void> {
 // Each issue is reviewed once. A repository's backlog is never reviewed: an
 // issue counts only when it was opened after its repository was selected, and
 // an extra reviewer only for issues opened after the panel grew to include it.
+// A sub-issue that its parent's review comments on gets no review of its own.
 
 const ISSUES_KEY = 'review-new-issues' as const
 export const ISSUE_REVIEW_SOURCE = 'poise:review-new-issues'
@@ -2110,6 +2112,205 @@ async function listOpenIssues(repo: string, since: string): Promise<DatastoreIss
   })
 }
 
+// The issues this one makes its sub-issues, read the way Caller's review reads
+// them: GitHub sub-issues and the links under its own Work Slices heading.
+async function listSubIssues(repo: string, number: number): Promise<string[]> {
+  const { stdout } = await runFile(
+    GH_INTERFACE,
+    ['--sub-issues', `#${number}`, '--repository', repo],
+    { timeoutMs: 30_000, maxOutputBytes: 4 * 1024 * 1024, signal: behaviorSignal() },
+  )
+  const data = objectValue(parseJson(stdout, 'github-interface --sub-issues'), 'github-interface --sub-issues')
+  if (data.action !== 'sub_issues'
+    || String(data.repository || '').toLowerCase() !== repo.toLowerCase()
+    || data.issue_number !== number
+    || !Array.isArray(data.sub_issues)) {
+    throw new Error(`github-interface --sub-issues returned a malformed result for ${repo}#${number}`)
+  }
+  // A link no issue can answer to, such as a `#0` placeholder, is no sub-issue:
+  // the review cannot comment on it either.
+  return data.sub_issues.flatMap((row) => {
+    const value = row && typeof row === 'object' ? row as Record<string, unknown> : {}
+    const repository = String(value.repository || '')
+    const issue = value.issue_number
+    return isValidRepository(repository) && Number.isSafeInteger(issue) && Number(issue) >= 1 && Number(issue) <= MAX_ISSUE_NUMBER
+      ? [`${repository}#${issue}`]
+      : []
+  })
+}
+
+// Sub-issues are read a few at a time, inside the minute's budget. What
+// failed last is kept so one broken issue is not reported every minute.
+const SUB_ISSUE_READS_AT_ONCE = 4
+const subIssueReadErrors = new Map<string, string>()
+
+// The sub-issues of each issue that could be read. An issue whose read fails
+// covers nothing and waits. Only several reads all failing, which is GitHub or
+// the token rather than one issue, stops the minute.
+async function readSubIssues(entries: readonly EligibleIssue[]): Promise<Map<string, string[]>> {
+  const subIssues = new Map<string, string[]>()
+  const failures: unknown[] = []
+  let next = 0
+  const reader = async () => {
+    while (next < entries.length) {
+      const { issue } = entries[next++]
+      const ref = issueRef(`${issue.repo}#${issue.number}`)
+      try {
+        subIssues.set(ref, await listSubIssues(issue.repo, issue.number))
+        subIssueReadErrors.delete(ref)
+      } catch (error) {
+        if (behaviorAborted()) throw error
+        failures.push(error)
+        const message = error instanceof Error ? error.message : String(error)
+        if (subIssueReadErrors.get(ref) !== message) {
+          console.error(`[behaviors] review-new-issues cannot read the sub-issues of ${issue.repo}#${issue.number}: ${message}`)
+        }
+        subIssueReadErrors.set(ref, message)
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(SUB_ISSUE_READS_AT_ONCE, entries.length) }, reader))
+  if (failures.length > 1 && subIssues.size === 0) throw failures[0]
+  return subIssues
+}
+
+// The largest issue number a launch record keeps.
+const MAX_ISSUE_NUMBER = 9_999_999_999
+
+// GitHub treats repository names case-insensitively.
+function issueRef(issue: string): string {
+  return issue.toLowerCase()
+}
+
+// Which of the issues whose review is still to come get a review of their
+// own. `refs` lists them, oldest first. An issue that one of them makes
+// its sub-issue is covered by that one's review. A sub-issue of a covered
+// issue is not, since a review reaches only its own issue's sub-issues. In a
+// loop of sub-issues the oldest issue is reviewed on its own.
+export function reviewRoots(
+  refs: readonly string[],
+  subIssues: ReadonlyMap<string, readonly string[]>,
+): Set<string> {
+  const order = [...new Set(refs)]
+  const members = new Set(order)
+  const parents = new Map<string, string[]>()
+  for (const parent of order) {
+    for (const child of subIssues.get(parent) ?? []) {
+      const ref = issueRef(child)
+      if (ref === parent || !members.has(ref)) continue
+      parents.set(ref, [...(parents.get(ref) ?? []), parent])
+    }
+  }
+  const roots = new Set<string>()
+  const covered = new Set<string>()
+  while (roots.size + covered.size < order.length) {
+    let decided = false
+    for (const ref of order) {
+      if (roots.has(ref) || covered.has(ref)) continue
+      const of = parents.get(ref) ?? []
+      if (of.some((parent) => roots.has(parent))) {
+        covered.add(ref)
+        decided = true
+      } else if (of.every((parent) => covered.has(parent))) {
+        roots.add(ref)
+        decided = true
+      }
+    }
+    if (!decided) roots.add(order.find((ref) => !roots.has(ref) && !covered.has(ref))!)
+  }
+  return roots
+}
+
+interface IssueCandidate {
+  issue: DatastoreIssue
+  slot: ReviewerSlot
+  target: string
+  order: number
+}
+
+interface EligibleIssue {
+  issue: DatastoreIssue
+  // Its reviewer targets, one per slot the panel gives it.
+  targets: string[]
+}
+
+interface IssueReviewPlan {
+  // The issues to launch now, each with the sub-issues its review covers.
+  launch: Map<string, string[]>
+  // Issues another review has already commented on, and which review.
+  reviewed: Array<{ ref: string, by: string }>
+}
+
+// A sub-issue is reviewed once. A review comments on its issue and on that
+// issue's sub-issues, so an issue that another review covers gets no review of
+// its own. It waits while that review is still to come or running, and is
+// settled once the review has commented on it. An issue that became a
+// sub-issue only after its parent's review began, or that the review left
+// without a comment, is reviewed on its own.
+async function planIssueReviews(
+  candidates: readonly IssueCandidate[],
+  eligible: readonly EligibleIssue[],
+  logs: () => Promise<LogEntry[]>,
+): Promise<IssueReviewPlan> {
+  const plan: IssueReviewPlan = { launch: new Map(), reviewed: [] }
+  const due = [...new Set(candidates.map(({ issue }) => issueRef(`${issue.repo}#${issue.number}`)))]
+  if (due.length === 0) return plan
+
+  // What reviews have commented on besides their own issue.
+  const commentedBy = new Map<string, string>()
+  for (const call of await logs()) {
+    if (call.behavior !== ISSUE_REVIEW_BEHAVIOR || !call.receipts) continue
+    const reviewed = `${call.repo}#${call.pr_id}`
+    for (const receipt of call.receipts) {
+      if (issueRef(receipt.issue) !== issueRef(reviewed)) commentedBy.set(issueRef(receipt.issue), reviewed)
+    }
+  }
+  // What running reviews will comment on besides their own issue.
+  const runningFor = new Map<string, string>()
+  for (const claim of listBehaviorLaunchClaims(ISSUES_KEY)) {
+    const reviewed = `${claim.launchRepo}#${claim.launchPr}`
+    for (const covered of claim.launchCovers) {
+      if (issueRef(covered) !== issueRef(reviewed)) runningFor.set(issueRef(covered), reviewed)
+    }
+  }
+  for (const ref of due) {
+    const by = commentedBy.get(ref)
+    if (by) plan.reviewed.push({ ref, by })
+  }
+
+  // Every issue whose own review is still to come, settled or not, may cover
+  // a due one; the roots among them are reviewed.
+  const pending: EligibleIssue[] = []
+  const pendingRefs = new Set<string>()
+  for (const entry of eligible) {
+    const ref = issueRef(`${entry.issue.repo}#${entry.issue.number}`)
+    if (commentedBy.has(ref) || runningFor.has(ref)) continue
+    for (const target of entry.targets) {
+      if (await issueTargetLaunchable(target, logs)) {
+        pending.push(entry)
+        pendingRefs.add(ref)
+        break
+      }
+    }
+  }
+  // A due issue held after a failure launches nothing, and while every
+  // reviewer is busy nothing can launch: neither asks anything of GitHub.
+  const open = due.filter((ref) => pendingRefs.has(ref))
+  if (open.length === 0 || listBehaviorLaunchClaims(ISSUES_KEY).length >= MAX_ISSUE_REVIEW_RUNS) return plan
+  pending.sort((a, b) => Date.parse(a.issue.createdAt) - Date.parse(b.issue.createdAt)
+    || a.issue.repo.localeCompare(b.issue.repo)
+    || a.issue.number - b.issue.number)
+  const subIssues = await readSubIssues(pending)
+  const readable = pending
+    .map(({ issue }) => issueRef(`${issue.repo}#${issue.number}`))
+    .filter((ref) => subIssues.has(ref))
+  const roots = reviewRoots(readable, subIssues)
+  for (const ref of open) {
+    if (roots.has(ref)) plan.launch.set(ref, subIssues.get(ref) ?? [])
+  }
+  return plan
+}
+
 async function issueSlotModel(slot: ReviewerSlot): Promise<{ model: string, recovery: string, catalog: Catalog } | null> {
   const panel = await reviewPanel(getReviewers(ISSUES_KEY), 'issue_review')
   const reviewer = panel.reviewers.find((entry) => entry.slot === slot)
@@ -2121,6 +2322,7 @@ async function fireIssueReview(
   target: string,
   claimId: string,
   slot: ReviewerSlot,
+  covers: readonly string[],
 ): Promise<boolean> {
   if (!isEnabled(ISSUES_KEY)) return false
   const resolved = await waitForBehavior(issueSlotModel(slot))
@@ -2148,6 +2350,7 @@ async function fireIssueReview(
     actor,
     source: ISSUE_REVIEW_SOURCE,
     correlationId: claimId,
+    covers,
   })) return false
   await spawnDetached(AGENT_INTERFACE, [
     '--issue-review',
@@ -2176,19 +2379,36 @@ async function fireIssueReview(
 // failure is not one held for a person, and it has not already had its retry.
 // `logs` is shared by the whole scan: a held reviewer is looked at every
 // tick, and each read of the agent log is a subprocess.
-async function releaseFailedIssueReviewIfSafe(target: string, logs: () => Promise<LogEntry[]>): Promise<boolean> {
+async function releasableIssueReviewFailure(
+  target: string,
+  logs: () => Promise<LogEntry[]>,
+): Promise<BehaviorLaunchClaim | null> {
   const failed = getFailedBehaviorLaunch(ISSUES_KEY, target)
   if (!failed?.launchCallId
     || failed.launchBehavior !== 'issue_review'
     || failed.launchSource !== ISSUE_REVIEW_SOURCE
-    || countBehaviorDeadLetters(ISSUES_KEY, target) >= ISSUE_REVIEW_ATTEMPTS) return false
+    || countBehaviorDeadLetters(ISSUES_KEY, target) >= ISSUE_REVIEW_ATTEMPTS) return null
   const call = (await logs()).find((row) => row.id === failed.launchCallId)
   if (!call
     || !FAILED_AGENT_STATUSES.has(call.status.toLowerCase())
     || call.behavior !== ISSUE_REVIEW_BEHAVIOR
     || call.correlation_id !== failed.launchCorrelationId
     || (call.receipts !== null && call.receipts !== undefined)
-    || HELD_ISSUE_REVIEW_ERRORS.has(call.error_code || '')) return false
+    || HELD_ISSUE_REVIEW_ERRORS.has(call.error_code || '')) return null
+  return failed
+}
+
+// Whether a reviewer's launch is still to come: never claimed, claimed by a
+// process that died before launching, or failed in a way that runs once more.
+async function issueTargetLaunchable(target: string, logs: () => Promise<LogEntry[]>): Promise<boolean> {
+  if (!hasSeen(ISSUES_KEY, target)) return countBehaviorDeadLetters(ISSUES_KEY, target) < ISSUE_REVIEW_ATTEMPTS
+  if (hasExpiredPreLaunchClaim(ISSUES_KEY, target)) return true
+  return !!await releasableIssueReviewFailure(target, logs)
+}
+
+async function releaseFailedIssueReviewIfSafe(target: string, logs: () => Promise<LogEntry[]>): Promise<boolean> {
+  const failed = await releasableIssueReviewFailure(target, logs)
+  if (!failed?.launchCallId) return false
   const released = releaseFailedBehaviorLaunch(ISSUES_KEY, target, failed.launchCallId, failed.launchExpectedHead)
   if (released) console.log(`[behaviors] review-new-issues relaunching ${target} after a failure that posted nothing`)
   return released
@@ -2199,6 +2419,7 @@ async function launchIssueReview(
   slot: ReviewerSlot,
   target: string,
   logs: () => Promise<LogEntry[]>,
+  covers: readonly string[],
 ): Promise<void> {
   if (countBehaviorDeadLetters(ISSUES_KEY, target) >= ISSUE_REVIEW_ATTEMPTS && !hasSeen(ISSUES_KEY, target)) return
   let claimId = claimSeenOwned(ISSUES_KEY, target, ISSUE_PRE_LAUNCH_LEASE_MS)
@@ -2209,7 +2430,7 @@ async function launchIssueReview(
   }
   trackClaim(ISSUES_KEY, target, claimId)
   try {
-    if (!await fireIssueReview(issue, target, claimId, slot)) {
+    if (!await fireIssueReview(issue, target, claimId, slot, covers)) {
       releaseOwnedClaim(ISSUES_KEY, target, claimId)
       return
     }
@@ -2229,23 +2450,28 @@ async function tickReviewNewIssues(): Promise<void> {
   const slotSince = getIssueSlotSince()
   await requireFreshDatastore()
   const open = new Set<string>()
-  const candidates: Array<{ issue: DatastoreIssue, slot: ReviewerSlot, target: string, order: number }> = []
+  const eligible: EligibleIssue[] = []
+  const candidates: IssueCandidate[] = []
   const now = Date.now()
   for (const { repo, since } of repositories) {
     for (const issue of await listOpenIssues(repo, since)) {
       const key = `${issue.repo}#${issue.number}`
       open.add(key)
       const created = Date.parse(issue.createdAt)
-      if (!authors.has(issue.author.toLowerCase()) || created < Date.parse(since) || now - created < ISSUE_SETTLE_MS) continue
+      if (!authors.has(issue.author.toLowerCase()) || created < Date.parse(since)) continue
+      const targets: string[] = []
       slots.forEach((slot, index) => {
         const joined = slot === 'primary' ? undefined : slotSince[slot]
         if (joined && created < Date.parse(joined)) return
         const target = reviewSlotTarget(key, slot)
+        targets.push(target)
+        if (now - created < ISSUE_SETTLE_MS) return
         if (hasSeen(ISSUES_KEY, target)
           && !getFailedBehaviorLaunch(ISSUES_KEY, target)
           && !hasExpiredPreLaunchClaim(ISSUES_KEY, target)) return
         candidates.push({ issue, slot, target, order: created * REVIEWER_SLOTS.length + index })
       })
+      if (targets.length > 0) eligible.push({ issue, targets })
     }
   }
   // Every selected repository was read, so what is not open is closed or no
@@ -2254,12 +2480,29 @@ async function tickReviewNewIssues(): Promise<void> {
   candidates.sort((a, b) => a.order - b.order)
   let logs: Promise<LogEntry[]> | null = null
   const readLogs = () => (logs ??= fetchAgentLogs({ signal: behaviorSignal() }))
+  const plan = await planIssueReviews(candidates, eligible, readLogs)
+  for (const { ref, by } of plan.reviewed) {
+    let settled: string | null = null
+    for (const { issue, target } of candidates) {
+      if (issueRef(`${issue.repo}#${issue.number}`) !== ref) continue
+      // Its own review failing earlier is no longer an incident: it was reviewed.
+      if (retireBehaviorDeadLettersForTarget(ISSUES_KEY, target) > 0) settled = `${issue.repo}#${issue.number}`
+      // A claim whose process died before launching gives way to the marker.
+      if (hasExpiredPreLaunchClaim(ISSUES_KEY, target)) releaseSeen(ISSUES_KEY, target)
+      if (hasSeen(ISSUES_KEY, target)) continue
+      recordSeen(ISSUES_KEY, target)
+      settled = `${issue.repo}#${issue.number}`
+    }
+    if (settled) console.log(`[behaviors] review-new-issues: ${settled} was reviewed as a sub-issue of ${by}`)
+  }
   let failure: unknown
   for (const { issue, slot, target } of candidates) {
     if (!isEnabled(ISSUES_KEY) || behaviorAborted()) return
+    const covers = plan.launch.get(issueRef(`${issue.repo}#${issue.number}`))
+    if (!covers) continue
     if (listBehaviorLaunchClaims(ISSUES_KEY).length >= MAX_ISSUE_REVIEW_RUNS) break
     try {
-      await launchIssueReview(issue, slot, target, readLogs)
+      await launchIssueReview(issue, slot, target, readLogs, covers)
     } catch (error) {
       if (behaviorAborted()) return
       console.error(`[behaviors] review-new-issues step failed for ${target}:`, error)

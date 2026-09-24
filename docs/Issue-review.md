@@ -41,7 +41,8 @@ An open issue is reviewed once, when all of these hold:
   ticking a repository never reviews its backlog;
 - its author is one of the trusted authors;
 - it has been open for 10 minutes, so sub-issues and links added right after
-  opening it are part of the review.
+  opening it are part of the review;
+- no other issue's review covers it as a sub-issue (see below).
 
 An extra reviewer reviews only the issues opened after the panel grew to
 include it. Edits, new comments and the review agent's own comments never
@@ -63,6 +64,31 @@ or an HTML comment. The heading may read `Work Slices`, `Work Slices:` or
 `5. Work Slices`. A linked sub-issue must belong to the same owner as the
 issue, as GitHub's own sub-issues do; it can live in another of that owner's
 repositories, and reviewers comment on it there.
+
+A sub-issue is reviewed once. When a new issue is also a sub-issue of another
+new issue, the parent's review covers it, and it gets no review of its own:
+
+- it waits while its parent's review is still to come (the parent may still be
+  settling) or running;
+- once any review has commented on it, it is done;
+- it is reviewed on its own when it became a sub-issue only after its parent's
+  review began, or when that review ended without commenting on it, for
+  example because it was stopped.
+
+A review reaches only its own issue's sub-issues, so a sub-issue of a covered
+Slice still gets a review of its own. An issue whose sub-issues cannot be
+read, a deleted one say, waits and covers nothing until they can be, while
+the rest go ahead. When several reads fail and none succeeds, which points at
+GitHub or the token, nothing launches that minute and Behaviors shows why.
+
+The same holds the other way round. A review does not comment on a sub-issue
+that already has an issue review from another issue, or whose own review is
+still running, such as a Slice reviewed on its own before a PRD took it in.
+Its reviewers read that sub-issue and its review for context, and put anything
+they add in their comment on the issue itself.
+
+Two new issues that both make the same issue their sub-issue, reviewed at the
+same time, both comment on it.
 
 ## What a reviewer does
 

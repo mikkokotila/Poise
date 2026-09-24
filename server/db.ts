@@ -82,6 +82,7 @@ db.exec(`
     launch_source TEXT,
     launch_correlation_id TEXT,
     launch_action TEXT,
+    launch_covers TEXT,
     PRIMARY KEY (key, target)
   );
 
@@ -204,6 +205,7 @@ const migrateSchema = db.transaction(() => {
   ensureColumn('behavior_seen', 'launch_source', 'launch_source TEXT')
   ensureColumn('behavior_seen', 'launch_correlation_id', 'launch_correlation_id TEXT')
   ensureColumn('behavior_seen', 'launch_action', 'launch_action TEXT')
+  ensureColumn('behavior_seen', 'launch_covers', 'launch_covers TEXT')
   ensureColumn('behavior_dead_letters', 'retired_at', 'retired_at TEXT')
   const behaviorLaunchTrackingMigrated = db.prepare(
     'SELECT 1 FROM meta WHERE key = ?',
@@ -375,6 +377,24 @@ export interface BehaviorLaunchClaim {
   launchActor: string
   launchSource: string
   launchCorrelationId: string
+  // The sub-issues an issue review also comments on, as they stood at its
+  // launch; empty for every other launch.
+  launchCovers: string[]
+}
+
+const MAX_LAUNCH_COVERS = 1_000
+const ISSUE_REFERENCE_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}#[1-9][0-9]{0,9}$/
+
+function parseLaunchCovers(value: string | null): string[] {
+  if (!value) return []
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return Array.isArray(parsed)
+      ? parsed.filter((issue): issue is string => typeof issue === 'string' && ISSUE_REFERENCE_PATTERN.test(issue))
+      : []
+  } catch {
+    return []
+  }
 }
 
 export function claimSeenOwned(
@@ -416,7 +436,8 @@ export function claimSeenOwnedAs(
        launch_actor = NULL,
        launch_source = NULL,
        launch_correlation_id = NULL,
-       launch_action = NULL
+       launch_action = NULL,
+       launch_covers = NULL
      WHERE behavior_seen.claim_id <> ''
        AND behavior_seen.lease_until IS NOT NULL
        AND behavior_seen.lease_until <= ?
@@ -459,6 +480,8 @@ export function markBehaviorLaunchIntentOwned(input: {
   actor: string
   source: string
   correlationId: string
+  // Issue reviews only: the sub-issues this launch also comments on.
+  covers?: readonly string[]
   leaseMs?: number
 }): boolean {
   const leaseMs = input.leaseMs ?? DEFAULT_CLAIM_LEASE_MS
@@ -481,13 +504,20 @@ export function markBehaviorLaunchIntentOwned(input: {
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.correlationId)) {
     throw new Error('invalid behavior correlation id')
   }
+  if ((input.covers?.length ?? 0) > 0 && input.launchBehavior !== 'issue_review') {
+    throw new Error('only an issue review covers sub-issues')
+  }
+  // What a launch covers only holds other launches back, so a malformed entry
+  // is dropped rather than failing the launch.
+  const covers = [...new Set((input.covers ?? []).filter((issue) => ISSUE_REFERENCE_PATTERN.test(issue)))]
+    .slice(0, MAX_LAUNCH_COVERS)
   const info = db.prepare(`
     UPDATE behavior_seen
     SET launch_behavior = ?, launch_repo = ?, launch_pr = ?,
         launch_requested_at = ?, launch_call_id = NULL, launch_error = NULL,
         launch_outcome = NULL, launch_completed_at = NULL, launch_head_sha = NULL,
         launch_expected_head = ?, launch_actor = ?, launch_source = ?,
-        launch_correlation_id = ?, launch_action = NULL,
+        launch_correlation_id = ?, launch_action = NULL, launch_covers = ?,
         lease_until = ?
     WHERE key = ? AND target = ? AND claim_id = ? AND claim_id <> ''
   `).run(
@@ -499,6 +529,7 @@ export function markBehaviorLaunchIntentOwned(input: {
     input.actor,
     input.source,
     input.correlationId,
+    covers.length > 0 ? JSON.stringify(covers) : null,
     Date.now() + leaseMs,
     input.key,
     input.target,
@@ -511,7 +542,8 @@ export function listBehaviorLaunchClaims(key: string): BehaviorLaunchClaim[] {
   const rows = db.prepare(`
     SELECT key, target, seen_at, claim_id, lease_until, launch_behavior,
            launch_repo, launch_pr, launch_requested_at, launch_call_id, launch_error,
-           launch_expected_head, launch_actor, launch_source, launch_correlation_id
+           launch_expected_head, launch_actor, launch_source, launch_correlation_id,
+           launch_covers
     FROM behavior_seen
     WHERE key = ? AND claim_id <> '' AND launch_requested_at IS NOT NULL
     ORDER BY launch_requested_at, target
@@ -531,6 +563,7 @@ export function listBehaviorLaunchClaims(key: string): BehaviorLaunchClaim[] {
     launch_actor: string
     launch_source: string
     launch_correlation_id: string
+    launch_covers: string | null
   }>
   return rows.map((row) => ({
     key: row.key,
@@ -548,6 +581,7 @@ export function listBehaviorLaunchClaims(key: string): BehaviorLaunchClaim[] {
     launchActor: row.launch_actor,
     launchSource: row.launch_source,
     launchCorrelationId: row.launch_correlation_id,
+    launchCovers: parseLaunchCovers(row.launch_covers),
   }))
 }
 
@@ -558,7 +592,8 @@ export function getFailedBehaviorLaunch(
   const row = db.prepare(`
     SELECT key, target, seen_at, claim_id, lease_until, launch_behavior,
            launch_repo, launch_pr, launch_requested_at, launch_call_id, launch_error,
-           launch_expected_head, launch_actor, launch_source, launch_correlation_id
+           launch_expected_head, launch_actor, launch_source, launch_correlation_id,
+           launch_covers
     FROM behavior_seen
     WHERE key = ? AND target = ? AND claim_id = ''
       AND launch_requested_at IS NOT NULL
@@ -581,6 +616,7 @@ export function getFailedBehaviorLaunch(
     launch_actor: string
     launch_source: string
     launch_correlation_id: string
+    launch_covers: string | null
   } | undefined
   return row ? {
     key: row.key,
@@ -598,6 +634,7 @@ export function getFailedBehaviorLaunch(
     launchActor: row.launch_actor,
     launchSource: row.launch_source,
     launchCorrelationId: row.launch_correlation_id,
+    launchCovers: parseLaunchCovers(row.launch_covers),
   } : null
 }
 
@@ -848,6 +885,14 @@ export function recordBehaviorDeadLetter(
     createdAt,
   )
   return id
+}
+
+export function retireBehaviorDeadLettersForTarget(behavior: string, target: string): number {
+  return db.prepare(`
+    UPDATE behavior_dead_letters
+    SET retired_at = ?
+    WHERE behavior = ? AND target = ? AND retired_at IS NULL
+  `).run(new Date().toISOString(), behavior, target).changes
 }
 
 export function retireBehaviorDeadLetter(id: string): boolean {
