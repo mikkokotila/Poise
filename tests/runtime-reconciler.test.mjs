@@ -230,3 +230,18 @@ describe('production update record', () => {
     expect(test.recorded().poise.installed).toBe(A)
   })
 })
+
+
+it('uses one timestamp for a new failure even when the clock advances between reads', async () => {
+  const RealDate = Date
+  let reads = 0
+  vi.stubGlobal('Date', class extends RealDate {
+    constructor(value) { super(value ?? 1_700_000_000_000 + reads++) }
+  })
+  try {
+    const test = harness({ dirty: ' M package.json', previous: previousRecord() })
+    await expect(reconcileRuntime(test.options)).rejects.toThrow(/clean managed worktree/)
+    expect(test.recorded().failingSince).toBe(test.recorded().at)
+    expect(test.recorded().status).toBe('failed')
+  } finally { vi.unstubAllGlobals() }
+})

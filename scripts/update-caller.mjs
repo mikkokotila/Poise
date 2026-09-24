@@ -150,9 +150,11 @@ export async function reconcileRuntime(options = {}) {
     return result
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error)
+    // One failure event has one timestamp, even across a millisecond boundary.
+    state.at = new Date().toISOString()
     state.failingSince = previous?.status === 'failed' && typeof previous.failingSince === 'string'
       ? previous.failingSince
-      : new Date().toISOString()
+      : state.at
     throw error
   } finally {
     const { deployed, remote } = state.poise
@@ -168,7 +170,7 @@ export async function reconcileRuntime(options = {}) {
     } else if (deployed && remote) {
       state.poise.behind = 0
     }
-    state.at = new Date().toISOString()
+    state.at ??= new Date().toISOString()
     await writeState(statePath, state)
   }
 }
