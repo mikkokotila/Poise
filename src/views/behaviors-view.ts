@@ -366,16 +366,43 @@ function renderTriggerRepos() {
   const all = [...new Set([...(orgRepos ?? []), ...triggersDraft])]
     .sort((a, b) => shortRepo(a).localeCompare(shortRepo(b)))
   const shown = all.filter((repo) => !filter || repo.toLowerCase().includes(filter))
-  const error = orgReposError
-    ? `<div class="st-help st-help-error">Could not list the repositories: ${escapeHtml(orgReposError)} <button type="button" class="bt-retry">Retry</button></div>`
-    : ''
-  list.innerHTML = error + (shown.length
-    ? shown.map((repo) => `
-        <label class="bt-repo" title="${escapeHtml(repo)}">
-          <input type="checkbox" value="${escapeHtml(repo)}"${triggersDraft.has(repo) ? ' checked' : ''} />
-          <span>${escapeHtml(shortRepo(repo))}</span>
-        </label>`).join('')
-    : `<div class="st-help st-help-info">${filter ? 'No repository matches.' : 'No repositories.'}</div>`)
+  const notes: HTMLElement[] = []
+  if (orgReposError) {
+    notes.push(triggerReposNote('error', `Could not list the repositories: ${escapeHtml(orgReposError)} <button type="button" class="bt-retry">Retry</button>`))
+  }
+  if (!shown.length) notes.push(triggerReposNote('info', filter ? 'No repository matches.' : 'No repositories.'))
+  // A row that stays is kept where it is, not rebuilt: the list can grow while
+  // the dropdown is open, and replacing the row under the pointer or the
+  // keyboard focus would swallow the click or drop the focus.
+  const rows = new Map([...list.querySelectorAll<HTMLInputElement>('.bt-repo input')]
+    .map((box) => [box.value, box.closest<HTMLElement>('.bt-repo')!]))
+  const wanted = [...notes, ...shown.map((repo) => {
+    const row = rows.get(repo) ?? triggerRepoRow(repo)
+    row.querySelector<HTMLInputElement>('input')!.checked = triggersDraft.has(repo)
+    return row
+  })]
+  const keep = new Set<Node>(wanted)
+  for (const node of [...list.childNodes]) if (!keep.has(node)) node.remove()
+  let cursor = list.firstChild
+  for (const node of wanted) {
+    if (node === cursor) cursor = cursor.nextSibling
+    else list.insertBefore(node, cursor)
+  }
+}
+
+function triggerRepoRow(repo: string): HTMLElement {
+  const row = document.createElement('label')
+  row.className = 'bt-repo'
+  row.title = repo
+  row.innerHTML = `<input type="checkbox" value="${escapeHtml(repo)}" /><span>${escapeHtml(shortRepo(repo))}</span>`
+  return row
+}
+
+function triggerReposNote(kind: 'info' | 'error', html: string): HTMLElement {
+  const note = document.createElement('div')
+  note.className = `st-help st-help-${kind}`
+  note.innerHTML = html
+  return note
 }
 
 function buildTriggersPanel(): HTMLElement {
@@ -454,7 +481,9 @@ function openTriggersPanel(key: BehaviorKey) {
   triggersPanelEl.querySelector<HTMLInputElement>('.bt-filter')!.value = ''
   triggersPanelEl.querySelector<HTMLInputElement>('.bt-authors')!.value = triggersLoaded.authors.join(', ')
   setTriggersStatus('')
-  if (!orgRepos) void loadOrgRepos().then(() => { if (triggersKey === key) renderTriggerRepos() })
+  // The organization gains repositories while a tab stays open, so every
+  // opening asks again; the list already held shows until the answer lands.
+  void loadOrgRepos().then(() => { if (triggersKey === key) renderTriggerRepos() })
   renderTriggerRepos()
   triggersPanelEl.classList.add('open')
   triggersPanelEl.removeAttribute('inert')

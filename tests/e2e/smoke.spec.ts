@@ -395,6 +395,58 @@ test('opts repositories and trusted authors into Review New Issues from Behavior
   await expect(pill).toBeDisabled()
 })
 
+test('lists a repository created while the tab was open in the Review New Issues dropdown', async ({ page }) => {
+  const behavior = (extra: Record<string, unknown>) => ({
+    owner: 'bit-mis', enabled: false, setting: null, reviewers: null, scratchpad: '', lastTriggered: null, ...extra,
+  })
+  await page.route('**/api/behaviors', async (route) => {
+    await route.fulfill({ json: {
+      'review-new-prs': behavior({ setting: 'p2', reviewers: 1 }),
+      'approve-prs': behavior({}),
+      'resolve-unblocking': behavior({ scratchpad: null }),
+      'review-new-issues': behavior({ repos: ['Vaquum/Origo'], authors: ['mikkokotila'], reviewers: 1 }),
+      diagnostics: { status: 'ok', agentLogsError: null, datastore: { status: 'healthy', checkedAt: new Date().toISOString(), ageSeconds: 1, lastSuccessAt: null, error: null }, identity: { status: 'valid', actor: 'bit-mis', error: null }, failures: [], deadLetters: [] },
+    } })
+  })
+  let repos = ['Vaquum/Limen', 'Vaquum/Origo']
+  let answered: Promise<void> = Promise.resolve()
+  await page.route('**/api/repos', async (route) => {
+    const listed = [...repos]
+    await answered
+    await route.fulfill({ json: { repos: listed } })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Behaviors', exact: true }).click()
+  const pill = page.locator('tr[data-behavior="review-new-issues"] .behavior-triggers-btn')
+  const dialog = page.getByRole('dialog', { name: /Review New Issues/ })
+  await pill.click()
+  await expect(dialog.locator('.bt-repo')).toHaveCount(2)
+  await page.keyboard.press('Escape')
+  await expect(dialog).toBeHidden()
+
+  // The organization gains a repository. Opening again asks again, showing the
+  // list already held until the answer lands.
+  repos = ['Vaquum/Limen', 'Vaquum/Market-State-Cube-Explorer', 'Vaquum/Origo']
+  let answer!: () => void
+  answered = new Promise((resolve) => { answer = resolve })
+  const asked = page.waitForRequest('**/api/repos')
+  await pill.click()
+  await asked
+  await expect(dialog.locator('.bt-repo')).toHaveCount(2)
+  await expect(dialog).not.toContainText('Loading repositories')
+  // Opening focuses the filter; only then does the keyboard move to a row.
+  await expect(dialog.locator('.bt-filter')).toBeFocused()
+  const origo = dialog.getByRole('checkbox', { name: 'Origo' })
+  await expect(origo).toBeChecked()
+  await origo.focus()
+  answer()
+  await expect(dialog.locator('.bt-repo')).toHaveCount(3)
+  await expect(dialog.getByRole('checkbox', { name: 'Market-State-Cube-Explorer' })).not.toBeChecked()
+  // The new row lands above the one the keyboard is on, which keeps its focus.
+  await expect(origo).toBeFocused()
+  await expect(origo).toBeChecked()
+})
+
 test('stops a running run from Swarm after a second click, and settles the row', async ({ page }) => {
   const ago = (ms: number) => new Date(Date.now() - ms).toISOString()
   const id = 'c'.repeat(32)
