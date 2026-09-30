@@ -17,6 +17,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config as loadDotenv } from 'dotenv'
+import { installPoiseCommand } from './poise-command-install.mjs'
 import { installStopGate } from './stop-gate-runtime.mjs'
 import { servicePath } from './production-path.mjs'
 
@@ -423,6 +424,12 @@ async function main() {
   await run('npm', ['run', 'build'], {
     cwd: projectRoot,
     env: nodeEnvironment,
+  })
+  await installPoiseCommand({
+    home,
+    node,
+    port: process.env.POISE_PORT || '5555',
+    projectRoot,
   })
 
   const legacyData = join(home, 'dev', 'caller', 'agent_interface', 'data')
