@@ -148,9 +148,10 @@ describe('elapsed is live while a run is still going', () => {
 
 it('shows an invalid terminal result as an error without a live timer or success verdict', () => {
   const row = entry({ status: 'invalid', completed_at: null, outcome: 'clean', time_elapsed: '7m 36s', error: 'Invalid completed result: missing head proof' })
-  expect(helpers.statusCell(row)).toContain('state bad')
+  expect(helpers.statusCell(row)).toContain('agent-status-icon bad')
   expect(helpers.statusCell(row)).toContain('invalid')
-  expect(helpers.statusCell(row)).not.toContain('state-outcome')
+  expect(helpers.statusCell(row)).not.toContain('invalid · clean')
+  expect(helpers.statusCell(row)).not.toContain('agent-status-icon ok')
   expect(helpers.elapsedText(row)).toBe('7m 36s')
   expect(helpers.hasDetail(row)).toBe(true)
 })

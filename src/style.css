@@ -2617,25 +2617,28 @@ body:has(#behavior-memory-panel.open) #menu-toggle {
    link, expand row).
    ───────────────────────────────────────────────────────────────────────── */
 
-/* Six equally-wide data columns + the icon column. Each data column
-   takes the same fraction of (table width − action column) so the
-   layout reads as six even bays. Started + Elapsed right-align as
-   numeric columns. */
-.col-model,
-.col-behavior,
-.col-target,
-.col-status,
-.col-started,
-.col-elapsed {
-  /* Six evenly-sized data columns share whatever's left after the two
-     fixed-width columns on the right (Replay 56px + action chevron
-     32px). */
-  width: calc((100% - 56px - 32px) / 6);
+/* The table takes the window, not the 960px reading column: ten columns
+   of short values were squeezed into a strip with half the screen empty
+   beside it, and every target and status was cut off. The negative
+   margins pull <main> out to the same 24px inset the control bar and the
+   kanban use; below the column width they resolve to zero. */
+#view-swarm main {
+  margin-inline: calc(50% - 50vw + 24px);
 }
-.col-started  { text-align: right; }
-.col-elapsed  { text-align: right; }
-.col-replay   { width: 56px; text-align: center; }
-.col-stop     { width: 56px; text-align: center; }
+
+/* Identity columns scale with the table; Status takes what is left, since
+   its note (live activity, or why a run failed) is the only free text.
+   Started + Elapsed right-align as numeric columns. Scoped to the table
+   because Archive already owns bare .col-repo / .col-status widths. */
+#swarm-table .col-model    { width: 14%; }
+#swarm-table .col-behavior { width: 9%; }
+#swarm-table .col-org      { width: 9%; }
+#swarm-table .col-repo     { width: 16%; }
+#swarm-table .col-status   { width: auto; }
+#swarm-table .col-started  { width: 72px; text-align: right; }
+#swarm-table .col-elapsed  { width: 80px; text-align: right; }
+#swarm-table .col-replay   { width: 56px; text-align: center; }
+#swarm-table .col-stop     { width: 56px; text-align: center; }
 /* The text-align on the .col-* classes only hits the THs. The TDs need
    their own pin so the values right-align under their headers. Started
    and Elapsed get explicit classes; Replay is centered (overrides the
@@ -2646,6 +2649,14 @@ body:has(#behavior-memory-panel.open) #menu-toggle {
 #view-swarm tbody td.elapsed-cell { text-align: right; }
 #view-swarm tbody td.replay-cell  { text-align: center; }
 #view-swarm tbody td.stop-cell    { text-align: center; }
+/* A dash stands where a button would be, at the button's height, so a row
+   with nothing to replay, stop or open is as tall as every other row. */
+#view-swarm tbody td.replay-cell .agent-dash,
+#view-swarm tbody td.stop-cell .agent-dash {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+}
 
 /* Soft fade when the 30s ticker advances a Started value (3m → 4m).
    The class is re-added on each change; the keyframe restart trick
@@ -2681,14 +2692,50 @@ body:has(#behavior-memory-panel.open) #menu-toggle {
   text-decoration: none;
   font-variant-numeric: tabular-nums;
 }
-a.agent-target:hover {
-  text-decoration: underline;
-  text-underline-offset: 3px;
-  text-decoration-thickness: 1px;
-}
 .agent-dash {
   color: var(--text-tertiary);
 }
+
+/* Org is the quiet half of the target, Repo the loud one; the pull request
+   number trails the repo name and never truncates — the name gives way. */
+td a.agent-org,
+td a.agent-repo,
+td a.agent-pr,
+.agent-repo,
+.agent-pr {
+  font-size: 0.75rem;
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+}
+td a.agent-org {
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+td a.agent-repo,
+.agent-repo {
+  font-weight: 600;
+  color: var(--text);
+}
+td a.agent-pr,
+.agent-pr {
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+td a.agent-org:hover,
+td a.agent-pr:hover { color: var(--text-secondary); }
+.agent-repo-cell {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.agent-repo {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-pr { flex: 0 0 auto; }
 
 /* A run with no pull request is identified by its chat session, and that
    reference opens the conversation. It is a button because it navigates
@@ -2712,19 +2759,44 @@ button.agent-target:hover {
   text-decoration-thickness: 1px;
 }
 
-/* Status reuses Archive's .state pill — same shape across both views.
-   Add the agent-only flavors (ok / bad / flat) for completed / failed
-   / queued so the closed vocabulary lights up correctly. */
-.state.ok   { color: var(--a3); border-color: var(--a3); }
-.state.bad  { color: var(--a5); border-color: var(--a5); }
-.state.flat { color: var(--text-tertiary); }
-.state.warn { color: var(--a2); border-color: var(--a2); }
-
-/* The verdict sits next to the status, not instead of it: "completed" says
-   the agent finished, the outcome says what it decided. */
-.state-outcome {
-  margin-left: 4px;
+/* Status is an icon whose colour carries the verdict, then one line of
+   note: what a running agent is doing, or why a failed one failed. The
+   words behind the icon stay in the DOM for screen readers and tooltips. */
+.agent-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
+.agent-status-icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+}
+.agent-status-icon.live { color: var(--a1); }
+.agent-status-icon.ok   { color: var(--a3); }
+.agent-status-icon.warn { color: var(--a4); }
+.agent-status-icon.bad  { color: var(--a5); }
+.agent-status-icon.flat { color: var(--text-tertiary); }
+.agent-status-icon.live svg { animation: replay-spin 1.4s linear infinite; }
+.agent-status-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.agent-status-note {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+}
+.agent-status-note.agent-progress-summary { color: var(--text-secondary); }
 
 /* A thousand rows scroll a long way; the headers have to stay. */
 #swarm-table thead th {
@@ -2806,6 +2878,11 @@ tr:hover .stop-btn { opacity: 1; }
   background: var(--surface);
   border-bottom: var(--b-hair);
   white-space: normal;
+}
+/* The table is window-wide; a response is prose. Keep it at the reading
+   width the person set rather than one line across the whole screen. */
+#view-swarm tr.agent-expand-row > td > * {
+  max-width: var(--typo-width, 960px);
 }
 
 .agent-response-body {
@@ -5034,15 +5111,6 @@ body.editor-writer-mode .editor-focus-btn:hover { color: var(--text); }
    than as a confident "off". */
 .toggle-unknown { opacity: 0.45; cursor: not-allowed; }
 
-/* Provider observations stay subordinate to the authoritative run outcome. */
-.agent-progress-summary {
-  margin-top: 5px;
-  max-width: 300px;
-  white-space: normal;
-  line-height: 1.4;
-  font-size: 0.75rem;
-  color: var(--text-secondary);
-}
 .agent-progress-detail { margin-bottom: 16px; font-size: 0.8125rem; }
 .agent-progress-detail p { margin: 0 0 10px; color: var(--text-secondary); }
 .agent-progress-detail ol { margin: 0; padding: 0; list-style: none; line-height: 1.7; }

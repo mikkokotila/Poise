@@ -42,6 +42,7 @@ interface LogEntry {
   outcome: 'clean' | 'changes_requested' | 'approved' | 'superseded' | 'preflight_failed' | 'commented' | null
   response: string        // upstream availability marker; fetch body by full id
   error: string
+  error_code?: string | null   // 'stopped' when a person stopped the run
 }
 
 // When a run started, as an exact instant. `started_at_precise` carries a UTC
@@ -127,31 +128,69 @@ function escapeHtml(s: string): string {
 }
 
 
-// Reuse Archive's `.state` pill class — same closed vocabulary, same shape
-// across both views, plus the agent flavours (ok / bad / flat).
+// Status is one coloured icon. The status and outcome used to be two uppercase
+// pills ("FAILED PREFLIGHT", "COMPLETED CHANGES") that never fit the column and
+// were cut to "FAILED PREFLI…" on every row. The words are still on the row for
+// screen readers, the filter and the tooltip; the eye only needs the shape and
+// the colour.
 //
 // What a finished run actually decided. "completed" says the agent ran, not
-// what it concluded — an approval and a demand for changes rendered as the same
-// green pill, and the only way to tell them apart was to expand the row and
-// read the prose.
-const OUTCOME_LABEL: Record<string, { text: string, cls: string }> = {
-  clean: { text: 'clean', cls: 'ok' },
-  approved: { text: 'approved', cls: 'ok' },
-  changes_requested: { text: 'changes', cls: 'warn' },
-  superseded: { text: 'superseded', cls: 'flat' },
-  preflight_failed: { text: 'preflight', cls: 'bad' },
+// what it concluded — an approval and a demand for changes must not look alike.
+const statusSvg = (body: string) => '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor"'
+  + ` stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`
+const ICON_RUNNING = statusSvg('<path d="M7 1.75A5.25 5.25 0 1 1 1.75 7"/>')
+const ICON_DONE = statusSvg('<path d="M3 7.25l2.75 2.75L11 4.25"/>')
+const ICON_APPROVED = statusSvg('<circle cx="7" cy="7" r="5.75" stroke-width="1.3"/><path d="M4.6 7.1l1.7 1.7 3.2-3.5"/>')
+const ICON_CHANGES = statusSvg('<circle cx="7" cy="7" r="5.75" stroke-width="1.3"/><path d="M7 4.1v3.4M7 9.85h.01"/>')
+const ICON_POSTED = statusSvg('<path d="M2 3.5A1.5 1.5 0 0 1 3.5 2h7A1.5 1.5 0 0 1 12 3.5v5a1.5 1.5 0 0 1-1.5 1.5H6l-2.5 2V10A1.5 1.5 0 0 1 2 8.5z" stroke-width="1.3"/>')
+const ICON_SUPERSEDED = statusSvg('<path d="M2.5 7h7M7 4l3 3-3 3M11.75 3.25v7.5"/>')
+const ICON_BLOCKED = statusSvg('<circle cx="7" cy="7" r="5.75" stroke-width="1.3"/><path d="M2.95 2.95l8.1 8.1"/>')
+const ICON_FAILED = statusSvg('<path d="M3.5 3.5l7 7M10.5 3.5l-7 7"/>')
+const ICON_STOPPED = statusSvg('<rect x="3" y="3" width="8" height="8" rx="1.5" stroke-width="1.3"/>')
+const ICON_OTHER = statusSvg('<circle cx="7" cy="7" r="5" stroke-width="1.3" stroke-dasharray="2 2.25"/>')
+
+type Tone = 'live' | 'ok' | 'warn' | 'bad' | 'flat'
+
+const OUTCOME_LOOK: Record<string, { icon: string, tone: Tone, text: string }> = {
+  clean: { icon: ICON_DONE, tone: 'ok', text: 'clean' },
+  approved: { icon: ICON_APPROVED, tone: 'ok', text: 'approved' },
+  changes_requested: { icon: ICON_CHANGES, tone: 'warn', text: 'changes requested' },
+  superseded: { icon: ICON_SUPERSEDED, tone: 'flat', text: 'superseded' },
+  preflight_failed: { icon: ICON_BLOCKED, tone: 'bad', text: 'preflight failed' },
   // An issue review ends with its comments posted.
-  commented: { text: 'posted', cls: 'ok' },
+  commented: { icon: ICON_POSTED, tone: 'ok', text: 'comments posted' },
+}
+
+function statusLook(e: LogEntry): { icon: string, tone: Tone, label: string } {
+  const status = (e.status || '').toLowerCase()
+  if (status === 'invalid') return { icon: ICON_FAILED, tone: 'bad', label: status }
+  if (isRunning(e)) return { icon: ICON_RUNNING, tone: 'live', label: 'running' }
+  const verdict = e.outcome ? OUTCOME_LOOK[e.outcome] : null
+  if (verdict) return { icon: verdict.icon, tone: verdict.tone, label: `${status || 'finished'} · ${verdict.text}` }
+  if (e.error_code === 'stopped' || status === 'cancelled') return { icon: ICON_STOPPED, tone: 'flat', label: `${status} · stopped` }
+  if (status === 'completed') return { icon: ICON_DONE, tone: 'ok', label: status }
+  if (status === 'failed' || status === 'error') return { icon: ICON_FAILED, tone: 'bad', label: status }
+  if (status === 'superseded') return { icon: ICON_SUPERSEDED, tone: 'flat', label: status }
+  return { icon: ICON_OTHER, tone: 'flat', label: status || 'unknown' }
+}
+
+// The line beside the icon: what a running agent is doing now, or why a failed
+// one failed. A finished run has nothing to add — the icon says it.
+function statusNote(e: LogEntry): string {
+  if (isRunning(e)) {
+    const text = progressText(e)
+    return `<span class="agent-status-note agent-progress-summary" title="${escapeHtml(text)}">${escapeHtml(text)}</span>`
+  }
+  const failure = (e.error || '').trim().split('\n')[0]
+  if (!failure) return ''
+  return `<span class="agent-status-note" title="${escapeHtml(failure)}">${escapeHtml(failure)}</span>`
 }
 
 function statusCell(e: LogEntry): string {
-  const s = e.status
-  const k = (s || '').toLowerCase()
-  const cls = k === 'completed' ? 'ok' : (k === 'error' || k === 'failed' || k === 'invalid') ? 'bad' : 'flat'
-  const pill = `<span class="state ${cls}">${escapeHtml(s || '—')}</span>`
-  const verdict = k !== 'invalid' && e.outcome ? OUTCOME_LABEL[e.outcome] : null
-  if (!verdict) return pill
-  return `${pill} <span class="state ${verdict.cls} state-outcome" title="Outcome: ${escapeHtml(e.outcome!)}">${escapeHtml(verdict.text)}</span>`
+  const look = statusLook(e)
+  const title = look.label.charAt(0).toUpperCase() + look.label.slice(1)
+  return `<span class="agent-status"><span class="agent-status-icon ${look.tone}" title="${escapeHtml(title)}">`
+    + `${look.icon}<span class="agent-status-label">${escapeHtml(look.label)}</span></span>${statusNote(e)}</span>`
 }
 
 function isRunning(e: LogEntry): boolean {
@@ -171,11 +210,6 @@ function progressText(e: LogEntry): string {
     return `No provider update for ${relFromMs(Date.parse(p.last_provider_event_at!))}; last: ${label.toLowerCase()}`
   }
   return `${label} · ${relFromMs(Date.parse(p.phase_started_at))} in stage`
-}
-
-function progressCell(e: LogEntry): string {
-  const text = progressText(e)
-  return text ? `<div class="agent-progress-summary">${escapeHtml(text)}</div>` : ''
 }
 
 function progressDetail(e: LogEntry): string {
@@ -260,15 +294,19 @@ function patchContent(element: Element, markup: string): void {
 }
 
 function modelCell(s: string): string {
-  return `<span class="agent-model">${escapeHtml(s || '—')}</span>`
+  return `<span class="agent-model" title="${escapeHtml(s || '')}">${escapeHtml(s || '—')}</span>`
 }
 
 function behaviorCell(s: string | null): string {
   if (!s) return '<span class="agent-dash">—</span>'
-  return `<span class="agent-behavior">${escapeHtml(s)}</span>`
+  return `<span class="agent-behavior" title="${escapeHtml(s)}">${escapeHtml(s)}</span>`
 }
 
-// Repo + PR number as a short tag linking to GitHub when both are set.
+// The target is two columns, Org and Repo, each linking to its own GitHub page.
+// As one "owner/name#123" string it was cut to "autonomio/chan…" on every row —
+// the repository name and the pull request were exactly the part that went.
+// The pull request number rides along in the Repo column and links to the
+// pull request (or issue).
 //
 // A session id is the only thing identifying a run that is not tied to a pull
 // request, and Swarm has no Prompt column — so a chat, debate or find_alpha row
@@ -303,23 +341,45 @@ function targetText(e: LogEntry): string {
   return e.session_id ? sessionLabel(e.session_id) : ''
 }
 
-function targetCell(e: LogEntry): string {
+// `owner/name` split in two. A bare name has no owner — the agent log allows it.
+function repoParts(e: LogEntry): { owner: string, name: string } {
   const repo = e.repo || ''
+  const slash = repo.indexOf('/')
+  return slash < 0 ? { owner: '', name: repo } : { owner: repo.slice(0, slash), name: repo.slice(slash + 1) }
+}
+
+function githubUrl(...parts: string[]): string {
+  return `https://github.com/${parts.map(encodeURIComponent).join('/')}`
+}
+
+function githubLink(cls: string, href: string, text: string, title: string): string {
+  return `<a class="${cls}" href="${href}" target="_blank" rel="noopener" title="${escapeHtml(title)}">${escapeHtml(text)}</a>`
+}
+
+function orgCell(e: LogEntry): string {
+  const { owner } = repoParts(e)
+  if (!owner) return '<span class="agent-dash">—</span>'
+  return githubLink('agent-org', githubUrl(owner), owner, owner)
+}
+
+function repoCell(e: LogEntry): string {
+  const { owner, name } = repoParts(e)
   const pr = e.pr_id ? String(e.pr_id) : ''
-  const label = targetText(e)
-  if (repo || pr) {
-    // A GitHub pull-request URL needs owner/name. A bare repo name produced a
-    // link to github.com/<name>/pull/<n>, which is someone else's namespace or
-    // a 404 — render it as text rather than sending the person somewhere wrong.
-    if (repo.includes('/') && pr) {
-      const safeRepo = repo.split('/').map(encodeURIComponent).join('/')
-      // An issue review's target is an issue; GitHub serves it under /issues.
-      const kind = e.behavior === 'issue_review' ? 'issues' : 'pull'
-      const href = `https://github.com/${safeRepo}/${kind}/${encodeURIComponent(pr)}`
-      return `<a class="agent-target" href="${href}" target="_blank" rel="noopener">${escapeHtml(label)}</a>`
-    }
-    return `<span class="agent-target" title="${escapeHtml(repo && pr ? `${repo}#${pr}` : label)}">${escapeHtml(label)}</span>`
+  if (name || pr) {
+    // A link needs owner/name. A bare repo name produced a link into
+    // github.com/<name>/…, which is someone else's namespace or a 404 — render
+    // it as text rather than sending the person somewhere wrong.
+    const repoHtml = !name ? ''
+      : owner ? githubLink('agent-repo', githubUrl(owner, name), name, `${owner}/${name}`)
+        : `<span class="agent-repo" title="${escapeHtml(name)}">${escapeHtml(name)}</span>`
+    // An issue review's target is an issue; GitHub serves it under /issues.
+    const kind = e.behavior === 'issue_review' ? 'issues' : 'pull'
+    const prHtml = !pr ? ''
+      : owner ? githubLink('agent-pr', githubUrl(owner, name, kind, pr), `#${pr}`, `${owner}/${name}#${pr}`)
+        : `<span class="agent-pr">#${escapeHtml(pr)}</span>`
+    return `<span class="agent-repo-cell">${repoHtml}${prHtml}</span>`
   }
+  const label = targetText(e)
   // A session always resolves: listChatHistory reads the same agent log this
   // row came from, filtered by session_id, so the conversation contains at
   // least this run. Clicking opens it in the chat pane — or, for a Chat view
@@ -405,6 +465,9 @@ function visible(): LogEntry[] {
   return entries.filter(matchesSearch)
 }
 
+// Every column in the header row; the expanded detail row spans all of them.
+const COLUMN_COUNT = 10
+
 function renderShell() {
   viewEl.innerHTML = `
     <header class="view-header">
@@ -421,7 +484,8 @@ function renderShell() {
           <tr>
             <th class="col-model">Model</th>
             <th class="col-behavior">Behavior</th>
-            <th class="col-target">Target</th>
+            <th class="col-org">Org</th>
+            <th class="col-repo">Repo</th>
             <th class="col-status">Status</th>
             <th class="col-started">Started</th>
             <th class="col-elapsed">Elapsed</th>
@@ -478,8 +542,9 @@ function mainRowInnerHTML(e: LogEntry): string {
   return `
     <td>${modelCell(e.recovery_model ? `${e.model} → ${e.recovery_model}` : e.model)}</td>
     <td>${behaviorCell(e.behavior)}</td>
-    <td>${targetCell(e)}</td>
-    <td class="agent-status-cell">${statusCell(e)}${progressCell(e)}</td>
+    <td class="org-cell">${orgCell(e)}</td>
+    <td class="repo-cell">${repoCell(e)}</td>
+    <td class="agent-status-cell">${statusCell(e)}</td>
     <td class="started-cell"><span class="date">${escapeHtml(startedRel(e))}</span></td>
     <td class="elapsed-cell"><span class="date">${escapeHtml(elapsedText(e))}</span></td>
     <td class="replay-cell">${replayCell(e)}</td>
@@ -510,7 +575,7 @@ function setExpandContent(tr: HTMLTableRowElement, id: string) {
     : (state.body
         ? `<pre class="agent-response-body">${escapeHtml(state.body)}</pre>`
         : (errorBlock || activity ? '' : '<div class="agent-response-empty">No response body.</div>'))
-  patchContent(tr, `<td colspan="8">${activity}${errorBlock}${inner}</td>`)
+  patchContent(tr, `<td colspan="${COLUMN_COUNT}">${activity}${errorBlock}${inner}</td>`)
 }
 
 function refreshRunDetail(row: HTMLTableRowElement, entry: LogEntry): void {
@@ -966,7 +1031,13 @@ function refreshStartedCells(): void {
   for (const row of bodyEl.querySelectorAll<HTMLElement>('.agent-row')) {
     const e = byId.get(row.dataset.id || '')
     const summary = row.querySelector<HTMLElement>('.agent-progress-summary')
-    if (e && summary) summary.textContent = progressText(e)
+    if (e && summary) {
+      const text = progressText(e)
+      if (summary.textContent !== text) {
+        summary.textContent = text
+        summary.title = text
+      }
+    }
   }
   for (const row of bodyEl.querySelectorAll<HTMLTableRowElement>('.agent-expand-row')) {
     const e = byId.get(row.dataset.expandFor || '')
