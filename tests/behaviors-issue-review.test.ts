@@ -359,6 +359,13 @@ describe('Review New Issues', () => {
       expect(behaviors.getBehaviorsRuntimeHealth().deadLetters).toEqual([
         expect.objectContaining({ target: `${REPO}#452`, error: expect.stringContaining('invalid_agent_result: ') }),
       ])
+      agentLogs[0] = {
+        ...agentLogs[0], status: 'failed', action: null, outcome: null, receipts: null,
+        error: 'provider exited before reporting a comment',
+      }
+      await behaviors.runEnabledBehaviorsOnce()
+      expect(launches()).toHaveLength(2)
+      expect(database.getFailedBehaviorLaunch(KEY, `${REPO}#452`)?.launchError).toContain('invalid_agent_result: ')
     }
   })
 

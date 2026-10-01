@@ -1560,6 +1560,7 @@ async function releaseFailedBehaviorIfNoAction(
   const source = `poise:${behavior}`
   const failed = getFailedBehaviorLaunch(behavior, target)
   if (!failed?.launchCallId
+    || failed.launchError?.startsWith(INVALID_AGENT_RESULT_PREFIX)
     || failed.launchBehavior !== launchBehavior
     || failed.launchRepo !== repo
     || failed.launchPr !== number
@@ -2534,6 +2535,7 @@ async function releasableIssueReviewFailure(
 ): Promise<BehaviorLaunchClaim | null> {
   const failed = getFailedBehaviorLaunch(ISSUES_KEY, target)
   if (!failed?.launchCallId
+    || failed.launchError?.startsWith(INVALID_AGENT_RESULT_PREFIX)
     || failed.launchBehavior !== 'issue_review'
     || failed.launchSource !== ISSUE_REVIEW_SOURCE
     || countBehaviorDeadLetters(ISSUES_KEY, target) >= ISSUE_REVIEW_ATTEMPTS) return null

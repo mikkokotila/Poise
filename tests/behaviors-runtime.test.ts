@@ -1432,6 +1432,14 @@ describe('behavior launch claims', () => {
       expect(loaded.behaviors.getBehaviorsRuntimeHealth().deadLetters).toEqual([
         expect.objectContaining({ behavior, target: `${pr.repo}#${pr.number}`, error: expect.stringContaining('invalid_agent_result: ') }),
       ])
+      // A revised failure cannot replace the persisted ambiguity with retry proof.
+      agentLogs[0] = {
+        ...agentLogs[0], status: 'failed', action: null, outcome: null, head_sha: null,
+        error: 'provider exited before reporting an action',
+      }
+      await loaded.behaviors.runEnabledBehaviorsOnce()
+      expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+      expect(loaded.database.getFailedBehaviorLaunch(behavior, launched.target)?.launchError).toContain('invalid_agent_result: ')
       // Quarantine is durable even after Caller rotates the invalid result.
       agentLogs = []
       loaded = await restartModules()
