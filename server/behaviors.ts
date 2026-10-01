@@ -21,7 +21,7 @@ import { mkdir } from 'node:fs/promises'
 import { ISSUE_REVIEW_BEHAVIOR, fetchAgentLogs, type LogEntry } from './agent'
 import { claudeAuth } from './claude-auth'
 import { REVIEW_POLICY, needsClaude, reviewChoice, reviewPanel, type ReviewPlace } from './review-model'
-import { type Catalog, type ReviewerSlot, REVIEWER_SLOTS, loadCatalog } from './models'
+import { type Catalog, type ReviewerSlot, REVIEWER_SLOTS } from './models'
 import {
   db,
   claimPrOperationOwned,
@@ -278,7 +278,7 @@ function setPersistedEnabled(key: BehaviorKey, enabled: boolean) {
 export const BEHAVIOR_RETRY_BASE_MS = 60_000
 export const BEHAVIOR_RETRY_MAX_MS = 60 * 60_000
 
-type BehaviorFailureKind = 'operation' | 'worker'
+type BehaviorFailureKind = 'operation'
 
 interface PersistedBehaviorFailure {
   kind: BehaviorFailureKind
@@ -298,7 +298,9 @@ function readBehaviorFailure(key: BehaviorKey): PersistedBehaviorFailure | null 
   if (!raw) return null
   try {
     const value = JSON.parse(raw) as Partial<PersistedBehaviorFailure>
-    if ((value.kind !== 'operation' && value.kind !== 'worker')
+    // Worker failures belong to their durable target claims. Ignore the old
+    // account-wide worker breaker when upgrading without changing that proof.
+    if (value.kind !== 'operation'
       || !Number.isSafeInteger(value.consecutiveFailures)
       || Number(value.consecutiveFailures) < 1
       || !Number.isFinite(value.lastFailureAtMs)
@@ -340,13 +342,6 @@ function recordBehaviorFailure(key: BehaviorKey, kind: BehaviorFailureKind, caus
 
 function clearBehaviorFailure(key: BehaviorKey): void {
   setMeta(failureKey(key), '')
-}
-
-function behaviorRetryDue(key: BehaviorKey): boolean {
-  const failure = readBehaviorFailure(key)
-  return failure === null
-    || failure.kind === 'operation'
-    || Date.now() >= failure.nextRetryAtMs
 }
 
 // Per-behavior setting (the priority ceiling for review-new-prs:
@@ -511,6 +506,7 @@ const FAILED_AGENT_STATUSES = new Set([
   'timeout',
 ])
 const SUPERSEDED_AGENT_ERROR = 'pull-request head changed during behavior execution'
+const INVALID_AGENT_RESULT_PREFIX = 'invalid_agent_result: '
 
 function upstreamBehavior(behavior: ActiveClaim['behavior']): BehaviorAgentLaunch {
   return behavior === 'review-new-prs' ? 'pr_review' : behavior === 'review-new-issues' ? 'issue_review' : 'pr_approve'
@@ -534,6 +530,22 @@ function hasActiveAgentLaunchForPr(repo: string, pr: number): boolean {
   return (['review-new-prs', 'approve-prs'] as const).some((behavior) =>
     listBehaviorLaunchClaims(behavior).some((claim) =>
       claim.launchRepo === repo && claim.launchPr === pr))
+}
+
+// Approval dedupe keys change with the head. An ambiguous terminal result
+// must stay held across those keys even after its Caller log has rotated away.
+function hasInvalidApprovalResult(repo: string, pr: number): boolean {
+  return !!db.prepare(`
+    SELECT 1 FROM behavior_seen
+    WHERE key = 'approve-prs' AND launch_repo = ? AND launch_pr = ?
+      AND launch_outcome IS NULL
+      AND substr(launch_error, 1, ?) = ?
+    LIMIT 1
+  `).get(repo, pr, INVALID_AGENT_RESULT_PREFIX.length, INVALID_AGENT_RESULT_PREFIX)
+}
+
+function invalidAgentResultMessage(error: string): string {
+  return INVALID_AGENT_RESULT_PREFIX + (error || 'agent call has an invalid terminal result').slice(-3_500)
 }
 
 function markLaunchIntent(
@@ -604,15 +616,14 @@ async function reconcileBehaviorLaunchClaims(
     for (const claim of claims) retainClaimSafely(claim, message)
     throw error
   }
-  // Which sign-in a failed call counts against is decided by its model's
-  // provider; a log row can name a model the catalog has since retired.
-  const catalogForCalls: Catalog | null = await loadCatalog().catch(() => null)
 
   let recoveredDeadLetter = false
   const expectedActions = behavior === 'review-new-prs'
     ? new Map([['reviewed_clean', 'clean'], ['requested_changes', 'changes_requested']])
     : new Map([['approved', 'approved'], ['requested_changes', 'changes_requested']])
   for (const letter of deadLetters) {
+    // A later log cannot silently retire a durable ambiguous-result hold.
+    if (letter.error.startsWith(INVALID_AGENT_RESULT_PREFIX)) continue
     const call = logs.find((row) => row.id.toLowerCase() === letter.callId)
     const completedAt = String(call?.completed_at || '')
     const action = String(call?.action || '')
@@ -688,9 +699,7 @@ async function reconcileBehaviorLaunchClaims(
         } else {
           const message = 'agent call did not register before the launch deadline'
           recordBehaviorDeadLetter(claim, message)
-          if (releaseOwnedClaim(behavior, claim.target, claim.claimId)) {
-            recordBehaviorFailure(behavior, 'worker')
-          }
+          releaseOwnedClaim(behavior, claim.target, claim.claimId)
         }
         continue
       }
@@ -719,6 +728,10 @@ async function reconcileBehaviorLaunchClaims(
     }
 
     const status = call.status.toLowerCase()
+    if (status === 'invalid' || call.error_code === 'invalid_agent_result') {
+      deadLetterClaim(claim, invalidAgentResultMessage(call.error))
+      continue
+    }
     const superseded = status === 'superseded'
       || String(call.outcome || '') === 'superseded'
       || call.error === SUPERSEDED_AGENT_ERROR
@@ -751,19 +764,14 @@ async function reconcileBehaviorLaunchClaims(
         })()
       } else {
         recordBehaviorDeadLetter(claim, message, call.id)
-        if (releaseOwnedClaim(behavior, claim.target, claim.claimId)) {
-          recordBehaviorFailure(behavior, 'worker')
-        }
+        releaseOwnedClaim(behavior, claim.target, claim.claimId)
       }
       continue
     }
     const terminal = status === 'completed' || FAILED_AGENT_STATUSES.has(status)
     if (!terminal && Date.now() - requestedAtMs >= BEHAVIOR_CLAIM_RENEWAL_MS) {
       const message = `behavior launch exceeded ${BEHAVIOR_CLAIM_RENEWAL_MS}ms running limit`
-      if (deadLetterClaim(claim, message)) {
-        recordBehaviorFailure(behavior, 'worker')
-        if (needsClaude(catalogForCalls, call.model)) claudeAuth.observeProcessFailure({ code: 1, signal: null, error: new Error(message) })
-      }
+      deadLetterClaim(claim, message)
       continue
     }
     if (status === 'completed') {
@@ -778,7 +786,7 @@ async function reconcileBehaviorLaunchClaims(
         || !Number.isFinite(Date.parse(completedAt))
         || headSha !== claim.launchExpectedHead) {
         const error = 'completed agent call is missing authoritative action/outcome/head metadata'
-        if (deadLetterClaim(claim, error)) recordBehaviorFailure(behavior, 'worker')
+        deadLetterClaim(claim, invalidAgentResultMessage(error))
         console.error(`[behaviors] ${error} for ${claim.launchRepo}#${claim.launchPr}`)
         continue
       }
@@ -802,16 +810,12 @@ async function reconcileBehaviorLaunchClaims(
         )
         if (current) {
           const error = 'terminal agent outcome could not complete its owned launch claim'
-          if (deadLetterClaim(current, error)) recordBehaviorFailure(behavior, 'worker')
+          deadLetterClaim(current, error)
         }
       }
     } else if (FAILED_AGENT_STATUSES.has(status)) {
       const message = call.error || `agent call terminated with status ${status}`
-      if (deadLetterClaim(claim, message)) {
-        recordBehaviorFailure(behavior, 'worker')
-        // A run the user stopped from Swarm says nothing about the provider.
-        if (call.error_code !== 'stopped' && needsClaude(catalogForCalls, call.model)) claudeAuth.observeProcessFailure(message)
-      }
+      deadLetterClaim(claim, message)
     } else if (RUNNING_AGENT_STATUSES.has(status)) {
       setBehaviorLaunchErrorOwned(claim.key, claim.target, claim.claimId, null)
       renewSeenOwned(
@@ -823,10 +827,7 @@ async function reconcileBehaviorLaunchClaims(
       renewPrOperationOwned(claim.claimId, BEHAVIOR_CLAIM_RENEWAL_MS)
     } else {
       const message = `unrecognized agent call status "${status || 'missing'}"`
-      if (deadLetterClaim(claim, message)) {
-        recordBehaviorFailure(behavior, 'worker')
-        if (needsClaude(catalogForCalls, call.model)) claudeAuth.observeProcessFailure(message)
-      }
+      deadLetterClaim(claim, message)
     }
   }
 }
@@ -1542,9 +1543,8 @@ async function packetBlocked(
   return false
 }
 
-// Held like the bounded failures: a run the user stopped from Swarm must not
-// be relaunched on the same head by the next tick; a new head or a replay is
-// a fresh decision.
+// Explicitly stopped or bounded work stays held even if Caller also reports
+// no preflight side effect; that proof alone is not permission to repeat it.
 function boundedReviewFailure(call: LogEntry): boolean {
   return call.review_policy === REVIEW_POLICY
     && ['model_output_limit', 'review_budget_exhausted', 'review_recovery_failed', 'stopped'].includes(call.error_code || '')
@@ -1580,13 +1580,14 @@ async function releaseFailedBehaviorIfNoAction(
     || call.head_sha !== null) {
     return false
   }
-  // A bounded attempt already used its recovery. Hold this input across
-  // restarts; a different head or an explicit model change can be reconsidered.
+  // A failed worker is held on its original input, independently of other
+  // targets. A new head or an explicit model change may be reconsidered, but
+  // still requires the no-side-effect proof below before releasing its claim.
   const configuredModel = launchBehavior === 'pr_approve'
     ? (await reviewChoice('pr_approve')).model
     : (await slotModel(reviewSlotOfTarget(target)))?.model
-  if (boundedReviewFailure(call) && call.model === configuredModel
-    && await currentHeadSha(repo, number, failed.launchActor) === failed.launchExpectedHead) return false
+  const modelChanged = !!call.model && !!configuredModel && call.model !== configuredModel
+  if (!modelChanged && await currentHeadSha(repo, number, failed.launchActor) === failed.launchExpectedHead) return false
   const blockedPacket = call.action === 'not_started'
     && call.outcome === 'preflight_failed'
     && call.error_code === 'review_packet_too_large'
@@ -1784,6 +1785,7 @@ async function tickApprovePrs(): Promise<void> {
     await Promise.all(prs.map(async (pr) => {
       if (!isEnabled('approve-prs') || behaviorAborted()) return
       const prTarget = `${pr.repo}#${pr.number}`
+      if (hasInvalidApprovalResult(pr.repo, pr.number)) return
       let check: ChangesAddressedResult
       try {
         check = await checkChangesAddressed(pr.repo, pr.number, reviewer)
@@ -2674,7 +2676,6 @@ async function reconcileIssueReviewClaims(): Promise<void> {
     for (const claim of claims) retainClaimSafely(claim, message)
     throw error
   }
-  const catalogForCalls: Catalog | null = await loadCatalog().catch(() => null)
   const commented = (call: LogEntry | undefined) => call?.status.toLowerCase() === 'completed'
     && call.behavior === ISSUE_REVIEW_BEHAVIOR
     && call.action === 'commented'
@@ -2684,6 +2685,8 @@ async function reconcileIssueReviewClaims(): Promise<void> {
   // A dead letter whose exact call finished after all was a false alarm.
   let recoveredDeadLetter = false
   for (const letter of deadLetters) {
+    // A later log cannot silently retire a durable ambiguous-result hold.
+    if (letter.error.startsWith(INVALID_AGENT_RESULT_PREFIX)) continue
     const call = logs.find((row) => row.id === letter.callId)
     if (commented(call)
       && call!.repo === letter.repo
@@ -2742,9 +2745,7 @@ async function reconcileIssueReviewClaims(): Promise<void> {
           // Nothing ran, so nothing was posted; the next scan may launch it
           // again, once.
           recordBehaviorDeadLetter(claim, 'agent call did not register before the launch deadline')
-          if (releaseOwnedClaim(ISSUES_KEY, claim.target, claim.claimId)) {
-            recordBehaviorFailure(ISSUES_KEY, 'worker', 'agent call did not register before the launch deadline')
-          }
+          releaseOwnedClaim(ISSUES_KEY, claim.target, claim.claimId)
         }
         continue
       }
@@ -2766,10 +2767,14 @@ async function reconcileIssueReviewClaims(): Promise<void> {
     }
 
     const status = call.status.toLowerCase()
+    if (status === 'invalid' || call.error_code === 'invalid_agent_result') {
+      deadLetterClaim(claim, invalidAgentResultMessage(call.error))
+      continue
+    }
     if (status === 'completed') {
       if (!commented(call)) {
         const error = 'completed agent call is missing its commented outcome'
-        if (deadLetterClaim(claim, error)) recordBehaviorFailure(ISSUES_KEY, 'worker', error)
+        deadLetterClaim(claim, invalidAgentResultMessage(error))
         continue
       }
       activeClaims.delete(claim.claimId)
@@ -2783,19 +2788,13 @@ async function reconcileIssueReviewClaims(): Promise<void> {
     }
     if (FAILED_AGENT_STATUSES.has(status)) {
       const message = call.error || `agent call terminated with status ${status}`
-      if (deadLetterClaim(claim, message)) {
-        const posted = call.receipts !== null && call.receipts !== undefined
-        if (call.error_code !== 'stopped' && (posted || !HELD_ISSUE_REVIEW_ERRORS.has(call.error_code || ''))) {
-          recordBehaviorFailure(ISSUES_KEY, 'worker', message)
-        }
-        if (call.error_code !== 'stopped' && needsClaude(catalogForCalls, call.model)) claudeAuth.observeProcessFailure(message)
-      }
+      deadLetterClaim(claim, message)
       continue
     }
     if (RUNNING_AGENT_STATUSES.has(status)) {
       if (Date.now() - requestedAtMs >= BEHAVIOR_CLAIM_RENEWAL_MS) {
         const message = `behavior launch exceeded ${BEHAVIOR_CLAIM_RENEWAL_MS}ms running limit`
-        if (deadLetterClaim(claim, message)) recordBehaviorFailure(ISSUES_KEY, 'worker', message)
+        deadLetterClaim(claim, message)
         continue
       }
       setBehaviorLaunchErrorOwned(claim.key, claim.target, claim.claimId, null)
@@ -2803,7 +2802,7 @@ async function reconcileIssueReviewClaims(): Promise<void> {
       continue
     }
     const message = `unrecognized agent call status "${status || 'missing'}"`
-    if (deadLetterClaim(claim, message)) recordBehaviorFailure(ISSUES_KEY, 'worker', message)
+    deadLetterClaim(claim, message)
   }
 }
 
@@ -2923,7 +2922,6 @@ async function runBehaviorCycle(
   key: BehaviorKey,
   operation: () => Promise<boolean>,
 ): Promise<void> {
-  if (!behaviorRetryDue(key)) return
   const lifecycle = behaviorAbortController?.signal
   try {
     const recovered = await serializeBehaviorOperation(key, operation)
@@ -2958,7 +2956,6 @@ export async function runEnabledBehaviorsOnce(
     operations.push(runBehaviorCycle('review-new-prs', async () => {
       return await withBehaviorProcessLock('review-new-prs', async () => {
         await reconcileBehaviorLaunchClaims('review-new-prs')
-        if (!behaviorRetryDue('review-new-prs')) return false
         if (await reviewHeldByClaudeAuth('pr_review')) return false
         await tickReviewNewPrs()
         return listBehaviorLaunchClaims('review-new-prs').length === 0
@@ -2970,7 +2967,6 @@ export async function runEnabledBehaviorsOnce(
     operations.push(runBehaviorCycle('approve-prs', async () => {
       return await withBehaviorProcessLock('approve-prs', async () => {
         await reconcileBehaviorLaunchClaims('approve-prs')
-        if (!behaviorRetryDue('approve-prs')) return false
         if (await reviewHeldByClaudeAuth('pr_approve')) return false
         await tickApprovePrs()
         return listBehaviorLaunchClaims('approve-prs').length === 0
@@ -2982,7 +2978,6 @@ export async function runEnabledBehaviorsOnce(
     operations.push(runBehaviorCycle('review-new-issues', async () => {
       return await withBehaviorProcessLock('review-new-issues', async () => {
         await reconcileIssueReviewClaims()
-        if (!behaviorRetryDue('review-new-issues')) return false
         if (await reviewHeldByClaudeAuth('issue_review')) return false
         await tickReviewNewIssues()
         return listBehaviorLaunchClaims('review-new-issues').length === 0
@@ -3181,9 +3176,6 @@ export function startBehaviorsRuntime(config: BehaviorsRuntimeConfig = {}): void
             migrateReviewNewPrsLedger()
             await initializeReviewBaseline()
             await reconcileBehaviorLaunchClaims('review-new-prs')
-            // Startup reconciliation can clear a breaker only by observing an
-            // owned worker completion. An empty claim list does not prove that a
-            // previously failing model has recovered.
             return false
           })
         })

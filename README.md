@@ -51,9 +51,10 @@ environment allowlist, an isolated Anthropic profile store, and one merged
 settings overlay that neutralizes provider credentials and credential helpers.
 Immediately before each model process, it requires Claude Code to report the
 Claude.ai first-party provider. This keeps Poise-owned calls from silently
-switching to Console/API credentials. One failed worker attempt also opens a
-durable per-behavior circuit breaker, and Poise disables Claude Code's built-in
-request retry loop, so neither layer can repeat provider calls during an outage.
+switching to Console/API credentials. Independent authentication and live
+provider checks control the shared launch gate. A worker failure can request a
+background check, but cannot by itself declare the provider unavailable. Poise
+also disables Claude Code's built-in request retry loop.
 
 Verification uses local status polling once per minute plus one minimal Haiku
 request at startup, after sign-in or a failed worker, every six hours while
@@ -64,10 +65,15 @@ Credits](https://support.claude.com/en/articles/12429409-manage-usage-credits-fo
 after included limits; disable them under Claude account Settings > Usage if you
 need a hard spending cap. Poise can isolate provider credentials, but it cannot
 change that account-level billing control. Transient probe failures back off for
-up to one hour; expired tokens fail closed until sign-in succeeds. Failed
-behavior scans and workers also back off exponentially for up to one hour,
-survive restarts, and keep `/api/health` degraded until a clean scan or worker
-success confirms recovery.
+up to one hour; expired tokens fail closed until sign-in succeeds. Failed reviews
+remain visible against their pull request or issue and do not pause other targets.
+Incomplete terminal results with valid launch provenance are held as invalid on
+that target, preserving their evidence without rejecting unrelated results.
+Failed PR workers with unchanged head and model stay held; changed input can be retried
+only after verifying the earlier attempt posted no review. Review reconciliation
+continues even while provider checks pause new launches. Old account-wide worker
+cooldowns no longer block scanning; existing claims and failure records remain.
+Scan failures stay visible in `/api/health` until a successful scan confirms recovery.
 
 ## Development
 

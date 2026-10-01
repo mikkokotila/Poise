@@ -477,6 +477,59 @@ describe('Claude subscription authentication monitor', () => {
     expect(run).toHaveBeenCalledTimes(4)
   })
 
+  it('keeps verified readiness while an unrelated worker failure is independently checked', async () => {
+    const live = deferred<{ stdout: string, stderr: string }>()
+    const run = validRun()
+    const monitor = new ClaudeAuthMonitor({ runFile: run, clock: new FakeClock() })
+    await monitor.check({ forceLive: true })
+    const verifiedAt = monitor.snapshot().verifiedAt
+    run.mockReset()
+      .mockResolvedValueOnce({ stdout: VALID_STATUS, stderr: '' })
+      .mockImplementationOnce(() => live.promise)
+
+    try {
+      monitor.observeProcessFailure(new Error('completed review is missing its authoritative outcome'))
+      monitor.observeProcessFailure({ code: 1, signal: null, error: new Error('GitHub posting failed') })
+      await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2))
+      expect(monitor.snapshot()).toMatchObject({ status: 'authenticated', verifiedAt })
+      // A second consumer with recent verification can proceed while the
+      // independent check is still blocked; no duplicate canary is launched.
+      await expect(monitor.requireReady({ liveWithinMs: CLAUDE_AUTH_POLL_MS })).resolves.toBeUndefined()
+      expect(run).toHaveBeenCalledTimes(2)
+    } finally {
+      live.resolve(OK)
+      await monitor.check()
+    }
+    expect(monitor.snapshot().status).toBe('authenticated')
+    expect(run).toHaveBeenCalledTimes(2)
+  })
+
+  it('worker reports cannot bypass backoff after the independent canary fails', async () => {
+    const clock = new FakeClock()
+    const run = validRun()
+    const monitor = new ClaudeAuthMonitor({ runFile: run, clock })
+    await monitor.check({ forceLive: true })
+    run.mockReset().mockImplementation(async (_command, args) => {
+      if (args[0] === 'auth') return { stdout: VALID_STATUS, stderr: '' }
+      throw new Error('502 Bad Gateway')
+    })
+
+    monitor.observeProcessFailure(new Error('worker failed'))
+    await monitor.check()
+    expect(monitor.snapshot().status).toBe('degraded')
+    for (let worker = 0; worker < 3; worker += 1) {
+      monitor.observeProcessFailure(new Error('another unrelated failed review'))
+      await expect(monitor.requireReady()).rejects.toMatchObject({ code: 'CLAUDE_AUTH_NOT_READY' })
+    }
+    expect(run.mock.calls.filter(([, args]) => args[0] === '--print')).toHaveLength(1)
+
+    clock.advance(CLAUDE_AUTH_RETRY_BASE_MS)
+    run.mockImplementation(async (_command, args) => args[0] === 'auth' ? { stdout: VALID_STATUS, stderr: '' } : OK)
+    await monitor.requireReady()
+    expect(monitor.snapshot().status).toBe('authenticated')
+    expect(run.mock.calls.filter(([, args]) => args[0] === '--print')).toHaveLength(2)
+  })
+
   it('forces a live canary after a failed worker and never treats a 502 as auth failure', async () => {
     const run = validRun()
     const monitor = new ClaudeAuthMonitor({ runFile: run, clock: new FakeClock() })
@@ -487,7 +540,7 @@ describe('Claude subscription authentication monitor', () => {
 
     monitor.observeProcessFailure({ code: 1, signal: null, error: new Error('worker failed') })
 
-    expect(monitor.snapshot().status).toBe('degraded')
+    expect(monitor.snapshot().status).toBe('authenticated')
     await vi.waitFor(() => expect(monitor.snapshot().status).toBe('degraded'))
     expect(run).toHaveBeenCalledTimes(2)
   })
@@ -503,9 +556,26 @@ describe('Claude subscription authentication monitor', () => {
 
     monitor.observeProcessFailure(new Error('401 invalid API key'))
 
-    expect(monitor.snapshot().status).toBe('degraded')
+    expect(monitor.snapshot().status).toBe('authenticated')
     live.resolve(OK)
-    await vi.waitFor(() => expect(monitor.snapshot().status).toBe('authenticated'))
+    await monitor.check()
+    expect(monitor.snapshot().status).toBe('authenticated')
+    expect(run).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps unknown readiness until the independent authentication check completes', async () => {
+    const local = deferred<{ stdout: string, stderr: string }>()
+    const run = vi.fn<ClaudeAuthRunFile>().mockImplementationOnce(() => local.promise)
+    const monitor = new ClaudeAuthMonitor({ runFile: run, clock: new FakeClock() })
+    try {
+      monitor.observeProcessFailure(new Error('unrelated review failed'))
+      expect(monitor.snapshot().status).toBe('checking')
+    } finally {
+      local.resolve({ stdout: JSON.stringify({ loggedIn: false, authMethod: 'none' }), stderr: '' })
+      await monitor.check()
+    }
+    expect(monitor.snapshot().status).toBe('reauth_required')
+    expect(run).toHaveBeenCalledOnce()
   })
 
   it('does not let a late generic failure erase a known sign-in requirement', async () => {
@@ -543,14 +613,16 @@ describe('Claude subscription authentication monitor', () => {
     expect(monitor.snapshot().status).toBe('unavailable')
   })
 
-  it('marks definitive worker authentication errors and requireReady fails with a typed 503', async () => {
-    const run = vi.fn<ClaudeAuthRunFile>()
+  it('closes verified readiness when the isolated canary confirms an authentication failure', async () => {
+    const run = validRun()
+    const monitor = new ClaudeAuthMonitor({ runFile: run, clock: new FakeClock() })
+    await monitor.check({ forceLive: true })
+    run.mockReset()
       .mockResolvedValueOnce({ stdout: VALID_STATUS, stderr: '' })
       .mockRejectedValueOnce(new Error('401 authentication_error'))
-    const monitor = new ClaudeAuthMonitor({ runFile: run, clock: new FakeClock() })
 
     monitor.observeProcessFailure(Object.assign(new Error('OAuth token expired'), { code: 1 }))
-    expect(monitor.snapshot().status).toBe('degraded')
+    expect(monitor.snapshot().status).toBe('authenticated')
     await vi.waitFor(() => expect(monitor.snapshot().status).toBe('reauth_required'))
     expect(run).toHaveBeenCalledTimes(2)
     await expect(monitor.requireReady()).rejects.toMatchObject({
@@ -571,7 +643,10 @@ describe('Claude subscription authentication monitor', () => {
     expect(monitor.snapshot().status).toBe('authenticated')
     expect(run).not.toHaveBeenCalled()
 
+    run.mockImplementation(async (_command, args) => args[0] === 'auth' ? { stdout: VALID_STATUS, stderr: '' } : OK)
     monitor.observeProcessFailure({ code: 1, signal: null })
-    expect(monitor.snapshot().status).toBe('degraded')
+    expect(monitor.snapshot().status).toBe('authenticated')
+    await monitor.check()
+    expect(monitor.snapshot().status).toBe('authenticated')
   })
 })

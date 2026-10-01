@@ -170,11 +170,6 @@ function finished(target: string, overrides: Record<string, unknown>): Record<st
   return callFor(target, { completed_at: new Date().toISOString(), ...overrides })
 }
 
-// A failed reviewer backs the behavior off for a minute; these tests move on.
-function skipBackoff(): void {
-  database!.setMeta('behavior_review_new_issues_failure', '')
-}
-
 beforeEach(async () => {
   tempRoot = await mkdtemp(join(tmpdir(), 'poise-issue-review-test-'))
   mocks.runFile.mockReset()
@@ -334,21 +329,72 @@ describe('Review New Issues', () => {
     expect(behaviors.getBehaviorsRuntimeHealth().failures).toEqual([])
   })
 
+  it.each(['posting failure', 'incomplete completion', 'missing failure error'] as const)('keeps an issue with %s held while another repository proceeds despite a legacy worker cooldown', async (scenario) => {
+    const otherRepo = 'Vaquum/Other'
+    const since = ago(60 * MINUTE)
+    const { behaviors, database } = await start({ repos: [{ repo: REPO, since }, { repo: otherRepo, since }] })
+    issues = [issue(452)]
+    await behaviors.runEnabledBehaviorsOnce()
+    agentLogs = [finished(`${REPO}#452`, scenario === 'posting failure'
+      ? { status: 'failed', error: 'posting failed', receipts: [] }
+      : { status: scenario === 'incomplete completion' ? 'completed' : 'failed', error: '' })]
+    database.setMeta('behavior_review_new_issues_failure', JSON.stringify({
+      kind: 'worker', consecutiveFailures: 21, lastFailureAtMs: Date.now(), nextRetryAtMs: Date.now() + 3_600_000,
+    }))
+    issues.push(issue(96, { repo: otherRepo, url: `https://github.com/${otherRepo}/issues/96` }))
+    await behaviors.runEnabledBehaviorsOnce()
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches()).toHaveLength(2)
+    expect(flag(launches()[1], '--issue-review')).toBe(`${otherRepo}#96`)
+    expect(database.getFailedBehaviorLaunch(KEY, `${REPO}#452`)).not.toBeNull()
+    expect(behaviors.getBehaviorsRuntimeHealth().failures).toEqual([])
+    expect(behaviors.getBehaviorsRuntimeHealth().deadLetters).toEqual([
+      expect.objectContaining({ target: `${REPO}#452`, error: scenario === 'posting failure' ? 'posting failed' : expect.stringContaining('reported status') }),
+    ])
+    expect(mocks.observeAuthFailure).not.toHaveBeenCalled()
+    if (scenario !== 'posting failure') {
+      agentLogs[0] = { ...agentLogs[0], status: 'completed', action: 'commented', outcome: 'commented' }
+      await behaviors.runEnabledBehaviorsOnce()
+      expect(launches()).toHaveLength(2)
+      expect(behaviors.getBehaviorsRuntimeHealth().deadLetters).toEqual([
+        expect.objectContaining({ target: `${REPO}#452`, error: expect.stringContaining('invalid_agent_result: ') }),
+      ])
+    }
+  })
+
+  it('settles a completed issue review while verified provider auth blocks new issue launches', async () => {
+    const { behaviors, database } = await start()
+    issues = [issue(452)]
+    await behaviors.runEnabledBehaviorsOnce()
+    agentLogs = [finished(`${REPO}#452`, { status: 'completed', action: 'commented', outcome: 'commented', receipts: [] })]
+    database.setMeta('behavior_review_new_issues_failure', JSON.stringify({
+      kind: 'worker', consecutiveFailures: 21, lastFailureAtMs: Date.now(), nextRetryAtMs: Date.now() + 3_600_000,
+    }))
+    issues.push(issue(453))
+    mocks.authStatus = 'reauth_required'
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(database.listBehaviorLaunchClaims(KEY)).toEqual([])
+    expect(database.hasSeen(KEY, `${REPO}#452`)).toBe(true)
+    expect(launches()).toHaveLength(1)
+    mocks.authStatus = 'authenticated'
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches()).toHaveLength(2)
+  })
+
   it('relaunches a reviewer once after a failure that posted nothing, then holds it', async () => {
     const { behaviors, database } = await start()
     issues = [issue(452)]
     await behaviors.runEnabledBehaviorsOnce()
     agentLogs = [finished(`${REPO}#452`, { status: 'failed', error: 'provider exited 1' })]
     await behaviors.runEnabledBehaviorsOnce()
-    expect(behaviors.getBehaviorsRuntimeHealth().failures[0]).toMatchObject({ behavior: KEY, kind: 'worker', error: 'provider exited 1' })
+    expect(behaviors.getBehaviorsRuntimeHealth().failures).toEqual([])
+    expect(behaviors.getBehaviorsRuntimeHealth().deadLetters).toEqual([expect.objectContaining({ behavior: KEY, error: 'provider exited 1' })])
 
-    skipBackoff()
     await behaviors.runEnabledBehaviorsOnce()
     expect(launches()).toHaveLength(2)
 
     agentLogs.push(finished(`${REPO}#452`, { status: 'failed', error: 'provider exited 1 again' }))
     await behaviors.runEnabledBehaviorsOnce()
-    skipBackoff()
     await behaviors.runEnabledBehaviorsOnce()
     await behaviors.runEnabledBehaviorsOnce()
     expect(launches()).toHaveLength(2)
@@ -367,7 +413,6 @@ describe('Review New Issues', () => {
       await behaviors.runEnabledBehaviorsOnce()
       agentLogs = [finished(`${REPO}#452`, { status: 'failed', error: 'GitHub 502', error_code: errorCode, receipts })]
       await behaviors.runEnabledBehaviorsOnce()
-      skipBackoff()
       await behaviors.runEnabledBehaviorsOnce()
       expect(launches()).toHaveLength(1)
       await behaviors.stopBehaviorsRuntime()
@@ -509,7 +554,6 @@ describe('Review New Issues sub-issues', () => {
     await behaviors.runEnabledBehaviorsOnce()
     agentLogs = [finished(ref(500), { status: 'failed', error: 'provider exited 1' })]
     await behaviors.runEnabledBehaviorsOnce()
-    skipBackoff()
     await behaviors.runEnabledBehaviorsOnce()
     expect(launches().map((args) => args[1])).toEqual([ref(500), ref(500)])
   })
@@ -616,7 +660,7 @@ describe('Review New Issues sub-issues', () => {
     issues = [issue(501, { created_at: ago(30 * MINUTE) }), issue(502, { created_at: ago(30 * MINUTE) })]
     // 501 was reviewed on its own and failed; 502's claim died before launching.
     await behaviors.runEnabledBehaviorsOnce()
-    agentLogs = [finished(ref(501), { status: 'failed', error: 'provider exited 1' }), finished(ref(502), { status: 'failed', error: 'provider exited 1' })]
+    agentLogs = [finished(ref(501), { status: 'failed', error: 'posting failed', error_code: 'posting_failed', receipts: [] }), finished(ref(502), { status: 'failed', error: 'posting failed', error_code: 'posting_failed', receipts: [] })]
     await behaviors.runEnabledBehaviorsOnce()
     database.releaseSeen(KEY, ref(502))
     expect(database.claimSeenOwned(KEY, ref(502), 1)).toBeTruthy()
@@ -628,7 +672,6 @@ describe('Review New Issues sub-issues', () => {
       ...agentLogs[0], id: 'f'.repeat(32), pr_id: '500', correlation_id: 'replay-1', source: 'poise:replay',
       status: 'completed', action: 'commented', outcome: 'commented', error: '', receipts: commentedOn(ref(500), ref(501), ref(502)),
     })
-    skipBackoff()
     await behaviors.runEnabledBehaviorsOnce()
     expect(launches()).toHaveLength(2)
     expect(database.listBehaviorIncidents()).toEqual([])
@@ -688,7 +731,6 @@ describe('Review New Issues launch safety', () => {
 
     exit!({ code: 1, signal: null })
     await behaviors.runEnabledBehaviorsOnce()
-    skipBackoff()
     await behaviors.runEnabledBehaviorsOnce()
     expect(launches()).toHaveLength(2)
   })

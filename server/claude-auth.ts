@@ -324,12 +324,9 @@ export class ClaudeAuthMonitor {
     // The login path always ends with a forced live canary. Let it own the
     // transition so an older worker cannot invalidate or strand that flow.
     if (this.loginInProgress) return
-    // Worker failures can include GitHub and other model providers, so their
-    // text is never authoritative for Claude auth. Close the gate now, then
-    // let the isolated Claude canary make the classification.
-    if (this.status !== 'reauth_required' && this.status !== 'unavailable') {
-      this.status = 'degraded'
-    }
+    // Worker failures can come from GitHub, review validation, or another
+    // provider. Keep the current readiness until the isolated Claude check
+    // establishes whether there is a shared authentication/provider failure.
     this.forceLiveRequested = true
     void this.check({ forceLive: true })
   }

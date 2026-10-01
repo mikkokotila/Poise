@@ -87,7 +87,7 @@ function startedRel(e: LogEntry): string {
 // ticked every thirty seconds, which read as a stalled agent. Derive it live
 // for a run that has not finished.
 function elapsedText(e: LogEntry): string {
-  const running = !e.completed_at && e.status !== 'completed' && e.status !== 'failed' && e.status !== 'error'
+  const running = !e.completed_at && e.status !== 'completed' && e.status !== 'failed' && e.status !== 'error' && e.status !== 'invalid'
   if (!running) return e.time_elapsed || '—'
   const started = startedAtMs(e)
   if (!isFinite(started)) return e.time_elapsed || '—'
@@ -147,9 +147,9 @@ const OUTCOME_LABEL: Record<string, { text: string, cls: string }> = {
 function statusCell(e: LogEntry): string {
   const s = e.status
   const k = (s || '').toLowerCase()
-  const cls = k === 'completed' ? 'ok' : (k === 'error' || k === 'failed') ? 'bad' : 'flat'
+  const cls = k === 'completed' ? 'ok' : (k === 'error' || k === 'failed' || k === 'invalid') ? 'bad' : 'flat'
   const pill = `<span class="state ${cls}">${escapeHtml(s || '—')}</span>`
-  const verdict = e.outcome ? OUTCOME_LABEL[e.outcome] : null
+  const verdict = k !== 'invalid' && e.outcome ? OUTCOME_LABEL[e.outcome] : null
   if (!verdict) return pill
   return `${pill} <span class="state ${verdict.cls} state-outcome" title="Outcome: ${escapeHtml(e.outcome!)}">${escapeHtml(verdict.text)}</span>`
 }

@@ -110,6 +110,78 @@ describe('agent log compatibility', () => {
     await expect(fetchAgentLogs()).rejects.toThrow(/incomplete Poise provenance/)
   })
 
+  it.each(['completed_at', 'action', 'outcome', 'head_sha'])(
+    'retains a Poise completion missing %s beside valid siblings for target reconciliation', async (field) => {
+      const completed = logRow({
+        source: 'poise:review-new-prs',
+        expected_head: 'b'.repeat(40),
+        head_sha: 'b'.repeat(40),
+        correlation_id: 'correlation-1',
+        action: 'reviewed_clean',
+        outcome: 'clean',
+      })
+      const incomplete = { ...completed, [field]: null }
+      const sibling = { ...completed, id: 'b'.repeat(32), pr_id: '13', correlation_id: 'correlation-2' }
+      mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([incomplete, sibling]), stderr: '' })
+
+      const rows = await fetchAgentLogs()
+
+      expect(rows).toHaveLength(2)
+      expect(rows[0]).toMatchObject(sibling)
+      // Preserve the identity and proof without classifying ambiguous work
+      // as a success or a failed run eligible for a no-action retry.
+      expect(rows[1]).toMatchObject({ ...incomplete, status: 'invalid', error_code: 'invalid_agent_result', error: expect.stringContaining('reported status completed with incomplete terminal outcome') })
+      expect(rows[1][field as 'completed_at' | 'action' | 'outcome' | 'head_sha']).toBeNull()
+      expect(rows[1].status).toBe('invalid')
+    },
+  )
+
+  it.each([
+    { status: 'failed', error: '', action: null, outcome: null },
+    { status: 'superseded', completed_at: null, action: null, outcome: 'superseded' },
+    { status: 'superseded', head_sha: null, action: null, outcome: 'superseded' },
+    { status: 'completed', action: 'unknown-action', outcome: 'clean' },
+    { status: 'failed', action: null, outcome: 'unknown-outcome', error: 'provider returned invalid result' },
+  ])('quarantines attributable terminal semantics and preserves launch evidence: %j', async (overrides) => {
+    const receipt = { issue: 'owner/repo#12', comment_id: 7, url: null, author: 'bit-mis' }
+    const reported = logRow({
+      source: 'poise:review-new-prs', expected_head: 'b'.repeat(40), head_sha: 'b'.repeat(40),
+      correlation_id: 'correlation-1',
+      review_id: 9, receipts: [receipt], ...overrides,
+    })
+    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([reported, logRow({ id: 'b'.repeat(32) })]), stderr: '' })
+    const rows = await fetchAgentLogs()
+    expect(rows).toHaveLength(2)
+    expect(rows[1]).toMatchObject({
+      id: 'a'.repeat(32), repo: 'owner/repo', pr_id: '12', actor: 'bit-mis',
+      status: 'invalid', error_code: 'invalid_agent_result',
+      error: expect.stringContaining(`reported status ${overrides.status}`),
+      source: 'poise:review-new-prs', expected_head: 'b'.repeat(40),
+      correlation_id: 'correlation-1', review_id: 9, receipts: [receipt],
+      head_sha: reported.head_sha,
+    })
+    if (overrides.action === 'unknown-action') expect(rows[1].action).toBeNull()
+    else expect(rows[1].action).toBe(reported.action)
+    if (overrides.outcome === 'unknown-outcome') expect(rows[1].outcome).toBeNull()
+    else expect(rows[1].outcome).toBe(reported.outcome)
+  })
+
+  it.each([
+    { action: 42 }, { outcome: {} }, { head_sha: 'not-a-sha' }, { correlation_id: null }, { error_code: 42 },
+  ])('keeps malformed types and unidentified provenance as feed errors: %j', async (overrides) => {
+    const row = logRow({
+      source: 'poise:review-new-prs', expected_head: 'b'.repeat(40), head_sha: 'b'.repeat(40),
+      correlation_id: 'correlation-1', ...overrides,
+    })
+    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([row]), stderr: '' })
+    await expect(fetchAgentLogs()).rejects.toThrow(/agent-interface log row/)
+  })
+
+  it('still rejects invalid row structure instead of dropping uncertain launch evidence', async () => {
+    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([logRow(), logRow({ id: 'not-a-call-id' })]), stderr: '' })
+    await expect(fetchAgentLogs()).rejects.toThrow(/violates the schema/)
+  })
+
   it('accepts a running Poise call before it has a terminal error', async () => {
     mocks.runFile.mockResolvedValue({
       stdout: JSON.stringify([logRow({
@@ -324,14 +396,17 @@ describe('issue review rows', () => {
     expect(byId('e').receipts).toEqual([])
   })
 
-  it('keeps the commented outcome to issue reviews and requires a terminal outcome', async () => {
+  it('keeps commented outcomes exclusive to issues and preserves missing completion proof', async () => {
     mocks.runFile.mockResolvedValue({
       stdout: JSON.stringify([logRow({ action: 'commented', outcome: 'commented' })]),
       stderr: '',
     })
     await expect(fetchAgentLogs()).rejects.toThrow(/violates the schema/)
     mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([issueRow({ status: 'completed' })]), stderr: '' })
-    await expect(fetchAgentLogs()).rejects.toThrow(/incomplete terminal outcome/)
+    await expect(fetchAgentLogs()).resolves.toMatchObject([{
+      status: 'invalid', action: null, outcome: null, head_sha: null, correlation_id: 'claim-1',
+      error_code: 'invalid_agent_result', error: expect.stringContaining('reported status completed'),
+    }])
   })
 
   it('replays an issue review with the Issue review default and no head or checkout', async () => {

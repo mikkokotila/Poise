@@ -15,6 +15,7 @@ type Helpers = {
   setSearch: (q: string) => void
   startedAtMs: (e: any) => number
   elapsedText: (e: any) => string
+  statusCell: (e: any) => string
   hasDetail: (e: any) => boolean
   progressText: (e: any) => string
   progressDetail: (e: any) => string
@@ -26,7 +27,7 @@ async function loadHelpers(): Promise<Helpers> {
   // otherwise only reachable through a DOM input event.
   const patched = source + `
 export const __test = {
-  sessionLabel, targetText, matchesSearch, startedAtMs, elapsedText, hasDetail, progressText, progressDetail,
+  sessionLabel, targetText, matchesSearch, startedAtMs, elapsedText, statusCell, hasDetail, progressText, progressDetail,
   setSearch: (q: string) => { searchQuery = q },
 }
 `
@@ -143,6 +144,15 @@ describe('elapsed is live while a run is still going', () => {
       status: 'completed', completed_at: '2026-07-29T18:34:00.262Z', time_elapsed: '7m 36s',
     }))).toBe('7m 36s')
   })
+})
+
+it('shows an invalid terminal result as an error without a live timer or success verdict', () => {
+  const row = entry({ status: 'invalid', completed_at: null, outcome: 'clean', time_elapsed: '7m 36s', error: 'Invalid completed result: missing head proof' })
+  expect(helpers.statusCell(row)).toContain('state bad')
+  expect(helpers.statusCell(row)).toContain('invalid')
+  expect(helpers.statusCell(row)).not.toContain('state-outcome')
+  expect(helpers.elapsedText(row)).toBe('7m 36s')
+  expect(helpers.hasDetail(row)).toBe(true)
 })
 
 // Every failed run carries an error string. The row offered no way to open it,

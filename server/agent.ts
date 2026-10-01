@@ -161,11 +161,22 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
   const correlationId = optionalString('correlation_id')
   const action = optionalString('action')
   const error = optionalString('error') || ''
-  const preflightFailed = status === 'failed'
+  const errorCode = optionalString('error_code')
+  const runner = optionalString('runner')
+  const externalChatTurn = runner === 'external' && behavior === 'chat' && source === 'poise:chat'
+  const terminalStatus = status.toLowerCase()
+  const quarantineable = source?.startsWith('poise:') && !externalChatTurn
+    && ['completed', 'failed', 'superseded'].includes(terminalStatus)
+  const validOutcome = ['clean', 'changes_requested', 'approved', 'superseded', 'preflight_failed', 'commented', null].includes(outcome)
+  const validAction = ['reviewed_clean', 'requested_changes', 'approved', 'not_started', 'commented', null].includes(action)
+  const preflightFailed = terminalStatus === 'failed'
     && action === 'not_started'
     && outcome === 'preflight_failed'
     && headSha === null
   const issueReview = behavior === ISSUE_REVIEW_BEHAVIOR
+  const invalidResultShape = !validOutcome || !validAction
+    || ((action === 'commented' || outcome === 'commented') && !issueReview)
+    || ((action === 'not_started' || outcome === 'preflight_failed') && !preflightFailed)
   if (!/^[0-9a-f]{32}$/.test(id)
     || (prId !== null && !/^[1-9][0-9]*$/.test(prId))
     || (repo !== null && !/^[^/\s]+(?:\/[^/\s]+)?$/.test(repo))
@@ -174,24 +185,19 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
     || !Number.isFinite(Date.parse(startedAt))
     || (startedAtPrecise !== null && !Number.isFinite(Date.parse(startedAtPrecise)))
     || (completedAt !== null && !Number.isFinite(Date.parse(completedAt)))
-    || !['clean', 'changes_requested', 'approved', 'superseded', 'preflight_failed', 'commented', null].includes(outcome)
     || (headSha !== null && !/^[0-9a-f]{40}$/.test(headSha))
     || (expectedHead !== null && !/^[0-9a-f]{40}$/.test(expectedHead))
-    || !['reviewed_clean', 'requested_changes', 'approved', 'not_started', 'commented', null].includes(action)
-    || ((action === 'commented' || outcome === 'commented') && !issueReview)
-    || ((action === 'not_started' || outcome === 'preflight_failed') && !preflightFailed)
+    || (invalidResultShape && !quarantineable)
     || (source !== null && !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(source))
     || (correlationId !== null && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(correlationId))) {
     throw new Error(`agent-interface log row ${index} violates the schema`)
   }
-  const runner = optionalString('runner')
   if (runner !== null && runner !== 'external') {
     throw new Error(`agent-interface log row ${index} has invalid runner`)
   }
   // A Chat turn is a Caller row without a Caller process: it is exempt from
   // the review provenance rules only when it is exactly the well-formed
   // externally recorded shape (runner, behavior and source all agree).
-  const externalChatTurn = runner === 'external' && behavior === 'chat' && source === 'poise:chat'
   if (externalChatTurn) {
     if (!sessionId || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(sessionId)) {
       throw new Error(`agent-interface log row ${index} is a chat turn without a session`)
@@ -202,21 +208,28 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
   } else if (runner === 'external') {
     throw new Error(`agent-interface log row ${index} is externally recorded but not a chat turn`)
   }
+  let invalidResult: string | null = null
   if (source?.startsWith('poise:') && !externalChatTurn) {
     if (!actor || (!expectedHead && !issueReview) || !correlationId || !behavior
       || !repo || !/^[^/\s]+\/[^/\s]+$/.test(repo) || !prId) {
       throw new Error(`agent-interface log row ${index} has incomplete Poise provenance`)
     }
-    if (status === 'completed' && (!completedAt || !action || !outcome || (!headSha && !issueReview))) {
-      throw new Error(`agent-interface log row ${index} has incomplete terminal outcome`)
-    }
-    if (status === 'failed' && !error) {
-      throw new Error(`agent-interface log row ${index} has no terminal error`)
-    }
-    if (status === 'superseded'
+    if (invalidResultShape) {
+      invalidResult = 'invalid terminal action/outcome'
+    } else if (terminalStatus === 'completed' && (!completedAt || !action || !outcome || (!headSha && !issueReview))) {
+      invalidResult = 'incomplete terminal outcome'
+    } else if (terminalStatus === 'failed' && !error) {
+      invalidResult = 'missing terminal error'
+    } else if (terminalStatus === 'superseded'
       && (!completedAt || outcome !== 'superseded' || !headSha || action !== null)) {
-      throw new Error(`agent-interface log row ${index} has incomplete superseded outcome`)
+      invalidResult = 'incomplete superseded outcome'
     }
+  }
+  // Identity and provenance remain strict, but incomplete terminal evidence
+  // belongs to its target. Never call it failed (which admits retries), claim
+  // success, or drop the launch. Reconciliation quarantines this explicit state.
+  if (invalidResult) {
+    invalidResult = `agent-interface reported status ${status} with ${invalidResult}${error ? `; reported error: ${error}` : ''}`
   }
   return {
     id,
@@ -231,17 +244,17 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
     started_at_precise: startedAtPrecise,
     completed_at: completedAt,
     time_elapsed: requiredString('time_elapsed'),
-    status,
+    status: invalidResult ? 'invalid' : status,
     progress: parseProgress(row.progress),
-    outcome: outcome as LogEntry['outcome'],
+    outcome: (validOutcome ? outcome : null) as LogEntry['outcome'],
     head_sha: headSha,
     expected_head: expectedHead,
     source,
     correlation_id: correlationId,
-    action: action as LogEntry['action'],
+    action: (validAction ? action : null) as LogEntry['action'],
     response: optionalString('response'),
-    error,
-    error_code: optionalString('error_code'),
+    error: invalidResult ?? error,
+    error_code: invalidResult ? 'invalid_agent_result' : errorCode,
     review_policy: optionalString('review_policy'),
     recovery_model: optionalString('recovery_model'),
     review_id: Number.isSafeInteger(row.review_id) && Number(row.review_id) > 0 ? Number(row.review_id) : null,

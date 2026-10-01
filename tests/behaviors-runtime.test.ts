@@ -1365,7 +1365,122 @@ describe('behavior launch claims', () => {
     expect(runtime.getBehaviorsRuntimeHealth().failures).toEqual([])
   })
 
-  it('preserves an existing breaker when shutdown aborts a behavior scan', async () => {
+  it.each([
+    ['review-new-prs', 'failed'], ['approve-prs', 'failed'],
+    ['review-new-prs', 'completed'], ['approve-prs', 'completed'],
+    ['review-new-prs', 'superseded'], ['approve-prs', 'superseded'],
+    ['approve-prs', 'wrong-head'], ['approve-prs', 'wrong-pair'],
+  ] as const)('isolates a %s %s outcome and ignores its legacy account breaker across restart', async (behavior, result) => {
+    const status = result === 'wrong-head' || result === 'wrong-pair' ? 'completed' : result
+    const launched = behavior === 'review-new-prs' ? await launchReviewBeforeCrash() : await launchApprovalBeforeCrash()
+    const failure = { kind: 'worker', consecutiveFailures: 21, lastFailureAtMs: Date.now(), nextRetryAtMs: Date.now() + 3_600_000 }
+    const failureKey = `behavior_${behavior.replace(/-/g, '_')}_failure`
+    launched.database.setMeta(failureKey, JSON.stringify(failure))
+    agentLogs = [agentLog({
+      id: 'b'.repeat(32), model: 'opus-5-xhigh',
+      behavior: behavior === 'review-new-prs' ? 'pr_review' : 'pr_approve',
+      started_at: new Date(Date.parse(launched.requestedAt) + 1_000).toISOString(),
+      status, error: status === 'failed' ? 'review behavior must produce exactly one atomic clean or change-request review' : '',
+      outcome: status === 'superseded' ? 'superseded' : null,
+      ...(result === 'wrong-head' ? { action: 'approved', outcome: 'approved', head_sha: NEXT_HEAD_SHA } : {}),
+      ...(result === 'wrong-pair' ? { action: 'approved', outcome: 'clean', head_sha: HEAD_SHA } : {}),
+      expected_head: launched.expectedHead, actor: launched.actor, source: launched.source, correlation_id: launched.correlationId,
+    })]
+    listedPrs = [pr, { ...pr, repo: 'Vaquum/unrelated', number: 96, url: 'https://github.com/Vaquum/unrelated/pull/96' }]
+    let loaded = await restartModules()
+    loaded.behaviors.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    await loaded.behaviors.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+    expect(mocks.spawnDetached.mock.calls[1][1]).toContain('#96')
+    expect(loaded.database.getFailedBehaviorLaunch(behavior, launched.target)).toMatchObject({
+      launchCallId: 'b'.repeat(32), launchCorrelationId: launched.correlationId, launchExpectedHead: launched.expectedHead,
+    })
+    expect(loaded.behaviors.getBehaviorsRuntimeHealth().failures).toEqual([])
+    expect(loaded.behaviors.getBehaviorsRuntimeHealth().deadLetters).toEqual([
+      expect.objectContaining({
+        behavior, target: `${pr.repo}#${pr.number}`,
+        error: status === 'failed' ? expect.stringContaining('exactly one atomic')
+          : result === 'wrong-head' || result === 'wrong-pair' ? expect.stringContaining('missing authoritative action/outcome/head')
+            : expect.stringContaining(`reported status ${status}`),
+      }),
+    ])
+    expect(mocks.observeAuthFailure).not.toHaveBeenCalled()
+    loaded = await restartModules()
+    loaded.behaviors.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    await loaded.behaviors.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+    expect(loaded.database.hasSeen(behavior, launched.target)).toBe(true)
+    if (status !== 'failed') {
+      // Invalid terminal proof stays ambiguous even when the input changes.
+      arrangeCli(behavior === 'approve-prs', false, { headSha: NEXT_HEAD_SHA })
+      loaded.database.setMeta('models', JSON.stringify({
+        [behavior === 'review-new-prs' ? 'pr_review' : 'pr_approve']: { default: 'gpt-6-astra-ultra', fallback: 'opus-5-xhigh' },
+      }))
+      await loaded.behaviors.runEnabledBehaviorsOnce()
+      expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+      expect(loaded.database.getFailedBehaviorLaunch(behavior, launched.target)).toMatchObject({
+        launchCallId: 'b'.repeat(32), launchCorrelationId: launched.correlationId, launchExpectedHead: launched.expectedHead,
+      })
+      // Corrected logs cannot hide an unresolved durable quarantine.
+      agentLogs[0] = {
+        ...agentLogs[0], status: 'completed', completed_at: new Date().toISOString(),
+        action: behavior === 'review-new-prs' ? 'reviewed_clean' : 'approved',
+        outcome: behavior === 'review-new-prs' ? 'clean' : 'approved', head_sha: HEAD_SHA,
+      }
+      await loaded.behaviors.runEnabledBehaviorsOnce()
+      expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+      expect(loaded.behaviors.getBehaviorsRuntimeHealth().deadLetters).toEqual([
+        expect.objectContaining({ behavior, target: `${pr.repo}#${pr.number}`, error: expect.stringContaining('invalid_agent_result: ') }),
+      ])
+      // Quarantine is durable even after Caller rotates the invalid result.
+      agentLogs = []
+      loaded = await restartModules()
+      loaded.behaviors.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+      await loaded.behaviors.runEnabledBehaviorsOnce()
+      expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+      expect(loaded.database.getFailedBehaviorLaunch(behavior, launched.target)).not.toBeNull()
+    }
+  })
+
+  it('reconciles successful and failed reviewers while verified provider auth holds new launches', async () => {
+    arrangeCli(false)
+    mocks.spawnDetached.mockResolvedValue(undefined)
+    const { database: db, behaviors: runtime } = await loadModules()
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_review_new_prs_enabled', '1')
+    db.setMeta('behavior_review_new_prs_reviewers', '2')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    await runtime.runEnabledBehaviorsOnce()
+    const claims = db.listBehaviorLaunchClaims('review-new-prs')
+    expect(claims).toHaveLength(2)
+    agentLogs = claims.map((claim, index) => agentLog({
+      id: String(index + 1).repeat(32), model: claim.target.endsWith(':secondary') ? 'gpt-6-astra-ultra' : 'opus-5-xhigh',
+      started_at: new Date(Date.parse(claim.launchRequestedAt) + 1).toISOString(),
+      started_at_precise: new Date(Date.parse(claim.launchRequestedAt) + 1).toISOString(),
+      expected_head: claim.launchExpectedHead, actor: claim.launchActor, source: claim.launchSource, correlation_id: claim.launchCorrelationId,
+      ...(claim.target.endsWith(':secondary')
+        ? { status: 'failed', error: 'malformed reviewer output' }
+        : { status: 'completed', completed_at: new Date().toISOString(), action: 'reviewed_clean', outcome: 'clean', head_sha: HEAD_SHA }),
+    }))
+    db.setMeta('behavior_review_new_prs_failure', JSON.stringify({
+      kind: 'worker', consecutiveFailures: 21, lastFailureAtMs: Date.now(), nextRetryAtMs: Date.now() + 3_600_000,
+    }))
+    mocks.authStatus = 'reauth_required'
+    listedPrs = [pr, { ...pr, number: 96, url: 'https://github.com/Vaquum/poise-test/pull/96' }]
+    await runtime.runEnabledBehaviorsOnce()
+    expect(db.listBehaviorLaunchClaims('review-new-prs')).toEqual([])
+    expect(db.latestApprovalBasisLaunch(pr.repo, pr.number)).toMatchObject({ headSha: HEAD_SHA })
+    expect(db.getFailedBehaviorLaunch('review-new-prs', `${pr.repo}#${pr.number}:secondary`)).not.toBeNull()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+    expect(mocks.observeAuthFailure).not.toHaveBeenCalled()
+    mocks.authStatus = 'authenticated'
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(4)
+    expect(mocks.spawnDetached.mock.calls.slice(2).every(([, args]) => args.includes('#96'))).toBe(true)
+  })
+
+  it('preserves an existing scan failure when shutdown aborts a behavior scan', async () => {
     mocks.runFile.mockImplementation(async (
       _command: string,
       _args: string[],
@@ -1381,7 +1496,7 @@ describe('behavior launch claims', () => {
     db.setMeta('me', 'poise-user')
     db.setMeta('behavior_resolve_unblocking_enabled', '1')
     db.setMeta('behavior_resolve_unblocking_failure', JSON.stringify({
-      kind: 'worker',
+      kind: 'operation',
       consecutiveFailures: 2,
       lastFailureAtMs: Date.now() - 120_000,
       nextRetryAtMs: Date.now() - 1,
@@ -1396,7 +1511,7 @@ describe('behavior launch claims', () => {
     expect(runtime.getBehaviorsRuntimeHealth().failures).toEqual([
       expect.objectContaining({
         behavior: 'resolve-unblocking',
-        kind: 'worker',
+        kind: 'operation',
         consecutiveFailures: 2,
       }),
     ])
@@ -1696,8 +1811,8 @@ describe('behavior launch claims', () => {
     mocks.observeAuthFailure.mockImplementation(() => { mocks.authStatus = 'degraded' })
     await runtime.runEnabledBehaviorsOnce()
 
-    expect(mocks.observeAuthFailure).toHaveBeenCalledOnce()
-    expect(mocks.authStatus).toBe('degraded')
+    expect(mocks.observeAuthFailure).not.toHaveBeenCalled()
+    expect(mocks.authStatus).toBe('authenticated')
     expect(db.hasSeen('review-new-prs', launched.target)).toBe(true)
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
 
@@ -1806,7 +1921,7 @@ describe('behavior launch claims', () => {
     expect(mocks.spawnDetached.mock.calls.slice(1).every((call) => (call[1] as string[]).includes('#18'))).toBe(true)
   })
 
-  it('relaunches a dead reviewer once the siblings\' reviews are accounted for', async () => {
+  it('relaunches a dead reviewer on a changed head once siblings\' reviews are accounted for', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-09-17T12:00:00.000Z'))
     arrangeCli(false)
@@ -1858,14 +1973,18 @@ describe('behavior launch claims', () => {
     await runtime.runEnabledBehaviorsOnce()
     expect(mocks.spawnDetached).toHaveBeenCalledTimes(3)
 
-    // Every review since the launch belongs to a sibling: the secondary runs again.
+    // Accounting for sibling reviews alone does not retry unchanged input.
     arrangeCli(false, false, { reviewerReviewIdsSince: [91, 92] })
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(3)
+    // A changed head plus proof that no unclaimed review was posted permits retry.
+    arrangeCli(false, false, { headSha: NEXT_HEAD_SHA, reviewerReviewIdsSince: [91, 92] })
     vi.setSystemTime(new Date(Date.now() + runtime.BEHAVIOR_RETRY_BASE_MS))
     await runtime.runEnabledBehaviorsOnce()
     expect(mocks.spawnDetached).toHaveBeenCalledTimes(4)
     const relaunch = mocks.spawnDetached.mock.calls[3][1] as string[]
     expect(relaunch[relaunch.indexOf('--model') + 1]).toBe('gpt-6-astra-ultra')
-    expect(relaunch).toEqual(expect.arrayContaining(['--expected-head', HEAD_SHA]))
+    expect(relaunch).toEqual(expect.arrayContaining(['--expected-head', NEXT_HEAD_SHA]))
   })
 
   it('recovers a failed review only after GitHub proves no reviewer action', async () => {
@@ -1877,7 +1996,7 @@ describe('behavior launch claims', () => {
       started_at: new Date(Date.parse(launched.requestedAt) + 1_000).toISOString(),
       started_at_precise: new Date(Date.parse(launched.requestedAt) + 1_001).toISOString(),
       status: 'failed',
-      error: 'model unavailable',
+      error: 'model unavailable', model: 'opus-5-xhigh',
       expected_head: launched.expectedHead,
       actor: launched.actor,
       source: launched.source,
@@ -1890,7 +2009,8 @@ describe('behavior launch claims', () => {
     await runtime.runEnabledBehaviorsOnce()
 
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
-    expect(mocks.authStatus).toBe('degraded')
+    expect(mocks.authStatus).toBe('authenticated')
+    expect(mocks.observeAuthFailure).not.toHaveBeenCalled()
     expect(db.hasSeen('review-new-prs', launched.target)).toBe(true)
 
     mocks.authStatus = 'authenticated'
@@ -1943,9 +2063,9 @@ describe('behavior launch claims', () => {
     runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
     await runtime.runEnabledBehaviorsOnce()
 
-    expect(db.hasSeen('approve-prs', launched.target)).toBe(false)
+    expect(db.hasSeen('approve-prs', launched.target)).toBe(true)
     expect(mocks.observeAuthFailure).not.toHaveBeenCalled()
-    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
     expect(db.listBehaviorDeadLetters()).toEqual([
       expect.objectContaining({
         behavior: 'approve-prs',
@@ -1994,6 +2114,24 @@ describe('behavior launch claims', () => {
     arrangeCli(behavior === 'approve-prs', false, { headSha: NEXT_HEAD_SHA })
     await modules.behaviors.runEnabledBehaviorsOnce()
     expect(mocks.spawnDetached).toHaveBeenCalledTimes(3)
+  })
+
+  it.each(['review-new-prs', 'approve-prs'] as const)('does not repeat a stopped %s worker even with no-action preflight metadata', async (behavior) => {
+    const launched = behavior === 'review-new-prs' ? await launchReviewBeforeCrash() : await launchApprovalBeforeCrash()
+    agentLogs = [agentLog({
+      id: 'a'.repeat(32), model: 'opus-5-xhigh',
+      behavior: behavior === 'review-new-prs' ? 'pr_review' : 'pr_approve',
+      started_at: new Date(Date.parse(launched.requestedAt) + 1_000).toISOString(),
+      status: 'failed', action: 'not_started', outcome: 'preflight_failed', review_policy: 'bounded-v1', error_code: 'stopped', error: 'stopped by user',
+      expected_head: launched.expectedHead, actor: launched.actor, source: launched.source, correlation_id: launched.correlationId,
+    })]
+    const { database: db, behaviors: runtime } = await restartModules()
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    await runtime.runEnabledBehaviorsOnce()
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(db.getFailedBehaviorLaunch(behavior, launched.target)).not.toBeNull()
+    expect(runtime.getBehaviorsRuntimeHealth().failures).toEqual([])
   })
 
   it('allows an explicit model change after a bounded no-action failure', async () => {
@@ -2064,7 +2202,7 @@ describe('behavior launch claims', () => {
       started_at: new Date(Date.parse(launched.requestedAt) + 1_000).toISOString(),
       started_at_precise: new Date(Date.parse(launched.requestedAt) + 1_001).toISOString(),
       status: 'failed',
-      error: 'legacy preflight timeout',
+      error: 'legacy preflight timeout', model: 'opus-5-xhigh',
       expected_head: launched.expectedHead,
       actor: launched.actor,
       source: launched.source,
@@ -2083,6 +2221,9 @@ describe('behavior launch claims', () => {
     await runtime.runEnabledBehaviorsOnce()
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
 
+    db.setMeta('models', JSON.stringify({ pr_approve: { default: 'gpt-6-astra-ultra', fallback: 'opus-5-xhigh' } }))
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
     arrangeCli(true, false, { reviewerReviewsSince: 0, reviewerPendingReviews: 0 })
     await runtime.runEnabledBehaviorsOnce()
     expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
@@ -2137,7 +2278,7 @@ describe('behavior launch claims', () => {
       launched.target,
     )
     await runtime.runEnabledBehaviorsOnce()
-    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
 
     vi.setSystemTime(new Date(Date.now() + runtime.BEHAVIOR_RETRY_BASE_MS))
     await runtime.runEnabledBehaviorsOnce()
@@ -2716,6 +2857,38 @@ describe('multiple organization behavior isolation', () => {
     await Promise.all([scan, enable, disable])
     expect(runtime.getEnabledMap()['review-new-prs']).toBe(false)
     expect(mocks.spawnDetached).not.toHaveBeenCalled()
+  })
+
+  it('ignores a managed account worker cooldown without losing its failed PR proof', async () => {
+    const { database: db, behaviors: runtime, rows } = await arrangeOrganizations()
+    db.setMeta('behavior_review_new_prs_enabled', '1')
+    db.recordSeen('review-new-prs', '__snapshot_v3__')
+    db.recordSeen('review-new-prs', '__snapshot_v3__:org:beta')
+    db.setMeta('org:beta:behavior_review_new_prs_failure', JSON.stringify({
+      kind: 'worker', consecutiveFailures: 21, lastFailureAtMs: Date.now(), nextRetryAtMs: Date.now() + 3_600_000,
+    }))
+    const target = 'beta/poise-test#17'
+    const claimId = db.claimSeenOwned('review-new-prs', target)!
+    const requestedAt = new Date(Date.now() - 10_000).toISOString()
+    db.markBehaviorLaunchIntentOwned({
+      key: 'review-new-prs', target, claimId, launchBehavior: 'pr_review', repo: 'beta/poise-test', pr: 17,
+      requestedAt, expectedHead: HEAD_SHA, actor: 'review-bot', source: 'poise:review-new-prs', correlationId: claimId,
+    })
+    agentLogs = [agentLog({
+      id: 'c'.repeat(32), repo: 'beta/poise-test', pr_id: '17', model: 'opus-5-xhigh',
+      started_at: new Date(Date.parse(requestedAt) + 1).toISOString(),
+      started_at_precise: new Date(Date.parse(requestedAt) + 1).toISOString(),
+      status: 'failed', error: 'malformed review result', correlation_id: claimId,
+    })]
+    rows.set('beta', [pull('beta', 17), pull('beta', 96)])
+    await runtime.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    expect(mocks.spawnDetached.mock.calls[0][1]).toContain('#96')
+    expect(db.getFailedBehaviorLaunch('review-new-prs', target)).toMatchObject({
+      launchCallId: 'c'.repeat(32), launchCorrelationId: claimId, launchExpectedHead: HEAD_SHA,
+    })
+    expect(runtime.getBehaviorsRuntimeHealth().failures).toEqual([])
+    expect(db.listBehaviorDeadLetters()).toEqual([expect.objectContaining({ target, repo: 'beta/poise-test' })])
   })
 
   it('reports the latest resolve event across ready accounts while retaining scoped diagnostics', async () => {
