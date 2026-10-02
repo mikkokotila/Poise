@@ -1871,8 +1871,10 @@ describe('behavior launch claims', () => {
     const { database: db, behaviors: runtime } = await restartModules()
     runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
     await runtime.runEnabledBehaviorsOnce()
-    expect(db.listBehaviorLaunchClaims('review-new-prs').find((claim) => claim.target === launched.target)?.launchError)
-      .toContain('agent log row quarantined')
+    expect(db.listBehaviorLaunchClaims('review-new-prs').find((claim) => claim.target === launched.target)).toMatchObject({
+      launchQuarantine: 'invalid_result',
+      launchError: 'completed agent evidence conflicts with another record for the same launch',
+    })
     expect(db.listBehaviorDeadLetters()).toEqual([expect.objectContaining({ target: launched.target })])
     expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
   })
@@ -3407,6 +3409,99 @@ describe('durable behavior quarantine', () => {
     await launched.behaviors.runEnabledBehaviorsOnce()
     expect(launched.database.listBehaviorLaunchClaims('review-new-prs')[0].launchQuarantine).toBe('unreadable')
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+  })
+
+  it.each((['review-new-prs', 'approve-prs'] as const).flatMap((behavior) =>
+    (['active', 'closed'] as const).flatMap((state) =>
+      (['call-id', 'correlation', 'quarantined-call-id'] as const).map((identity) => [behavior, state, identity] as const))))(
+    'retains contradictory completed evidence for an unreadable %s %s launch sharing %s after rotation', async (behavior, state, identity) => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      const launched = behavior === 'review-new-prs' ? await launchReviewBeforeCrash() : await launchApprovalBeforeCrash()
+      const failed = agentLog({ behavior: behavior === 'review-new-prs' ? 'pr_review' : 'pr_approve',
+        actor: launched.actor, source: launched.source, correlation_id: launched.correlationId,
+        status: 'failed', error: 'provider exited without action' })
+      if (state === 'closed') {
+        agentLogs = [failed]
+        await launched.behaviors.runEnabledBehaviorsOnce()
+      }
+      const original = mocks.runFile.getMockImplementation()!
+      mocks.runFile.mockImplementation(async (command: string, args: string[], options?: { cwd?: string }) => {
+        if (command === 'agent-interface' && args[0] === '--logs') throw new Error('temporary feed outage')
+        return original(command, args, options)
+      })
+      await launched.behaviors.runEnabledBehaviorsOnce()
+      mocks.runFile.mockImplementation(original)
+      const completed = { ...failed, id: identity === 'correlation' ? 'e'.repeat(32) : failed.id, status: 'completed', error: '',
+        action: behavior === 'review-new-prs' ? 'reviewed_clean' : 'approved',
+        outcome: behavior === 'review-new-prs' ? 'clean' : 'approved',
+        head_sha: HEAD_SHA, completed_at: new Date().toISOString() }
+      const duplicate = identity === 'quarantined-call-id' ? { ...failed, status: 'running', actor: 42 } : failed
+      agentLogs = behavior === 'review-new-prs' ? [duplicate, completed] : [completed, duplicate]
+      await launched.behaviors.runEnabledBehaviorsOnce()
+      const held = state === 'closed' ? launched.database.getFailedBehaviorLaunch(behavior, launched.target)
+        : launched.database.listBehaviorLaunchClaims(behavior)[0]
+      expect(held?.launchQuarantine).toBe('invalid_result')
+      agentLogs = [failed]
+      vi.setSystemTime(Date.now() + 60_000)
+      const loaded = await restartModules()
+      loaded.behaviors.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+      await loaded.behaviors.runEnabledBehaviorsOnce()
+      expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+      expect(loaded.database.listBehaviorDeadLetters()).toHaveLength(1)
+    },
+  )
+
+  it.each((['review-new-prs', 'approve-prs'] as const).flatMap((behavior) =>
+    (['id', 'correlation'] as const).map((field) => [behavior, field] as const)))('retains a sole completed %s record contradicting its linked %s', async (behavior, field) => {
+    const launched = behavior === 'review-new-prs' ? await launchReviewBeforeCrash() : await launchApprovalBeforeCrash()
+    const call = agentLog({ behavior: behavior === 'review-new-prs' ? 'pr_review' : 'pr_approve',
+      actor: launched.actor, source: launched.source, correlation_id: launched.correlationId, status: 'running' })
+    agentLogs = [call]
+    await launched.behaviors.runEnabledBehaviorsOnce()
+    const original = mocks.runFile.getMockImplementation()!
+    mocks.runFile.mockImplementation(async (command: string, args: string[], options?: { cwd?: string }) => {
+      if (command === 'agent-interface' && args[0] === '--logs') throw new Error('temporary feed outage')
+      return original(command, args, options)
+    })
+    await launched.behaviors.runEnabledBehaviorsOnce()
+    mocks.runFile.mockImplementation(original)
+    agentLogs = [{ ...call, status: 'completed', error: '', completed_at: new Date().toISOString(), head_sha: HEAD_SHA,
+      action: behavior === 'review-new-prs' ? 'reviewed_clean' : 'approved', outcome: behavior === 'review-new-prs' ? 'clean' : 'approved',
+      ...(field === 'id' ? { id: 'e'.repeat(32) } : { correlation_id: 'different-correlation' }),
+    }]
+    await launched.behaviors.runEnabledBehaviorsOnce()
+    expect(launched.database.listBehaviorLaunchClaims(behavior)[0]).toMatchObject({ launchCallId: call.id, launchQuarantine: 'invalid_result' })
+    agentLogs = [{ ...call, status: 'failed', error: 'provider exited without action' }]
+    await launched.behaviors.runEnabledBehaviorsOnce()
+    expect(launched.database.listBehaviorLaunchClaims(behavior)[0].launchQuarantine).toBe('invalid_result')
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+  })
+
+  it.each(['actor', 'source', 'expected-head', 'start', 'head'] as const)('retains a closed unreadable PR launch when completed evidence has the wrong %s', async (field) => {
+    const launched = await launchReviewBeforeCrash()
+    const failed = agentLog({ actor: launched.actor, source: launched.source, correlation_id: launched.correlationId,
+      status: 'failed', error: 'provider exited without action' })
+    agentLogs = [failed]
+    await launched.behaviors.runEnabledBehaviorsOnce()
+    const original = mocks.runFile.getMockImplementation()!
+    mocks.runFile.mockImplementation(async (command: string, args: string[], options?: { cwd?: string }) => {
+      if (command === 'agent-interface' && args[0] === '--logs') throw new Error('temporary feed outage')
+      return original(command, args, options)
+    })
+    await launched.behaviors.runEnabledBehaviorsOnce()
+    mocks.runFile.mockImplementation(original)
+    const completed = { ...failed, status: 'completed', error: '', action: 'reviewed_clean', outcome: 'clean',
+      head_sha: HEAD_SHA, completed_at: new Date().toISOString(),
+      ...(field === 'actor' ? { actor: 'another-bot' } : {}),
+      ...(field === 'source' ? { source: 'poise:another-source' } : {}),
+      ...(field === 'expected-head' ? { expected_head: NEXT_HEAD_SHA } : {}),
+      ...(field === 'start' ? { started_at: '2020-01-01T00:00:00Z', started_at_precise: '2020-01-01T00:00:00Z' } : {}),
+      ...(field === 'head' ? { head_sha: NEXT_HEAD_SHA } : {}),
+    }
+    agentLogs = [completed]
+    await launched.behaviors.runEnabledBehaviorsOnce()
+    expect(launched.database.getFailedBehaviorLaunch('review-new-prs', launched.target)?.launchQuarantine).toBe('invalid_result')
+    expect(launched.database.listBehaviorDeadLetters()).toHaveLength(1)
   })
 
   it.each(['review-new-prs', 'approve-prs'] as const)('keeps %s held after corrupt row rotation and restart', async (behavior) => {

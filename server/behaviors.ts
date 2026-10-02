@@ -818,19 +818,53 @@ function restoreReadableFailedClaim(claim: BehaviorLaunchClaim, call: LogEntry |
   })()
 }
 
-function clearCompletedUnreadableHold(claim: BehaviorLaunchClaim): void {
+function clearCompletedUnreadableHold(claim: BehaviorLaunchClaim, call: LogEntry, snapshot: AgentLogSnapshot): boolean {
+  if (claim.launchQuarantine === 'invalid_result') return false
+  const actions = claim.launchBehavior === 'issue_review'
+    ? new Map([['commented', 'commented']])
+    : claim.launchBehavior === 'pr_review'
+      ? new Map([['reviewed_clean', 'clean'], ['requested_changes', 'changes_requested']])
+      : new Map([['approved', 'approved'], ['requested_changes', 'changes_requested']])
+  if (!unambiguousAgentCall(snapshot, call)
+    || call.id !== claim.launchCallId
+    || call.behavior !== claim.launchBehavior
+    || call.repo !== claim.launchRepo
+    || String(call.pr_id || '') !== String(claim.launchPr)
+    || String(call.actor || '').toLowerCase() !== claim.launchActor.toLowerCase()
+    || call.source !== claim.launchSource
+    || call.correlation_id !== claim.launchCorrelationId
+    || (call.expected_head || '') !== claim.launchExpectedHead
+    || !Number.isFinite(Date.parse(claim.launchRequestedAt))
+    || !Number.isFinite(Date.parse(agentCallStartedAt(call)))
+    || Date.parse(agentCallStartedAt(call)) < Date.parse(claim.launchRequestedAt)
+    || call.status.toLowerCase() !== 'completed'
+    || actions.get(call.action || '') !== call.outcome
+    || !Number.isFinite(Date.parse(call.completed_at || ''))
+    || (claim.launchBehavior !== 'issue_review' && call.head_sha !== claim.launchExpectedHead)) {
+    quarantineFailedClaim(claim, 'invalid_result',
+      'completed agent evidence is ambiguous or contradicts the persisted launch contract',
+      quarantineEvidence(snapshot, claim, call).hasLiveEvidence)
+    return false
+  }
   db.prepare(`
     UPDATE behavior_seen SET launch_quarantine = NULL
     WHERE key = ? AND target = ? AND claim_id = '' AND launch_quarantine = 'unreadable'
       AND launch_call_id = ? AND launch_correlation_id = ? AND launch_requested_at = ?
   `).run(claim.key, claim.target, claim.launchCallId, claim.launchCorrelationId, claim.launchRequestedAt)
+  return true
 }
 
 function failedBehaviorLaunches(behavior: string): BehaviorLaunchClaim[] {
   const rows = db.prepare(`
-    SELECT target FROM behavior_seen
+    SELECT target FROM behavior_seen AS launch
     WHERE key = ? AND claim_id = '' AND launch_call_id IS NOT NULL
       AND launch_requested_at IS NOT NULL AND launch_error IS NOT NULL AND launch_outcome IS NULL
+      AND (launch_quarantine IS NOT NULL OR EXISTS (
+        SELECT 1 FROM behavior_dead_letters AS incident
+        WHERE incident.behavior = launch.key AND incident.target = launch.target
+          AND incident.correlation_id = launch.launch_correlation_id AND incident.retired_at IS NULL
+          AND (incident.call_id IS NULL OR incident.call_id = launch.launch_call_id)
+      ))
   `).all(behavior) as Array<{ target: string }>
   return rows.map(({ target }) => getFailedBehaviorLaunch(behavior, target))
     .filter((claim): claim is BehaviorLaunchClaim => claim !== null && organizationOwns(claim.launchRepo))
@@ -883,10 +917,15 @@ async function reconcileBehaviorLaunchClaims(
     ? new Map([['reviewed_clean', 'clean'], ['requested_changes', 'changes_requested']])
     : new Map([['approved', 'approved'], ['requested_changes', 'changes_requested']])
   for (const letter of deadLetters) {
-    const call = logs.find((row) => row.id.toLowerCase() === letter.callId)
+    const call = logs.find((row) => row.status.toLowerCase() === 'completed'
+      && (row.id.toLowerCase() === letter.callId || (!!letter.correlationId && row.correlation_id === letter.correlationId)))
+      ?? logs.find((row) => row.id.toLowerCase() === letter.callId)
     const failed = getFailedBehaviorLaunch(letter.behavior, letter.target)
     if (failed?.launchCallId === letter.callId && failed.launchCorrelationId === letter.correlationId
       && quarantineFailedLog(snapshot, failed, call)) continue
+    if (call?.status.toLowerCase() === 'completed' && failed?.launchCallId === letter.callId
+      && failed.launchCorrelationId === letter.correlationId
+      && !clearCompletedUnreadableHold(failed, call, snapshot)) continue
     const completedAt = String(call?.completed_at || '')
     const action = String(call?.action || '')
     const outcome = String(call?.outcome || '')
@@ -901,7 +940,6 @@ async function reconcileBehaviorLaunchClaims(
       && expectedActions.get(action) === outcome
       && SHA_PATTERN.test(String(call.head_sha || '').toLowerCase())
       && Number.isFinite(Date.parse(completedAt))) {
-      if (failed?.launchCallId === call.id) clearCompletedUnreadableHold(failed)
       if (retireBehaviorDeadLetter(letter.id)) {
         clearBehaviorFailure(behavior, letter.target)
         recoveredDeadLetter = true
@@ -942,6 +980,19 @@ async function reconcileBehaviorLaunchClaims(
     const quarantine = logQuarantine(snapshot, {
       ...claimLogIdentity(claim), id: claim.launchCallId ?? observed?.id ?? null,
     }, observed !== undefined)
+    const ambiguousCompletion = claim.launchQuarantine === 'unreadable'
+      ? logs.find((row) => row.status.toLowerCase() === 'completed'
+        && (row.correlation_id === claim.launchCorrelationId || row.id === claim.launchCallId)
+        && (!unambiguousAgentCall(snapshot, row)
+          || (!!claim.launchCallId && row.id !== claim.launchCallId)
+          || row.correlation_id !== claim.launchCorrelationId))
+      : undefined
+    if (ambiguousCompletion) {
+      quarantineClaim(claim, 'invalid_result',
+        'completed agent evidence conflicts with another record for the same launch',
+        claim.launchCallId ?? ambiguousCompletion.id, quarantineEvidence(snapshot, claim, ambiguousCompletion).mayRun)
+      continue
+    }
     if (quarantine) {
       const evidence = quarantineEvidence(snapshot, claim, observed)
       quarantineClaim(claim, evidence.terminal ? 'invalid_result' : 'unreadable',
@@ -3175,16 +3226,20 @@ async function reconcileIssueReviewClaims(): Promise<void> {
   // A dead letter whose exact call finished after all was a false alarm.
   let recoveredDeadLetter = false
   for (const letter of deadLetters) {
-    const call = logs.find((row) => row.id === letter.callId)
+    const call = logs.find((row) => row.status.toLowerCase() === 'completed'
+      && (row.id === letter.callId || (!!letter.correlationId && row.correlation_id === letter.correlationId)))
+      ?? logs.find((row) => row.id === letter.callId)
     const failed = getFailedBehaviorLaunch(letter.behavior, letter.target)
     if (failed?.launchCallId === letter.callId && failed.launchCorrelationId === letter.correlationId
       && quarantineFailedLog(snapshot, failed, call)) continue
+    if (call?.status.toLowerCase() === 'completed' && failed?.launchCallId === letter.callId
+      && failed.launchCorrelationId === letter.correlationId
+      && !clearCompletedUnreadableHold(failed, call, snapshot)) continue
     if (commented(call)
       && !logQuarantine(snapshot, { id: call!.id, correlationId: call!.correlation_id }, true)
       && call!.repo === letter.repo
       && String(call!.pr_id || '') === String(letter.pr)
       && call!.correlation_id === letter.correlationId) {
-      if (failed?.launchCallId === call!.id) clearCompletedUnreadableHold(failed)
       if (retireBehaviorDeadLetter(letter.id)) {
         clearBehaviorFailure(ISSUES_KEY, letter.target)
         recoveredDeadLetter = true
@@ -3221,6 +3276,19 @@ async function reconcileIssueReviewClaims(): Promise<void> {
     const quarantine = logQuarantine(snapshot, {
       ...claimLogIdentity(claim), id: claim.launchCallId ?? observed?.id ?? null,
     }, observed !== undefined)
+    const ambiguousCompletion = claim.launchQuarantine === 'unreadable'
+      ? logs.find((row) => row.status.toLowerCase() === 'completed'
+        && (row.correlation_id === claim.launchCorrelationId || row.id === claim.launchCallId)
+        && (!unambiguousAgentCall(snapshot, row)
+          || (!!claim.launchCallId && row.id !== claim.launchCallId)
+          || row.correlation_id !== claim.launchCorrelationId))
+      : undefined
+    if (ambiguousCompletion) {
+      quarantineClaim(claim, 'invalid_result',
+        'completed agent evidence conflicts with another record for the same launch',
+        claim.launchCallId ?? ambiguousCompletion.id, quarantineEvidence(snapshot, claim, ambiguousCompletion).mayRun)
+      continue
+    }
     if (quarantine) {
       const evidence = quarantineEvidence(snapshot, claim, observed)
       quarantineClaim(claim, evidence.terminal ? 'invalid_result' : 'unreadable',
