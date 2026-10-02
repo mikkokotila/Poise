@@ -314,7 +314,19 @@ describe('global behavior settings API', () => {
     behaviorLogs = [healthy, { ...healthy, repo: 'elsewhere/repo', outcome: null }]
     const scoped = await (await fetch(`${base}/api/agent-logs?org=Legacy`)).json()
     expect(scoped.logs).toEqual([])
-    expect(scoped.quarantined).toMatchObject([{ id: healthy.id, repo: 'elsewhere/repo' }])
+    expect(scoped.quarantined).toMatchObject([{
+      id: healthy.id, repo: 'elsewhere/repo', correlationId: 'healthy-review',
+      error: expect.stringContaining('incomplete terminal outcome'),
+    }])
+    // A duplicate correlation has the same ambiguity even with a different
+    // call ID and an apparently unrelated reported organization.
+    behaviorLogs = [healthy, { ...healthy, id: '3'.repeat(32), repo: 'elsewhere/repo', outcome: null }]
+    const conflictingCorrelation = await (await fetch(`${base}/api/agent-logs?org=Legacy`)).json()
+    expect(conflictingCorrelation.logs).toEqual([])
+    expect(conflictingCorrelation.quarantined).toMatchObject([{
+      id: '3'.repeat(32), repo: 'elsewhere/repo', correlationId: 'healthy-review',
+      error: expect.stringContaining('incomplete terminal outcome'),
+    }])
   })
 
   it('shows latest behavior activity across configured accounts', async () => {

@@ -68,12 +68,13 @@ describe('behavior database lifecycle', () => {
     expect(getMeta('github_token')).toBeNull()
     expect(getMeta('schema_secure_delete_rebuild_v1')).toBe('complete')
     expect(db.prepare(`
-      SELECT claim_id, lease_until, launch_error FROM behavior_seen
+      SELECT claim_id, lease_until, launch_error, launch_quarantine FROM behavior_seen
       WHERE key = 'review-new-prs' AND target = 'owner/repo#9@legacy'
     `).get()).toEqual({
       claim_id: '',
       lease_until: null,
       launch_error: 'legacy in-flight claim retained to prevent duplicate launch',
+      launch_quarantine: null,
     })
     expect(db.pragma('secure_delete', { simple: true })).toBe(1)
     expect((await stat(path)).mode & 0o777).toBe(0o600)
@@ -338,6 +339,50 @@ describe('behavior database lifecycle', () => {
     expect(db.prepare(`
       SELECT count(*) FROM behavior_dead_letters WHERE retired_at IS NOT NULL
     `).pluck().get()).toBe(1)
+  })
+
+  it('persists quarantine occupancy independently of the invalid result and never loses running uncertainty', async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'poise-db-test-'))
+    const path = join(tempRoot, 'cache.db')
+    let store = await loadIsolatedDb(path)
+    const target = 'Vaquum/Origo#500'
+    const claimId = store.claimSeenOwned('review-new-issues', target)!
+    store.markBehaviorLaunchIntentOwned({
+      key: 'review-new-issues', target, claimId, launchBehavior: 'issue_review',
+      repo: 'Vaquum/Origo', pr: 500, requestedAt: new Date().toISOString(),
+      expectedHead: '', actor: 'bit-mis', source: 'poise:review-new-issues', correlationId: claimId,
+    })
+    store.quarantineBehaviorLaunchOwned('review-new-issues', target, claimId, 'invalid_result', 'bad terminal outcome', false)
+    expect(store.listBehaviorLaunchClaims('review-new-issues')[0].launchQuarantineMayRun).toBe(false)
+    store.quarantineBehaviorLaunchOwned('review-new-issues', target, claimId, 'unreadable', 'conflicting running row', true)
+    store.quarantineBehaviorLaunchOwned('review-new-issues', target, claimId, 'invalid_result', 'rewritten terminal row', false)
+    store.closeDatabase()
+    store = await loadIsolatedDb(path)
+    expect(store.listBehaviorLaunchClaims('review-new-issues')[0]).toMatchObject({
+      launchQuarantine: 'invalid_result', launchQuarantineMayRun: true, launchError: 'bad terminal outcome',
+    })
+  })
+
+  it.each(['invalid_result', 'unreadable'] as const)('keeps a closed parent incident visible while %s evidence still holds its children', async (kind) => {
+    tempRoot = await mkdtemp(join(tmpdir(), 'poise-db-test-'))
+    const store = await loadIsolatedDb(join(tempRoot, 'cache.db'))
+    const target = 'Vaquum/Origo#500'
+    const claimId = store.claimSeenOwned('review-new-issues', target)!
+    store.markBehaviorLaunchIntentOwned({
+      key: 'review-new-issues', target, claimId, launchBehavior: 'issue_review',
+      repo: 'Vaquum/Origo', pr: 500, requestedAt: new Date().toISOString(),
+      expectedHead: '', actor: 'bit-mis', source: 'poise:review-new-issues',
+      correlationId: claimId, covers: ['Vaquum/Origo#501'],
+    })
+    store.quarantineBehaviorLaunchOwned('review-new-issues', target, claimId, kind, 'uncertain comments')
+    store.recordBehaviorDeadLetter(store.listBehaviorLaunchClaims('review-new-issues')[0], 'uncertain comments')
+    expect(store.retireBehaviorDeadLettersForClosedPrs(new Set(['Vaquum/Origo#501']), ['review-new-issues'])).toBe(0)
+    expect(store.listBehaviorIncidents()).toMatchObject([{ target, error: 'uncertain comments' }])
+    const completed = store.completeIssueReviewLaunchOwned({
+      key: 'review-new-issues', target, claimId, completedAt: new Date().toISOString(),
+    })
+    expect(completed).toBe(kind === 'unreadable')
+    if (completed) expect(store.retireBehaviorDeadLettersForClosedPrs(new Set(), ['review-new-issues'])).toBe(1)
   })
 
   // An issue review's dead letter names an issue. A pull-request scan lists

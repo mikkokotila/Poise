@@ -21,7 +21,7 @@ import { join, resolve, isAbsolute, sep } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { chmod, lstat, mkdir, open, writeFile, readdir, rename, rmdir, stat, unlink } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
-import { fetchAgentLogs, type LogEntry } from './agent'
+import { fetchAgentLogs, fetchAgentLogSnapshot, scopedAgentLogs, type LogEntry } from './agent'
 import { db } from './db'
 import { readDoc, slugFromEditorSession } from './editor'
 import { HttpError } from './http'
@@ -372,8 +372,12 @@ export function mergeAuthorContentJobState(row: ChatLogEntry): ChatLogEntry {
 
 export async function listChatHistory(sessionId: string): Promise<ChatLogEntry[]> {
   if (!sessionId) return []
-  const all = await fetchAgentLogs({ identity: { sessionId } })
-  // The proxy's fetchAgentLogs already returns newest-first; flip back
+  const snapshot = await fetchAgentLogSnapshot()
+  // A review row has no session ID. Scope both transcript behaviors so its
+  // missing session cannot make unrelated review corruption block every chat.
+  scopedAgentLogs(snapshot, { sessionId, behavior: 'chat' })
+  const all = scopedAgentLogs(snapshot, { sessionId, behavior: 'author_content' })
+  // The snapshot already returns newest-first; flip back
   // for chat (oldest-first reads top-to-bottom like a transcript).
   // We include both `chat` and `author_content` behaviors — author_content
   // calls now carry session_id (agent-interface --author-content

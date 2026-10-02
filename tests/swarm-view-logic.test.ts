@@ -18,6 +18,7 @@ type Helpers = {
   hasDetail: (e: any) => boolean
   progressText: (e: any) => string
   progressDetail: (e: any) => string
+  quarantineRecordMarkup: (e: any) => string
 }
 
 async function loadHelpers(): Promise<Helpers> {
@@ -26,7 +27,7 @@ async function loadHelpers(): Promise<Helpers> {
   // otherwise only reachable through a DOM input event.
   const patched = source + `
 export const __test = {
-  sessionLabel, targetText, matchesSearch, startedAtMs, elapsedText, hasDetail, progressText, progressDetail,
+  sessionLabel, targetText, matchesSearch, startedAtMs, elapsedText, hasDetail, progressText, progressDetail, quarantineRecordMarkup,
   setSearch: (q: string) => { searchQuery = q },
 }
 `
@@ -198,5 +199,45 @@ describe('progress reports observations without inventing model activity', () =>
     expect(helpers.progressText(row)).toContain('Progress incomplete')
     expect(helpers.progressDetail(row)).toContain('Stage deadline passed; awaiting worker outcome')
     expect(row.status).toBe('running')
+  })
+})
+
+
+describe('unreadable records remain diagnostics rather than actionable runs', () => {
+  const unreadable = {
+    index: 2, error: 'incomplete terminal outcome', id: 'b'.repeat(32),
+    correlationId: 'claim-2', repo: 'owner/repo', prId: '42', behavior: 'pr_review', sessionId: null,
+  }
+
+  it('shows the reported target, call and rejection reason without implying an outcome or activity', () => {
+    const markup = helpers.quarantineRecordMarkup(unreadable)
+    expect(markup).toContain('Reported target: owner/repo#42')
+    expect(markup).toContain('Call: ' + unreadable.id)
+    expect(markup).toContain('Correlation: claim-2')
+    expect(markup).toContain('Behavior: pr_review')
+    expect(markup).toContain('incomplete terminal outcome')
+    expect(markup).not.toMatch(/<button|agent-status-icon|elapsed-cell|started-cell|agent-row/)
+  })
+
+  it('keeps an unidentified record visible without inventing a target or call', () => {
+    const markup = helpers.quarantineRecordMarkup({
+      index: 0, error: 'log row is not an object', id: null, correlationId: null,
+      repo: null, prId: null, behavior: null, sessionId: null,
+    })
+    expect(markup).toContain('Target unknown')
+    expect(markup).toContain('Call: unknown')
+    expect(markup).toContain('Log index: 0')
+    expect(markup).toContain('log row is not an object')
+  })
+
+  it('preserves full session identity and escapes every reported field', () => {
+    const markup = helpers.quarantineRecordMarkup({
+      ...unreadable, repo: null, prId: null, sessionId: 'content-session-123',
+      behavior: '<img src=x onerror=alert(1)>', error: '<script>bad</script>',
+    })
+    expect(markup).toContain('Reported session: content-session-123')
+    expect(markup).toContain('&lt;script&gt;bad&lt;/script&gt;')
+    expect(markup).toContain('&lt;img')
+    expect(markup).not.toMatch(/<script|<img/)
   })
 })

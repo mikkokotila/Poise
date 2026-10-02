@@ -96,6 +96,9 @@ function parseReceipts(value: unknown): IssueCommentReceipt[] | null {
 }
 
 export interface QuarantinedAgentLog {
+  // A readable lifecycle hint can retain running capacity; it never proves
+  // the rejected result's action or outcome.
+  status?: string | null
   index: number
   error: string
   id: string | null
@@ -115,6 +118,7 @@ export type AgentLogIdentity = Partial<Pick<QuarantinedAgentLog,
   'id' | 'correlationId' | 'repo' | 'prId' | 'behavior' | 'sessionId'>>
 
 const LOG_CALL_ID = /^[0-9a-f]{32}$/
+const LOG_STATUS = /^(?:pending|queued|running|in_progress|completed|superseded|invalid|failed|error|cancelled|canceled|timed_out|timeout)$/
 const LOG_PR_ID = /^[1-9][0-9]*$/
 const LOG_REPO = /^[^/\s]+(?:\/[^/\s]+)?$/
 const LOG_CORRELATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
@@ -131,6 +135,7 @@ function quarantineLogEntry(value: unknown, index: number, error: unknown): Quar
   }
   return {
     index,
+    status: text('status', LOG_STATUS, true),
     error: error instanceof Error ? error.message : String(error),
     id: text('id', LOG_CALL_ID, true),
     correlationId: text('correlation_id', LOG_CORRELATION_ID),

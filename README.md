@@ -51,12 +51,12 @@ environment allowlist, an isolated Anthropic profile store, and one merged
 settings overlay that neutralizes provider credentials and credential helpers.
 Immediately before each model process, it requires Claude Code to report the
 Claude.ai first-party provider. This keeps Poise-owned calls from silently
-switching to Console/API credentials. One failed worker attempt also opens a
-durable per-behavior circuit breaker, and Poise disables Claude Code's built-in
-request retry loop, so neither layer can repeat provider calls during an outage.
+switching to Console/API credentials. Independent authentication checks control
+provider readiness; ordinary worker errors do not change that shared state or
+trigger extra probes. Poise disables Claude Code's built-in request retry loop.
 
 Verification uses local status polling once per minute plus one minimal Haiku
-request at startup, after sign-in or a failed worker, every six hours while
+request at startup, after sign-in, every six hours while
 healthy, and immediately before a scheduled agent launch when the last canary
 is at least one minute old. Concurrent launch gates share the fresh result.
 These probes consume Pro/Max usage. Anthropic can bill account-level [Usage
@@ -64,10 +64,12 @@ Credits](https://support.claude.com/en/articles/12429409-manage-usage-credits-fo
 after included limits; disable them under Claude account Settings > Usage if you
 need a hard spending cap. Poise can isolate provider credentials, but it cannot
 change that account-level billing control. Transient probe failures back off for
-up to one hour; expired tokens fail closed until sign-in succeeds. Failed
-behavior scans and workers also back off exponentially for up to one hour,
-survive restarts, and keep `/api/health` degraded until a clean scan or worker
-success confirms recovery.
+up to one hour; expired tokens fail closed until sign-in succeeds. Worker retry
+delays apply only to the failed target and reviewer. Retryable failures require
+proof that no action was posted; bounded failures remain held on unchanged input.
+Target and repository checks keep their own retry delays and diagnostics; a missing
+checkout or inaccessible repository does not mark the scheduler unhealthy. Shared
+scan or log-feed failures remain visible until a successful read confirms recovery.
 
 ## Development
 
@@ -170,9 +172,13 @@ retry delay. A reviewer that needs unavailable provider authentication waits
 without holding the other providers in its panel. Ordinary worker errors do
 not change shared authentication state; provider sign-in checks own that state.
 Unreadable worker log rows are quarantined by their available identity. Healthy
-results still reconcile; uncertain launches retain ownership until their evidence
-is readable, preventing duplicate reviews or content publication. Swarm shows
-remaining valid rows with a quarantine warning.
+results still reconcile. Attributable invalid results remain held across log
+rotation, rewritten logs, restarts, and model or commit changes. Unidentified
+evidence holds unresolved launches until trustworthy matching completion is available.
+Issue holds preserve their original child coverage; confirmed terminal holds do not
+consume worker slots. Uncertain live workers still count toward the concurrency limit.
+Swarm identifies unreadable targets and their errors alongside valid live runs, and
+persistent incidents keep holds visible after the source logs disappear.
 
 ## Review New Issues
 

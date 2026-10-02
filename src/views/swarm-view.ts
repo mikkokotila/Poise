@@ -45,6 +45,19 @@ interface LogEntry {
   error_code?: string | null   // 'stopped' when a person stopped the run
 }
 
+// These identities are independently readable fields from rejected records,
+// not validated runs. Keep their diagnostics outside the actionable run table.
+interface QuarantinedLog {
+  index: number
+  error: string
+  id: string | null
+  correlationId: string | null
+  repo: string | null
+  prId: string | null
+  behavior: string | null
+  sessionId: string | null
+}
+
 // When a run started, as an exact instant. `started_at_precise` carries a UTC
 // offset; `started_at` is naive local, which is ambiguous for the hour that
 // repeats when the clock goes back and wrong for the hour that does not exist
@@ -104,6 +117,7 @@ let bodyEl: HTMLElement
 let searchEl: HTMLInputElement | null = null
 let initialized = false
 let entries: LogEntry[] = []
+let quarantined: QuarantinedLog[] = []
 let searchQuery = ''
 let searchDebounce: ReturnType<typeof setTimeout> | null = null
 // Tick listener — installed on view init, removed on view leave.
@@ -127,6 +141,30 @@ function escapeHtml(s: string): string {
   ))
 }
 
+
+function quarantineRecordMarkup(row: QuarantinedLog): string {
+  const target = row.repo || row.prId
+    ? `Reported target: ${row.repo || 'unknown repository'}${row.prId ? `#${row.prId}` : ''}`
+    : row.sessionId ? `Reported session: ${row.sessionId}` : 'Target unknown'
+  const identity = [
+    `Call: ${row.id || 'unknown'}`,
+    row.correlationId ? `Correlation: ${row.correlationId}` : '',
+    row.behavior ? `Behavior: ${row.behavior}` : '',
+    row.sessionId && (row.repo || row.prId) ? `Session: ${row.sessionId}` : '',
+    `Log index: ${row.index}`,
+  ].filter(Boolean).join(' · ')
+  return `<div role="listitem" class="swarm-quarantine-record"><p class="st-help"><strong>${escapeHtml(target)}</strong></p>`
+    + `<pre class="agent-response-error">${escapeHtml(row.error)}</pre>`
+    + `<p class="st-help">${escapeHtml(identity)}</p></div>`
+}
+
+function renderQuarantine(): void {
+  const el = viewEl.querySelector<HTMLElement>('#swarm-quarantine')!
+  el.hidden = quarantined.length === 0
+  patchContent(el, quarantined.length === 0 ? ''
+    : '<p class="st-help">Unreadable worker records. Reported identity may be incomplete or conflicting; outcomes are unverified.</p>'
+      + `<div role="list">${quarantined.map(quarantineRecordMarkup).join('')}</div>`)
+}
 
 // Status is one coloured icon. The status and outcome used to be two uppercase
 // pills ("FAILED PREFLIGHT", "COMPLETED CHANGES") that never fit the column and
@@ -478,6 +516,8 @@ function renderShell() {
       </div>
     </header>
     <main>
+      <p id="swarm-stale" class="st-help st-help-error" role="status" hidden></p>
+      <section id="swarm-quarantine" aria-label="Unreadable worker records" hidden></section>
       <table id="swarm-table">
         <thead>
           <tr>
@@ -495,7 +535,6 @@ function renderShell() {
         </thead>
         <tbody id="swarm-tbody"></tbody>
       </table>
-      <p id="swarm-stale" class="st-help st-help-error" role="status" hidden></p>
       <p id="swarm-empty" hidden>No agent calls.</p>
       <div id="swarm-loader" class="loader" hidden><span></span><span></span><span></span></div>
     </main>
@@ -643,13 +682,14 @@ function render() {
   // a fetch, a parse and a full table rebuild every minute, on the main thread,
   // while the person was typing in another view.
   if (!viewEl || viewEl.hidden) return
+  renderQuarantine()
   const list = visible()
   const empty = viewEl.querySelector<HTMLElement>('#swarm-empty')!
   const table = viewEl.querySelector<HTMLElement>('#swarm-table')!
   const countEl = viewEl.querySelector<HTMLElement>('#swarm-count')!
   if (entries.length === 0) {
     table.hidden = true
-    empty.textContent = 'No agent calls.'
+    empty.textContent = quarantined.length > 0 ? 'No readable agent calls.' : 'No agent calls.'
     empty.hidden = false
     countEl.textContent = ''
     bodyEl.innerHTML = ''
@@ -945,7 +985,7 @@ function pollOnce(): Promise<void> {
       if (mine !== pollSequence || org !== getSelectedOrganization()) return
       entries = (data.logs || []) as LogEntry[]
       lastLoadError = null
-      quarantinedCount = Array.isArray(data.quarantined) ? data.quarantined.length : 0
+      quarantined = Array.isArray(data.quarantined) ? data.quarantined : []
       lastLoadedAt = Date.now()
       render()
       for (const entry of entries) {
@@ -978,7 +1018,6 @@ function pollOnce(): Promise<void> {
 // seconds, so a dead runtime read as a live one — statuses stuck on 'running',
 // no new runs, and nothing to suggest looking elsewhere. Unreadable rows are
 // now isolated, with a warning alongside the remaining live results.
-let quarantinedCount = 0
 let lastLoadError: string | null = null
 let lastLoadedAt = 0
 
@@ -986,12 +1025,12 @@ function renderStaleBanner(): void {
   if (!viewEl) return
   const el = viewEl.querySelector<HTMLElement>('#swarm-stale')
   if (!el) return
-  if (!lastLoadError && quarantinedCount > 0) {
-    el.textContent = `${quarantinedCount} unreadable worker log row(s) isolated. Other runs continue updating.`
+  if (!lastLoadError && quarantined.length > 0) {
+    el.textContent = `${quarantined.length} unreadable worker log row(s) isolated. Other runs continue updating.`
     el.hidden = false
     return
   }
-  if (!lastLoadError || entries.length === 0) {
+  if (!lastLoadError || (entries.length === 0 && quarantined.length === 0)) {
     el.hidden = true
     el.textContent = ''
     return
@@ -1060,8 +1099,12 @@ export async function initSwarmView() {
     attachClicks()
     window.addEventListener('poise:organization-filter-changed', () => {
       entries = []
+      quarantined = []
+      lastLoadError = null
+      lastLoadedAt = 0
       expanded.clear()
       render()
+      renderStaleBanner()
       if (!viewEl.hidden) void pollOnce()
     })
   }

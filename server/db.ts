@@ -74,6 +74,8 @@ db.exec(`
     launch_requested_at TEXT,
     launch_call_id TEXT,
     launch_error TEXT,
+    launch_quarantine TEXT,
+    launch_quarantine_may_run INTEGER NOT NULL DEFAULT 1,
     launch_outcome TEXT,
     launch_completed_at TEXT,
     launch_head_sha TEXT,
@@ -198,6 +200,8 @@ const migrateSchema = db.transaction(() => {
   ensureColumn('behavior_seen', 'launch_requested_at', 'launch_requested_at TEXT')
   ensureColumn('behavior_seen', 'launch_call_id', 'launch_call_id TEXT')
   ensureColumn('behavior_seen', 'launch_error', 'launch_error TEXT')
+  ensureColumn('behavior_seen', 'launch_quarantine', 'launch_quarantine TEXT')
+  ensureColumn('behavior_seen', 'launch_quarantine_may_run', 'launch_quarantine_may_run INTEGER NOT NULL DEFAULT 1')
   ensureColumn('behavior_seen', 'launch_outcome', 'launch_outcome TEXT')
   ensureColumn('behavior_seen', 'launch_completed_at', 'launch_completed_at TEXT')
   ensureColumn('behavior_seen', 'launch_head_sha', 'launch_head_sha TEXT')
@@ -373,6 +377,8 @@ export interface BehaviorLaunchClaim {
   launchRequestedAt: string
   launchCallId: string | null
   launchError: string | null
+  launchQuarantine: 'invalid_result' | 'unreadable' | null
+  launchQuarantineMayRun: boolean
   // A pull-request launch pins the head it reviews; an issue review has none
   // and stores the empty string.
   launchExpectedHead: string
@@ -431,6 +437,8 @@ export function claimSeenOwnedAs(
        launch_requested_at = NULL,
        launch_call_id = NULL,
        launch_error = NULL,
+       launch_quarantine = NULL,
+       launch_quarantine_may_run = 1,
        launch_outcome = NULL,
        launch_completed_at = NULL,
        launch_head_sha = NULL,
@@ -516,7 +524,8 @@ export function markBehaviorLaunchIntentOwned(input: {
   const info = db.prepare(`
     UPDATE behavior_seen
     SET launch_behavior = ?, launch_repo = ?, launch_pr = ?,
-        launch_requested_at = ?, launch_call_id = NULL, launch_error = NULL,
+        launch_requested_at = ?, launch_call_id = NULL, launch_error = NULL, launch_quarantine = NULL,
+        launch_quarantine_may_run = 1,
         launch_outcome = NULL, launch_completed_at = NULL, launch_head_sha = NULL,
         launch_expected_head = ?, launch_actor = ?, launch_source = ?,
         launch_correlation_id = ?, launch_action = NULL, launch_covers = ?,
@@ -543,7 +552,7 @@ export function markBehaviorLaunchIntentOwned(input: {
 export function listBehaviorLaunchClaims(key: string): BehaviorLaunchClaim[] {
   const rows = db.prepare(`
     SELECT key, target, seen_at, claim_id, lease_until, launch_behavior,
-           launch_repo, launch_pr, launch_requested_at, launch_call_id, launch_error,
+           launch_repo, launch_pr, launch_requested_at, launch_call_id, launch_error, launch_quarantine, launch_quarantine_may_run,
            launch_expected_head, launch_actor, launch_source, launch_correlation_id,
            launch_covers
     FROM behavior_seen
@@ -561,6 +570,8 @@ export function listBehaviorLaunchClaims(key: string): BehaviorLaunchClaim[] {
     launch_requested_at: string
     launch_call_id: string | null
     launch_error: string | null
+    launch_quarantine: BehaviorLaunchClaim['launchQuarantine']
+    launch_quarantine_may_run: number
     launch_expected_head: string
     launch_actor: string
     launch_source: string
@@ -579,6 +590,8 @@ export function listBehaviorLaunchClaims(key: string): BehaviorLaunchClaim[] {
     launchRequestedAt: row.launch_requested_at,
     launchCallId: row.launch_call_id,
     launchError: row.launch_error,
+    launchQuarantine: row.launch_quarantine,
+    launchQuarantineMayRun: row.launch_quarantine_may_run !== 0,
     launchExpectedHead: row.launch_expected_head,
     launchActor: row.launch_actor,
     launchSource: row.launch_source,
@@ -593,7 +606,7 @@ export function getFailedBehaviorLaunch(
 ): BehaviorLaunchClaim | null {
   const row = db.prepare(`
     SELECT key, target, seen_at, claim_id, lease_until, launch_behavior,
-           launch_repo, launch_pr, launch_requested_at, launch_call_id, launch_error,
+           launch_repo, launch_pr, launch_requested_at, launch_call_id, launch_error, launch_quarantine, launch_quarantine_may_run,
            launch_expected_head, launch_actor, launch_source, launch_correlation_id,
            launch_covers
     FROM behavior_seen
@@ -614,6 +627,8 @@ export function getFailedBehaviorLaunch(
     launch_requested_at: string
     launch_call_id: string
     launch_error: string
+    launch_quarantine: BehaviorLaunchClaim['launchQuarantine']
+    launch_quarantine_may_run: number
     launch_expected_head: string
     launch_actor: string
     launch_source: string
@@ -632,6 +647,8 @@ export function getFailedBehaviorLaunch(
     launchRequestedAt: row.launch_requested_at,
     launchCallId: row.launch_call_id,
     launchError: row.launch_error,
+    launchQuarantine: row.launch_quarantine,
+    launchQuarantineMayRun: row.launch_quarantine_may_run !== 0,
     launchExpectedHead: row.launch_expected_head,
     launchActor: row.launch_actor,
     launchSource: row.launch_source,
@@ -665,10 +682,32 @@ export function linkBehaviorLaunchCallOwned(
   const normalizedCallId = callId.toLowerCase()
   const info = db.prepare(`
     UPDATE behavior_seen
-    SET launch_call_id = ?, launch_error = NULL
+    SET launch_call_id = ?,
+        launch_error = CASE WHEN launch_quarantine = 'invalid_result' THEN launch_error ELSE NULL END
     WHERE key = ? AND target = ? AND claim_id = ? AND claim_id <> ''
       AND (launch_call_id IS NULL OR launch_call_id = ?)
   `).run(normalizedCallId, key, target, claimId, normalizedCallId)
+  return info.changes === 1
+}
+
+// Quarantine is evidence, separate from the current diagnostic message. A
+// stronger invalid-result hold cannot be weakened by a later unreadable feed.
+export function quarantineBehaviorLaunchOwned(
+  key: string,
+  target: string,
+  claimId: string,
+  kind: 'invalid_result' | 'unreadable',
+  error: string,
+  mayRun = true,
+): boolean {
+  const info = db.prepare(`
+    UPDATE behavior_seen
+    SET launch_quarantine_may_run = CASE WHEN launch_quarantine IS NULL THEN ? ELSE MAX(launch_quarantine_may_run, ?) END,
+        launch_quarantine = CASE WHEN launch_quarantine = 'invalid_result' THEN launch_quarantine ELSE ? END,
+        launch_error = CASE WHEN launch_quarantine = 'invalid_result' THEN launch_error ELSE ? END
+    WHERE key = ? AND target = ? AND claim_id = ? AND claim_id <> ''
+      AND launch_requested_at IS NOT NULL
+  `).run(Number(mayRun), Number(mayRun), kind, error.slice(0, 4_000), key, target, claimId)
   return info.changes === 1
 }
 
@@ -680,7 +719,7 @@ export function setBehaviorLaunchErrorOwned(
 ): boolean {
   const info = db.prepare(`
     UPDATE behavior_seen
-    SET launch_error = ?
+    SET launch_error = CASE WHEN launch_quarantine = 'invalid_result' THEN launch_error ELSE ? END
     WHERE key = ? AND target = ? AND claim_id = ? AND claim_id <> ''
   `).run(error ? error.slice(0, 4_000) : null, key, target, claimId)
   return info.changes === 1
@@ -770,11 +809,11 @@ export function completeBehaviorLaunchOwned(input: {
   return db.transaction(() => {
     const info = db.prepare(`
       UPDATE behavior_seen
-      SET claim_id = '', lease_until = NULL, seen_at = ?, launch_error = NULL,
+      SET claim_id = '', lease_until = NULL, seen_at = ?, launch_error = NULL, launch_quarantine = NULL,
           launch_outcome = ?, launch_completed_at = ?, launch_head_sha = ?,
           launch_action = ?
       WHERE key = ? AND target = ? AND claim_id = ? AND claim_id <> ''
-        AND launch_expected_head = ?
+        AND launch_expected_head = ? AND COALESCE(launch_quarantine, '') <> 'invalid_result'
     `).run(
       new Date().toISOString(),
       input.outcome,
@@ -803,11 +842,11 @@ export function completeIssueReviewLaunchOwned(input: {
   }
   const info = db.prepare(`
     UPDATE behavior_seen
-    SET claim_id = '', lease_until = NULL, seen_at = ?, launch_error = NULL,
+    SET claim_id = '', lease_until = NULL, seen_at = ?, launch_error = NULL, launch_quarantine = NULL,
         launch_outcome = 'commented', launch_completed_at = ?, launch_head_sha = NULL,
         launch_action = 'commented'
     WHERE key = ? AND target = ? AND claim_id = ? AND claim_id <> ''
-      AND launch_behavior = 'issue_review'
+      AND launch_behavior = 'issue_review' AND COALESCE(launch_quarantine, '') <> 'invalid_result'
   `).run(new Date().toISOString(), input.completedAt, input.key, input.target, input.claimId)
   return info.changes === 1
 }
@@ -916,8 +955,13 @@ export function retireBehaviorDeadLettersForClosedPrs(
 ): number {
   const rows = (db.prepare(`
     SELECT id, behavior, repo, pr
-    FROM behavior_dead_letters
+    FROM behavior_dead_letters AS dead
     WHERE retired_at IS NULL AND repo IS NOT NULL AND pr IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM behavior_seen AS held
+        WHERE held.key = dead.behavior AND held.target = dead.target
+          AND held.launch_quarantine IS NOT NULL
+      )
   `).all() as Array<{ id: string, behavior: string, repo: string, pr: number }>)
     .filter((row) => behaviors.includes(row.behavior)
       && !unreadRepositories?.has(row.repo)
@@ -962,6 +1006,12 @@ function readBehaviorDeadLetters(limit: number, grouped: boolean, organization?:
         -- Each issue reviewer is its own launch: another reviewer of the same
         -- issue finishing does not settle this one's incident.
         AND (dead.behavior <> 'review-new-issues' OR recovered.target = dead.target)
+        -- A completed sibling does not resolve durable uncertain evidence.
+        AND NOT EXISTS (
+          SELECT 1 FROM behavior_seen AS held
+          WHERE held.key = dead.behavior AND held.target = dead.target
+            AND held.launch_quarantine IS NOT NULL
+        )
     )
     ), ranked AS (
       SELECT *,

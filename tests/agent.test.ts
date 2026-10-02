@@ -165,6 +165,7 @@ describe('agent log quarantine', () => {
     expect(snapshot.entries.map((row) => row.id)).toEqual(['c'.repeat(32), 'a'.repeat(32)])
     expect(snapshot.quarantined).toEqual([{
       index: 1,
+      status: 'completed',
       error: 'agent-interface log row 1 has invalid actor',
       id: 'b'.repeat(32),
       correlationId: 'claim-1',
@@ -175,6 +176,18 @@ describe('agent log quarantine', () => {
     }])
     expect(mocks.runFile).toHaveBeenCalledWith('agent-interface', ['--logs'], expect.objectContaining({ signal: controller.signal }))
     await expect(fetchAgentLogs()).rejects.toThrow(/log row 1 has invalid actor/)
+  })
+
+  it('retains recognized lifecycle hints without inventing terminal state for unreadable rows', async () => {
+    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([
+      logRow({ actor: 42, status: 'RUNNING' }),
+      logRow({ actor: 42, status: 'completed' }),
+      logRow({ actor: 42, status: 'unexpected' }),
+      logRow({ actor: 42, status: 42 }),
+    ]), stderr: '' })
+    const snapshot = await fetchAgentLogSnapshot()
+    expect(snapshot.entries).toEqual([])
+    expect(snapshot.quarantined.map((row) => row.status)).toEqual(['running', 'completed', null, null])
   })
 
   it('validates routing independently and keeps completely unreadable rows conservative', async () => {

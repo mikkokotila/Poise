@@ -535,22 +535,64 @@ test('shows live activity, preserves its expansion, and loads the final response
   expect(requests).toBe(leftAt)
 })
 
-test('keeps healthy Swarm rows live while reporting an isolated unreadable row', async ({ page }) => {
+test('keeps healthy Swarm rows live while identifying unreadable records', async ({ page }) => {
   const logs = [{ id: 'a'.repeat(32), model: 'astra', behavior: 'pr_review', repo: 'o/r', pr_id: '1',
     status: 'running', started_at: new Date().toISOString(), response: '', error: '' }]
   await page.route('**/api/agent-logs', (route) => route.fulfill({ json: {
-    logs, quarantined: [{ index: 1, error: 'invalid terminal outcome' }],
+    logs, quarantined: [
+      { index: 1, error: 'invalid terminal outcome', id: 'b'.repeat(32),
+        repo: 'o/r', prId: '2', correlationId: 'claim-2', behavior: 'pr_review', sessionId: null },
+      { index: 2, error: 'log row is not an object', id: null,
+        repo: null, prId: null, correlationId: null, behavior: null, sessionId: null },
+    ],
   } }))
   await page.clock.install()
   await page.goto('/')
   await page.getByRole('button', { name: 'Swarm', exact: true }).click()
   await expect(page.locator('.agent-row')).toHaveCount(1)
-  await expect(page.locator('#swarm-stale')).toContainText('1 unreadable worker log row(s) isolated')
+  await expect(page.locator('#swarm-stale')).toContainText('2 unreadable worker log row(s) isolated')
+  const diagnostics = page.getByRole('region', { name: 'Unreadable worker records' })
+  await expect(diagnostics.locator('.swarm-quarantine-record')).toHaveCount(2)
+  await expect(diagnostics).toContainText('Reported target: o/r#2')
+  await expect(diagnostics).toContainText('Call: ' + 'b'.repeat(32))
+  await expect(diagnostics).toContainText('Correlation: claim-2')
+  await expect(diagnostics).toContainText('invalid terminal outcome')
+  await expect(diagnostics).toContainText('Target unknown')
+  await expect(diagnostics).toContainText('log row is not an object')
+  await expect(diagnostics.locator('button, .agent-status-icon, .started-cell, .elapsed-cell')).toHaveCount(0)
   logs[0].status = 'failed'
   logs[0].error = 'task-local failure'
   await page.clock.fastForward(15_001)
   await expect(page.locator('.agent-row .agent-status-icon')).toHaveAttribute('title', 'Failed')
   await expect(page.locator('#swarm-stale')).toContainText('Other runs continue updating')
+})
+
+test('shows conflicting identity diagnostics when no validated Swarm row remains, then clears recovered evidence', async ({ page }) => {
+  const id = 'c'.repeat(32)
+  let unreadable = true
+  await page.route('**/api/agent-logs', (route) => route.fulfill({ json: unreadable
+    ? { logs: [], quarantined: [{ index: 1, error: 'incomplete terminal outcome', id,
+        repo: 'elsewhere/repo', prId: '1', correlationId: 'claim-1', behavior: 'pr_review', sessionId: null }] }
+    : { logs: [{ id, model: 'astra', behavior: 'pr_review', repo: 'o/r', pr_id: '1',
+        status: 'completed', outcome: 'clean', started_at: new Date().toISOString(),
+        completed_at: new Date().toISOString(), response: '', error: '' }], quarantined: [] },
+  }))
+  await page.clock.install()
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Swarm', exact: true }).click()
+  const diagnostics = page.getByRole('region', { name: 'Unreadable worker records' })
+  await expect(page.locator('.agent-row')).toHaveCount(0)
+  await expect(page.locator('#swarm-empty')).toHaveText('No readable agent calls.')
+  await expect(diagnostics).toContainText('Reported target: elsewhere/repo#1')
+  await expect(diagnostics).toContainText('Call: ' + id)
+  await expect(diagnostics).toContainText('incomplete terminal outcome')
+  await expect(diagnostics.locator('button, .agent-status-icon, .started-cell, .elapsed-cell')).toHaveCount(0)
+  unreadable = false
+  await page.evaluate(() => window.dispatchEvent(new Event('poise:refresh-tick')))
+  await expect(page.locator('.agent-row')).toHaveCount(1)
+  await expect(page.locator('#swarm-quarantine')).toBeHidden()
+  await expect(page.locator('#swarm-quarantine')).toHaveText('')
+  await expect(page.locator('#swarm-stale')).toBeHidden()
 })
 
 test('shows missing worker heartbeat, refreshes failures, and stops polling when hidden', async ({ page }) => {

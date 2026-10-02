@@ -4,9 +4,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CATALOG_STDOUT } from './model-catalog-fixture'
+import type { QuarantinedAgentLog } from '../server/agent'
 
 const mocks = vi.hoisted(() => ({
   fetchAgentLogs: vi.fn(),
+  quarantined: [] as QuarantinedAgentLog[],
   runFile: vi.fn(),
   spawnDetached: vi.fn(),
   authStatus: 'authenticated',
@@ -15,7 +17,12 @@ const mocks = vi.hoisted(() => ({
   observeAuthFailure: vi.fn(),
 }))
 
-vi.mock('../server/agent', () => ({ fetchAgentLogs: mocks.fetchAgentLogs, fetchAgentResponse: vi.fn() }))
+vi.mock('../server/agent', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../server/agent')>(),
+  fetchAgentLogs: mocks.fetchAgentLogs,
+  fetchAgentLogSnapshot: async () => ({ entries: await mocks.fetchAgentLogs(), quarantined: mocks.quarantined }),
+  fetchAgentResponse: vi.fn(),
+}))
 vi.mock('../server/process', () => ({
   MAX_PROCESS_ARG_BYTES: 64 * 1024,
   runFile: mocks.runFile,
@@ -47,6 +54,7 @@ beforeEach(async () => {
   process.env.AGENT_INTERFACE_ROOT = join(root, 'agent-interface')
   process.env.TMPDIR = join(root, 'tmp')
   mocks.fetchAgentLogs.mockReset().mockResolvedValue([])
+  mocks.quarantined = []
   mocks.catalogStdout = CATALOG_STDOUT
   mocks.runFile.mockReset().mockImplementation(async (command: string, args: string[]) => {
     if (command === 'agent-interface' && args[0] === '--models') return { stdout: mocks.catalogStdout, stderr: '' }
@@ -82,6 +90,46 @@ function worktreeName(session: string): string {
 }
 
 describe('chat runtime hardening', () => {
+  it('keeps chat history available when unrelated review logs are malformed', async () => {
+    const chat = await import('../server/chat')
+    database = await import('../server/db')
+    mocks.fetchAgentLogs.mockResolvedValue([{
+      id: 'a'.repeat(32), behavior: 'chat', session_id: 'session',
+      prompt: 'hello', status: 'completed',
+    }])
+    mocks.quarantined = ['pr_review', 'issue_review'].map((behavior, index) => ({
+      index, error: 'invalid review result', id: null, correlationId: null,
+      repo: 'owner/repo', prId: '12', behavior, sessionId: null,
+    }))
+
+    await expect(chat.listChatHistory('session')).resolves.toMatchObject([{ prompt: 'hello' }])
+    expect(mocks.fetchAgentLogs).toHaveBeenCalledOnce()
+  })
+
+  it.each(['chat', 'author_content', null])('holds chat history for potentially matching %s corruption', async (behavior) => {
+    const chat = await import('../server/chat')
+    database = await import('../server/db')
+    mocks.quarantined = [{
+      index: 0, error: 'invalid transcript result', id: null, correlationId: null,
+      repo: null, prId: null, behavior, sessionId: null,
+    }]
+    await expect(chat.listChatHistory('session')).rejects.toThrow('invalid transcript result')
+  })
+
+  it('rejects conflicting call identities even when malformed review routing contradicts the transcript', async () => {
+    const chat = await import('../server/chat')
+    database = await import('../server/db')
+    mocks.fetchAgentLogs.mockResolvedValue([{
+      id: 'a'.repeat(32), behavior: 'chat', session_id: 'session',
+      prompt: 'hello', status: 'completed',
+    }])
+    mocks.quarantined = [{
+      index: 0, error: 'duplicate corrupt result', id: 'a'.repeat(32), correlationId: null,
+      repo: 'owner/repo', prId: '12', behavior: 'pr_review', sessionId: null,
+    }]
+    await expect(chat.listChatHistory('session')).rejects.toThrow('duplicate corrupt result')
+  })
+
   it('gates Claude models without blocking the others, and falls back off Claude when it is signed out', async () => {
     const chat = await import('../server/chat')
     database = await import('../server/db')
