@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { link, lstat, mkdir, open, readdir, unlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { fetchAgentLogs, fetchAgentResponse } from './agent'
+import { fetchAgentLogs, fetchAgentLogSnapshot, scopedAgentLogs, fetchAgentResponse } from './agent'
 import {
   authorContentStatus,
   contentSlugForCallId,
@@ -19,6 +19,7 @@ import {
   getMeta,
 } from './db'
 import { claudeAuth } from './claude-auth'
+import { isClaudeModel, loadCatalog } from './models'
 import { HttpError } from './http'
 import { withProcessLock } from './process-lock'
 
@@ -50,6 +51,7 @@ interface ContentLaunchRow {
   requested_at: string
   registration_deadline_at: number
   recovery_eligible: number
+  evidence_unreadable: number
   status: 'pending' | 'linked' | 'failed'
   call_id: string | null
   error: string | null
@@ -103,7 +105,7 @@ export interface ContentLaunchPending {
 }
 
 export interface ContentFinalizerDependencies {
-  listCalls(): Promise<Array<{
+  listCalls(identity?: { sessionId: string, behavior: string }): Promise<Array<{
     id: string
     behavior?: string | null
     session_id?: string | null
@@ -376,7 +378,7 @@ export async function createContentArticleOnce(slug: string, content: string): P
 }
 
 const defaultDependencies: ContentFinalizerDependencies = {
-  listCalls: fetchAgentLogs,
+  listCalls: (identity) => fetchAgentLogs({ identity }),
   inspectCall: authorContentStatus,
   async readResponse(callId: string): Promise<string> {
     return (await fetchAgentResponse(callId)).body
@@ -624,6 +626,7 @@ function expirePendingLaunches(now: number, sessionId?: string): number {
         UPDATE content_launches
         SET status = 'failed', error = ?, updated_at = ?
         WHERE status = 'pending'
+          AND evidence_unreadable = 0
           AND registration_deadline_at <= ?
           AND session_id = ?
       `).run(REGISTRATION_DEADLINE_ERROR, updatedAt, now, sessionId)
@@ -631,6 +634,7 @@ function expirePendingLaunches(now: number, sessionId?: string): number {
         UPDATE content_launches
         SET status = 'failed', error = ?, updated_at = ?
         WHERE status = 'pending'
+          AND evidence_unreadable = 0
           AND registration_deadline_at <= ?
       `).run(REGISTRATION_DEADLINE_ERROR, updatedAt, now)
   return result.changes
@@ -643,7 +647,8 @@ function persistLaunchIntent(sessionId: string, topic: string): ContentLaunchRow
   expirePendingLaunches(nowMs, sessionId)
   const existing = db.prepare(`
     SELECT * FROM content_launches
-    WHERE session_id = ? AND status = 'pending'
+    WHERE session_id = ? AND (status = 'pending'
+      OR (call_id IS NULL AND recovery_eligible = 1 AND evidence_unreadable = 1))
     LIMIT 1
   `).get(sessionId) as ContentLaunchRow | undefined
   if (existing) throw new ContentLaunchPendingError(sessionId)
@@ -687,12 +692,12 @@ function markLaunchAttempted(launchId: string): void {
   if (updated.changes !== 1) throw new Error('author-content launch intent is no longer pending')
 }
 
-function updatePendingLaunchError(launchId: string, error: string): void {
+function updatePendingLaunchError(launchId: string, error: string, evidenceUnreadable = false): void {
   db.prepare(`
     UPDATE content_launches
-    SET error = ?, updated_at = ?
+    SET error = ?, updated_at = ?, evidence_unreadable = MAX(evidence_unreadable, ?)
     WHERE launch_id = ? AND status = 'pending'
-  `).run(error.slice(0, 4_000), new Date().toISOString(), launchId)
+  `).run(error.slice(0, 4_000), new Date().toISOString(), Number(evidenceUnreadable), launchId)
 }
 
 function failPendingLaunch(launchId: string, error: string): void {
@@ -709,6 +714,13 @@ function invalidateLaunchRecovery(launchId: string, error: string): void {
     SET status = 'failed', recovery_eligible = 0, error = ?, updated_at = ?
     WHERE launch_id = ? AND call_id IS NULL
   `).run(error.slice(0, 4_000), new Date().toISOString(), launchId)
+}
+
+function holdUnreadableLaunch(launchId: string, error: unknown, now: number): void {
+  const message = `author-content log recovery unavailable: ${error instanceof Error ? error.message : String(error)}`
+  db.prepare(`UPDATE content_launches SET error = ?, updated_at = ?, evidence_unreadable = 1
+    WHERE launch_id = ? AND call_id IS NULL`)
+    .run(message.slice(0, 4_000), new Date(now).toISOString(), launchId)
 }
 
 function recordLaunchRecoveryState(
@@ -794,7 +806,10 @@ export async function launchAndEnqueueContentJob(
   if (!normalizedSessionId) throw new HttpError(400, 'session is required')
   // Tests and recovery tools can inject a non-agent launcher. Production's
   // default path and the launcher itself are both guarded.
-  if (launch === startAuthorContent) await claudeAuth.requireReady()
+  if (launch === startAuthorContent) {
+    const catalog = await loadCatalog()
+    if (isClaudeModel(catalog, catalog.behaviors.author_content)) await claudeAuth.requireReady()
+  }
 
   return withProcessLock({ path: launchLockPath() }, async () => {
     // Commit intent before spawn so a crash anywhere after this point is
@@ -818,7 +833,7 @@ export async function launchAndEnqueueContentJob(
         // either hit "an author-content launch is already pending" or, after two
         // minutes, started a second one. Report it as what it is — started, not
         // yet identified.
-        updatePendingLaunchError(intent.launch_id, message)
+        updatePendingLaunchError(intent.launch_id, message, error.code === 'AUTHOR_CONTENT_DISCOVERY_UNAVAILABLE')
         wakeContentFinalizer()
         return { launch_id: intent.launch_id, status: 'pending', pending: true }
       }
@@ -891,7 +906,26 @@ export async function recoverPendingContentLaunches(
     }
     if (boundedIntents.length === 0) return 0
 
-    const rows = await listCalls()
+    // One shared read bounds recovery latency; apply identity guards in memory.
+    let snapshot: Awaited<ReturnType<typeof fetchAgentLogSnapshot>> | null = null
+    if (listCalls === defaultDependencies.listCalls) {
+      try { snapshot = await fetchAgentLogSnapshot() }
+      catch (error) {
+        for (const { intent } of boundedIntents) holdUnreadableLaunch(intent.launch_id, error, now)
+        return 0
+      }
+    }
+    const rows: Awaited<ReturnType<typeof listCalls>> = []
+    const unreadSessions = new Map<string, unknown>()
+    for (const sessionId of new Set(boundedIntents.map(({ intent }) => intent.session_id))) {
+      try {
+        const identity = { sessionId, behavior: 'author_content' }
+        const calls = snapshot ? scopedAgentLogs(snapshot, identity) : await listCalls(identity)
+        rows.push(...calls.filter((row) => row.session_id === sessionId))
+      } catch (error) {
+        unreadSessions.set(sessionId, error)
+      }
+    }
     const linkedCallIds = new Set((db.prepare(`
       SELECT call_id FROM content_launches WHERE call_id IS NOT NULL
     `).all() as Array<{ call_id: string }>).map((row) => row.call_id.toLowerCase()))
@@ -949,6 +983,14 @@ export async function recoverPendingContentLaunches(
 
     let inserted = 0
     for (const { intent } of boundedIntents) {
+      const unread = unreadSessions.get(intent.session_id)
+      if (unreadSessions.has(intent.session_id)) {
+        // Unreadable evidence is not proof of a missing worker. Keep ownership
+        // even after the registration deadline, while other sessions recover.
+        holdUnreadableLaunch(intent.launch_id, unread, now)
+        continue
+      }
+      db.prepare('UPDATE content_launches SET evidence_unreadable = 0 WHERE launch_id = ?').run(intent.launch_id)
       const candidates = matchesByIntent.get(intent.launch_id) || []
       if (candidates.length === 0) {
         if (intent.status === 'pending') {

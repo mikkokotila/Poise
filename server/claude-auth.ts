@@ -152,19 +152,6 @@ function isDefinitiveAuthFailure(error: unknown): boolean {
     || /\bexpired\b[^\n]{0,80}(?:oauth|token|credential)/i.test(text)
 }
 
-function processFailed(resultOrError: unknown): boolean {
-  if (resultOrError instanceof Error) return true
-  if (typeof resultOrError === 'string') return resultOrError.length > 0
-  if (!resultOrError || typeof resultOrError !== 'object') return false
-  const result = resultOrError as Record<string, unknown>
-  if (result.error) return true
-  // A worker killed by a signal — a stop from Swarm — says nothing about the
-  // provider; an auth or provider failure ends in a non-zero exit code.
-  if (result.signal) return false
-  if (typeof result.code === 'number') return result.code !== 0
-  return result.code !== undefined && result.code !== null
-}
-
 export class ClaudeAuthMonitor {
   private readonly run: ClaudeAuthRunFile
   private readonly clock: ClaudeAuthClock
@@ -319,19 +306,10 @@ export class ClaudeAuthMonitor {
     if (current !== 'authenticated') throw new ClaudeAuthReadinessError(current)
   }
 
-  observeProcessFailure(resultOrError: unknown): void {
-    if (this.stopped || !processFailed(resultOrError)) return
-    // The login path always ends with a forced live canary. Let it own the
-    // transition so an older worker cannot invalidate or strand that flow.
-    if (this.loginInProgress) return
-    // Worker failures can include GitHub and other model providers, so their
-    // text is never authoritative for Claude auth. Close the gate now, then
-    // let the isolated Claude canary make the classification.
-    if (this.status !== 'reauth_required' && this.status !== 'unavailable') {
-      this.status = 'degraded'
-    }
-    this.forceLiveRequested = true
-    void this.check({ forceLive: true })
+  observeProcessFailure(_resultOrError: unknown): void {
+    // Worker output can report GitHub, other providers, or task-local failures;
+    // it cannot establish Claude authentication state, even when it says 401.
+    // Only the scheduled auth checks and launch freshness checks own this gate.
   }
 
   private schedulePoll(lifecycle: number): void {

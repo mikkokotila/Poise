@@ -354,14 +354,14 @@ test('reports failures across accounts in global behavior diagnostics', async ({
     datastore: { status: 'healthy', checkedAt: '', ageSeconds: 1, lastSuccessAt: '', error: null },
     identity: { status: 'valid', actor: 'octocat', error: null },
     failures: [
-      { org: 'acme', behavior: 'review-new-prs', kind: 'review', consecutiveFailures: 1, lastFailureAt: '', nextRetryAt: '', error: 'First account error' },
+      { org: 'acme', behavior: 'review-new-prs', target: 'acme/same-repo#7', kind: 'review', consecutiveFailures: 1, lastFailureAt: '', nextRetryAt: '', error: 'First account error' },
       { org: 'mikkokotila', behavior: 'review-new-issues', kind: 'review', consecutiveFailures: 2, lastFailureAt: '', nextRetryAt: '', error: 'Personal account error' },
     ], deadLetters: [],
   }
   await page.goto('/')
   await page.locator('#main-filters').getByLabel('Account filter').selectOption('mikkokotila')
   await page.getByRole('button', { name: 'Behaviors', exact: true }).click()
-  await expect(page.locator('#behavior-diagnostics')).toContainText('acme: review-new-prs: 1 consecutive review failure(s) — First account error')
+  await expect(page.locator('#behavior-diagnostics')).toContainText('acme: review-new-prs acme/same-repo#7: 1 consecutive review failure(s) — First account error')
   await expect(page.locator('#behavior-diagnostics')).toContainText('mikkokotila: review-new-issues: 2 consecutive review failure(s) — Personal account error')
   expect(state.reads.filter((read) => read.path === '/api/behaviors').every((read) => read.org === '')).toBe(true)
 })

@@ -945,6 +945,7 @@ function pollOnce(): Promise<void> {
       if (mine !== pollSequence || org !== getSelectedOrganization()) return
       entries = (data.logs || []) as LogEntry[]
       lastLoadError = null
+      quarantinedCount = Array.isArray(data.quarantined) ? data.quarantined.length : 0
       lastLoadedAt = Date.now()
       render()
       for (const entry of entries) {
@@ -975,8 +976,9 @@ function pollOnce(): Promise<void> {
 // Once Swarm had rows, a failing refresh was invisible: the table froze on the
 // last good snapshot while the Started column kept ticking every thirty
 // seconds, so a dead runtime read as a live one — statuses stuck on 'running',
-// no new runs, and nothing to suggest looking elsewhere. One row that violates
-// the schema is enough, because the server validates the whole batch.
+// no new runs, and nothing to suggest looking elsewhere. Unreadable rows are
+// now isolated, with a warning alongside the remaining live results.
+let quarantinedCount = 0
 let lastLoadError: string | null = null
 let lastLoadedAt = 0
 
@@ -984,6 +986,11 @@ function renderStaleBanner(): void {
   if (!viewEl) return
   const el = viewEl.querySelector<HTMLElement>('#swarm-stale')
   if (!el) return
+  if (!lastLoadError && quarantinedCount > 0) {
+    el.textContent = `${quarantinedCount} unreadable worker log row(s) isolated. Other runs continue updating.`
+    el.hidden = false
+    return
+  }
   if (!lastLoadError || entries.length === 0) {
     el.hidden = true
     el.textContent = ''

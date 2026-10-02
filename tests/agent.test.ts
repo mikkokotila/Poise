@@ -24,7 +24,7 @@ vi.mock('../server/gh', () => ({
   localCheckoutPath: vi.fn(),
 }))
 
-import { fetchAgentLogs, fetchAgentReasoning } from '../server/agent'
+import { fetchAgentLogs, fetchAgentLogSnapshot, fetchAgentReasoning, quarantinedLogMayMatch } from '../server/agent'
 import { CATALOG_STDOUT } from './model-catalog-fixture'
 
 function logRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -146,6 +146,156 @@ describe('agent log compatibility', () => {
       outcome: 'superseded',
       head_sha: 'c'.repeat(40),
     }])
+  })
+})
+
+describe('agent log quarantine', () => {
+  beforeEach(() => mocks.runFile.mockReset())
+
+  it('returns valid rows newest first while retaining malformed row attribution', async () => {
+    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([
+      logRow({ id: 'a'.repeat(32) }),
+      logRow({ id: 'B'.repeat(32), actor: 42, correlation_id: 'claim-1', session_id: 'session-1' }),
+      logRow({ id: 'c'.repeat(32) }),
+    ]), stderr: '' })
+    const controller = new AbortController()
+
+    const snapshot = await fetchAgentLogSnapshot({ signal: controller.signal })
+
+    expect(snapshot.entries.map((row) => row.id)).toEqual(['c'.repeat(32), 'a'.repeat(32)])
+    expect(snapshot.quarantined).toEqual([{
+      index: 1,
+      error: 'agent-interface log row 1 has invalid actor',
+      id: 'b'.repeat(32),
+      correlationId: 'claim-1',
+      repo: 'owner/repo',
+      prId: '12',
+      behavior: 'pr_review',
+      sessionId: 'session-1',
+    }])
+    expect(mocks.runFile).toHaveBeenCalledWith('agent-interface', ['--logs'], expect.objectContaining({ signal: controller.signal }))
+    await expect(fetchAgentLogs()).rejects.toThrow(/log row 1 has invalid actor/)
+  })
+
+  it('validates routing independently and keeps completely unreadable rows conservative', async () => {
+    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([
+      logRow({ id: 'bad-id', correlation_id: 'claim-1', repo: 'bad repo', pr_id: 12, behavior: {}, session_id: [] }),
+      null,
+      ['not a log object'],
+    ]), stderr: '' })
+
+    const snapshot = await fetchAgentLogSnapshot()
+
+    expect(snapshot.entries).toEqual([])
+    expect(snapshot.quarantined[0]).toMatchObject({
+      id: null, correlationId: 'claim-1', repo: null, prId: null, behavior: null, sessionId: null,
+    })
+    for (const row of snapshot.quarantined.slice(1)) {
+      expect(row).toMatchObject({ id: null, correlationId: null, repo: null, prId: null, behavior: null, sessionId: null })
+      expect(quarantinedLogMayMatch(row, { id: 'a'.repeat(32), correlationId: 'claim-2', repo: 'owner/repo', prId: '12', behavior: 'pr_review' })).toBe(true)
+    }
+  })
+
+  it.each([
+    ['empty output', ''],
+    ['invalid JSON', '[broken'],
+    ['non-array JSON', '{}'],
+  ])('rejects an unavailable feed with %s', async (message, stdout) => {
+    mocks.runFile.mockResolvedValue({ stdout, stderr: '' })
+    await expect(fetchAgentLogSnapshot()).rejects.toThrow(message)
+    await expect(fetchAgentLogs()).rejects.toThrow(message)
+  })
+
+  it('isolates unrelated identities but retains duplicate call or correlation identities', async () => {
+    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([
+      logRow({ id: 'a'.repeat(32), correlation_id: 'claim-1', actor: 42, session_id: 'session-1' }),
+    ]), stderr: '' })
+    const { quarantined: [row] } = await fetchAgentLogSnapshot()
+
+    expect(quarantinedLogMayMatch(row, { repo: 'owner/other' })).toBe(false)
+    expect(quarantinedLogMayMatch(row, { prId: '13' })).toBe(false)
+    expect(quarantinedLogMayMatch(row, { behavior: 'issue_review' })).toBe(false)
+    expect(quarantinedLogMayMatch(row, { sessionId: 'session-2' })).toBe(false)
+    expect(quarantinedLogMayMatch(row, { id: 'b'.repeat(32) })).toBe(false)
+    expect(quarantinedLogMayMatch(row, { correlationId: 'claim-2' })).toBe(false)
+    expect(quarantinedLogMayMatch(row, { repo: 'OWNER/REPO', prId: '12' })).toBe(true)
+    expect(quarantinedLogMayMatch(row, { id: 'A'.repeat(32), correlationId: 'claim-2', repo: 'other/repo' })).toBe(true)
+    expect(quarantinedLogMayMatch(row, { id: 'b'.repeat(32), correlationId: 'claim-1', repo: 'other/repo' })).toBe(true)
+  })
+
+  it('allows unrelated quarantine only for an explicitly scoped read', async () => {
+    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([
+      logRow({ id: 'a'.repeat(32), session_id: 'session-1' }),
+      logRow({ id: 'b'.repeat(32), actor: 42, session_id: 'session-2' }),
+    ]), stderr: '' })
+
+    await expect(fetchAgentLogs({ identity: { sessionId: 'session-1' } }))
+      .resolves.toMatchObject([{ id: 'a'.repeat(32) }])
+    await expect(fetchAgentLogs({ identity: { sessionId: 'session-2' } })).rejects.toThrow(/invalid actor/)
+    await expect(fetchAgentLogs()).rejects.toThrow(/invalid actor/)
+  })
+
+  it('allows an exact validated call despite unknown rows but never infers a missing call or complete session', async () => {
+    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([
+      logRow({ id: 'a'.repeat(32), session_id: 'session-1' }),
+      null,
+    ]), stderr: '' })
+
+    await expect(fetchAgentLogs({ identity: { id: 'A'.repeat(32) } }))
+      .resolves.toMatchObject([{ id: 'a'.repeat(32) }])
+    await expect(fetchAgentLogs({ identity: { id: 'b'.repeat(32) } })).rejects.toThrow(/not an object/)
+    await expect(fetchAgentLogs({ identity: { sessionId: 'session-1' } })).rejects.toThrow(/not an object/)
+  })
+
+  it.each(['id', 'correlation'])('rejects an exact call result with a conflicting quarantined %s duplicate', async (duplicate) => {
+    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([
+      logRow({ id: 'a'.repeat(32), correlation_id: 'claim-1' }),
+      logRow({
+        id: duplicate === 'id' ? 'a'.repeat(32) : 'b'.repeat(32),
+        correlation_id: duplicate === 'correlation' ? 'claim-1' : 'claim-2',
+        repo: 'other/repo',
+        actor: 42,
+      }),
+    ]), stderr: '' })
+
+    await expect(fetchAgentLogs({ identity: { id: 'a'.repeat(32), repo: 'owner/repo' } }))
+      .rejects.toThrow(/invalid actor/)
+  })
+
+  it.each(['id', 'correlation'])('rejects a session-scoped result with a quarantined %s duplicate claiming another session', async (duplicate) => {
+    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([
+      logRow({ id: 'a'.repeat(32), correlation_id: 'claim-1', session_id: 'session-1', behavior: 'author_content' }),
+      logRow({
+        id: duplicate === 'id' ? 'a'.repeat(32) : 'b'.repeat(32),
+        correlation_id: duplicate === 'correlation' ? 'claim-1' : 'claim-2',
+        session_id: 'session-2', behavior: 'chat', actor: 42,
+      }),
+    ]), stderr: '' })
+
+    await expect(fetchAgentLogs({ identity: { sessionId: 'session-1', behavior: 'author_content' } }))
+      .rejects.toThrow(/invalid actor/)
+  })
+
+  it.each(['session-2', null])('does not extend a session scope to a valid duplicate with session %s', async (sessionId) => {
+    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([
+      logRow({ id: 'a'.repeat(32), session_id: 'session-1', behavior: 'author_content' }),
+      logRow({ id: 'b'.repeat(32), session_id: sessionId, behavior: 'author_content' }),
+      logRow({ id: 'b'.repeat(32), session_id: 'session-3', behavior: 'author_content', actor: 42 }),
+    ]), stderr: '' })
+
+    const rows = await fetchAgentLogs({ identity: { sessionId: 'session-1', behavior: 'author_content' } })
+
+    expect(rows.map((row) => row.id)).toEqual(['b'.repeat(32), 'a'.repeat(32)])
+  })
+
+  it('does not invent an owner for a legacy unqualified repository', async () => {
+    mocks.runFile.mockResolvedValue({ stdout: JSON.stringify([
+      logRow({ actor: 42, repo: 'legacy-repo' }),
+    ]), stderr: '' })
+    const { quarantined: [row] } = await fetchAgentLogSnapshot()
+
+    expect(quarantinedLogMayMatch(row, { repo: 'owner/legacy-repo' })).toBe(true)
+    expect(quarantinedLogMayMatch(row, { repo: 'owner/another-repo' })).toBe(false)
   })
 })
 

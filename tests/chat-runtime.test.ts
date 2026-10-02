@@ -10,11 +10,12 @@ const mocks = vi.hoisted(() => ({
   runFile: vi.fn(),
   spawnDetached: vi.fn(),
   authStatus: 'authenticated',
+  catalogStdout: '',
   requireAuth: vi.fn(),
   observeAuthFailure: vi.fn(),
 }))
 
-vi.mock('../server/agent', () => ({ fetchAgentLogs: mocks.fetchAgentLogs }))
+vi.mock('../server/agent', () => ({ fetchAgentLogs: mocks.fetchAgentLogs, fetchAgentResponse: vi.fn() }))
 vi.mock('../server/process', () => ({
   MAX_PROCESS_ARG_BYTES: 64 * 1024,
   runFile: mocks.runFile,
@@ -46,8 +47,9 @@ beforeEach(async () => {
   process.env.AGENT_INTERFACE_ROOT = join(root, 'agent-interface')
   process.env.TMPDIR = join(root, 'tmp')
   mocks.fetchAgentLogs.mockReset().mockResolvedValue([])
+  mocks.catalogStdout = CATALOG_STDOUT
   mocks.runFile.mockReset().mockImplementation(async (command: string, args: string[]) => {
-    if (command === 'agent-interface' && args[0] === '--models') return { stdout: CATALOG_STDOUT, stderr: '' }
+    if (command === 'agent-interface' && args[0] === '--models') return { stdout: mocks.catalogStdout, stderr: '' }
     throw new Error(`unexpected CLI call: ${command} ${args.join(' ')}`)
   })
   mocks.spawnDetached.mockReset().mockResolvedValue(undefined)
@@ -126,11 +128,49 @@ describe('chat runtime hardening', () => {
     })
   })
 
+  it('runs a debate with no Claude participants while Claude is signed out', async () => {
+    const catalog = JSON.parse(CATALOG_STDOUT)
+    catalog.behaviors.debate_moderator = 'gpt-6-astra-ultra'
+    catalog.debate_participants = ['gpt-6-astra-ultra', 'grok-4.6-xhigh']
+    mocks.catalogStdout = JSON.stringify(catalog)
+    mocks.authStatus = 'reauth_required'
+    const result = { synthesis: 'Provider comparison', rounds: [] }
+    mocks.runFile.mockImplementation(async (_command, args) => ({
+      stdout: args[0] === '--models'
+        ? mocks.catalogStdout
+        : JSON.stringify({ response: JSON.stringify(result) }),
+      stderr: '',
+    }))
+    const chat = await import('../server/chat')
+    database = await import('../server/db')
+
+    await expect(chat.runDebate('Compare providers')).resolves.toEqual(result)
+
+    expect(mocks.requireAuth).not.toHaveBeenCalled()
+    expect(mocks.runFile).toHaveBeenCalledWith('agent-interface', ['--debate', 'Compare providers', '--rounds', '1'], expect.any(Object))
+  })
+
+  it.each(['moderator', 'participant'])('keeps a debate gated when its %s requires Claude', async (role) => {
+    const catalog = JSON.parse(CATALOG_STDOUT)
+    catalog.behaviors.debate_moderator = role === 'moderator' ? 'opus-5-max' : 'gpt-6-astra-ultra'
+    catalog.debate_participants = role === 'participant' ? ['opus-5-max'] : ['grok-4.6-xhigh']
+    mocks.catalogStdout = JSON.stringify(catalog)
+    mocks.authStatus = 'reauth_required'
+    const chat = await import('../server/chat')
+    database = await import('../server/db')
+
+    await expect(chat.runDebate('Compare providers')).rejects.toThrow(/Claude authentication required/)
+
+    expect(mocks.requireAuth).toHaveBeenCalledOnce()
+    expect(mocks.runFile).toHaveBeenCalledOnce()
+    expect(mocks.runFile.mock.calls[0][1]).toEqual(['--models'])
+  })
+
   it('does not classify another debate provider\'s 401 as Claude auth failure', async () => {
     const failure = new Error('401 invalid API key')
     // The CLI-maintenance preflight reads the catalogue first; fail the debate itself.
     mocks.runFile.mockImplementation(async (_command, args) => {
-      if (args[0] === '--models') return { stdout: CATALOG_STDOUT, stderr: '' }
+      if (args[0] === '--models') return { stdout: mocks.catalogStdout, stderr: '' }
       throw failure
     })
     const chat = await import('../server/chat')
@@ -356,6 +396,50 @@ describe('chat runtime hardening', () => {
       .rejects.toMatchObject({ statusCode: 413 })
     expect(mocks.spawnDetached).not.toHaveBeenCalled()
     expect(mocks.runFile).not.toHaveBeenCalled()
+  })
+
+  it.each(['direct', 'durable'])('launches %s non-Claude content while Claude is signed out', async (path) => {
+    const catalog = JSON.parse(CATALOG_STDOUT)
+    catalog.behaviors.author_content = 'gpt-6-astra-ultra'
+    mocks.catalogStdout = JSON.stringify(catalog)
+    mocks.authStatus = 'reauth_required'
+    const callId = 'a'.repeat(32)
+    mocks.fetchAgentLogs.mockResolvedValueOnce([]).mockResolvedValueOnce([{
+      id: callId,
+      behavior: 'author_content',
+      session_id: 'content-session',
+      prompt: 'Independent article',
+      started_at: new Date().toISOString(),
+    }])
+    const chat = await import('../server/chat')
+    database = await import('../server/db')
+    const jobs = await import('../server/content-jobs')
+
+    const result = path === 'direct'
+      ? chat.startAuthorContent('Independent article', 'content-session')
+      : jobs.launchAndEnqueueContentJob('Independent article', 'content-session')
+    await expect(result).resolves.toMatchObject({ call_id: callId })
+
+    expect(mocks.requireAuth).not.toHaveBeenCalled()
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    if (path === 'durable') expect(jobs.getContentJobResponse(callId)).toMatchObject({ status: 'pending' })
+  })
+
+  it.each(['direct', 'durable'])('keeps %s Claude content gated before launch', async (path) => {
+    mocks.authStatus = 'reauth_required'
+    const chat = await import('../server/chat')
+    database = await import('../server/db')
+    const jobs = await import('../server/content-jobs')
+
+    const result = path === 'direct'
+      ? chat.startAuthorContent('Claude article', 'content-session')
+      : jobs.launchAndEnqueueContentJob('Claude article', 'content-session')
+    await expect(result).rejects.toThrow(/Claude authentication required/)
+
+    expect(mocks.requireAuth).toHaveBeenCalledOnce()
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+    expect(mocks.fetchAgentLogs).not.toHaveBeenCalled()
+    expect(database.db.prepare('SELECT count(*) AS count FROM content_launches').get()).toEqual({ count: 0 })
   })
 
   it('marks a post-spawn log lookup failure as recoverable discovery state', async () => {

@@ -949,7 +949,7 @@ function renderDiagnostics() {
     diagnostics.datastore.error ? `Datastore: ${diagnostics.datastore.error}` : '',
     diagnostics.identity.error ? `Identity: ${diagnostics.identity.error}` : '',
     ...diagnostics.failures.map((failure) =>
-      `${failure.org ? `${failure.org}: ` : ''}${failure.behavior}: ${failure.consecutiveFailures} consecutive ${failure.kind} failure(s)${failure.error ? ` — ${diagnosticCause(failure.error)}` : ''}`),
+      `${failure.org ? `${failure.org}: ` : ''}${failure.behavior}${failure.target ? ` ${failure.target}` : ''}: ${failure.consecutiveFailures} consecutive ${failure.kind} failure(s)${failure.error ? ` — ${diagnosticCause(failure.error)}` : ''}`),
     ...diagnostics.deadLetters.slice(0, DEAD_LETTERS_SHOWN).map((letter) =>
       `${letter.behavior} ${letter.target}: ${diagnosticCause(letter.error)}${(letter.attemptCount ?? 1) > 1 ? ` (${letter.attemptCount} attempts)` : ''}`),
     // A dead letter is a target the behaviour permanently gave up on. Showing

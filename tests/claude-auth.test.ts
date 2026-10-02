@@ -477,55 +477,74 @@ describe('Claude subscription authentication monitor', () => {
     expect(run).toHaveBeenCalledTimes(4)
   })
 
-  it('forces a live canary after a failed worker and never treats a 502 as auth failure', async () => {
+  it.each([
+    ['worker exit', { code: 1, signal: null }],
+    ['generic error', new Error('worker failed')],
+    ['GitHub failure', new Error('gh: HTTP 502 Bad Gateway')],
+    ['GitHub auth failure', new Error('gh: HTTP 401 Bad credentials')],
+    ['other provider auth failure', new Error('401 invalid API key')],
+    ['max turns', 'max turns reached'],
+    ['output budget', { code: 1, error: new Error('max output bytes exceeded') }],
+    ['timeout', new Error('worker timed out')],
+    ['stopped worker', { code: null, signal: 'SIGTERM' }],
+    ['stop error', { code: null, signal: 'SIGTERM', error: new Error('aborted') }],
+    ['unverified expired token', Object.assign(new Error('OAuth token expired'), { code: 1 })],
+  ])('keeps unrelated launches authenticated after %s', async (_label, failure) => {
     const run = validRun()
-    const monitor = new ClaudeAuthMonitor({ runFile: run, clock: new FakeClock() })
+    const clock = new FakeClock()
+    const monitor = new ClaudeAuthMonitor({ runFile: run, clock })
     await monitor.check({ forceLive: true })
-    run.mockReset()
+    const verified = monitor.snapshot()
+    // A worker failure must not create a canary whose transient failure could
+    // close the shared gate while the existing verification is still fresh.
+    run.mockReset().mockRejectedValue(new Error('502 Bad Gateway'))
+
+    monitor.observeProcessFailure(failure)
+
+    expect(monitor.snapshot()).toEqual(verified)
+    await expect(monitor.requireReady({ liveWithinMs: CLAUDE_AUTH_POLL_MS }))
+      .resolves.toBeUndefined()
+    expect(run).not.toHaveBeenCalled()
+  })
+
+  it('still verifies freshness and blocks a real expired Claude credential after a worker failure', async () => {
+    const run = validRun()
+    const clock = new FakeClock()
+    const monitor = new ClaudeAuthMonitor({ runFile: run, clock })
+    await monitor.check({ forceLive: true })
+    monitor.observeProcessFailure(new Error('max turns reached'))
+    clock.advance(CLAUDE_AUTH_POLL_MS)
     run.mockResolvedValueOnce({ stdout: VALID_STATUS, stderr: '' })
-      .mockRejectedValueOnce(new Error('502 Bad Gateway'))
+      .mockRejectedValueOnce(new Error('401 authentication_error: OAuth token expired'))
 
-    monitor.observeProcessFailure({ code: 1, signal: null, error: new Error('worker failed') })
-
-    expect(monitor.snapshot().status).toBe('degraded')
-    await vi.waitFor(() => expect(monitor.snapshot().status).toBe('degraded'))
-    expect(run).toHaveBeenCalledTimes(2)
+    await expect(monitor.requireReady({ liveWithinMs: CLAUDE_AUTH_POLL_MS }))
+      .rejects.toMatchObject({
+        statusCode: 503,
+        code: 'CLAUDE_AUTH_REQUIRED',
+        authStatus: 'reauth_required',
+      })
+    expect(run).toHaveBeenCalledTimes(4)
+    expect(monitor.snapshot().status).toBe('reauth_required')
   })
 
-  it('does not attribute a mixed-provider 401 to Claude', async () => {
-    const live = deferred<{ stdout: string, stderr: string }>()
-    const run = validRun()
-    const monitor = new ClaudeAuthMonitor({ runFile: run, clock: new FakeClock() })
-    await monitor.check({ forceLive: true })
-    run.mockReset()
-      .mockResolvedValueOnce({ stdout: VALID_STATUS, stderr: '' })
-      .mockImplementationOnce(() => live.promise)
-
-    monitor.observeProcessFailure(new Error('401 invalid API key'))
-
-    expect(monitor.snapshot().status).toBe('degraded')
-    live.resolve(OK)
-    await vi.waitFor(() => expect(monitor.snapshot().status).toBe('authenticated'))
-  })
-
-  it('does not let a late generic failure erase a known sign-in requirement', async () => {
-    const retry = deferred<{ stdout: string, stderr: string }>()
-    const loggedOut = {
+  it('does not let a late worker failure erase a verified sign-in requirement', async () => {
+    const run = vi.fn<ClaudeAuthRunFile>().mockResolvedValue({
       stdout: JSON.stringify({ loggedIn: false, authMethod: 'none' }),
       stderr: '',
-    }
-    const run = vi.fn<ClaudeAuthRunFile>()
-      .mockResolvedValueOnce(loggedOut)
-      .mockImplementationOnce(() => retry.promise)
+    })
     const monitor = new ClaudeAuthMonitor({ runFile: run, clock: new FakeClock() })
     await monitor.check()
+    run.mockClear()
 
     monitor.observeProcessFailure({ code: 1, signal: null, error: new Error('late exit') })
-    expect(monitor.snapshot().status).toBe('reauth_required')
 
-    retry.resolve(loggedOut)
-    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2))
     expect(monitor.snapshot().status).toBe('reauth_required')
+    await expect(monitor.requireReady()).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'CLAUDE_AUTH_REQUIRED',
+      authStatus: 'reauth_required',
+    })
+    expect(run).not.toHaveBeenCalled()
   })
 
   it('ignores late worker exits after stop', async () => {
@@ -541,37 +560,5 @@ describe('Claude subscription authentication monitor', () => {
 
     expect(run).not.toHaveBeenCalled()
     expect(monitor.snapshot().status).toBe('unavailable')
-  })
-
-  it('marks definitive worker authentication errors and requireReady fails with a typed 503', async () => {
-    const run = vi.fn<ClaudeAuthRunFile>()
-      .mockResolvedValueOnce({ stdout: VALID_STATUS, stderr: '' })
-      .mockRejectedValueOnce(new Error('401 authentication_error'))
-    const monitor = new ClaudeAuthMonitor({ runFile: run, clock: new FakeClock() })
-
-    monitor.observeProcessFailure(Object.assign(new Error('OAuth token expired'), { code: 1 }))
-    expect(monitor.snapshot().status).toBe('degraded')
-    await vi.waitFor(() => expect(monitor.snapshot().status).toBe('reauth_required'))
-    expect(run).toHaveBeenCalledTimes(2)
-    await expect(monitor.requireReady()).rejects.toMatchObject({
-      statusCode: 503,
-      code: 'CLAUDE_AUTH_REQUIRED',
-      authStatus: 'reauth_required',
-    })
-  })
-
-  it('ignores a worker killed by a signal, which is a stop and not a provider failure', async () => {
-    const run = validRun()
-    const monitor = new ClaudeAuthMonitor({ runFile: run, clock: new FakeClock() })
-    await monitor.check({ forceLive: true })
-    expect(monitor.snapshot().status).toBe('authenticated')
-    run.mockReset()
-
-    monitor.observeProcessFailure({ code: null, signal: 'SIGTERM' })
-    expect(monitor.snapshot().status).toBe('authenticated')
-    expect(run).not.toHaveBeenCalled()
-
-    monitor.observeProcessFailure({ code: 1, signal: null })
-    expect(monitor.snapshot().status).toBe('degraded')
   })
 })

@@ -535,6 +535,24 @@ test('shows live activity, preserves its expansion, and loads the final response
   expect(requests).toBe(leftAt)
 })
 
+test('keeps healthy Swarm rows live while reporting an isolated unreadable row', async ({ page }) => {
+  const logs = [{ id: 'a'.repeat(32), model: 'astra', behavior: 'pr_review', repo: 'o/r', pr_id: '1',
+    status: 'running', started_at: new Date().toISOString(), response: '', error: '' }]
+  await page.route('**/api/agent-logs', (route) => route.fulfill({ json: {
+    logs, quarantined: [{ index: 1, error: 'invalid terminal outcome' }],
+  } }))
+  await page.clock.install()
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Swarm', exact: true }).click()
+  await expect(page.locator('.agent-row')).toHaveCount(1)
+  await expect(page.locator('#swarm-stale')).toContainText('1 unreadable worker log row(s) isolated')
+  logs[0].status = 'failed'
+  logs[0].error = 'task-local failure'
+  await page.clock.fastForward(15_001)
+  await expect(page.locator('.agent-row .agent-status-icon')).toHaveAttribute('title', 'Failed')
+  await expect(page.locator('#swarm-stale')).toContainText('Other runs continue updating')
+})
+
 test('shows missing worker heartbeat, refreshes failures, and stops polling when hidden', async ({ page }) => {
   const now = new Date().toISOString()
   const logs = [

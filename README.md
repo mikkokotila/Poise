@@ -164,6 +164,16 @@ review policy is `bounded-v1`: reviews have a total 23m33s budget. Timeouts and
 failed recovery remain visible and are held across restarts for the same
 input/model; new commits, new approval input, or a model change can be retried.
 
+Worker retry delays are scoped to the failed PR or issue and its reviewer.
+Other targets keep launching, and completed runs keep reconciling during that
+retry delay. A reviewer that needs unavailable provider authentication waits
+without holding the other providers in its panel. Ordinary worker errors do
+not change shared authentication state; provider sign-in checks own that state.
+Unreadable worker log rows are quarantined by their available identity. Healthy
+results still reconcile; uncertain launches retain ownership until their evidence
+is readable, preventing duplicate reviews or content publication. Swarm shows
+remaining valid rows with a quarantine warning.
+
 ## Review New Issues
 
 Behaviors → Review New Issues gives each new issue in the repositories you opt

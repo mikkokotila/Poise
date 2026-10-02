@@ -10,7 +10,7 @@ import { getProductionUpdateHealth } from './production-update'
 import { listCards, createCard, setCardText, setCardRepo, moveCard, removeCard, type Lane } from './current'
 import { handleGhBody, listOrgRepos, listOrganizationsRepos, selectOrganizations, repoBelongsTo, requireConfiguredRepository, setReviewAgentUsername } from './gh'
 import { getOrganizations, addOrganization, retryOrganization, startOrganizationsRuntime, stopOrganizationsRuntime } from './organizations'
-import { fetchAgentLogs, fetchAgentResponse, fetchAgentReasoning, triggerPrReview, replayAgentJob, stopAgentJob } from './agent'
+import { fetchAgentLogs, fetchAgentLogSnapshot, fetchAgentResponse, fetchAgentReasoning, triggerPrReview, replayAgentJob, stopAgentJob } from './agent'
 import { listChatHistory, sendChat, saveAttachment, runDebate } from './chat'
 import { listDocs, readDoc, writeDoc, deleteDoc, newSlug, readAnnotations, writeAnnotations, getOrCreateChatSession, MAX_DOC_BYTES, MAX_ANNOTATIONS_BYTES, EditorConflictError } from './editor'
 import { handleSnippetApi } from './snippet-api'
@@ -324,8 +324,15 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
         if (path === '/api/agent-logs' && req.method === 'GET') {
           try {
             const orgs = selectedOrg ? selectOrganizations(selectedOrg) : null
-            const logs = (await fetchAgentLogs()).filter((entry) => !orgs || (!!entry.repo && orgs.some((org) => repoBelongsTo(entry.repo!, org.login))))
-            return json(res, 200, { logs })
+            const snapshot = await fetchAgentLogSnapshot()
+            const belongs = (repo: string | null) => !orgs || (!!repo && orgs.some((org) => repoBelongsTo(repo, org.login)))
+            const selected = snapshot.entries.filter((entry) => belongs(entry.repo))
+            const quarantined = snapshot.quarantined.filter((row) => !row.repo || belongs(row.repo)
+              || selected.some((entry) => row.id === entry.id
+                || (!!entry.correlation_id && row.correlationId === entry.correlation_id)))
+            const logs = selected.filter((entry) => !snapshot.quarantined.some((row) => row.id === entry.id
+                || (!!entry.correlation_id && row.correlationId === entry.correlation_id)))
+            return json(res, 200, { logs, quarantined })
           } catch (err: any) {
             return json(res, 502, { error: 'agent-interface --logs failed: ' + (err.message || String(err)) })
           }
@@ -352,8 +359,11 @@ export function createPoiseMiddleware(opts: CachePluginOptions = {}): Connect.Ne
           const scratch = getScratchpadMap()
           let logs: Awaited<ReturnType<typeof fetchAgentLogs>> = []
           let agentLogsError: string | null = null
-          try { logs = await fetchAgentLogs() }
-          catch (error) {
+          try {
+            const snapshot = await fetchAgentLogSnapshot()
+            logs = snapshot.entries
+            if (snapshot.quarantined.length > 0) agentLogsError = `${snapshot.quarantined.length} unreadable worker log row(s) quarantined`
+          } catch (error) {
             agentLogsError = error instanceof Error ? error.message : String(error)
           }
           // fetchAgentLogs returns newest-first, so .find() picks the

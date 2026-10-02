@@ -62,6 +62,7 @@ export interface BehaviorDiagnostics {
   failures: Array<{
     org?: string
     behavior: BehaviorKey
+    target?: string
     kind: string
     consecutiveFailures: number
     lastFailureAt: string

@@ -95,9 +95,123 @@ function parseReceipts(value: unknown): IssueCommentReceipt[] | null {
   })
 }
 
+export interface QuarantinedAgentLog {
+  index: number
+  error: string
+  id: string | null
+  correlationId: string | null
+  repo: string | null
+  prId: string | null
+  behavior: string | null
+  sessionId: string | null
+}
+
+export interface AgentLogSnapshot {
+  entries: LogEntry[]
+  quarantined: QuarantinedAgentLog[]
+}
+
+export type AgentLogIdentity = Partial<Pick<QuarantinedAgentLog,
+  'id' | 'correlationId' | 'repo' | 'prId' | 'behavior' | 'sessionId'>>
+
+const LOG_CALL_ID = /^[0-9a-f]{32}$/
+const LOG_PR_ID = /^[1-9][0-9]*$/
+const LOG_REPO = /^[^/\s]+(?:\/[^/\s]+)?$/
+const LOG_CORRELATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+
+function quarantineLogEntry(value: unknown, index: number, error: unknown): QuarantinedAgentLog {
+  const row = value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+  const text = (key: string, pattern?: RegExp, lowercase = false): string | null => {
+    const raw = row[key]
+    if (typeof raw !== 'string' || !raw) return null
+    const result = lowercase ? raw.toLowerCase() : raw
+    return !pattern || pattern.test(result) ? result : null
+  }
+  return {
+    index,
+    error: error instanceof Error ? error.message : String(error),
+    id: text('id', LOG_CALL_ID, true),
+    correlationId: text('correlation_id', LOG_CORRELATION_ID),
+    repo: text('repo', LOG_REPO),
+    prId: text('pr_id', LOG_PR_ID),
+    behavior: text('behavior'),
+    sessionId: text('session_id'),
+  }
+}
+
+function sameLogIdentity(row: QuarantinedAgentLog, identity: AgentLogIdentity): boolean {
+  return !!((row.id && identity.id && row.id.toLowerCase() === identity.id.toLowerCase())
+    || (row.correlationId && identity.correlationId && row.correlationId === identity.correlationId))
+}
+
+/** Unreadable identity is uncertainty, never proof that a call is absent. */
+export function quarantinedLogMayMatch(row: QuarantinedAgentLog, identity: AgentLogIdentity): boolean {
+  // A duplicate call/correlation identity must remain suspect even when the
+  // malformed row contradicts other provenance on an otherwise valid call.
+  if (sameLogIdentity(row, identity)) return true
+  for (const key of ['id', 'correlationId', 'repo', 'prId', 'behavior', 'sessionId'] as const) {
+    const actual = row[key]
+    const expected = identity[key]
+    if (!actual || !expected) continue
+    if (key === 'repo') {
+      // Historical rows can name only the repository; its owner is unknown.
+      const qualified = actual.includes('/') && expected.includes('/')
+      const actualRepo = qualified ? actual : actual.split('/').at(-1)!
+      const expectedRepo = qualified ? expected : expected.split('/').at(-1)!
+      if (actualRepo.toLowerCase() !== expectedRepo.toLowerCase()) return false
+    } else if (key === 'id') {
+      if (actual.toLowerCase() !== expected.toLowerCase()) return false
+    } else if (actual !== expected) return false
+  }
+  return true
+}
+
+/** An unscoped read remains strict; scoped reads retain uncertainty in that scope. */
 export async function fetchAgentLogs(
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal, identity?: AgentLogIdentity } = {},
 ): Promise<LogEntry[]> {
+  return scopedAgentLogs(await fetchAgentLogSnapshot(options), options.identity)
+}
+
+/** Apply one consumer's scope to a shared snapshot without rereading the CLI. */
+export function scopedAgentLogs(snapshot: AgentLogSnapshot, identity?: AgentLogIdentity): LogEntry[] {
+  const exact = identity?.id
+    ? snapshot.entries.find((row) => row.id === identity.id!.toLowerCase())
+    : undefined
+  const scoped = identity ? snapshot.entries.filter((entry) => {
+    const values: AgentLogIdentity = {
+      id: entry.id, correlationId: entry.correlation_id, repo: entry.repo,
+      prId: entry.pr_id, behavior: entry.behavior, sessionId: entry.session_id,
+    }
+    return Object.entries(identity).every(([field, expected]) => {
+      if (!expected) return true
+      const actual = values[field as keyof AgentLogIdentity]
+      if (!actual) return false
+      return field === 'id' || field === 'repo'
+        ? actual.toLowerCase() === expected.toLowerCase()
+        : actual === expected
+    })
+  }) : []
+  const rejected = snapshot.quarantined.find((row) => {
+    if (!identity) return true
+    if (exact) {
+      // A verified exact-ID result does not infer absence from the rest of
+      // the feed. Conflicting duplicates still invalidate that result.
+      return sameLogIdentity(row, identity)
+        || sameLogIdentity(row, { id: exact.id, correlationId: exact.correlation_id })
+    }
+    if (scoped.some((entry) => sameLogIdentity(row, { id: entry.id, correlationId: entry.correlation_id }))) return true
+    return quarantinedLogMayMatch(row, identity)
+  })
+  if (rejected) throw new Error(rejected.error)
+  return snapshot.entries
+}
+
+export async function fetchAgentLogSnapshot(
+  options: { signal?: AbortSignal } = {},
+): Promise<AgentLogSnapshot> {
   const { stdout } = await runFile(CLI, ['--logs'], {
     cwd: agentCwd(),
     timeoutMs: 30_000,
@@ -114,7 +228,13 @@ export async function fetchAgentLogs(
     throw new Error('agent-interface --logs returned invalid JSON', { cause: error })
   }
   if (!Array.isArray(list)) throw new Error('agent-interface --logs returned non-array JSON')
-  return list.map(validateLogEntry).reverse()
+  const entries: LogEntry[] = []
+  const quarantined: QuarantinedAgentLog[] = []
+  list.forEach((value, index) => {
+    try { entries.push(validateLogEntry(value, index)) }
+    catch (error) { quarantined.push(quarantineLogEntry(value, index, error)) }
+  })
+  return { entries: entries.reverse(), quarantined }
 }
 
 function validateLogEntry(value: unknown, index: number): LogEntry {
@@ -126,9 +246,9 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
   // one". Only `null` was accepted, so a row written before agent-interface
   // added a field — `expected_head`, `source`, `correlation_id`, `action` —
   // omits the key entirely, `row[field]` is undefined, and validation threw.
-  // One such row rejects the whole batch, because the batch is validated as a
-  // unit: with 1044 rows in the log and the oldest dating to May, Swarm served
-  // a 502 and rendered nothing at all. Absent is null.
+  // Previously one such row rejected the whole batch: with 1044 rows in the
+  // log and the oldest dating to May, Swarm served a 502 and rendered nothing.
+  // Absent is null; genuinely unreadable rows now retain a quarantine identity.
   const optionalString = (field: string): string | null => {
     const item = row[field]
     if (item === null || item === undefined) return null
@@ -166,9 +286,9 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
     && outcome === 'preflight_failed'
     && headSha === null
   const issueReview = behavior === ISSUE_REVIEW_BEHAVIOR
-  if (!/^[0-9a-f]{32}$/.test(id)
-    || (prId !== null && !/^[1-9][0-9]*$/.test(prId))
-    || (repo !== null && !/^[^/\s]+(?:\/[^/\s]+)?$/.test(repo))
+  if (!LOG_CALL_ID.test(id)
+    || (prId !== null && !LOG_PR_ID.test(prId))
+    || (repo !== null && !LOG_REPO.test(repo))
     || (actor !== null
       && !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?$/.test(actor))
     || !Number.isFinite(Date.parse(startedAt))
@@ -181,7 +301,7 @@ function validateLogEntry(value: unknown, index: number): LogEntry {
     || ((action === 'commented' || outcome === 'commented') && !issueReview)
     || ((action === 'not_started' || outcome === 'preflight_failed') && !preflightFailed)
     || (source !== null && !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(source))
-    || (correlationId !== null && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(correlationId))) {
+    || (correlationId !== null && !LOG_CORRELATION_ID.test(correlationId))) {
     throw new Error(`agent-interface log row ${index} violates the schema`)
   }
   const runner = optionalString('runner')

@@ -408,6 +408,68 @@ describe('durable author-content finalization', () => {
     await expect(jobs.recoverPendingContentLaunches(listCalls)).resolves.toBe(0)
   })
 
+  it('retains all unresolved launch ownership when the shared log read fails', async () => {
+    const chat = await import('../server/chat')
+    for (const session of ['first-unreadable', 'second-unreadable']) {
+      await jobs.launchAndEnqueueContentJob('Recovery topic', session,
+        vi.fn().mockRejectedValue(new chat.AuthorContentDiscoveryTimeoutError()))
+    }
+    database.db.prepare(`UPDATE content_launches
+      SET registration_deadline_at = CAST(strftime('%s', requested_at) AS INTEGER) * 1000 + 1000`).run()
+    const agent = await import('../server/agent')
+    const read = vi.spyOn(agent, 'fetchAgentLogSnapshot').mockRejectedValue(new Error('log feed unavailable'))
+    try {
+      await expect(jobs.recoverPendingContentLaunches()).resolves.toBe(0)
+      expect(read).toHaveBeenCalledOnce()
+      expect(database.db.prepare('SELECT status, evidence_unreadable FROM content_launches').all())
+        .toEqual([{ status: 'pending', evidence_unreadable: 1 }, { status: 'pending', evidence_unreadable: 1 }])
+      database.db.prepare('UPDATE content_launches SET registration_deadline_at = 1').run()
+      const retry = vi.fn()
+      await expect(jobs.launchAndEnqueueContentJob('Retry', 'first-unreadable', retry))
+        .rejects.toBeInstanceOf(jobs.ContentLaunchPendingError)
+      expect(retry).not.toHaveBeenCalled()
+    } finally { read.mockRestore() }
+  })
+
+  it('recovers another session while unreadable launch evidence retains ownership beyond its deadline', async () => {
+    const chat = await import('../server/chat')
+    for (const session of ['unreadable', 'healthy']) {
+      await jobs.launchAndEnqueueContentJob('Recovery topic', session,
+        vi.fn().mockRejectedValue(new chat.AuthorContentDiscoveryTimeoutError()))
+    }
+    const intent = database.db.prepare('SELECT requested_at FROM content_launches WHERE session_id = ?')
+      .get('healthy') as { requested_at: string }
+    database.db.prepare('UPDATE content_launches SET registration_deadline_at = ? WHERE session_id = ?')
+      .run(Date.parse(intent.requested_at), 'unreadable')
+    const callId = '7'.repeat(32)
+    const listCalls = vi.fn().mockImplementation(async (identity: { sessionId: string }) => {
+      if (identity.sessionId === 'unreadable') throw new Error('quarantined log row')
+      return [{ id: callId, behavior: 'author_content', session_id: 'healthy',
+        prompt: 'Recovery topic', started_at: intent.requested_at }]
+    })
+
+    await expect(jobs.recoverPendingContentLaunches(listCalls)).resolves.toBe(1)
+    expect(jobs.getContentJob(callId)).toMatchObject({ sessionId: 'healthy', status: 'pending' })
+    expect(database.db.prepare('SELECT status, call_id, error FROM content_launches WHERE session_id = ?')
+      .get('unreadable')).toEqual({ status: 'pending', call_id: null,
+      error: 'author-content log recovery unavailable: quarantined log row' })
+    await restartModules()
+    await expect(jobs.recoverPendingContentLaunches(listCalls)).resolves.toBe(0)
+    const retry = vi.fn()
+    await expect(jobs.launchAndEnqueueContentJob('Retry topic', 'unreadable', retry))
+      .rejects.toBeInstanceOf(jobs.ContentLaunchPendingError)
+    expect(retry).not.toHaveBeenCalled()
+    expect(database.db.prepare('SELECT status, call_id FROM content_launches WHERE session_id = ?')
+      .get('unreadable')).toEqual({ status: 'pending', call_id: null })
+    const readable = database.db.prepare('SELECT requested_at FROM content_launches WHERE session_id = ?')
+      .get('unreadable') as { requested_at: string }
+    listCalls.mockResolvedValue([{ id: '8'.repeat(32), behavior: 'author_content', session_id: 'unreadable',
+      prompt: 'Recovery topic', started_at: readable.requested_at }])
+    await expect(jobs.recoverPendingContentLaunches(listCalls)).resolves.toBe(1)
+    expect(database.db.prepare('SELECT status, evidence_unreadable FROM content_launches WHERE session_id = ?')
+      .get('unreadable')).toEqual({ status: 'linked', evidence_unreadable: 0 })
+  })
+
   it('periodically recovers delayed call registration without a server restart', async () => {
     const chat = await import('../server/chat')
     const launch = vi.fn().mockRejectedValue(new chat.AuthorContentDiscoveryTimeoutError())

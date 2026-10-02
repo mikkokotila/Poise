@@ -170,9 +170,10 @@ function finished(target: string, overrides: Record<string, unknown>): Record<st
   return callFor(target, { completed_at: new Date().toISOString(), ...overrides })
 }
 
-// A failed reviewer backs the behavior off for a minute; these tests move on.
+// Advance only the clock; unrelated targets need no cooldown bypass.
 function skipBackoff(): void {
-  database!.setMeta('behavior_review_new_issues_failure', '')
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(Date.now() + 60_000)
 }
 
 beforeEach(async () => {
@@ -193,6 +194,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await behaviors?.stopBehaviorsRuntime()
+  vi.useRealTimers()
   if (database?.db.open) database.closeDatabase()
   behaviors = null
   database = null
@@ -334,6 +336,54 @@ describe('Review New Issues', () => {
     expect(behaviors.getBehaviorsRuntimeHealth().failures).toEqual([])
   })
 
+  it('lets another issue run while one reviewer waits to retry, including after restart', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-02T06:00:00Z'))
+    let modules = await start()
+    issues = [issue(452)]
+    await modules.behaviors.runEnabledBehaviorsOnce()
+    agentLogs = [finished(`${REPO}#452`, { status: 'failed', error: 'provider max turns reached' })]
+    issues.push(issue(453))
+    await modules.behaviors.runEnabledBehaviorsOnce()
+    expect(launches().map((args) => args[1])).toEqual([`${REPO}#452`, `${REPO}#453`])
+    expect(modules.behaviors.getBehaviorsRuntimeHealth().failures).toMatchObject([
+      { target: `${REPO}#452`, kind: 'worker' },
+    ])
+    await modules.behaviors.stopBehaviorsRuntime()
+    modules.database.closeDatabase()
+    modules = await start()
+    issues.push(issue(454))
+    await modules.behaviors.runEnabledBehaviorsOnce()
+    expect(launches().map((args) => args[1])).toEqual([`${REPO}#452`, `${REPO}#453`, `${REPO}#454`])
+    skipBackoff()
+    await modules.behaviors.runEnabledBehaviorsOnce()
+    expect(launches().map((args) => args[1])).toEqual([`${REPO}#452`, `${REPO}#453`, `${REPO}#454`, `${REPO}#452`])
+  })
+
+  it('continues another repository when one issue listing fails and preserves unread incidents', async () => {
+    const other = 'Vaquum/Limen'
+    const since = ago(60 * MINUTE)
+    const { behaviors, database } = await start({ repos: [{ repo: REPO, since }, { repo: other, since }] })
+    issues = [issue(452)]
+    await behaviors.runEnabledBehaviorsOnce()
+    agentLogs = [finished(`${REPO}#452`, { status: 'failed', error: 'provider exited' })]
+    issues.push(issue(453, { repo: other, url: `https://github.com/${other}/issues/453` }))
+    const original = mocks.runFile.getMockImplementation()!
+    mocks.runFile.mockImplementation(async (command: string, args: string[]) => {
+      if (command === 'github-datastore' && args[0] === 'view' && args[args.indexOf('--repo') + 1] === REPO) {
+        throw new Error('repository read failed')
+      }
+      return original(command, args)
+    })
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches().map((args) => args[1])).toEqual([`${REPO}#452`, `${other}#453`])
+    expect(database.listBehaviorDeadLetters()).toMatchObject([{ target: `${REPO}#452` }])
+    expect(behaviors.getBehaviorsRuntimeHealth().failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({ error: 'repository read failed' }),
+      expect.objectContaining({ target: `${REPO}#452` }),
+    ]))
+  })
+
   it('relaunches a reviewer once after a failure that posted nothing, then holds it', async () => {
     const { behaviors, database } = await start()
     issues = [issue(452)]
@@ -426,6 +476,58 @@ describe('Review New Issues sub-issues', () => {
   const settle = (...numbers: number[]) => {
     issues = issues.map((row) => numbers.includes(row.number as number) ? { ...row, created_at: ago(11 * MINUTE) } : row)
   }
+
+  it('quarantines a corrupt parent review and its covered issues while another issue launches', async () => {
+    const { behaviors, database } = await start()
+    issues = [issue(500, { created_at: ago(30 * MINUTE) }), issue(501)]
+    subIssues = { [ref(500)]: [ref(501)] }
+    await behaviors.runEnabledBehaviorsOnce()
+    agentLogs = [finished(ref(500), { status: 'completed' })] // Missing action and outcome.
+    issues.push(issue(502))
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(Date.now() + 6 * MINUTE)
+    await behaviors.runEnabledBehaviorsOnce()
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches().map((args) => args[1])).toEqual([ref(500), ref(502)])
+    expect(database.listBehaviorLaunchClaims(KEY).find((claim) => claim.target === ref(500))?.launchError)
+      .toContain('agent log row quarantined')
+    expect(database.listBehaviorDeadLetters()).toEqual([])
+    expect(behaviors.getBehaviorsRuntimeHealth().failures).toEqual([])
+  })
+
+  it('reconciles an exact healthy issue result while unidentified corruption holds missing claims and uncertain coverage', async () => {
+    const { behaviors, database } = await start()
+    issues = [issue(500), issue(501)]
+    await behaviors.runEnabledBehaviorsOnce()
+    agentLogs = [reviewed(ref(500), ref(500)), { corrupt: true }]
+    issues.push(issue(502))
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(Date.now() + 6 * MINUTE)
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(database.listBehaviorLaunchClaims(KEY).map((claim) => claim.target)).toEqual([ref(501)])
+    expect(database.listBehaviorLaunchClaims(KEY)[0].launchError).toContain('agent log row quarantined')
+    expect(database.listBehaviorDeadLetters()).toEqual([])
+    expect(launches()).toHaveLength(2)
+    expect(behaviors.getBehaviorsRuntimeHealth().failures).toEqual([
+      expect.objectContaining({ error: expect.stringContaining('Issue review coverage is uncertain') }),
+    ])
+  })
+
+  it.each(['pr_review', 'issue_review'])('holds a parent and its receipt coverage when a malformed %s duplicate contradicts apparent success', async (malformedBehavior) => {
+    const { behaviors, database } = await start()
+    issues = [issue(500, { created_at: ago(30 * MINUTE) }), issue(501)]
+    subIssues = { [ref(500)]: [ref(501)] }
+    await behaviors.runEnabledBehaviorsOnce()
+    const completed = reviewed(ref(500), ref(500), ref(501))
+    agentLogs = [completed, { id: completed.id, repo: 'other/unrelated', behavior: malformedBehavior }]
+    issues.push(issue(502))
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(database.listBehaviorLaunchClaims(KEY).find((claim) => claim.target === ref(500))?.launchError)
+      .toContain('agent log row quarantined')
+    expect(database.hasSeen(KEY, ref(501))).toBe(false)
+    expect(launches().map((args) => args[1])).toEqual([ref(500), ref(502)])
+    expect(database.listBehaviorDeadLetters()).toEqual([])
+  })
 
   it('reviews slices once, inside their PRD\'s review, when they follow the PRD', async () => {
     const { behaviors, database } = await start({ reviewers: 2 })

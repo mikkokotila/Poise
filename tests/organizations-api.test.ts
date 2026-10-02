@@ -295,6 +295,28 @@ describe('global behavior settings API', () => {
     expect((await state())['review-new-issues']!.enabled).toBe(false)
   })
 
+  it('serves healthy Swarm rows and diagnostics when one worker row is unreadable', async () => {
+    const healthy = { id: '1'.repeat(32), behavior: 'pr_review',
+      source: 'poise:review-new-prs', repo: 'Legacy/same-repo', pr_id: '1',
+      started_at: '2026-10-01T12:00:00Z', completed_at: '2026-10-01T12:00:01Z', status: 'completed',
+      actor: 'review-bot', expected_head: 'a'.repeat(40), head_sha: 'a'.repeat(40),
+      correlation_id: 'healthy-review', action: 'reviewed_clean', outcome: 'clean',
+      model: 'test', prompt: '', time_elapsed: '1s' }
+    behaviorLogs = [healthy, { ...healthy, id: '2'.repeat(32), pr_id: '2',
+      correlation_id: 'unreadable-review', outcome: null }]
+    const response = await fetch(`${base}/api/agent-logs`)
+    expect(response.status).toBe(200)
+    const data = await response.json()
+    expect(data.logs).toMatchObject([{ id: healthy.id }])
+    expect(data.quarantined).toMatchObject([{ id: '2'.repeat(32), prId: '2' }])
+    const diagnostics = await state()
+    expect(diagnostics['review-new-prs']!.lastTriggered).toMatchObject({ target: 'Legacy/same-repo#1' })
+    behaviorLogs = [healthy, { ...healthy, repo: 'elsewhere/repo', outcome: null }]
+    const scoped = await (await fetch(`${base}/api/agent-logs?org=Legacy`)).json()
+    expect(scoped.logs).toEqual([])
+    expect(scoped.quarantined).toMatchObject([{ id: healthy.id, repo: 'elsewhere/repo' }])
+  })
+
   it('shows latest behavior activity across configured accounts', async () => {
     await addSecondAccount()
     behaviorLogs = ['Legacy', 'beta', 'unconfigured'].map((owner, index) => ({

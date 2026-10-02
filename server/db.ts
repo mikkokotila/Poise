@@ -127,6 +127,7 @@ db.exec(`
     requested_at TEXT NOT NULL,
     registration_deadline_at INTEGER NOT NULL DEFAULT 0,
     recovery_eligible INTEGER NOT NULL DEFAULT 0,
+    evidence_unreadable INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL CHECK (status IN ('pending', 'linked', 'failed')),
     call_id TEXT UNIQUE,
     error TEXT,
@@ -249,6 +250,7 @@ const migrateSchema = db.transaction(() => {
     'registration_deadline_at',
     'registration_deadline_at INTEGER NOT NULL DEFAULT 0',
   )
+  ensureColumn('content_launches', 'evidence_unreadable', 'evidence_unreadable INTEGER NOT NULL DEFAULT 0')
   const addedRecoveryEligibility = ensureColumn(
     'content_launches',
     'recovery_eligible',
@@ -910,6 +912,7 @@ export function retireBehaviorDeadLettersForClosedPrs(
   openTargets: ReadonlySet<string>,
   behaviors: readonly string[] = ['review-new-prs', 'approve-prs'],
   organization?: string,
+  unreadRepositories?: ReadonlySet<string>,
 ): number {
   const rows = (db.prepare(`
     SELECT id, behavior, repo, pr
@@ -917,6 +920,7 @@ export function retireBehaviorDeadLettersForClosedPrs(
     WHERE retired_at IS NULL AND repo IS NOT NULL AND pr IS NOT NULL
   `).all() as Array<{ id: string, behavior: string, repo: string, pr: number }>)
     .filter((row) => behaviors.includes(row.behavior)
+      && !unreadRepositories?.has(row.repo)
       && (organization === undefined || row.repo.split('/')[0].toLowerCase() === organization.toLowerCase()))
   const retire = db.prepare(`
     UPDATE behavior_dead_letters SET retired_at = ?
