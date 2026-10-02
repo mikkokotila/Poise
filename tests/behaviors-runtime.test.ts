@@ -3336,20 +3336,20 @@ describe('durable behavior quarantine', () => {
     })
   })
 
-  it('keeps unreadable evidence through rotation until an exact completion resolves the claim', async () => {
+  it.each(['review-new-prs', 'approve-prs'] as const)('restores normal %s reconciliation when exact failed evidence returns after rotation', async (behavior) => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
-    const launched = await launchReviewBeforeCrash()
+    const launched = behavior === 'review-new-prs' ? await launchReviewBeforeCrash() : await launchApprovalBeforeCrash()
     agentLogs = [{ corrupt: true }]
     await launched.behaviors.runEnabledBehaviorsOnce()
-    expect(launched.database.listBehaviorLaunchClaims('review-new-prs')[0].launchQuarantine).toBe('unreadable')
+    expect(launched.database.listBehaviorLaunchClaims(behavior)[0].launchQuarantine).toBe('unreadable')
     agentLogs = []
     vi.setSystemTime(Date.now() + 6 * 60_000)
     const loaded = await restartModules()
     loaded.behaviors.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
     await loaded.behaviors.runEnabledBehaviorsOnce()
     const actual = agentLog({
-      id: 'b'.repeat(32), actor: launched.actor, source: launched.source,
+      id: 'b'.repeat(32), behavior: behavior === 'review-new-prs' ? 'pr_review' : 'pr_approve', actor: launched.actor, source: launched.source,
       expected_head: HEAD_SHA, correlation_id: launched.correlationId,
       status: 'failed', error: 'provider exited before reporting an action',
     })
@@ -3357,14 +3357,57 @@ describe('durable behavior quarantine', () => {
     vi.setSystemTime(Date.now() + 60_000)
     await loaded.behaviors.runEnabledBehaviorsOnce()
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
-    expect(loaded.database.listBehaviorLaunchClaims('review-new-prs')[0].launchQuarantine).toBe('unreadable')
-    agentLogs = [{ ...actual, status: 'completed', action: 'reviewed_clean', outcome: 'clean', head_sha: HEAD_SHA, completed_at: new Date().toISOString() }]
+    expect(loaded.database.listBehaviorLaunchClaims(behavior)).toEqual([])
+    expect(loaded.database.getFailedBehaviorLaunch(behavior, launched.target)?.launchQuarantine).toBeNull()
+    expect(loaded.database.listBehaviorDeadLetters()).toMatchObject([{ error: 'provider exited before reporting an action' }])
+    agentLogs = [{ ...actual, status: 'completed', action: behavior === 'review-new-prs' ? 'reviewed_clean' : 'approved', outcome: behavior === 'review-new-prs' ? 'clean' : 'approved', head_sha: HEAD_SHA, completed_at: new Date().toISOString() }]
     await loaded.behaviors.runEnabledBehaviorsOnce()
-    expect(loaded.database.listBehaviorLaunchClaims('review-new-prs')).toEqual([])
+    expect(loaded.database.listBehaviorLaunchClaims(behavior)).toEqual([])
     expect(loaded.database.listBehaviorDeadLetters()).toEqual([])
     expect(mocks.spawnDetached).toHaveBeenCalledOnce()
   })
 
+
+  it.each(['review-new-prs', 'approve-prs'] as const)('applies the ordinary %s running limit after its log feed recovers', async (behavior) => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const launched = behavior === 'review-new-prs' ? await launchReviewBeforeCrash() : await launchApprovalBeforeCrash()
+    const original = mocks.runFile.getMockImplementation()!
+    mocks.runFile.mockImplementation(async (command: string, args: string[], options?: { cwd?: string }) => {
+      if (command === 'agent-interface' && args[0] === '--logs') throw new Error('temporary feed outage')
+      return original(command, args, options)
+    })
+    await launched.behaviors.runEnabledBehaviorsOnce()
+    expect(launched.database.listBehaviorLaunchClaims(behavior)[0].launchQuarantine).toBe('unreadable')
+    mocks.runFile.mockImplementation(original)
+    agentLogs = [agentLog({
+      behavior: behavior === 'review-new-prs' ? 'pr_review' : 'pr_approve',
+      actor: launched.actor, source: launched.source, expected_head: HEAD_SHA,
+      correlation_id: launched.correlationId, status: 'running',
+    })]
+    vi.setSystemTime(Date.now() + 2 * 60 * 60_000)
+    await launched.behaviors.runEnabledBehaviorsOnce()
+    expect(launched.database.listBehaviorLaunchClaims(behavior)).toEqual([])
+    expect(launched.database.getFailedBehaviorLaunch(behavior, launched.target)).toMatchObject({
+      launchQuarantine: null, launchCallId: agentLogs[0].id,
+      launchError: 'behavior launch exceeded 7200000ms running limit',
+    })
+    expect(launched.database.listBehaviorDeadLetters()).toMatchObject([{ error: 'behavior launch exceeded 7200000ms running limit' }])
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+  })
+
+  it.each(['unknown-status', 'duplicate-call', 'quarantined-duplicate'] as const)('does not clear unreadable evidence from a %s record', async (conflict) => {
+    const launched = await launchReviewBeforeCrash()
+    agentLogs = [{ corrupt: true }]
+    await launched.behaviors.runEnabledBehaviorsOnce()
+    const call = agentLog({ actor: launched.actor, source: launched.source, correlation_id: launched.correlationId,
+      status: conflict === 'unknown-status' ? 'not-a-status' : 'running' })
+    agentLogs = conflict === 'unknown-status' ? [call] : [call, {
+      ...call, ...(conflict === 'quarantined-duplicate' ? { actor: 42 } : { id: 'a'.repeat(32) }),
+    }]
+    await launched.behaviors.runEnabledBehaviorsOnce()
+    expect(launched.database.listBehaviorLaunchClaims('review-new-prs')[0].launchQuarantine).toBe('unreadable')
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+  })
 
   it.each(['review-new-prs', 'approve-prs'] as const)('keeps %s held after corrupt row rotation and restart', async (behavior) => {
     vi.useFakeTimers()

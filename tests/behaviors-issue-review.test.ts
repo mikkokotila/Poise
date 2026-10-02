@@ -669,13 +669,133 @@ describe('Review New Issues sub-issues', () => {
     agentLogs = running
     issues.push(issue(501))
     await behaviors.runEnabledBehaviorsOnce()
-    expect(database.listBehaviorLaunchClaims(KEY).every((claim) => claim.launchQuarantine === 'unreadable')).toBe(true)
+    expect(database.listBehaviorLaunchClaims(KEY).every((claim) => claim.launchQuarantine === null)).toBe(true)
     expect(launches()).toHaveLength(3)
-    expect(database.listBehaviorDeadLetters()).toHaveLength(3)
+    expect(database.listBehaviorDeadLetters()).toHaveLength(0)
+    expect(database.listBehaviorLaunchClaims(KEY).every((claim) => !!claim.launchCallId)).toBe(true)
     agentLogs = []
     await behaviors.runEnabledBehaviorsOnce()
-    expect(behaviors.getBehaviorsRuntimeHealth().deadLetters).toHaveLength(1)
+    expect(behaviors.getBehaviorsRuntimeHealth().deadLetters).toHaveLength(0)
     expect(launches()).toHaveLength(3)
+  })
+
+  it.each(['retryable', 'bounded', 'posted'] as const)('restores %s issue failures after a feed outage without blocking fresh issue capacity', async (kind) => {
+    const { behaviors, database } = await start({ reviewers: 3 })
+    issues = [issue(500)]
+    await behaviors.runEnabledBehaviorsOnce()
+    const targets = [ref(500), `${ref(500)}:secondary`, `${ref(500)}:tertiary`]
+    const failed = targets.map((target) => finished(target, {
+      status: 'failed', error: `${kind} worker failure`,
+      ...(kind === 'bounded' ? { error_code: 'review_budget_exhausted' } : {}),
+      ...(kind === 'posted' ? { receipts: [] } : {}),
+    }))
+    const original = mocks.runFile.getMockImplementation()!
+    mocks.runFile.mockImplementation(async (command, args, ...rest) => {
+      if (command === 'agent-interface' && args[0] === '--logs') throw new Error('temporary feed outage')
+      return original(command, args, ...rest)
+    })
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(database.listBehaviorLaunchClaims(KEY).every((claim) => claim.launchQuarantine === 'unreadable')).toBe(true)
+    mocks.runFile.mockImplementation(original)
+    agentLogs = failed
+    issues.push(issue(501))
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches().map((args) => args[1])).toEqual([ref(500), ref(500), ref(500), ref(501), ref(501), ref(501)])
+    expect(database.listBehaviorLaunchClaims(KEY).every((claim) => claim.launchPr === 501)).toBe(true)
+    for (const target of targets) {
+      expect(database.getFailedBehaviorLaunch(KEY, target)?.launchQuarantine).toBeNull()
+      expect(database.countBehaviorDeadLetters(KEY, target)).toBe(1)
+    }
+    expect(database.listBehaviorDeadLetters()).toHaveLength(3)
+    expect(database.listBehaviorDeadLetters().every((letter) => letter.error === `${kind} worker failure`)).toBe(true)
+    agentLogs.push(...[ref(501), `${ref(501)}:secondary`, `${ref(501)}:tertiary`].map((target) => reviewed(target, ref(501))))
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches()).toHaveLength(6)
+    skipBackoff()
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches()).toHaveLength(kind === 'retryable' ? 9 : 6)
+    if (kind === 'retryable') {
+      // Exactly one safe retry remains; diagnostics from the outage are not attempts.
+      agentLogs.push(...targets.map((target) => finished(target, { status: 'failed', error: 'second real failure' })))
+      await behaviors.runEnabledBehaviorsOnce()
+      skipBackoff()
+      await behaviors.runEnabledBehaviorsOnce()
+      expect(launches()).toHaveLength(9)
+      for (const target of targets) expect(database.countBehaviorDeadLetters(KEY, target)).toBe(2)
+    }
+  })
+
+  it('restores a previously closed failure after a feed outage and preserves its safe retry', async () => {
+    const { behaviors, database } = await start()
+    issues = [issue(500)]
+    await behaviors.runEnabledBehaviorsOnce()
+    agentLogs = [finished(ref(500), { status: 'failed', error: 'provider exited without action' })]
+    await behaviors.runEnabledBehaviorsOnce()
+    const original = mocks.runFile.getMockImplementation()!
+    mocks.runFile.mockImplementation(async (command, args, ...rest) => {
+      if (command === 'agent-interface' && args[0] === '--logs') throw new Error('temporary feed outage')
+      return original(command, args, ...rest)
+    })
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(database.getFailedBehaviorLaunch(KEY, ref(500))?.launchQuarantine).toBe('unreadable')
+    mocks.runFile.mockImplementation(original)
+    issues.push(issue(501))
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(database.getFailedBehaviorLaunch(KEY, ref(500))?.launchQuarantine).toBeNull()
+    expect(database.countBehaviorDeadLetters(KEY, ref(500))).toBe(1)
+    expect(launches().map((args) => args[1])).toEqual([ref(500), ref(501)])
+    skipBackoff()
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(launches().map((args) => args[1])).toEqual([ref(500), ref(501), ref(500)])
+  })
+
+  it('keeps closed failures held after a feed outage and rotation without resurrecting their worker slots', async () => {
+    const { behaviors, database } = await start({ reviewers: 3 })
+    issues = [issue(500)]
+    await behaviors.runEnabledBehaviorsOnce()
+    const targets = [ref(500), `${ref(500)}:secondary`, `${ref(500)}:tertiary`]
+    agentLogs = targets.map((target) => finished(target, { status: 'failed', error: 'provider exited without action' }))
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(database.listBehaviorLaunchClaims(KEY)).toEqual([])
+    const original = mocks.runFile.getMockImplementation()!
+    mocks.runFile.mockImplementation(async (command, args, ...rest) => {
+      if (command === 'agent-interface' && args[0] === '--logs') throw new Error('temporary feed outage')
+      return original(command, args, ...rest)
+    })
+    await behaviors.runEnabledBehaviorsOnce()
+    mocks.runFile.mockImplementation(original)
+    agentLogs = []
+    issues.push(issue(501))
+    skipBackoff()
+    await behaviors.runEnabledBehaviorsOnce()
+    for (const target of targets) expect(database.getFailedBehaviorLaunch(KEY, target)).toMatchObject({
+      launchQuarantine: 'unreadable', launchQuarantineMayRun: false,
+    })
+    expect(launches().map((args) => args[1])).toEqual([ref(500), ref(500), ref(500), ref(501), ref(501), ref(501)])
+    expect(database.listBehaviorLaunchClaims(KEY).every((claim) => claim.launchPr === 501)).toBe(true)
+  })
+
+  it('applies the issue running limit after an exact running record restores a failed feed', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const { behaviors, database } = await start({ reviewers: 3 })
+    issues = [issue(500)]
+    await behaviors.runEnabledBehaviorsOnce()
+    const running = [callFor(ref(500)), callFor(`${ref(500)}:secondary`), callFor(`${ref(500)}:tertiary`)]
+    const original = mocks.runFile.getMockImplementation()!
+    mocks.runFile.mockImplementation(async (command, args, ...rest) => {
+      if (command === 'agent-interface' && args[0] === '--logs') throw new Error('temporary feed outage')
+      return original(command, args, ...rest)
+    })
+    await behaviors.runEnabledBehaviorsOnce()
+    mocks.runFile.mockImplementation(original)
+    agentLogs = running
+    vi.setSystemTime(Date.now() + 2 * 60 * MINUTE)
+    issues.push(issue(501))
+    await behaviors.runEnabledBehaviorsOnce()
+    expect(database.getFailedBehaviorLaunch(KEY, ref(500))).toMatchObject({ launchQuarantine: null, launchError: 'behavior launch exceeded 7200000ms running limit' })
+    expect(database.listBehaviorDeadLetters()).toHaveLength(3)
+    expect(database.listBehaviorLaunchClaims(KEY).every((claim) => claim.launchPr === 501)).toBe(true)
+    expect(launches().map((args) => args[1])).toEqual([ref(500), ref(500), ref(500), ref(501), ref(501), ref(501)])
   })
 
   it("retains a failed parent's child coverage after later corruption is rotated away", async () => {

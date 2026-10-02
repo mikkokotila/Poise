@@ -711,6 +711,23 @@ export function quarantineBehaviorLaunchOwned(
   return info.changes === 1
 }
 
+// Only a readable record linked to this exact launch may restore ordinary
+// reconciliation. Proven invalid terminal evidence is never cleared here.
+export function clearUnreadableBehaviorLaunchOwned(
+  key: string,
+  target: string,
+  claimId: string,
+  callId: string,
+): boolean {
+  const info = db.prepare(`
+    UPDATE behavior_seen
+    SET launch_quarantine = NULL, launch_error = NULL, launch_quarantine_may_run = 1
+    WHERE key = ? AND target = ? AND claim_id = ? AND claim_id <> ''
+      AND launch_call_id = ? AND launch_quarantine = 'unreadable'
+  `).run(key, target, claimId, callId)
+  return info.changes === 1
+}
+
 export function setBehaviorLaunchErrorOwned(
   key: string,
   target: string,
@@ -862,10 +879,10 @@ export function hasExpiredPreLaunchClaim(key: string, target: string): boolean {
   `).get(key, target, Date.now())
 }
 
-// How many times a target's launch has already been given up on.
+// Count launch attempts, not multiple diagnostics about the same attempt.
 export function countBehaviorDeadLetters(behavior: string, target: string): number {
   const row = db.prepare(
-    'SELECT COUNT(*) AS n FROM behavior_dead_letters WHERE behavior = ? AND target = ?',
+    'SELECT COUNT(DISTINCT COALESCE(correlation_id, id)) AS n FROM behavior_dead_letters WHERE behavior = ? AND target = ?',
   ).get(behavior, target) as { n: number }
   return row.n
 }

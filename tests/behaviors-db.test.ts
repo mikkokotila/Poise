@@ -352,10 +352,17 @@ describe('behavior database lifecycle', () => {
       repo: 'Vaquum/Origo', pr: 500, requestedAt: new Date().toISOString(),
       expectedHead: '', actor: 'bit-mis', source: 'poise:review-new-issues', correlationId: claimId,
     })
+    store.linkBehaviorLaunchCallOwned('review-new-issues', target, claimId, 'a'.repeat(32))
     store.quarantineBehaviorLaunchOwned('review-new-issues', target, claimId, 'invalid_result', 'bad terminal outcome', false)
+    expect(store.clearUnreadableBehaviorLaunchOwned('review-new-issues', target, claimId, 'a'.repeat(32))).toBe(false)
     expect(store.listBehaviorLaunchClaims('review-new-issues')[0].launchQuarantineMayRun).toBe(false)
     store.quarantineBehaviorLaunchOwned('review-new-issues', target, claimId, 'unreadable', 'conflicting running row', true)
     store.quarantineBehaviorLaunchOwned('review-new-issues', target, claimId, 'invalid_result', 'rewritten terminal row', false)
+    const claim = store.listBehaviorLaunchClaims('review-new-issues')[0]
+    const incident = store.recordBehaviorDeadLetter(claim, 'feed unreadable')
+    store.retireBehaviorDeadLetter(incident)
+    store.recordBehaviorDeadLetter(claim, 'worker failed')
+    expect(store.countBehaviorDeadLetters('review-new-issues', target)).toBe(1)
     store.closeDatabase()
     store = await loadIsolatedDb(path)
     expect(store.listBehaviorLaunchClaims('review-new-issues')[0]).toMatchObject({
@@ -374,7 +381,10 @@ describe('behavior database lifecycle', () => {
       expectedHead: '', actor: 'bit-mis', source: 'poise:review-new-issues',
       correlationId: claimId, covers: ['Vaquum/Origo#501'],
     })
+    store.linkBehaviorLaunchCallOwned('review-new-issues', target, claimId, 'a'.repeat(32))
     store.quarantineBehaviorLaunchOwned('review-new-issues', target, claimId, kind, 'uncertain comments')
+    expect(store.clearUnreadableBehaviorLaunchOwned('review-new-issues', target, 'another-owner', 'a'.repeat(32))).toBe(false)
+    expect(store.clearUnreadableBehaviorLaunchOwned('review-new-issues', target, claimId, 'b'.repeat(32))).toBe(false)
     store.recordBehaviorDeadLetter(store.listBehaviorLaunchClaims('review-new-issues')[0], 'uncertain comments')
     expect(store.retireBehaviorDeadLettersForClosedPrs(new Set(['Vaquum/Origo#501']), ['review-new-issues'])).toBe(0)
     expect(store.listBehaviorIncidents()).toMatchObject([{ target, error: 'uncertain comments' }])

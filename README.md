@@ -174,7 +174,8 @@ not change shared authentication state; provider sign-in checks own that state.
 Unreadable worker log rows are quarantined by their available identity. Healthy
 results still reconcile. Attributable invalid results remain held across log
 rotation, rewritten logs, restarts, and model or commit changes. Unidentified
-evidence holds unresolved launches until trustworthy matching completion is available.
+evidence holds unresolved launches until a trustworthy matching run record restores
+normal reconciliation, retry, and timeout handling.
 Issue holds preserve their original child coverage; confirmed terminal holds do not
 consume worker slots. Uncertain live workers still count toward the concurrency limit.
 Swarm identifies unreadable targets and their errors alongside valid live runs, and

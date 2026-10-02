@@ -29,6 +29,7 @@ import {
   claimSeenOwned,
   claimSeenOwnedAs,
   clearSeenExceptLaunched,
+  clearUnreadableBehaviorLaunchOwned,
   completeBehaviorLaunchOwned,
   completeIssueReviewLaunchOwned,
   countBehaviorDeadLetters,
@@ -736,7 +737,7 @@ function quarantineFailedClaim(
   claim: BehaviorLaunchClaim,
   kind: NonNullable<BehaviorLaunchClaim['launchQuarantine']>,
   error: string,
-  mayRun = true,
+  mayRun = false,
 ): void {
   db.transaction(() => {
     const changed = db.prepare(`
@@ -755,13 +756,66 @@ function quarantineFailedClaim(
 }
 
 function quarantineFailedLog(snapshot: AgentLogSnapshot, claim: BehaviorLaunchClaim, observed?: LogEntry): boolean {
-  const quarantine = logQuarantine(snapshot, claimLogIdentity(claim), observed?.status.toLowerCase() === 'completed')
+  const quarantine = logQuarantine(snapshot, claimLogIdentity(claim), observed !== undefined)
   if (!quarantine) return false
   const attributable = quarantine.correlationId === claim.launchCorrelationId
     || (!!quarantine.id && quarantine.id === claim.launchCallId)
   quarantineFailedClaim(claim, attributable ? 'invalid_result' : 'unreadable',
-    `agent log row quarantined: ${quarantine.error}`, quarantineEvidence(snapshot, claim, observed).mayRun)
+    `agent log row quarantined: ${quarantine.error}`, quarantineEvidence(snapshot, claim, observed).hasLiveEvidence)
   return true
+}
+
+// Exact readable evidence restores normal reconciliation; absence and
+// conflicting identities do not. The linked call remains in the launch ledger.
+function unambiguousAgentCall(snapshot: AgentLogSnapshot, call: LogEntry): boolean {
+  return !logQuarantine(snapshot, { id: call.id, correlationId: call.correlation_id }, true)
+    && snapshot.entries.filter((row) => row.id === call.id || row.correlation_id === call.correlation_id).length === 1
+}
+
+function restoreReadableClaim(claim: BehaviorLaunchClaim, call: LogEntry, snapshot: AgentLogSnapshot): boolean {
+  if (!unambiguousAgentCall(snapshot, call)) return false
+  return db.transaction(() => {
+    if (!clearUnreadableBehaviorLaunchOwned(claim.key, claim.target, claim.claimId, call.id)) return false
+    retireQuarantineIncident(claim)
+    return true
+  })()
+}
+
+// A previously failed launch may also encounter a transient feed outage.
+// Restore only its exact terminal failure, leaving ordinary no-action policy
+// to decide whether it can retry. Running rows cannot revive closed ownership.
+function restoreReadableFailedClaim(claim: BehaviorLaunchClaim, call: LogEntry | undefined, snapshot: AgentLogSnapshot): void {
+  if (claim.launchQuarantine !== 'unreadable' || !call
+    || !FAILED_AGENT_STATUSES.has(call.status.toLowerCase())
+    || call.error_code === 'invalid_agent_result'
+    || !unambiguousAgentCall(snapshot, call)
+    || call.id !== claim.launchCallId
+    || call.behavior !== claim.launchBehavior
+    || call.repo !== claim.launchRepo
+    || String(call.pr_id || '') !== String(claim.launchPr)
+    || String(call.actor || '').toLowerCase() !== claim.launchActor.toLowerCase()
+    || call.source !== claim.launchSource
+    || call.correlation_id !== claim.launchCorrelationId
+    || (call.expected_head || '') !== claim.launchExpectedHead
+    || !Number.isFinite(Date.parse(claim.launchRequestedAt))
+    || !Number.isFinite(Date.parse(agentCallStartedAt(call)))
+    || Date.parse(agentCallStartedAt(call)) < Date.parse(claim.launchRequestedAt)) return
+  const message = call.error || `agent call terminated with status ${call.status.toLowerCase()}`
+  db.transaction(() => {
+    const changed = db.prepare(`
+      UPDATE behavior_seen SET launch_quarantine = NULL, launch_error = ?, launch_quarantine_may_run = 1
+      WHERE key = ? AND target = ? AND claim_id = '' AND launch_quarantine = 'unreadable'
+        AND launch_call_id = ? AND launch_correlation_id = ? AND launch_requested_at = ?
+        AND launch_outcome IS NULL
+    `).run(message, claim.key, claim.target, claim.launchCallId, claim.launchCorrelationId, claim.launchRequestedAt)
+    if (!changed.changes) return
+    retireQuarantineIncident(claim)
+    recordBehaviorDeadLetter(claim, message, call.id)
+    const retryFailure = claim.key === ISSUES_KEY
+      ? call.error_code !== 'stopped' && (call.receipts != null || !HELD_ISSUE_REVIEW_ERRORS.has(call.error_code || ''))
+      : !boundedReviewFailure(call) && call.error_code !== 'review_packet_too_large'
+    if (retryFailure) recordBehaviorFailure(claim.key as BehaviorKey, 'worker', message, claim.target)
+  })()
 }
 
 function clearCompletedUnreadableHold(claim: BehaviorLaunchClaim): void {
@@ -817,7 +871,8 @@ async function reconcileBehaviorLaunchClaims(
   }
   const logs = snapshot.entries
   for (const failed of failedClaims) {
-    quarantineFailedLog(snapshot, failed, logs.find((call) => call.id === failed.launchCallId))
+    const call = logs.find((row) => row.id === failed.launchCallId)
+    if (!quarantineFailedLog(snapshot, failed, call)) restoreReadableFailedClaim(failed, call, snapshot)
   }
   // Which sign-in a failed call counts against is decided by its model's
   // provider; a log row can name a model the catalog has since retired.
@@ -937,6 +992,7 @@ async function reconcileBehaviorLaunchClaims(
       if (!linkBehaviorLaunchCallOwned(claim.key, claim.target, claim.claimId, call.id)) {
         continue
       }
+      claim.launchCallId = call.id
     }
 
     const linkedStartedAtMs = Date.parse(agentCallStartedAt(call))
@@ -961,9 +1017,16 @@ async function reconcileBehaviorLaunchClaims(
         quarantineEvidence(snapshot, claim, call).mayRun)
       continue
     }
-    if (claim.launchQuarantine === 'unreadable' && status !== 'completed') {
-      retainClaimSafely(claim, claim.launchError || 'agent evidence remains unreadable')
+    if (claim.launchQuarantine === 'unreadable' && !unambiguousAgentCall(snapshot, call)) {
+      retainClaimSafely(claim, claim.launchError || 'agent evidence remains ambiguous')
       continue
+    }
+    if (claim.launchQuarantine === 'unreadable' && status !== 'completed') {
+      const recognized = RUNNING_AGENT_STATUSES.has(status) || FAILED_AGENT_STATUSES.has(status) || status === 'superseded'
+      if (!recognized || !restoreReadableClaim(claim, call, snapshot)) {
+        retainClaimSafely(claim, claim.launchError || 'agent evidence remains unreadable')
+        continue
+      }
     }
     const superseded = status === 'superseded'
       || String(call.outcome || '') === 'superseded'
@@ -3099,7 +3162,8 @@ async function reconcileIssueReviewClaims(): Promise<void> {
   }
   const logs = snapshot.entries
   for (const failed of failedClaims) {
-    quarantineFailedLog(snapshot, failed, logs.find((call) => call.id === failed.launchCallId))
+    const call = logs.find((row) => row.id === failed.launchCallId)
+    if (!quarantineFailedLog(snapshot, failed, call)) restoreReadableFailedClaim(failed, call, snapshot)
   }
   const catalogForCalls: Catalog | null = await loadCatalog().catch(() => null)
   const commented = (call: LogEntry | undefined) => call?.status.toLowerCase() === 'completed'
@@ -3200,6 +3264,7 @@ async function reconcileIssueReviewClaims(): Promise<void> {
       }
       call = candidates[0]
       if (!linkBehaviorLaunchCallOwned(claim.key, claim.target, claim.claimId, call.id)) continue
+      claim.launchCallId = call.id
     }
 
     const startedAtMs = Date.parse(agentCallStartedAt(call))
@@ -3223,9 +3288,16 @@ async function reconcileIssueReviewClaims(): Promise<void> {
         quarantineEvidence(snapshot, claim, call).mayRun)
       continue
     }
-    if (claim.launchQuarantine === 'unreadable' && status !== 'completed') {
-      retainClaimSafely(claim, claim.launchError || 'agent evidence remains unreadable')
+    if (claim.launchQuarantine === 'unreadable' && !unambiguousAgentCall(snapshot, call)) {
+      retainClaimSafely(claim, claim.launchError || 'agent evidence remains ambiguous')
       continue
+    }
+    if (claim.launchQuarantine === 'unreadable' && status !== 'completed') {
+      const recognized = RUNNING_AGENT_STATUSES.has(status) || FAILED_AGENT_STATUSES.has(status) || status === 'superseded'
+      if (!recognized || !restoreReadableClaim(claim, call, snapshot)) {
+        retainClaimSafely(claim, claim.launchError || 'agent evidence remains unreadable')
+        continue
+      }
     }
     if (status === 'completed') {
       if (!commented(call)) {
