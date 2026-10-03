@@ -166,11 +166,11 @@ function renderQuarantine(): void {
       + `<div role="list">${quarantined.map(quarantineRecordMarkup).join('')}</div>`)
 }
 
-// Status is one coloured icon. The status and outcome used to be two uppercase
-// pills ("FAILED PREFLIGHT", "COMPLETED CHANGES") that never fit the column and
-// were cut to "FAILED PREFLI…" on every row. The words are still on the row for
-// screen readers, the filter and the tooltip; the eye only needs the shape and
-// the colour.
+// Status is a coloured icon and the status in a word. The status and outcome
+// used to be two uppercase pills ("FAILED PREFLIGHT", "COMPLETED CHANGES") that
+// never fit the column and were cut to "FAILED PREFLI…" on every row. A plain
+// success is the only state that goes without its word: a green tick needs no
+// caption, and most rows are one.
 //
 // What a finished run actually decided. "completed" says the agent ran, not
 // what it concluded — an approval and a demand for changes must not look alike.
@@ -189,35 +189,47 @@ const ICON_OTHER = statusSvg('<circle cx="7" cy="7" r="5" stroke-width="1.3" str
 
 type Tone = 'live' | 'ok' | 'warn' | 'bad' | 'flat'
 
-const OUTCOME_LOOK: Record<string, { icon: string, tone: Tone, text: string }> = {
-  clean: { icon: ICON_DONE, tone: 'ok', text: 'clean' },
-  approved: { icon: ICON_APPROVED, tone: 'ok', text: 'approved' },
-  changes_requested: { icon: ICON_CHANGES, tone: 'warn', text: 'changes requested' },
-  superseded: { icon: ICON_SUPERSEDED, tone: 'flat', text: 'superseded' },
-  preflight_failed: { icon: ICON_BLOCKED, tone: 'bad', text: 'preflight failed' },
+// `word` is what the row says; `detail` adds the raw status for the tooltip.
+// `quiet` marks the plain success that shows its icon alone.
+interface StatusLook { icon: string, tone: Tone, word: string, detail: string, quiet?: boolean }
+
+const OUTCOME_LOOK: Record<string, { icon: string, tone: Tone, word: string, quiet?: boolean }> = {
+  clean: { icon: ICON_DONE, tone: 'ok', word: 'Clean', quiet: true },
+  approved: { icon: ICON_APPROVED, tone: 'ok', word: 'Approved' },
+  changes_requested: { icon: ICON_CHANGES, tone: 'warn', word: 'Changes requested' },
+  superseded: { icon: ICON_SUPERSEDED, tone: 'flat', word: 'Superseded' },
+  preflight_failed: { icon: ICON_BLOCKED, tone: 'bad', word: 'Preflight failed' },
   // An issue review ends with its comments posted.
-  commented: { icon: ICON_POSTED, tone: 'ok', text: 'comments posted' },
+  commented: { icon: ICON_POSTED, tone: 'ok', word: 'Commented' },
 }
 
-function statusLook(e: LogEntry): { icon: string, tone: Tone, label: string } {
+const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
+
+function statusLook(e: LogEntry): StatusLook {
   const status = (e.status || '').toLowerCase()
-  if (isRunning(e)) return { icon: ICON_RUNNING, tone: 'live', label: 'running' }
+  if (isRunning(e)) return { icon: ICON_RUNNING, tone: 'live', word: 'Running', detail: 'Running' }
   const verdict = e.outcome ? OUTCOME_LOOK[e.outcome] : null
-  if (verdict) return { icon: verdict.icon, tone: verdict.tone, label: `${status || 'finished'} · ${verdict.text}` }
-  if (e.error_code === 'stopped' || status === 'cancelled') return { icon: ICON_STOPPED, tone: 'flat', label: `${status} · stopped` }
-  if (status === 'completed') return { icon: ICON_DONE, tone: 'ok', label: status }
-  if (status === 'failed' || status === 'error') return { icon: ICON_FAILED, tone: 'bad', label: status }
-  if (status === 'superseded') return { icon: ICON_SUPERSEDED, tone: 'flat', label: status }
-  return { icon: ICON_OTHER, tone: 'flat', label: status || 'unknown' }
+  if (verdict) {
+    return { ...verdict, detail: `${capitalise(status || 'finished')} · ${verdict.word.toLowerCase()}` }
+  }
+  if (e.error_code === 'stopped' || status === 'cancelled') {
+    return { icon: ICON_STOPPED, tone: 'flat', word: 'Stopped', detail: `${capitalise(status)} · stopped` }
+  }
+  if (status === 'completed') return { icon: ICON_DONE, tone: 'ok', word: 'Completed', detail: 'Completed', quiet: true }
+  if (status === 'failed' || status === 'error') return { icon: ICON_FAILED, tone: 'bad', word: capitalise(status), detail: capitalise(status) }
+  if (status === 'superseded') return { icon: ICON_SUPERSEDED, tone: 'flat', word: 'Superseded', detail: 'Superseded' }
+  const word = capitalise(status || 'unknown')
+  return { icon: ICON_OTHER, tone: 'flat', word, detail: word }
 }
 
-// The line beside the icon: what a running agent is doing now, or why a failed
-// one failed. A finished run has nothing to add — the icon says it.
+// The line after the word: what a running agent is doing now, or why a failed
+// one failed. A stopped run's error only repeats "Stopped".
 function statusNote(e: LogEntry): string {
   if (isRunning(e)) {
     const text = progressText(e)
     return `<span class="agent-status-note agent-progress-summary" title="${escapeHtml(text)}">${escapeHtml(text)}</span>`
   }
+  if (e.error_code === 'stopped') return ''
   const failure = (e.error || '').trim().split('\n')[0]
   if (!failure) return ''
   return `<span class="agent-status-note" title="${escapeHtml(failure)}">${escapeHtml(failure)}</span>`
@@ -225,9 +237,10 @@ function statusNote(e: LogEntry): string {
 
 function statusCell(e: LogEntry): string {
   const look = statusLook(e)
-  const title = look.label.charAt(0).toUpperCase() + look.label.slice(1)
-  return `<span class="agent-status"><span class="agent-status-icon ${look.tone}" title="${escapeHtml(title)}">`
-    + `${look.icon}<span class="agent-status-label">${escapeHtml(look.label)}</span></span>${statusNote(e)}</span>`
+  return `<span class="agent-status ${look.tone}">`
+    + `<span class="agent-status-icon" title="${escapeHtml(look.detail)}">${look.icon}</span>`
+    + `<span class="agent-status-label${look.quiet ? ' quiet' : ''}">${escapeHtml(look.word)}</span>`
+    + `${statusNote(e)}</span>`
 }
 
 function isRunning(e: LogEntry): boolean {

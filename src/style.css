@@ -2759,34 +2759,39 @@ button.agent-target:hover {
   text-decoration-thickness: 1px;
 }
 
-/* Status is an icon whose colour carries the verdict, then one line of
-   note: what a running agent is doing, or why a failed one failed. The
-   words behind the icon stay in the DOM for screen readers and tooltips. */
+/* Status is an icon and a word, both in the verdict's colour, then one
+   line of note: what a running agent is doing, or why a failed one failed.
+   A plain success keeps its word for screen readers only. */
 .agent-status {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
 }
+.agent-status.live { color: var(--a1); }
+.agent-status.ok   { color: var(--a3); }
+.agent-status.warn { color: var(--a4); }
+.agent-status.bad  { color: var(--a5); }
+.agent-status.flat { color: var(--text-tertiary); }
 .agent-status-icon {
   flex: 0 0 auto;
   display: inline-flex;
   width: 14px;
   height: 14px;
 }
-.agent-status-icon.live { color: var(--a1); }
-.agent-status-icon.ok   { color: var(--a3); }
-.agent-status-icon.warn { color: var(--a4); }
-.agent-status-icon.bad  { color: var(--a5); }
-.agent-status-icon.flat { color: var(--text-tertiary); }
-.agent-status-icon.live svg { animation: replay-spin 1.4s linear infinite; }
+.agent-status.live .agent-status-icon svg { animation: replay-spin 1.4s linear infinite; }
 .agent-status-label {
+  flex: 0 0 auto;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.agent-status-label.quiet {
   position: absolute;
   width: 1px;
   height: 1px;
   overflow: hidden;
   clip-path: inset(50%);
-  white-space: nowrap;
 }
 .agent-status-note {
   min-width: 0;

@@ -478,7 +478,7 @@ test('stops a running run from Swarm after a second click, and settles the row',
   expect(stops).toEqual([])
   await running.getByRole('button', { name: 'Confirm stopping this run' }).click()
   await expect.poll(() => stops).toEqual([id])
-  await expect(running).toContainText('failed')
+  await expect(running.locator('.agent-status-label')).toHaveText('Stopped')
   await expect(running.locator('.stop-cell')).toHaveText('—')
   await running.getByRole('button', { name: 'Toggle detail' }).click()
   await expect(page.locator(`.agent-expand-row[data-expand-for="${id}"]`)).toContainText('Stopped by user')
@@ -526,7 +526,7 @@ test('shows live activity, preserves its expansion, and loads the final response
   row = { ...row, status: 'completed', outcome: 'approved', completed_at: ago(0), response: id.slice(0, 8),
     progress: { ...row.progress, phase: 'completed', events: [...row.progress.events, { at: ago(0), message: 'Run completed' }] } }
   await page.evaluate(() => window.dispatchEvent(new Event('poise:refresh-tick')))
-  await expect(main).toContainText('approved')
+  await expect(main.locator('.agent-status-label')).toHaveText('Approved')
   await expect(detail).toContainText('Approval confirmed on GitHub.')
   await expect(detail).toContainText('Run completed')
   await page.getByRole('button', { name: 'Archive', exact: true }).click()
