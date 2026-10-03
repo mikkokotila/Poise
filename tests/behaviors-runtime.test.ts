@@ -1326,6 +1326,43 @@ describe('behavior launch claims', () => {
     }
   })
 
+  it('preserves stale health evidence from exit 1, blocks work and recovers without resetting claims', async () => {
+    const { database: db, behaviors: runtime } = await loadModules()
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_resolve_unblocking_enabled', '1')
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    const stdout = JSON.stringify({
+      action: 'health', status: 'stale', healthy: false, database: '/legacy/github.sqlite',
+      max_age_seconds: 120, age_seconds: 3600, last_success_at: '2026-10-02T12:46:25Z',
+    })
+    mocks.runFile.mockRejectedValue(Object.assign(new Error('Command failed (1): github-datastore'), { code: 1, stdout, stderr: '' }))
+    await runtime.runEnabledBehaviorsOnce()
+    expect(runtime.getBehaviorsRuntimeHealth()).toMatchObject({
+      status: 'degraded', datastore: { status: 'unavailable', ageSeconds: 3600,
+        lastSuccessAt: '2026-10-02T12:46:25Z', error: expect.stringContaining('Datastore stale') },
+      failures: [{ error: expect.stringContaining('age 3600s exceeds 120s') }],
+    })
+    expect(mocks.runFile).toHaveBeenCalledOnce()
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+    arrangeCli(false)
+    await runtime.runEnabledBehaviorsOnce()
+    expect(runtime.getBehaviorsRuntimeHealth()).toMatchObject({ status: 'ok', failures: [], datastore: { status: 'healthy' } })
+  })
+
+  it('never accepts healthy output from a command that failed', async () => {
+    const { database: db, behaviors: runtime } = await loadModules()
+    db.setMeta('me', 'poise-user')
+    db.setMeta('behavior_resolve_unblocking_enabled', '1')
+    runtime.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    mocks.runFile.mockRejectedValue(Object.assign(new Error('Command failed (1): github-datastore'), {
+      code: 1, ...datastoreHealthOutput(),
+    }))
+    await runtime.runEnabledBehaviorsOnce()
+    expect(runtime.getBehaviorsRuntimeHealth().datastore.status).toBe('unavailable')
+    expect(mocks.runFile).toHaveBeenCalledOnce()
+    expect(mocks.spawnDetached).not.toHaveBeenCalled()
+  })
+
   it('retries a failed scan immediately so dependency recovery clears health', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-15T12:00:00.000Z'))
@@ -2366,6 +2403,40 @@ describe('behavior launch claims', () => {
         error: 'model unavailable',
       }),
     ])
+  })
+
+  it.each([HEAD_SHA, NEXT_HEAD_SHA])('recovers a closed legacy review when Caller later proves preflight no-action, head=%s', async (headSha) => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-07-15T12:00:00Z'))
+    const launched = await launchReviewBeforeCrash()
+    const call = agentLog({
+      id: 'c'.repeat(32),
+      started_at: new Date(Date.parse(launched.requestedAt) + 1_000).toISOString(),
+      status: 'failed', error: 'codex review produced no submitted verdict',
+      expected_head: launched.expectedHead, actor: launched.actor,
+      source: launched.source, correlation_id: launched.correlationId,
+    })
+    agentLogs = [call]
+    let modules = await restartModules()
+    modules.behaviors.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    arrangeCli(false, false, { reviewerReviewsSince: 3 })
+    await modules.behaviors.runEnabledBehaviorsOnce()
+    expect(modules.database.getFailedBehaviorLaunch('review-new-prs', launched.target)?.launchCallId).toBe(call.id)
+    expect(mocks.spawnDetached).toHaveBeenCalledOnce()
+    mocks.observeAuthFailure.mockClear()
+    // Caller now exposes an exact, typed proof that this failed run never posted.
+    // Other reviewers' actions must not turn that proof into an indefinite hold.
+    Object.assign(call, { action: 'not_started', outcome: 'preflight_failed' })
+    modules = await restartModules()
+    modules.behaviors.startBehaviorsRuntime({ reviewAgentUsername: 'review-bot' })
+    arrangeCli(false, false, { headSha, reviewerReviewsSince: 3 })
+    vi.setSystemTime(Date.now() + modules.behaviors.BEHAVIOR_RETRY_BASE_MS)
+    await modules.behaviors.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
+    expect(mocks.spawnDetached.mock.calls[1][1]).toEqual(expect.arrayContaining(['--expected-head', headSha]))
+    expect(mocks.observeAuthFailure).not.toHaveBeenCalled()
+    await modules.behaviors.runEnabledBehaviorsOnce()
+    expect(mocks.spawnDetached).toHaveBeenCalledTimes(2)
   })
 
   it('retries an approval after Caller reports that preflight failed before any action', async () => {

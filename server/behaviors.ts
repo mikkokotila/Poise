@@ -16,7 +16,7 @@ import { releaseBackgroundPaused, trackReleaseBackground } from './release-backg
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomUUID } from 'node:crypto'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { mkdir } from 'node:fs/promises'
 import { ISSUE_REVIEW_BEHAVIOR, fetchAgentLogSnapshot, quarantinedLogMayMatch, type LogEntry } from './agent'
@@ -64,6 +64,9 @@ import {
   type BehaviorLaunchClaim,
 } from './db'
 import { HttpError } from './http'
+import { behaviorErrorMessage } from './behavior-diagnostics'
+import { recoverLegacyDatastore } from './legacy-datastore-recovery'
+import { resolveReviewCheckout } from './review-checkout'
 import { claudeSubscriptionEnvironment, runFile, spawnDetached } from './process'
 import { withProcessLock } from './process-lock'
 import { getReviewAgentUsername, setReviewAgentUsername } from './gh'
@@ -333,7 +336,7 @@ function recordBehaviorFailure(key: BehaviorKey, kind: BehaviorFailureKind, caus
     BEHAVIOR_RETRY_MAX_MS,
   )
   const now = Date.now()
-  const error = cause === undefined ? undefined : (cause instanceof Error ? cause.message : String(cause)).slice(0, 300)
+  const error = cause === undefined ? undefined : behaviorErrorMessage(cause)
   setMeta(failureKey(key, target), JSON.stringify({
     kind,
     consecutiveFailures,
@@ -1253,21 +1256,45 @@ function safeInteger(value: unknown, field: string): number {
 async function requireFreshDatastore(): Promise<void> {
   const checkedAt = new Date().toISOString()
   try {
-    const { stdout } = await runFile(
-      DATASTORE,
-      datastoreArgs(['health', '--max-age-seconds', String(DATASTORE_MAX_AGE_SECONDS)]),
-      { timeoutMs: 30_000, maxOutputBytes: 1 * 1024 * 1024, signal: behaviorSignal() },
-    )
+    let stdout: string
+    let unhealthyExit: unknown
+    try {
+      const result = await runFile(
+        DATASTORE,
+        datastoreArgs(['health', '--max-age-seconds', String(DATASTORE_MAX_AGE_SECONDS)]),
+        { timeoutMs: 30_000, maxOutputBytes: 1 * 1024 * 1024, signal: behaviorSignal() },
+      )
+      stdout = result.stdout
+    } catch (error) {
+      const failure = error as { code?: unknown, stdout?: unknown }
+      if (failure.code !== 1 || typeof failure.stdout !== 'string' || !failure.stdout.trim()) throw error
+      stdout = failure.stdout
+      unhealthyExit = error
+    }
     const data = objectValue(parseJson(stdout, 'github-datastore health'), 'github-datastore health')
+    const org = currentOrganization()
+    if (org?.datastorePath && data.database !== resolve(org.datastorePath)) {
+      throw new Error('github-datastore health returned a different account database')
+    }
+    if (data.action === 'health' && data.status === 'stale' && data.healthy === false
+      && safeInteger(data.max_age_seconds, 'datastore max_age_seconds') === DATASTORE_MAX_AGE_SECONDS
+      && safeInteger(data.age_seconds, 'datastore age_seconds') > DATASTORE_MAX_AGE_SECONDS
+      && typeof data.last_success_at === 'string' && Number.isFinite(Date.parse(data.last_success_at))) {
+      const message = `Datastore stale: last successful sync ${data.last_success_at}; age ${data.age_seconds}s exceeds ${DATASTORE_MAX_AGE_SECONDS}s`
+      datastoreFreshnessByOrganization.set(operationKey('review-new-prs'), {
+        status: 'unavailable', checkedAt, ageSeconds: Number(data.age_seconds),
+        lastSuccessAt: data.last_success_at, error: message,
+      })
+      try { await recoverLegacyDatastore(org, behaviorSignal()) }
+      catch (error) { console.error('[behaviors] legacy datastore sync recovery failed:', behaviorErrorMessage(error)) }
+      throw new Error(message)
+    }
+    if (unhealthyExit) throw unhealthyExit
     if (data.action !== 'health'
       || data.status !== 'healthy'
       || data.healthy !== true
       || safeInteger(data.max_age_seconds, 'datastore max_age_seconds') !== DATASTORE_MAX_AGE_SECONDS) {
       throw new Error('github-datastore health returned a malformed or stale result')
-    }
-    const org = currentOrganization()
-    if (org?.datastorePath && data.database !== resolve(org.datastorePath)) {
-      throw new Error('github-datastore health returned a different account database')
     }
     const ageSeconds = safeInteger(data.age_seconds, 'datastore age_seconds')
     const lastSuccessAt = String(data.last_success_at || '')
@@ -1282,12 +1309,12 @@ async function requireFreshDatastore(): Promise<void> {
       error: null,
     })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = behaviorErrorMessage(error)
+    const observed = datastoreFreshnessByOrganization.get(operationKey('review-new-prs'))
     datastoreFreshnessByOrganization.set(operationKey('review-new-prs'), {
-      status: 'unavailable',
-      checkedAt,
-      ageSeconds: null,
-      lastSuccessAt: null,
+      status: 'unavailable', checkedAt,
+      ageSeconds: observed?.checkedAt === checkedAt ? observed.ageSeconds : null,
+      lastSuccessAt: observed?.checkedAt === checkedAt ? observed.lastSuccessAt : null,
       error: message,
     })
     throw new Error(`github-datastore freshness gate failed: ${message}`, { cause: error })
@@ -1330,24 +1357,8 @@ async function listOpenPrsByAuthor(author: string): Promise<DatastorePr[]> {
   return prs.filter((pr) => organizationOwns(pr.repo) && pr.author === author && !pr.draft)
 }
 
-async function localCheckoutPath(owner: string, repo: string): Promise<string> {
-  const { stdout } = await runFile(GH_INTERFACE, ['--local-checkout-path', owner, repo], {
-    timeoutMs: 30_000,
-    maxOutputBytes: 1 * 1024 * 1024,
-    signal: behaviorSignal(),
-  })
-  const result = objectValue(
-    parseJson(stdout, 'github-interface --local-checkout-path'),
-    'github-interface --local-checkout-path',
-  )
-  const repository = `${owner}/${repo}`
-  const path = String(result.path || '')
-  if (result.action !== 'local_checkout_path'
-    || result.repository !== repository
-    || !isAbsolute(path)) {
-    throw new Error('github-interface --local-checkout-path returned malformed state')
-  }
-  return path
+async function localCheckoutPath(owner: string, repo: string, number: number, head: string): Promise<string> {
+  return resolveReviewCheckout(owner, repo, number, configuredReviewer(), head, behaviorSignal())
 }
 
 async function currentHeadSha(
@@ -1437,7 +1448,6 @@ async function fireReview(
   const actor = configuredReviewer()
   if (claude) await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   await waitForBehavior(prepareModelClis(catalog, [model, recovery]))
-  const pwd = await localCheckoutPath(owner, repo)
   // mkdir the cwd hack dir — agent-interface needs it to exist for
   // --pwd resolution behavior identical to triggerPrReview in agent.ts.
   await mkdir(join(GH_INTERFACE_CWD_ROOT, owner, repo), { recursive: true })
@@ -1445,6 +1455,7 @@ async function fireReview(
   if (claude) await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   if (!isEnabled('review-new-prs') || behaviorAborted()) return false
   const expectedHead = await currentHeadSha(pr.repo, pr.number, actor)
+  const pwd = await localCheckoutPath(owner, repo, pr.number, expectedHead)
   // The head-SHA lookup above is a subprocess with a 30s timeout, so the user
   // has a real window to turn the behaviour off while it is out. Nothing
   // re-read the flag between it returning and the spawn below, so a toggle-off
@@ -2019,6 +2030,12 @@ async function releaseFailedBehaviorIfNoAction(
     if (await currentHeadSha(repo, number, failed.launchActor) === failed.launchExpectedHead) return false
     return releaseFailedBehaviorLaunch(behavior, target, failed.launchCallId, failed.launchExpectedHead)
   }
+  // Older Caller logs were closed before their no-action outcome was typed.
+  // Apply the same preflight recovery rule used for active claims above; exact
+  // identity, bounded-failure and oversized-packet holds have already passed.
+  if (call.action === 'not_started' && call.outcome === 'preflight_failed') {
+    return releaseFailedBehaviorLaunch(behavior, target, failed.launchCallId, failed.launchExpectedHead)
+  }
   if (call.action !== null || call.outcome !== null) return false
   const startedAt = agentCallStartedAt(call)
   if (!Number.isFinite(Date.parse(startedAt))) return false
@@ -2136,7 +2153,6 @@ async function fireApprove(
   const actor = configuredReviewer()
   if (claude) await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
   await waitForBehavior(prepareModelClis(catalog, [model, recovery]))
-  const pwd = await localCheckoutPath(owner, repo)
   await mkdir(join(GH_INTERFACE_CWD_ROOT, owner, repo), { recursive: true })
   if (!isEnabled('approve-prs')) return false
   if (claude) await waitForBehavior(claudeAuth.requireReady({ liveWithinMs: BEHAVIOR_AUTH_FRESHNESS_MS }))
@@ -2152,6 +2168,8 @@ async function fireApprove(
       `approval head changed before launch: expected ${expectedHead}, got ${currentHead}`,
     )
   }
+  const pwd = await localCheckoutPath(owner, repo, pr.number, expectedHead)
+  if (!isEnabled('approve-prs') || behaviorAborted()) return false
   if ((await reviewChoice('pr_approve')).model !== model) return false
   const source = 'poise:approve-prs'
   const args = [

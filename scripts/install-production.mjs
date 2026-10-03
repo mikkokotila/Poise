@@ -513,11 +513,12 @@ async function main() {
     const datastoreSync = plist([
       key('Label', `<string>com.vaquum.github-datastore.sync</string>`),
       key('ProgramArguments', array([
-        '/bin/zsh', '-lc', datastoreCommand(['sync', '--workers', '12']),
+        '/bin/zsh', '-lc', datastoreCommand(['sync', '--loop', '--interval', '60', '--workers', '12']),
       ])),
       key('WorkingDirectory', `<string>${xml(dirname(datastoreDb))}</string>`),
       key('RunAtLoad', '<true/>'),
-      key('StartInterval', '<integer>60</integer>'),
+      key('KeepAlive', '<true/>'),
+      key('ThrottleInterval', '<integer>60</integer>'),
       key('StandardOutPath', `<string>${xml(join(logRoot, 'datastore-sync.out.log'))}</string>`),
       key('StandardErrorPath', `<string>${xml(join(logRoot, 'datastore-sync.err.log'))}</string>`),
     ])
