@@ -98,6 +98,11 @@ describe('the watchdog pass', () => {
     return {
       pass, calls, logs, jobs,
       at: (ms: number) => { now = ms },
+      // One more completed run, as launchd's counter would show it.
+      ran: (label: string) => {
+        const job = jobs[label]
+        if (job && typeof job === 'object' && !(job instanceof Error)) job.runs = (job.runs ?? 0) + 1
+      },
       kicks: () => calls.filter((args) => args[0] === 'kickstart').map((args) => args[1]),
     }
   }
@@ -110,14 +115,14 @@ describe('the watchdog pass', () => {
     await h.pass()
     for (let minute = 1; minute <= 3; minute += 1) {
       h.at(minute * MIN)
-      h.jobs['com.vaquum.poise.health']!.runs! += 1
+      h.ran('com.vaquum.poise.health')
       await h.pass()
     }
     expect(h.kicks()).toEqual(['gui/501/com.vaquum.poise.caller-update'])
     expect(h.logs.join('\n')).toContain('com.vaquum.poise.caller-update runs every 60s but has not run for 3m')
     const tick = async (minute: number) => {
       h.at(minute * MIN)
-      h.jobs['com.vaquum.poise.health']!.runs! += 1
+      h.ran('com.vaquum.poise.health')
       await h.pass()
     }
     await tick(4)
@@ -132,10 +137,10 @@ describe('the watchdog pass', () => {
     await h.pass()
     h.at(3 * MIN)
     await h.pass()
-    h.jobs['com.vaquum.poise.caller-update']!.runs = 2
+    h.ran('com.vaquum.poise.caller-update')
     for (let minute = 4; minute <= 10; minute += 1) {
       h.at(minute * MIN)
-      h.jobs['com.vaquum.poise.caller-update']!.runs! += 1
+      h.ran('com.vaquum.poise.caller-update')
       await h.pass()
     }
     expect(h.kicks()).toHaveLength(1)
