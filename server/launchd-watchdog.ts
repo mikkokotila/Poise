@@ -73,6 +73,22 @@ export function watchdogLabels(value: string | undefined): string[] {
     .filter((label) => /^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$/.test(label))
 }
 
+// `launchctl print` exits 113 ("Could not find service") when the job is not
+// loaded in the domain. Any other failure — a timeout, a busy launchd — says
+// nothing about the job itself.
+const NOT_LOADED_EXIT = 113
+
+export function isNotLoaded(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === NOT_LOADED_EXIT
+}
+
+function failure(error: unknown): string {
+  const e = error as { killed?: boolean, signal?: string | null, code?: unknown, message?: string } | null
+  if (e?.killed || e?.signal) return `launchctl timed out after ${LAUNCHCTL_TIMEOUT_MS / 1000}s`
+  if (typeof e?.code === 'number') return `launchctl exited ${e.code}`
+  return (e?.message || String(error)).split('\n')[0]
+}
+
 function launchctl(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile('/bin/launchctl', args, { timeout: LAUNCHCTL_TIMEOUT_MS, encoding: 'utf8' }, (error, stdout) => {
@@ -98,18 +114,38 @@ export function createLaunchdWatchdog(options: LaunchdWatchdogOptions): () => Pr
   const now = options.now || Date.now
   const log = options.log || ((message: string) => console.warn(message))
   const watched = new Map<string, WatchState>()
+  // A job that cannot be read is reported once, and again only if the reason
+  // changes — the same line every minute would bury the log.
+  const reported = new Map<string, string>()
+  const report = (label: string, problem: string) => {
+    if (reported.get(label) === problem) return
+    reported.set(label, problem)
+    log(`[launchd-watchdog] ${label}: ${problem}`)
+  }
   return async () => {
     for (const label of options.labels) {
-      let job: LaunchdJob | null
+      let text: string
       try {
-        job = parseLaunchctlPrint(await run(['print', `${domain}/${label}`]))
-      } catch {
-        // Not loaded (an install in progress, or a job this machine does not
-        // have). Forget it so a reload starts from a fresh baseline.
-        watched.delete(label)
+        text = await run(['print', `${domain}/${label}`])
+      } catch (error) {
+        if (isNotLoaded(error)) {
+          // An install in progress, or a job this machine does not have.
+          // Forget it so a reload starts from a fresh baseline.
+          watched.delete(label)
+          reported.delete(label)
+        } else {
+          // Keep the baseline: resetting it on a hiccup would push a stall
+          // that is already under way back by a whole grace period.
+          report(label, `could not read its launchd state (${failure(error)}); still watching`)
+        }
         continue
       }
-      if (!job) continue
+      const job = parseLaunchctlPrint(text)
+      if (!job) {
+        report(label, 'launchctl print output was not understood; this job is not watched until it is')
+        continue
+      }
+      reported.delete(label)
       const { next, kick } = assess(watched.get(label), job, now())
       watched.set(label, next)
       if (!kick) continue

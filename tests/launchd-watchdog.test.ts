@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
-  assess, createLaunchdWatchdog, graceMs, parseLaunchctlPrint, startLaunchdWatchdog, watchdogLabels,
+  assess, createLaunchdWatchdog, graceMs, isNotLoaded, parseLaunchctlPrint, startLaunchdWatchdog, watchdogLabels,
 } from '../server/launchd-watchdog'
+
+// What execFile rejects with: `launchctl print` exits 113 for a job that is not
+// loaded; a timeout kills the child and leaves no exit code.
+const notLoaded = () => Object.assign(new Error('Could not find service'), { code: 113 })
+const timedOut = () => Object.assign(new Error('Command failed: /bin/launchctl print'), { killed: true, signal: 'SIGTERM', code: null })
 
 // The shape `launchctl print gui/501/<label>` prints, trimmed. Nested blocks
 // repeat `state =` one tab deeper, and must not be read as the service's own.
@@ -71,7 +76,7 @@ describe('deciding a job has gone quiet', () => {
 })
 
 describe('the watchdog pass', () => {
-  function harness(jobs: Record<string, { state?: string, runs?: number } | null>) {
+  function harness(jobs: Record<string, { state?: string, runs?: number } | null | Error | string>) {
     let now = 0
     const calls: string[][] = []
     const logs: string[] = []
@@ -84,7 +89,9 @@ describe('the watchdog pass', () => {
         calls.push(args)
         if (args[0] === 'kickstart') return ''
         const job = jobs[args[1].slice('gui/501/'.length)]
-        if (!job) throw new Error('Could not find service')
+        if (job === null) throw notLoaded()
+        if (job instanceof Error) throw job
+        if (typeof job === 'string') return job
         return printed(job)
       },
     })
@@ -149,6 +156,41 @@ describe('the watchdog pass', () => {
     expect(h.kicks()).toEqual(['gui/501/com.vaquum.github-datastore.sync'])
   })
 
+  it('keeps the baseline through a launchctl timeout, so a stall is still caught on time', async () => {
+    const label = 'com.vaquum.poise.caller-update'
+    const h = harness({ [label]: { runs: 3876 } })
+    await h.pass()
+    h.jobs[label] = timedOut()
+    for (const minute of [1, 2]) {
+      h.at(minute * MIN)
+      await h.pass()
+    }
+    expect(h.logs).toEqual([`[launchd-watchdog] ${label}: could not read its launchd state (launchctl timed out after 10s); still watching`])
+    h.jobs[label] = { runs: 3876 }
+    h.at(3 * MIN)
+    await h.pass()
+    expect(h.kicks()).toEqual([`gui/501/${label}`])
+  })
+
+  it('says once when it cannot understand a job, and watches it again when it can', async () => {
+    const label = 'com.vaquum.poise.health'
+    const h = harness({ [label]: 'gui/501/com.vaquum.poise.health = {\n\tsomething new = 1\n}' })
+    for (const minute of [0, 1, 2, 3, 4]) {
+      h.at(minute * MIN)
+      await h.pass()
+    }
+    expect(h.logs).toEqual([`[launchd-watchdog] ${label}: launchctl print output was not understood; this job is not watched until it is`])
+    expect(h.kicks()).toEqual([])
+    h.jobs[label] = { runs: 7 }
+    await h.pass()
+    h.at(7 * MIN)
+    await h.pass()
+    expect(h.kicks()).toEqual([`gui/501/${label}`])
+    h.jobs[label] = 'unreadable again'
+    await h.pass()
+    expect(h.logs.filter((line) => line.includes('not understood'))).toHaveLength(2)
+  })
+
   it('reports a failed kick and carries on with the other jobs', async () => {
     const logs: string[] = []
     let now = 0
@@ -170,6 +212,15 @@ describe('the watchdog pass', () => {
     await pass()
     expect(kicked).toEqual(['gui/501/a.one', 'gui/501/a.two'])
     expect(logs.some((line) => line.includes('could not start a.one: kickstart failed'))).toBe(true)
+  })
+})
+
+describe('telling a missing job from a failed read', () => {
+  it('treats only launchctl exit 113 as not loaded', () => {
+    expect(isNotLoaded(notLoaded())).toBe(true)
+    expect(isNotLoaded(timedOut())).toBe(false)
+    expect(isNotLoaded(Object.assign(new Error('x'), { code: 5 }))).toBe(false)
+    expect(isNotLoaded(null)).toBe(false)
   })
 })
 
