@@ -298,6 +298,20 @@ async function bootout(label) {
   }
 }
 
+// launchd normally starts a RunAtLoad job as it is bootstrapped. A session
+// left in on-demand-only mode — a logout that is started and then cancelled
+// leaves it there — records that start as pending and never makes it, so a
+// reinstall unloaded the running service and left it down. Ask for the start
+// explicitly: kickstart is honoured in that mode, and does nothing to a job
+// that is already running.
+async function start(label) {
+  try {
+    await run('/bin/launchctl', ['kickstart', `${domain}/${label}`], { capture: true })
+  } catch (error) {
+    console.warn(`Could not start ${label}: ${error.message}`)
+  }
+}
+
 function delay(ms) {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms))
 }
@@ -446,7 +460,17 @@ async function main() {
     // bundle that no longer matches the source on disk.
     key('ProgramArguments', array([node, join(projectRoot, 'scripts', 'start-production.mjs')])),
     key('WorkingDirectory', `<string>${xml(projectRoot)}</string>`),
-    key('EnvironmentVariables', dictionary(environment)),
+    // The timed jobs the server keeps alive when launchd stops firing their
+    // timers (server/launchd-watchdog.ts). Interval jobs only: the calendar
+    // jobs still fire in on-demand-only mode.
+    key('EnvironmentVariables', dictionary({
+      ...environment,
+      POISE_LAUNCHD_WATCHDOG: [
+        updaterLabel,
+        monitorLabel,
+        ...datastoreServices.filter((job) => job.kind !== 'reconcile').map((job) => job.label),
+      ].join(','),
+    })),
     key('RunAtLoad', '<true/>'),
     key('KeepAlive', '<true/>'),
     key('ProcessType', '<string>Interactive</string>'),
@@ -569,16 +593,27 @@ async function main() {
   await run('/bin/launchctl', ['enable', `${domain}/${updaterLabel}`])
   await run('/bin/launchctl', ['enable', `${domain}/${catalogLabel}`])
   for (const job of datastoreServices) await run('/bin/launchctl', ['enable', `${domain}/${job.label}`])
-  for (const job of datastoreServices.filter((job) => job.kind === 'sync')) await bootstrap(job.path)
+  for (const job of datastoreServices.filter((job) => job.kind === 'sync')) {
+    await bootstrap(job.path)
+    await start(job.label)
+  }
   await bootstrap(catalogPlist)
-  for (const job of datastoreServices.filter((job) => job.kind !== 'sync')) await bootstrap(job.path)
+  for (const job of datastoreServices.filter((job) => job.kind !== 'sync')) {
+    await bootstrap(job.path)
+    if (job.kind !== 'reconcile') await start(job.label)
+  }
   await bootstrap(servicePlist)
+  await start(serviceLabel)
   const health = await waitForHealthyProduction()
   // The service is up either way at this point, so the monitor and the updater
   // are bootstrapped regardless — leaving them out was what made a degraded
   // install a half-install.
   await bootstrap(monitorPlist)
-  if (!selfUpdating) await bootstrap(updaterPlist)
+  await start(monitorLabel)
+  if (!selfUpdating) {
+    await bootstrap(updaterPlist)
+    await start(updaterLabel)
+  }
   console.log(`Installed ${serviceLabel} with Caller ${manifest.commit}`)
   if (!datastoreDb) console.log('Add your first GitHub organization in Settings to initialize its datastore.')
   if (!health.healthy) {
